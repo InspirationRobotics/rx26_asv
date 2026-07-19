@@ -1,0 +1,88 @@
+# ============================================================================
+# Crusader — SINGLE SOURCE OF TRUTH for all ROS-side parameters (Phase 3.5).
+#
+# Standard ROS 2 parameter-file format: pass to launch via
+#     parameters=[os.path.join(pkg_share, "config", "crusader_params.yaml")]
+# or per-node:  ros2 run ... --ros-args --params-file config/crusader_params.yaml
+#
+# Node code loads THIS file for its declaration defaults (api/common/config.py),
+# and the episode evaluator reads the same file for objective-2 thresholds — so
+# the onboard at-risk detector and the scoring pipeline cannot drift apart.
+# The file's sha256 is recorded in every episode metrics JSON (ros_config_hash).
+#
+# Parameter posture (enforced in code via ParameterDescriptor):
+#   [RO] read_only — safety/structural; `ros2 param set` is REJECTED; change
+#        here + restart the node (rebuild NOT required, params load at start).
+#   [DYN] dynamic — accepted at runtime via `ros2 param set`, range-validated;
+#        this is the knob path for test-day tuning and the Level-1 loop.
+#
+# YAML anchors (&name / *name) tie values that MUST stay equal across sections.
+# ============================================================================
+
+shared:
+  # cells at/above this confidence count as obstacles — used by BOTH the grid
+  # node (publisher) and the APF node (consumer); anchor keeps them in lockstep
+  occupied_threshold: &occupied_threshold 50.0
+  # progress-monitor thresholds — onboard detector AND episode evaluator
+  progress_window_s: &progress_window_s 10.0
+  progress_speed_floor: &progress_speed_floor 0.3
+  progress_floor: &progress_floor 0.5
+  progress_heading_osc_floor: &progress_heading_osc_floor 0.05
+  progress_stall_after_s: &progress_stall_after_s 15.0
+
+telemetry_bridge:
+  ros__parameters:
+    mav_endpoint: "udp:127.0.0.1:14551"   # [RO] MAVProxy rebroadcast, never serial
+    drop_channel: 7                        # [RO] autonomy-drop RC channel (1..18)
+    drop_threshold: 1700                   # [RO] us; crossing trips the latch
+    drop_invert: false                     # [RO]
+    rc_stale_timeout: 1.0                  # [RO] s without RC -> trip
+
+perception_node:
+  ros__parameters:
+    engine_path: "/root/robotx_ws/models/buoy_v16.engine"   # [RO] per-Jetson
+    mount_offset_x: 0.0                    # [RO] camera in BODY frame [m]
+    mount_offset_y: 0.3                    # [RO]
+    conf_threshold: 0.4                    # [DYN] detector confidence floor (0..1)
+    latency_budget_ms: 100.0               # [DYN] health budget
+    fps_floor: 15.0                        # [DYN] health budget
+
+occupancy_grid_node:
+  ros__parameters:
+    cell_size: 0.5                         # [RO] grid geometry
+    decay_tau: 30.0                        # [DYN] perception-cell decay [s]
+    occupied_threshold: *occupied_threshold  # [DYN]
+
+mission_planner_node:
+  ros__parameters:
+    robocommand_host: "127.0.0.1"          # [RO] RJ-45 RoboCommand net at comp;
+    robocommand_port: 9500                 # [RO] mock_robocommand in test
+    vehicle_id: "crusader"                 # [RO]
+    tick_rate_hz: 5.0                      # [RO]
+    mission_file: ""                       # [RO] JSON {"waypoints": [[lat,lon],..]}
+    wp_radius: 2.0                         # [RO] mirrors ArduRover WP_RADIUS
+    loiter_radius: 3.0                     # [RO] Mission-4 assist loiter
+    loiter_min_s: 5.0                      # [RO] dwell before READINESS
+
+roa_apf_node:
+  ros__parameters:
+    rate_hz: 5.0                           # [RO]
+    occupied_threshold: *occupied_threshold  # [DYN] must track the grid's value
+    # --- APF gains: the primary Level-1 tunables on the ROS side [DYN] ---
+    apf_k_att: 1.0
+    apf_k_rep: 5.0
+    apf_influence_m: 6.0
+    apf_lookahead_m: 8.0
+    apf_slow_radius_m: 4.0
+    apf_min_speed_scale: 0.2
+    apf_trap_ratio: 0.15
+    apf_tangent_gain: 0.8
+    apf_project_s: 5.0
+    # --- progress monitor (shared with evaluator via anchors) [RO] ---
+    # read-only because the monitor is stateful; changing thresholds mid-episode
+    # would corrupt flag/stall accounting. Tune here + restart between runs.
+    monitor_window_s: *progress_window_s
+    monitor_speed_floor: *progress_speed_floor
+    monitor_progress_floor: *progress_floor
+    monitor_heading_osc_floor: *progress_heading_osc_floor
+    monitor_stall_after_s: *progress_stall_after_s

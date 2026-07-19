@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>robotx_2026</name>
+  <version>0.5.0</version>
+  <description>
+    Crusader USV ROS 2 nodes for RobotX 2026 (Team Inspiration): telemetry bridge,
+    perception, occupancy grid, APF advisory, mission planner. The autoresearch
+    harness under orchestrator/ is intentionally NOT part of this package
+    (orchestrator-vs-target boundary, see CLAUDE.md).
+  </description>
+  <maintainer email="brandont3927@gmail.com">Team Inspiration</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>interfaces</depend>
+
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <!-- depthai, pymavlink, ultralytics have no reliable rosdep keys on the
+       Jetson image; they are provided by the crusader container base image
+       and pinned in setup/install_container.sh -->
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

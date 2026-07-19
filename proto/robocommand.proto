@@ -1,0 +1,74 @@
+// RoboCommand message schema (team-side draft — replace field numbers/names with
+// the official 2026 spec when published; keep the wire framing in framing.md).
+// Compiled with: protoc --python_out=. robocommand.proto
+syntax = "proto3";
+package robocommand;
+
+// ---- inbound: RoboCommand -> vehicle ----
+
+message AssistanceRequest {
+  string request_id = 1;
+  string domain = 2;          // "surface" | "air" | "underwater"
+  double latitude = 3;
+  double longitude = 4;
+}
+
+message KeepOutZone {
+  string zone_id = 1;
+  repeated LatLon polygon = 2; // static keep-out (Advanced tier)
+}
+
+message MovingObject {                // Disruptive tier: 10 m live clearance,
+  string object_id = 1;               // current AND projected position
+  double latitude = 2;
+  double longitude = 3;
+  double heading_deg = 4;
+  double speed_mps = 5;
+  string system_type = 6;
+}
+
+message AllClear {
+  string ref_id = 1;          // request_id or zone_id being cleared
+}
+
+message Clearance {           // Core tier: resume authorization after loiter
+  string request_id = 1;
+}
+
+// ---- outbound: vehicle -> RoboCommand ----
+// Every tasking change requires an explicit message; a missed ack is a scoring
+// failure independent of maneuver correctness.
+
+message VehicleStatus {
+  enum Kind {
+    ACK_RECEIPT = 0;
+    ACK_INTENT = 1;           // intent-to-support
+    READINESS = 2;            // arrived + loitering
+    RESUMPTION = 3;           // resumed prior task
+    KEEPOUT_ACK = 4;
+    ALLCLEAR_ACK = 5;
+  }
+  Kind kind = 1;
+  string ref_id = 2;
+  string vehicle_id = 3;
+  double latitude = 4;
+  double longitude = 5;
+  int64 timestamp_ms = 6;
+}
+
+message LatLon {
+  double latitude = 1;
+  double longitude = 2;
+}
+
+// Envelope: every frame on the wire is one Envelope, length-prefixed (see mock).
+message Envelope {
+  oneof payload {
+    AssistanceRequest assistance_request = 1;
+    KeepOutZone keep_out_zone = 2;
+    MovingObject moving_object = 3;
+    AllClear all_clear = 4;
+    Clearance clearance = 5;
+    VehicleStatus vehicle_status = 6;
+  }
+}

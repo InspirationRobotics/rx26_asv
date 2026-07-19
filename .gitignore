@@ -1,0 +1,63 @@
+# ============================================================
+# robotx_2026 .gitignore
+# Rule of thumb: source and configs are tracked; anything a
+# machine can regenerate (builds, caches, logs, engines) is not.
+# ============================================================
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.python-version
+
+# --- Test / tooling caches ---
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# --- colcon / ROS 2 workspace build artifacts (in-container builds) ---
+build/
+install/
+log/
+
+# --- ROS bags & MAVLink telemetry logs (archive out-of-repo per plan §7) ---
+*.bag
+*.db3
+*.mcap
+*.tlog
+*.tlog.raw
+*.BIN
+
+# --- Per-Jetson TensorRT engines & model weights (regenerated per device,
+#     see tools/training/train_buoy.py; the dataset lives outside the repo) ---
+*.engine
+*.onnx
+*.pt
+tools/training/runs/
+tools/training/datasets/
+
+# --- Generated protobuf classes (compiled from proto/ at build time) ---
+*_pb2.py
+*_pb2.pyi
+
+# --- Episode / autoresearch run outputs (metrics JSON archived elsewhere) ---
+orchestrator/runs/
+orchestrator/history/
+*.episode.json
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- Secrets ---
+.env
+*.key

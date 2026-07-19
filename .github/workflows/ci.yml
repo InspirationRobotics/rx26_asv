@@ -1,0 +1,67 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  orchestrator:
+    name: orchestrator tests + G0 smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install pytest numpy pyyaml
+      - name: unit + episode tests
+        run: python -m pytest orchestrator/tests tests -q
+      - name: Gate G0 smoke — scripted episode emits metrics JSON
+        run: |
+          python orchestrator/run_episode.py \
+            --scenario orchestrator/scenarios/mission1_transit.json \
+            --backend kinematic --seed 0 --out /tmp/ep.json
+          python - <<'EOF'
+          import json
+          m = json.load(open("/tmp/ep.json"))
+          assert m["schema"] == "rx26-episode-metrics/1"
+          assert not m["objective1"]["auto_fail"]
+          print("G0 smoke OK:", m["objective3"]["partial_credit"])
+          EOF
+      - name: Gate G3 — APF advisory, 20 seeds, zero violations
+        run: python orchestrator/run_gate_g3.py --seeds 20 --out /tmp/g3.json
+      - name: Gate G4 — Mission-4 Core interrupt/resume, 10 seeds
+        run: python orchestrator/run_gate_g4.py --seeds 10 --out /tmp/g4.json
+      - name: Gate G5 — autoresearch unattended run + revert drill
+        run: python orchestrator/run_gate_g5.py --episodes 50 --out /tmp/g5.json
+
+  interfaces:
+    name: colcon build (ros:humble)
+    runs-on: ubuntu-latest
+    container: ros:humble
+    steps:
+      - uses: actions/checkout@v4
+      - name: build interfaces + robotx_2026 packages
+        shell: bash
+        run: |
+          mkdir -p /ws/src
+          # interfaces copied out separately: the repo root is itself the
+          # robotx_2026 package, and colcon does not descend into packages
+          cp -r interfaces /ws/src/
+          cp -r . /ws/src/robotx_2026_pkg
+          cd /ws
+          source /opt/ros/humble/setup.bash
+          colcon build --packages-select interfaces robotx_2026 \
+                       --event-handlers console_cohesion+
+
+  tools-lint:
+    name: tools syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: python compile + shell -n
+        run: |
+          python3 -m py_compile tools/scripts/*.py tools/sim/*.py \
+                                tools/training/*.py tools/bench/*.py \
+                                tools/udev/*.py
+          bash -n tools/udev/install_udev.sh tools/scripts/rebuild.sh \
+                  docker/sitl/install_sitl.sh docker/sitl/run_sitl.sh

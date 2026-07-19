@@ -1,0 +1,21 @@
+# /etc/systemd/system/crsd-mavproxy.service  (Jetson host)
+# MAVProxy is the SOLE owner of the Pixhawk serial link. Everything else —
+# ROS nodes, Mission Planner/QGC on the laptop, preflight, autoresearch —
+# consumes its rebroadcast. Nothing may open /dev/crsd-pixhawk directly.
+[Unit]
+Description=Crusader MAVProxy (sole Pixhawk owner)
+After=dev-crsd\x2dpixhawk.device network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jetson
+# LAPTOP_IP set in /etc/default/crusader (EnvironmentFile) so field IP changes
+# don't require a unit edit.
+EnvironmentFile=-/etc/default/crusader
+ExecStart=/home/jetson/robotx_ws/scripts/start_mavproxy.sh ${LAPTOP_IP}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

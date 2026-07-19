@@ -1,0 +1,25 @@
+{
+    "teensy": {
+        "port": "/dev/crsd-teensy",
+        "rate": 115200,
+        "port_chain": "1-2.2:1.0"
+    },
+    "ball_launcher": {
+        "port": "/dev/crsd-ball-launcher",
+        "rate": 9600,
+        "port_chain": "1-2.4.3:1.0"
+    },
+    "gps": {
+        "port": "/dev/crsd-gps",
+        "rate": 115200,
+        "port_chain": "1-2.1:1.0"
+    },
+    "oakd_lr": {
+        "id": ""
+    },
+    "led": {
+        "port": "/dev/crsd-led",
+        "rate": 115200,
+        "port_chain": "1-2.4.4:1.0"
+    }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "mission1_obstacle_field",
+  "version": "0.1",
+  "origin": [32.7020, -117.2510],
+  "waypoints": [[0, 10], [0, 60]],
+  "obstacles": [
+    {"x": -3, "y": 10, "radius": 0.3, "label": "green_gate1"},
+    {"x": 3,  "y": 10, "radius": 0.3, "label": "red_gate1"},
+    {"x": 0.5, "y": 30, "radius": 0.5, "label": "blocker_on_path"},
+    {"x": -2.0, "y": 45, "radius": 0.5, "label": "blocker_offset"},
+    {"x": -3, "y": 60, "radius": 0.3, "label": "green_gate2"},
+    {"x": 3,  "y": 60, "radius": 0.3, "label": "red_gate2"}
+  ],
+  "timeout_s": 180,
+  "wp_radius": 2.0,
+  "avoid_margin": 2.0
+}

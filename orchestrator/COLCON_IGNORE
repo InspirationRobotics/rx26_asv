@@ -1,0 +1,3 @@
+# orchestrator is a plain Python threading harness, NOT a ROS 2 package.
+# It must never be built into or launched from Crusader's node graph (plan: orchestrator
+# vs target-system boundary). This file keeps colcon out.

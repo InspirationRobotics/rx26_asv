@@ -1,0 +1,19 @@
+# /etc/systemd/system/crsd-container.service  (Jetson host)
+# Starts the crusader ROS 2 container after MAVProxy owns the Pixhawk, so no
+# node ever races MAVProxy for the serial device.
+[Unit]
+Description=Crusader ROS 2 container
+After=docker.service crsd-mavproxy.service
+Requires=docker.service
+Wants=crsd-mavproxy.service
+
+[Service]
+Type=simple
+User=jetson
+ExecStart=/usr/bin/docker start -a crusader
+ExecStop=/usr/bin/docker stop -t 10 crusader
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
