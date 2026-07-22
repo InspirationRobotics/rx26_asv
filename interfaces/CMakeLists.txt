@@ -12,6 +12,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/LatLonHead.msg"
   "msg/RcChannels.msg"
   "msg/FcuStatus.msg"
+  "msg/GuidedSetpoint.msg"
   "msg/Detection.msg"
   "msg/DetectionArray.msg"
   "msg/ApfAdvisory.msg"

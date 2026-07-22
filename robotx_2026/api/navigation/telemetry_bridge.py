@@ -41,7 +41,8 @@ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
-from interfaces.msg import LatLonHead, FcuStatus, RcChannels, DetectionArray
+from interfaces.msg import (LatLonHead, FcuStatus, RcChannels, DetectionArray,
+                            GuidedSetpoint)
 
 from ..common import config as crsd_config
 from ..common.drop_latch import DropLatch
@@ -69,6 +70,12 @@ MISSION_MSG_TYPES = ("MISSION_REQUEST", "MISSION_REQUEST_INT", "MISSION_ACK",
 
 RELEASE_FRAMES = 5          # all-zero override frames sent on trip
 PUB_RATE_HZ = 20.0
+
+# ArduPilot's documented position-only SET_POSITION_TARGET_GLOBAL_INT mask —
+# the EXACT value the pre-integration gate_navigator used and field-exercised.
+# yaw on GuidedSetpoint is accepted but not commanded yet (left to ArduRover);
+# adding yaw control means clearing the yaw-ignore bit and is a separate change.
+POSITION_ONLY_TYPE_MASK = 0b110111111100  # 3580
 
 
 class TelemetryBridge(Node):
@@ -101,6 +108,11 @@ class TelemetryBridge(Node):
 
         self.create_subscription(RcChannels, "/crsd/rc_override",
                                  self._override_cb, 10)
+        # Sanctioned GUIDED setpoint TX — task nodes (gate_navigator) publish here
+        # instead of opening their own MAVLink connection. Gated by the same latch
+        # as RC overrides, so an autonomy drop stops GUIDED motion too.
+        self.create_subscription(GuidedSetpoint, "/crsd/guided_setpoint",
+                                 self._guided_cb, 10)
         self.create_service(Trigger, "/crsd/autonomy_drop_reset", self._reset_cb)
 
         # --- keep-out -> exclusion-fence path (plan §3.2: AVOID_* is the hard
@@ -218,6 +230,20 @@ class TelemetryBridge(Node):
     def _send_override(self, ch8):
         self.conn.mav.rc_channels_override_send(
             self.conn.target_system, self.conn.target_component, *ch8)
+
+    # ---------- GUIDED setpoint TX (sanctioned, latch-gated) ----------
+
+    def _guided_cb(self, msg: GuidedSetpoint):
+        if not self.latch.allowed:
+            return                   # dropped/startup: setpoints die here too
+        time_boot_ms = int(time.monotonic() * 1000.0) & 0xFFFFFFFF
+        self.conn.mav.set_position_target_global_int_send(
+            time_boot_ms,
+            self.conn.target_system, self.conn.target_component,
+            self._mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+            POSITION_ONLY_TYPE_MASK,
+            int(msg.latitude * 1e7), int(msg.longitude * 1e7),
+            0, 0, 0, 0, 0, 0, 0, 0, 0)
 
     def _handle_trip(self):
         # called with latch already DROPPED; release every channel to the pilot

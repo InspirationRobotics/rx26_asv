@@ -27,6 +27,8 @@ setup(
             "config/crusader_params.yaml",
             "config/crusader_devices.json",
         ]),
+        # launch files (referenced via get_package_share_directory)
+        ("share/" + package_name + "/launch", ["launch/core.launch.py"]),
     ],
     package_data={
         # canonical-label class map consumed by api/perception/detector.py
@@ -53,6 +55,16 @@ setup(
             "roa_apf_node = robotx_2026.api.navigation.roa_apf_node:main",
             # Phase 4 — mission planner + RoboCommand
             "mission_planner_node = robotx_2026.api.mission.mission_planner_node:main",
+            # Operational stack (ported from the Crusader boat repo, rewired to
+            # consume telemetry_bridge topics / actuate via the sanctioned paths)
+            "led_node = robotx_2026.api.led.led_node:main",
+            "pixhawk_led_status_node = robotx_2026.api.pixhawk.pixhawk_led_status_node:main",
+            "gate_navigator = robotx_2026.api.navigation.gate_navigator:main",
+            "dp_hold = robotx_2026.api.navigation.dp_hold:main",
+            # Mission-3 effectors + inter-vehicle comms (ported from RoboBoat,
+            # rewired to this repo's conventions)
+            "actuator_node = robotx_2026.api.actuators.actuator_node:main",
+            "ivc_node = robotx_2026.api.ivc.ivc_node:main",
         ],
     },
 )

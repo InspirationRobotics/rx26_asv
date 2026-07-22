@@ -86,3 +86,72 @@ roa_apf_node:
     monitor_progress_floor: *progress_floor
     monitor_heading_osc_floor: *progress_heading_osc_floor
     monitor_stall_after_s: *progress_stall_after_s
+
+# ---- LED status stack (operational nodes, ported from the Crusader boat repo) ----
+led_node:
+  ros__parameters:
+    port: "/dev/crsd-led"                  # [RO] udev symlink (tools/udev), not by-id
+    baud: 115200                           # [RO] must match firmware/LED.ino Serial.begin
+    reconnect_s: 3.0                       # [RO] serial reconnect retry period [s]
+
+pixhawk_led_status_node:
+  ros__parameters:
+    estop_channel: 7                       # [RO] SB e-stop switch channel (RC reference)
+    estop_threshold: 1200                  # [RO] us; below = e-stopped (RC loss reads 0)
+    autonomy_hold_s: 1.0                   # [RO] stay GREEN this long after last autonomy beat
+    rate_hz: 5.0                           # [RO] LED state evaluation rate
+
+# ---- dp_hold: MANUAL RC-override lateral hold (Mission 3 docking) ----
+# gains are [RO] for now (change here + restart); making them [DYN] for the
+# Level-1 loop (CLAUDE.md lists dp_hold gains as Level-1 tunables) is a follow-up
+# that also needs a make_set_callback in the node.
+dp_hold:
+  ros__parameters:
+    target_classes: ["buoy_flash_green"]   # [RO] canonical labels to lock onto
+    target_yaw_deg: 240.0                  # [RO] hold heading [deg]
+    target_forward_m: 2.0                  # [RO] hold target this far ahead [m]
+    target_lateral_m: 0.0                  # [RO] lateral offset (0 = centered)
+    conf_min: 0.5                          # [RO] detection confidence floor
+    lost_timeout_s: 1.0                    # [RO] s without target -> hold yaw only
+    grace_s: 20.0                          # [RO] s after last sight before disengaging
+    kp_yaw: 4.0                            # [RO] PWM per deg yaw error
+    kd_yaw: 3.0                            # [RO] PWM per deg/s (yaw damper)
+    kp_fwd: 90.0                           # [RO] PWM per m forward error
+    kp_lat: 90.0                           # [RO] PWM per m lateral error
+    pwm_limit: 120                         # [RO] max PWM deflection from neutral
+    dead_yaw_deg: 5.0                      # [RO] ignore smaller yaw errors
+    dead_pos_m: 0.15                       # [RO] ignore smaller position errors
+    rate_hz: 10.0                          # [RO] control rate
+
+# ---- gate_navigator: GUIDED-mode buoy-gate transit (Mission 1) ----
+gate_navigator:
+  ros__parameters:
+    mission_file: ""                       # [RO] JSON {"waypoints": [[lat,lon],...]}; required
+    gate_wp_indices: [0, 1]                # [RO] zero-based waypoints treated as gates
+    cmd_period_s: 1.0                      # [RO] min seconds between guided setpoints
+    rate_hz: 20.0                          # [RO] control rate
+
+# ---- actuator_node: Mission 3 effectors (delivery launcher + water cannon) ----
+# FIRMWARE: char/PWM protocol mirrors the RoboBoat Maestro controller — confirm on
+# the bench against Crusader's actual actuator firmware before trusting it.
+actuator_node:
+  ros__parameters:
+    port: "/dev/crsd-ball-launcher"        # [RO] Maestro/Arduino serial (udev symlink)
+    baud: 9600                             # [RO] Maestro default
+    launch_char: "g"                       # [RO] fire command char
+    reload_char: "a"                       # [RO] reload command char
+    fire_gap_s: 0.5                        # [RO] delay between fire and reload [s]
+    pump_channel: 0                        # [RO] Maestro channel for the water pump
+    pump_on_us: 2000                       # [RO] pump-ON pulse width [us]
+    pump_off_us: 1000                      # [RO] pump-OFF pulse width [us]
+
+# ---- ivc_node: inter-vehicle comms over team WiFi (Bullet AC link) ----
+# Separate from the RJ-45 RoboCommand link and the Pixhawk link. Exactly one peer
+# per pairing runs role="server".
+ivc_node:
+  ros__parameters:
+    role: "client"                         # [RO] "server" (bind/wait) or "client" (connect)
+    partner_ip: "192.168.8.229"            # [RO] peer IP (client role only)
+    port: 65432                            # [RO]
+    reconnect_s: 2.0                       # [RO] (re)connect retry period [s]
+    poll_hz: 20.0                          # [RO] inbound-queue drain rate
