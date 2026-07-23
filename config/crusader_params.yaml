@@ -101,6 +101,24 @@ pixhawk_led_status_node:
     autonomy_hold_s: 1.0                   # [RO] stay GREEN this long after last autonomy beat
     rate_hz: 5.0                           # [RO] LED state evaluation rate
 
+# ---- rc_heartbeat_watchdog: force-disarm on RC-transmitter link loss (safety) ----
+# Consumes telemetry_bridge topics (/crsd/rc_channels, /crsd/fcu_status) and routes
+# a force-disarm back through the bridge (/crsd/force_disarm) — no own MAVLink conn.
+# Complements ArduPilot FS_THR/FS_GCS and the hardware SB e-stop (defense in depth).
+# All params [RO]: safety config, change here + restart. rc_channel/reset_channel
+# share ch7 (the SB switch) with telemetry_bridge/pixhawk_led as read-only inputs.
+rc_heartbeat_watchdog:
+  ros__parameters:
+    heartbeat_timeout: 1.0                 # [RO] s of stale monitored-channel PWM -> RC link lost
+    rc_channel: 7                          # [RO] channel whose valid PWM is the RC heartbeat
+    min_valid_pwm: 900                     # [RO] us; below = no pulses (RC loss reads 0)
+    require_armed: true                    # [RO] only force-disarm when armed
+    link_timeout: 3.0                      # [RO] s without any bridge topic -> gateway deemed down
+    enable_latch: false                    # [RO] true = hold kill until RC reset toggle clears it
+    reset_channel: 7                       # [RO] channel whose low->high toggle clears the latch
+    reset_low_pwm: 1300                    # [RO] us; reset switch "low" below this
+    reset_high_pwm: 1700                   # [RO] us; reset switch "high" above this
+
 # ---- dp_hold: MANUAL RC-override lateral hold (Mission 3 docking) ----
 # gains are [RO] for now (change here + restart); making them [DYN] for the
 # Level-1 loop (CLAUDE.md lists dp_hold gains as Level-1 tunables) is a follow-up

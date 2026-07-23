@@ -21,6 +21,12 @@ Plan §3.1/§3.2. Two jobs, deliberately fused into one node:
    nodes have no MAVLink connection of their own, a tripped latch cannot be
    bypassed from the ROS graph. (G1 gate: this is the mechanism under test.)
 
+3. TX (safety): the ONLY sanctioned force-disarm path. rc_heartbeat_watchdog
+   publishes std_msgs/Bool on /crsd/force_disarm on RC-transmitter link loss;
+   this node forwards it as MAV_CMD_COMPONENT_ARM_DISARM (force magic). Unlike
+   the RC-override/GUIDED paths it is NOT gated by the autonomy-drop latch — a
+   force-disarm must fire even when the latch has already tripped.
+
 The hardware e-stop (SB switch) remains below and independent of all of this.
 
 Parameters:
@@ -71,6 +77,10 @@ MISSION_MSG_TYPES = ("MISSION_REQUEST", "MISSION_REQUEST_INT", "MISSION_ACK",
 RELEASE_FRAMES = 5          # all-zero override frames sent on trip
 PUB_RATE_HZ = 20.0
 
+# Magic value ArduPilot requires in param2 of MAV_CMD_COMPONENT_ARM_DISARM to
+# force-disarm even while the vehicle is moving.
+FORCE_DISARM_MAGIC = 21196
+
 # ArduPilot's documented position-only SET_POSITION_TARGET_GLOBAL_INT mask —
 # the EXACT value the pre-integration gate_navigator used and field-exercised.
 # yaw on GuidedSetpoint is accepted but not commanded yet (left to ArduRover);
@@ -113,6 +123,13 @@ class TelemetryBridge(Node):
         # as RC overrides, so an autonomy drop stops GUIDED motion too.
         self.create_subscription(GuidedSetpoint, "/crsd/guided_setpoint",
                                  self._guided_cb, 10)
+        # Sanctioned force-disarm TX — rc_heartbeat_watchdog publishes here on RC
+        # link loss instead of opening its own MAVLink connection. Deliberately
+        # NOT gated by the autonomy-drop latch: a force-disarm must fire even
+        # (especially) when the latch has already tripped. This is the ONLY
+        # sanctioned disarm path from the ROS graph.
+        self.create_subscription(Bool, "/crsd/force_disarm",
+                                 self._force_disarm_cb, 10)
         self.create_service(Trigger, "/crsd/autonomy_drop_reset", self._reset_cb)
 
         # --- keep-out -> exclusion-fence path (plan §3.2: AVOID_* is the hard
@@ -244,6 +261,21 @@ class TelemetryBridge(Node):
             POSITION_ONLY_TYPE_MASK,
             int(msg.latitude * 1e7), int(msg.longitude * 1e7),
             0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+    # ---------- force-disarm TX (safety watchdog, latch-INDEPENDENT) ----------
+
+    def _force_disarm_cb(self, msg: Bool):
+        if not msg.data:
+            return
+        self.conn.mav.command_long_send(
+            self.conn.target_system, self.conn.target_component,
+            self._mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0,
+            0,                        # param1: 0 = disarm
+            FORCE_DISARM_MAGIC,       # param2: force even while moving
+            0, 0, 0, 0, 0)
+        self.get_logger().warn(
+            "force-disarm forwarded (rc_heartbeat_watchdog)",
+            throttle_duration_sec=1.0)
 
     def _handle_trip(self):
         # called with latch already DROPPED; release every channel to the pilot
