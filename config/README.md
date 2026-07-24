@@ -11,9 +11,9 @@ params against it and hard-fails on the protected set.
 
 ## Parameter posture (enforced in code, `api/common/param_utils.py`)
 
-- **`[RO]` read_only** — safety/structural (telemetry_bridge safety params, grid geometry,
-  engine path, monitor thresholds). `ros2 param set` is rejected loudly. Change = edit YAML +
-  restart node (no rebuild; params load at start).
+- **`[RO]` read_only** — safety/structural (telemetry_bridge + rc_heartbeat_watchdog safety
+  params, grid geometry, engine path, monitor thresholds). `ros2 param set` is rejected loudly.
+  Change = edit YAML + restart node (no rebuild; params load at start).
 - **`[DYN]` dynamic** — range-validated and actually applied at runtime (APF gains,
   conf_threshold, decay_tau, health budgets). This is the knob path for test-day tuning and
   the Level-1 loop.

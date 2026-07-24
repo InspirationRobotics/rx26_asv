@@ -6,10 +6,14 @@ Starts (all reading config/crusader_params.yaml from the package share):
                              /crsd/autonomy_drop; sanctioned override/setpoint TX)
   * led_node              — /crsd/led_state -> LED Arduino serial
   * pixhawk_led_status    — autopilot + RC state -> /crsd/led_state
+  * rc_watchdog           — force-disarm on RC-transmitter link loss; consumes
+                            telemetry_bridge topics, routes the disarm back
+                            through the bridge (/crsd/force_disarm)
 
 This differs from the boat repo's core launch (led + pixhawk_led only): here the
-LED-status node consumes telemetry_bridge topics instead of opening its own
-MAVLink connection, so the bridge must be up for the LEDs to reflect real state.
+LED-status node and the RC watchdog consume telemetry_bridge topics instead of
+opening their own MAVLink connections, so the bridge must be up for the LEDs to
+reflect real state and for the watchdog to disarm.
 MAVProxy itself (the sole Pixhawk owner) is started outside ROS — see
 scripts/start_mavproxy.sh — before this launch.
 
@@ -33,5 +37,7 @@ def generate_launch_description():
         Node(package="robotx_2026", executable="led_node",
              output="screen", parameters=[params]),
         Node(package="robotx_2026", executable="pixhawk_led_status_node",
+             output="screen", parameters=[params]),
+        Node(package="robotx_2026", executable="rc_watchdog",
              output="screen", parameters=[params]),
     ])

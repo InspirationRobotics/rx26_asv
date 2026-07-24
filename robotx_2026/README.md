@@ -14,13 +14,14 @@ and exactly one node (`telemetry_bridge`) touches that link.
 | Module | Role | Phase |
 |---|---|---|
 | `api/common/` | Shared plumbing: `drop_latch` (autonomy-drop state machine), `override_guard` (client pattern for RC-override producers), `geo`, `config`+`param_utils` (params from `config/crusader_params.yaml`, `[RO]`/`[DYN]` postures), `node_main` (canonical safe startup/teardown for all entry points) | 1, 3.5 |
-| `api/navigation/telemetry_bridge.py` | **THE single MAVProxy consumer and THE single RC-override sender.** Publishes `/crsd/pose`, `/crsd/fcu_status`, `/crsd/rc_channels`, latched `/crsd/autonomy_drop`; uploads keep-out fences with mandatory readback (`fence_core`) | 1, 3 |
+| `api/navigation/telemetry_bridge.py` | **THE single MAVProxy consumer and THE single RC-override / GUIDED / force-disarm sender.** Publishes `/crsd/pose`, `/crsd/fcu_status`, `/crsd/rc_channels`, latched `/crsd/autonomy_drop`; forwards `/crsd/force_disarm` (latch-independent) for the safety watchdog; uploads keep-out fences with mandatory readback (`fence_core`) | 1, 3 |
 | `api/navigation/frame_transform.py` | BODY→WORLD detection transform + latched `/crsd/world_origin` | 1 |
 | `api/perception/` | `perception_node` (capture→detect→associate → `/crsd/detections_body`), `detector` (TensorRT + class map), `depth_association`, `oakd_guard` (USB3 SUPER assert), `pipeline_stats` (fps/latency health) | 2 |
 | `api/navigation/occupancy_grid_node.py` (+`occupancy_core`) | World-frame sparse grid; perception cells decay, comms keep-out cells persist until All Clear and can never be overwritten by perception | 3 |
 | `api/navigation/roa_apf_node.py` (+`apf_core`) | APF **advisory** — corrected goal + speed scale on `/crsd/apf_advisory`; never commands motors (plan §3.2 single-writer arbitration) | 3 |
 | `api/navigation/progress_monitor.py` | Preventative local-minima detector — flags "at risk" *before* a stall (objective 2) | 3 |
 | `api/mission/` | `mission_planner_node` + `planner` (task stack, interrupt/resume), `task_stack` (`TaskContext` resumable state), `tasks/` (WaypointMission, LoiterAssist), `robocomms` (RoboCommand listener thread → queue), `events` | 4 |
+| `api/safety/rc_heartbeat_watchdog.py` | Force-disarm on RC-transmitter link loss. Consumes `telemetry_bridge` topics (`/crsd/rc_channels`, `/crsd/fcu_status`), routes the disarm back via `/crsd/force_disarm` — no own MAVLink conn. Complements ArduPilot FS_THR/FS_GCS + the hardware SB e-stop (defense in depth) | ops |
 | `api/testing/rc_override_smoke.py` | G1 bench node (props off) — never launched outside the G1 procedure | 1 |
 
 ## Runtime sequence (one control cycle, all phases live)
@@ -61,7 +62,8 @@ avoidance. If the ROS layer dies, the fence still holds.
 | If you edit… | Rebuild? | Re-run first | Downstream effect |
 |---|---|---|---|
 | `api/common/*` | yes (`tools/scripts/rebuild.sh`) | `pytest tests/` | **every node** — all entry points route through `node_main`/`config` |
-| `telemetry_bridge.py` / `fence_core.py` | yes | `tests/test_fence_core.py`, G1 bench | pose for all consumers; fence backstop; autonomy-drop safety path |
+| `telemetry_bridge.py` / `fence_core.py` | yes | `tests/test_fence_core.py`, G1 bench | pose for all consumers; fence backstop; autonomy-drop safety path; `/crsd/force_disarm` (RC-loss failsafe) |
+| `api/safety/rc_heartbeat_watchdog.py` | yes | G1 bench (RC-loss drill) | RC-transmitter-loss force-disarm; depends on telemetry_bridge topics + `/crsd/force_disarm` |
 | `perception/*` | yes | `tests/test_depth_association.py`, `test_pipeline_stats.py`; G2 gate if detector/model touched | occupancy ingest → APF → objective-1 metrics |
 | `occupancy_core.py` | yes | `tests/test_occupancy_core.py` + `orchestrator/run_gate_g3.py` | APF inputs, keep-out persistence (Mission 4) |
 | `apf_core.py` | yes | `tests/test_apf_core.py` + **G3** (20 seeds) | avoidance behavior; equilibrium-distance-vs-AVOID_MARGIN assert must stay green |
