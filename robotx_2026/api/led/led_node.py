@@ -22,9 +22,9 @@ from threading import Lock
 from rclpy.node import Node
 from std_msgs.msg import Int32
 
-from ..common import config as crsd_config
-from ..common.node_main import run_node
-from ..common.param_utils import declare_from_config
+from robotx_2026.api.common import config as crsd_config
+from robotx_2026.api.common.node_main import run_node
+from robotx_2026.api.common.param_utils import declare_from_config
 
 PARAM_SPEC = {
     "port": dict(read_only=True,

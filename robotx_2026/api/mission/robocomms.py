@@ -23,7 +23,7 @@ import struct
 import threading
 import time
 
-from .events import StatusKind, from_json_dict
+from robotx_2026.api.mission.events import StatusKind, from_json_dict
 
 try:
     import robocommand_pb2 as pb

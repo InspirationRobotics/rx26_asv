@@ -41,10 +41,10 @@ import queue
 from collections import deque
 from dataclasses import dataclass
 
-from .events import (AllClear, AssistanceRequest, Clearance, KeepOutZone,
+from robotx_2026.api.mission.events import (AllClear, AssistanceRequest, Clearance, KeepOutZone,
                      MovingObjectReport, StatusKind)
-from .task_stack import TaskStack
-from .tasks.waypoint_mission import LoiterAssist
+from robotx_2026.api.mission.task_stack import TaskStack
+from robotx_2026.api.mission.tasks.waypoint_mission import LoiterAssist
 
 
 @dataclass

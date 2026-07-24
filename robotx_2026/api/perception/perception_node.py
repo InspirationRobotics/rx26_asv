@@ -28,13 +28,13 @@ from std_msgs.msg import String
 
 from interfaces.msg import Detection, DetectionArray
 
-from ..common import config as crsd_config
-from ..common.node_main import run_node
-from ..common.param_utils import declare_from_config, make_set_callback
-from .depth_association import CameraModel, associate
-from .detector import Detector
-from .oakd_guard import assert_usb_super
-from .pipeline_stats import PipelineStats
+from robotx_2026.api.common import config as crsd_config
+from robotx_2026.api.common.node_main import run_node
+from robotx_2026.api.common.param_utils import declare_from_config, make_set_callback
+from robotx_2026.api.perception.depth_association import CameraModel, associate
+from robotx_2026.api.perception.detector import Detector
+from robotx_2026.api.perception.oakd_guard import assert_usb_super
+from robotx_2026.api.perception.pipeline_stats import PipelineStats
 
 PARAM_SPEC = {
     "engine_path": dict(read_only=True, description="per-Jetson TensorRT engine"),

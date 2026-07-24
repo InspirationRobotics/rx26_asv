@@ -19,11 +19,11 @@ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 
 from interfaces.msg import Cell, DetectionArray, Grid, LatLonHead, Occupancy
 
-from ..common import config as crsd_config
-from ..common import geo
-from ..common.node_main import run_node
-from ..common.param_utils import declare_from_config, make_set_callback
-from .occupancy_core import OccupancyCore, SOURCE_COMMS, SOURCE_PERCEPTION
+from robotx_2026.api.common import config as crsd_config
+from robotx_2026.api.common import geo
+from robotx_2026.api.common.node_main import run_node
+from robotx_2026.api.common.param_utils import declare_from_config, make_set_callback
+from robotx_2026.api.navigation.occupancy_core import OccupancyCore, SOURCE_COMMS, SOURCE_PERCEPTION
 
 PARAM_SPEC = {
     "cell_size": dict(read_only=True, lo=0.1, hi=5.0,
