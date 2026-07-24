@@ -36,6 +36,7 @@ from interfaces.msg import LatLonHead, FcuStatus, DetectionArray, GuidedSetpoint
 
 from ..common import config as crsd_config
 from ..common import geo
+from ..common.detection_input import DetectionInput
 from ..common.node_main import run_node
 from ..common.param_utils import declare_from_config
 
@@ -98,8 +99,8 @@ class GateNavigator(Node):
                                                   "/crsd/guided_setpoint", 10)
         self.create_subscription(LatLonHead, "/crsd/pose", self._pose_cb, 10)
         self.create_subscription(FcuStatus, "/crsd/fcu_status", self._fcu_cb, 10)
-        self.create_subscription(DetectionArray, "/crsd/detections_body",
-                                 self._det_cb, 10)
+        # prefer fused (LiDAR range) when the fusion node is up, else camera-only
+        self._det_input = DetectionInput(self, self._det_cb)
 
         self.lat = self.lon = self.heading = None
         self.mode = ""

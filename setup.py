@@ -26,9 +26,19 @@ setup(
         ("share/" + package_name + "/config", [
             "config/crusader_params.yaml",
             "config/crusader_devices.json",
+            # Livox MID360 network/extrinsic config — repo copy is the source of
+            # truth; lidar_fusion.launch.py points the driver at this share path.
+            "config/MID360_config.json",
         ]),
         # launch files (referenced via get_package_share_directory)
-        ("share/" + package_name + "/launch", ["launch/core.launch.py"]),
+        ("share/" + package_name + "/launch", [
+            "launch/core.launch.py",
+            # perception: single-sensor launches (independently runnable) + the
+            # composed fused stack that includes both.
+            "launch/camera.launch.py",
+            "launch/lidar.launch.py",
+            "launch/lidar_fusion.launch.py",
+        ]),
     ],
     package_data={
         # canonical-label class map consumed by api/perception/detector.py
@@ -50,6 +60,7 @@ setup(
             # Phase 2 — perception
             "perception_node = robotx_2026.api.perception.perception_node:main",
             "oakd_guard = robotx_2026.api.perception.oakd_guard:main",
+            "lidar_fusion_node = robotx_2026.api.perception.lidar_fusion_node:main",
             # Phase 3 — occupancy + reactive avoidance
             "occupancy_grid_node = robotx_2026.api.navigation.occupancy_grid_node:main",
             "roa_apf_node = robotx_2026.api.navigation.roa_apf_node:main",
