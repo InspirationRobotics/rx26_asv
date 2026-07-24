@@ -20,9 +20,9 @@ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 
 from interfaces.msg import LatLonHead, DetectionArray
 
-from ..common import geo
-from ..common.detection_input import DetectionInput
-from ..common.node_main import run_node
+from robotx_2026.api.common import geo
+from robotx_2026.api.common.detection_input import DetectionInput
+from robotx_2026.api.common.node_main import run_node
 
 
 class FrameTransform(Node):

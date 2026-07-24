@@ -17,11 +17,14 @@ and exactly one node (`telemetry_bridge`) touches that link.
 | `api/navigation/telemetry_bridge.py` | **THE single MAVProxy consumer and THE single RC-override / GUIDED / force-disarm sender.** Publishes `/crsd/pose`, `/crsd/fcu_status`, `/crsd/rc_channels`, latched `/crsd/autonomy_drop`; forwards `/crsd/force_disarm` (latch-independent) for the safety watchdog; uploads keep-out fences with mandatory readback (`fence_core`) | 1, 3 |
 | `api/navigation/frame_transform.py` | BODY→WORLD detection transform + latched `/crsd/world_origin` | 1 |
 | `api/perception/` | `perception_node` (capture→detect→associate → `/crsd/detections_body`), `detector` (TensorRT + class map), `depth_association`, `oakd_guard` (USB3 SUPER assert), `pipeline_stats` (fps/latency health) | 2 |
+| `api/perception/lidar_fusion_node.py` (+`lidar_fusion`) | Livox MID360 ↔ camera detection fusion: refines each detection's **range** from LiDAR returns in its bearing sector; a detection with no LiDAR support is passed through with its camera range, never dropped (objective-1 invariant) → `/crsd/detections_fused` | ops |
 | `api/navigation/occupancy_grid_node.py` (+`occupancy_core`) | World-frame sparse grid; perception cells decay, comms keep-out cells persist until All Clear and can never be overwritten by perception | 3 |
 | `api/navigation/roa_apf_node.py` (+`apf_core`) | APF **advisory** — corrected goal + speed scale on `/crsd/apf_advisory`; never commands motors (plan §3.2 single-writer arbitration) | 3 |
 | `api/navigation/progress_monitor.py` | Preventative local-minima detector — flags "at risk" *before* a stall (objective 2) | 3 |
 | `api/mission/` | `mission_planner_node` + `planner` (task stack, interrupt/resume), `task_stack` (`TaskContext` resumable state), `tasks/` (WaypointMission, LoiterAssist), `robocomms` (RoboCommand listener thread → queue), `events` | 4 |
-| `api/safety/rc_heartbeat_watchdog.py` | Force-disarm on RC-transmitter link loss. Consumes `telemetry_bridge` topics (`/crsd/rc_channels`, `/crsd/fcu_status`), routes the disarm back via `/crsd/force_disarm` — no own MAVLink conn. Complements ArduPilot FS_THR/FS_GCS + the hardware SB e-stop (defense in depth) | ops |
+| `api/safety/rc_heartbeat_watchdog.py` (+`rc_heartbeat_core`) | Force-disarm on RC-transmitter link loss. Consumes `telemetry_bridge` topics (`/crsd/rc_channels`, `/crsd/fcu_status`), routes the disarm back via `/crsd/force_disarm` — no own MAVLink conn. All latch/link-loss logic is in the ROS-free `rc_heartbeat_core`. Complements ArduPilot FS_THR/FS_GCS + the hardware SB e-stop (defense in depth) | ops |
+| `api/actuators/actuator_node.py` (+`actuator_core`) | Mission-3 effectors on one Maestro serial link: delivery launcher (`/crsd/actuator/launch`,`/release`) + water cannon (`/crsd/actuator/pump`). ROS services, not motors. Wire-protocol encoding in the ROS-free `actuator_core` | ops |
+| `api/ivc/ivc_node.py` (+`ivc_link`) | Inter-vehicle comms over the **team WiFi** (Bullet AC) — String ⇄ peer via a background connection thread (`/crsd/ivc/send`,`/receive`,`/health`). Separate from the RJ-45 RoboCommand link and the Pixhawk link. ROS-free `ivc_link` core | ops |
 | `api/testing/rc_override_smoke.py` | G1 bench node (props off) — never launched outside the G1 procedure | 1 |
 
 ## Runtime sequence (one control cycle, all phases live)
@@ -63,8 +66,11 @@ avoidance. If the ROS layer dies, the fence still holds.
 |---|---|---|---|
 | `api/common/*` | yes (`tools/scripts/rebuild.sh`) | `pytest tests/` | **every node** — all entry points route through `node_main`/`config` |
 | `telemetry_bridge.py` / `fence_core.py` | yes | `tests/test_fence_core.py`, G1 bench | pose for all consumers; fence backstop; autonomy-drop safety path; `/crsd/force_disarm` (RC-loss failsafe) |
-| `api/safety/rc_heartbeat_watchdog.py` | yes | G1 bench (RC-loss drill) | RC-transmitter-loss force-disarm; depends on telemetry_bridge topics + `/crsd/force_disarm` |
+| `api/safety/rc_heartbeat_core.py` / `rc_heartbeat_watchdog.py` | yes | `tests/test_rc_heartbeat_core.py` + G1 bench (RC-loss drill) | RC-transmitter-loss force-disarm; depends on telemetry_bridge topics + `/crsd/force_disarm` |
 | `perception/*` | yes | `tests/test_depth_association.py`, `test_pipeline_stats.py`; G2 gate if detector/model touched | occupancy ingest → APF → objective-1 metrics |
+| `perception/lidar_fusion*.py` | yes | `tests/test_lidar_fusion.py` | fused range on `/crsd/detections_fused`; extrinsic/NIC prerequisites (CLAUDE.md) |
+| `api/actuators/*` | yes | `tests/test_actuator_core.py` + bench (real controller) | Mission-3 launcher/pump; Maestro wire protocol |
+| `api/ivc/*` | yes | `tests/test_ivc_link.py` + bench (two radios) | inter-vehicle relay (Missions 1/3); team-WiFi link only |
 | `occupancy_core.py` | yes | `tests/test_occupancy_core.py` + `orchestrator/run_gate_g3.py` | APF inputs, keep-out persistence (Mission 4) |
 | `apf_core.py` | yes | `tests/test_apf_core.py` + **G3** (20 seeds) | avoidance behavior; equilibrium-distance-vs-AVOID_MARGIN assert must stay green |
 | `progress_monitor.py` | yes | `tests/test_progress_monitor.py` + `tests/test_config_shared.py` | objective-2 scoring — evaluator thresholds are anchored to the same YAML |

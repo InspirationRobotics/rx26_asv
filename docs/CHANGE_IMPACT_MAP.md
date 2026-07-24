@@ -70,13 +70,17 @@ treat edits there as repo-wide changes.
 | Edit target | Directly affects | Must re-run | Tier |
 |---|---|---|---|
 | `interfaces/*.msg` | every producer/consumer, recorded-bag readability | rebuild both pkgs, full pytest, G3+G4 | U+S |
-| `robotx_2026/api/common/*` | all 8 entry points | full pytest, rebuild, one smoke episode | U+S |
+| `robotx_2026/api/common/*` | all 16 entry points | full pytest, rebuild, one smoke episode | U+S |
 | `config/crusader_params.yaml` (anchored values) | node behavior AND evaluator scoring | `tests/test_config_shared.py`, G3/G4 | U+S |
 | `telemetry_bridge.py` / `fence_core.py` | pose for everyone; fence backstop; autonomy-drop | `test_fence_core.py`; G1 bench if safety path touched | U+B |
 | `perception/*` | grid ingest → APF → objective-1 metrics | perception tests; G2 bench if detector/model | U+B |
 | `occupancy_core.py` / `apf_core.py` | avoidance behavior in **both** boat and orchestrator episodes (episodes run the real cores) | `test_occupancy_core/apf_core.py` + G3 | U+S |
 | `progress_monitor.py` | objective-2 detection + scoring | `test_progress_monitor.py`, `test_config_shared.py` | U |
 | `api/mission/*` | interrupt/resume, comms compliance | planner+robocomms tests + G4 | U+S |
+| `api/safety/rc_heartbeat_core.py` / `_watchdog.py` | RC-loss force-disarm via `/crsd/force_disarm` | `test_rc_heartbeat_core.py`; G1 bench (RC-loss drill) | U+B |
+| `api/perception/lidar_fusion*.py` | fused range on `/crsd/detections_fused` | `test_lidar_fusion.py`; bench (calibrated extrinsic) | U+B |
+| `api/actuators/*` | Mission-3 launcher + water cannon | `test_actuator_core.py`; bench (real Maestro) | U+B |
+| `api/ivc/*` | inter-vehicle relay (Missions 1/3), team-WiFi link | `test_ivc_link.py`; bench (two radios) | U+B |
 | `proto/robocommand.proto` | robocomms + mock (must stay byte-identical) | recompile, loopback test, G4 | U+S |
 | `orchestrator/evaluator/*` | every historical/future keep decision | `test_metrics.py`, `test_keep_rule.py`, G3+G4+G5 | U+S |
 | `orchestrator/level2/validate.py` | the injected-code safety net | `test_level2.py`, G5 revert drills | U+S |

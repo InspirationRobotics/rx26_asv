@@ -286,11 +286,37 @@ orchestrator-vs-target boundary):
   `--level2-every M` for real runs (SITL episodes on the Jetson use the same
   loop; the kinematic backend is the CI-speed stand-in).
 
-## What is intentionally NOT here (later phases)
+## Post-Phase-5 additions (operational stack: RoboBoat merge, LiDAR fusion, RC watchdog)
 
-- No mission planner / task stack (Phase 4) — `mission4_advanced_keepout.json` exercises
-  only the keep-out / moving-object injection path; the Mission-4 Core interrupt/resume
-  scenario and its sub-metrics (which emit as explicit `null`s for now) land in Phase 4.
-- No Level 1/1.5/2 loops (Phase 5) — but the evaluator (`orchestrator/evaluator/`) they
-  will call is real, including the keep-rule.
-- SITL backend is written but only testable in the container (Gate G0's SITL leg runs there).
+Capability ported from the Crusader boat repo / RoboBoat_2026 and rewired to this repo's
+conventions (single-gateway rule, `[RO]`/`[DYN]` config, `*_core`/`*_node` split, tests in the
+same commit). These are additive to the Phase 0–5 plan, not new phases:
+
+- `api/safety/rc_heartbeat_watchdog.py` + `rc_heartbeat_core.py` — force-disarm on
+  RC-transmitter link loss. Rewired from the boat repo's own-MAVLink-connection version to
+  consume `telemetry_bridge` topics and route the disarm back via `/crsd/force_disarm`
+  (latch-independent in the bridge). All latch/link-loss logic is in the ROS-free core,
+  unit-tested in `tests/test_rc_heartbeat_core.py`. Launched in `core.launch.py`.
+- `api/perception/lidar_fusion_node.py` + `lidar_fusion.py` — Livox MID360 ↔ camera
+  detection-range fusion (fills the RX26 plan §3.1 LiDAR API slot). Numpy-only core,
+  `tests/test_lidar_fusion.py`. **Prereqs before trusting fused ranges:** calibrated
+  camera↔LiDAR extrinsic + MID360 on its own NIC/subnet (CLAUDE.md).
+- `api/actuators/actuator_node.py` + `actuator_core.py` — Mission-3 effectors (delivery
+  launcher + water cannon) on one Maestro serial link, exposed as ROS services. Wire-protocol
+  encoding unit-tested in `tests/test_actuator_core.py`; serial/service glue is bench-tier.
+- `api/ivc/ivc_node.py` + `ivc_link.py` — inter-vehicle comms over the team WiFi (Bullet AC),
+  ROS-free link core with a background connection thread, `tests/test_ivc_link.py`. Separate
+  from the RJ-45 RoboCommand link and the Pixhawk link.
+- `Dockerfile` (the `crusader` image, with `livox_ros_driver2` baked in) + `launch/` files
+  (`core`, `camera`, `lidar`, `lidar_fusion`) + `config/MID360_config.json`.
+
+New entry points added to `setup.py`: `rc_watchdog`, `actuator_node`, `ivc_node`,
+`lidar_fusion_node`. All four now carry config sections asserted by
+`tests/test_config_shared.py::test_all_nodes_have_config_sections`.
+
+## What was scaffolded but is completed later on-boat
+
+- Mission-4 Core interrupt/resume sub-metrics land with Phase 4 (above); the SITL backend is
+  written but only testable in the container (Gate G0's SITL leg runs there).
+- Buoy-model retraining (Gate G2) and the RC autonomy-drop switch (Gate G1) remain the two
+  prerequisites gating objective-1 trust and RC-override field work, respectively.

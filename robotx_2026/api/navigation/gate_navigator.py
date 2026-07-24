@@ -34,11 +34,11 @@ from rclpy.node import Node
 
 from interfaces.msg import LatLonHead, FcuStatus, DetectionArray, GuidedSetpoint
 
-from ..common import config as crsd_config
-from ..common import geo
-from ..common.detection_input import DetectionInput
-from ..common.node_main import run_node
-from ..common.param_utils import declare_from_config
+from robotx_2026.api.common import config as crsd_config
+from robotx_2026.api.common import geo
+from robotx_2026.api.common.detection_input import DetectionInput
+from robotx_2026.api.common.node_main import run_node
+from robotx_2026.api.common.param_utils import declare_from_config
 
 # Canonical perception labels (class_map.json): red/green flashing gate buoys.
 RED_CLASSES = {"buoy_flash_red"}

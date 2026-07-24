@@ -28,13 +28,13 @@ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 
 from interfaces.msg import Detection, DetectionArray, LatLonHead
 
-from ..common import config as crsd_config
-from ..common import geo
-from ..common.node_main import run_node
-from ..common.param_utils import declare_from_config
-from .planner import MissionPlanner, PlannerConfig
-from .robocomms import RoboCommandClient
-from .tasks.waypoint_mission import WaypointMission
+from robotx_2026.api.common import config as crsd_config
+from robotx_2026.api.common import geo
+from robotx_2026.api.common.node_main import run_node
+from robotx_2026.api.common.param_utils import declare_from_config
+from robotx_2026.api.mission.planner import MissionPlanner, PlannerConfig
+from robotx_2026.api.mission.robocomms import RoboCommandClient
+from robotx_2026.api.mission.tasks.waypoint_mission import WaypointMission
 
 PARAM_SPEC = {
     "robocommand_host": dict(read_only=True),

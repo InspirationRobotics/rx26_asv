@@ -35,11 +35,11 @@ from std_msgs.msg import String
 
 from interfaces.msg import Detection, DetectionArray
 
-from ..common import config as crsd_config
-from ..common.node_main import run_node
-from ..common.param_utils import declare_from_config, make_set_callback
-from .depth_association import BodyDetection
-from .lidar_fusion import (FusedDetection, FusionParams, LidarExtrinsics,
+from robotx_2026.api.common import config as crsd_config
+from robotx_2026.api.common.node_main import run_node
+from robotx_2026.api.common.param_utils import declare_from_config, make_set_callback
+from robotx_2026.api.perception.depth_association import BodyDetection
+from robotx_2026.api.perception.lidar_fusion import (FusedDetection, FusionParams, LidarExtrinsics,
                            config_extrinsic_nonidentity, fuse, to_body)
 
 PARAM_SPEC = {

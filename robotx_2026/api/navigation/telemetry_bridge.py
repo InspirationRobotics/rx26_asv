@@ -50,11 +50,11 @@ from std_srvs.srv import Trigger
 from interfaces.msg import (LatLonHead, FcuStatus, RcChannels, DetectionArray,
                             GuidedSetpoint)
 
-from ..common import config as crsd_config
-from ..common.drop_latch import DropLatch
-from ..common.node_main import run_node
-from ..common.param_utils import declare_from_config
-from .fence_core import (FenceError, FenceProtocol, MavFenceTransport,
+from robotx_2026.api.common import config as crsd_config
+from robotx_2026.api.common.drop_latch import DropLatch
+from robotx_2026.api.common.node_main import run_node
+from robotx_2026.api.common.param_utils import declare_from_config
+from robotx_2026.api.navigation.fence_core import (FenceError, FenceProtocol, MavFenceTransport,
                          items_from_keepouts)
 
 # All bridge params are SAFETY CONFIG -> read_only: `ros2 param set` is
