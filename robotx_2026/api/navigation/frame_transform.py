@@ -4,6 +4,11 @@ Subscribes BODY-frame detections (from the perception pipeline) and the fused
 pose (from telemetry_bridge — i.e. ArduRover's EK3, the only estimator), and
 republishes detections in the WORLD frame for the occupancy grid (Phase 3).
 
+Detection input goes through DetectionInput: it prefers /crsd/detections_fused
+(LiDAR-refined range) when the fusion node is running and falls back to
+/crsd/detections_body (camera-only) when it is not — so the avoidance path this
+node feeds works identically on a camera-only bench run or a full fused stack.
+
 The world origin is the first valid RTK fix seen, published once on
 /crsd/world_origin (LatLonHead, latched) so every consumer anchors identically.
 """
@@ -16,6 +21,7 @@ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from interfaces.msg import LatLonHead, DetectionArray
 
 from ..common import geo
+from ..common.detection_input import DetectionInput
 from ..common.node_main import run_node
 
 
@@ -34,8 +40,8 @@ class FrameTransform(Node):
         self.world_pub = self.create_publisher(DetectionArray,
                                                "/crsd/detections_world", 10)
         self.create_subscription(LatLonHead, "/crsd/pose", self._pose_cb, 10)
-        self.create_subscription(DetectionArray, "/crsd/detections_body",
-                                 self._detections_cb, 10)
+        # prefer fused (LiDAR range) when the fusion node is up, else camera-only
+        self._det_input = DetectionInput(self, self._detections_cb)
 
     def _pose_cb(self, msg: LatLonHead):
         if math.isnan(msg.heading):
