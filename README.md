@@ -1,4 +1,4 @@
-# RobotX 2026 — Crusader Software Package (v0.5)
+# RobotX 2026 — Crusader Software Package (v0.4)
 
 Team Inspiration's codebase for the 2026 RobotX competition. We run a single ASV
 (autonomous surface vessel), **Crusader**: a holonomic 4×T200 boat on ArduRover/Pixhawk with
@@ -20,19 +20,17 @@ and a change-impact table. The repo-wide "edit X → re-run Y" map is
 
 ```
 rx26_asv
-|-- rx26_asv/          # THE TARGET SYSTEM — ROS 2 python package running on the boat
+|-- rx26_asv/          # ROS 2 python package running on the boat
 |    |-- api/common/      #   shared plumbing: params, safe node lifecycle, autonomy-drop latch
 |    |-- api/navigation/  #   telemetry_bridge (sole MAVProxy consumer), frame transform,
 |    |                    #   occupancy grid, APF advisory, progress monitor, fence writer
 |    |-- api/perception/  #   OAK-D capture -> TensorRT detect -> depth assoc; Livox LiDAR fusion
-|    |-- api/mission/     #   task-stack mission planner + RoboCommand comms (Mission 4)
+|    |-- api/mission/     #   task-stack mission planner + RoboCommand comms
 |    |-- api/safety/      #   rc_heartbeat_watchdog: force-disarm on RC-link loss (+ core)
-|    |-- api/actuators/   #   Mission-3 effectors: delivery launcher + water cannon (Maestro)
-|    |-- api/ivc/         #   inter-vehicle comms over team WiFi (Bullet AC), separate link
-|    |-- api/testing/     #   bench-only nodes (G1 RC-override smoke)
+|    |-- api/actuators/   #   Mission-3 effectors: water cannon (Maestro)
+|    |-- api/ivc/         #   inter-vehicle comms over modem communication
+|    |-- api/testing/     #   bench-only nodes
 |-- interfaces/           # ROS 2 message package (typed contracts between nodes)
-|-- orchestrator/         # THE AUTORESEARCH HARNESS — Levels 1/1.5/2, episodes, evaluator,
-|                         #   gates. COLCON_IGNOREd: plain Python threading, never a ROS node
 |-- config/               # single source of truth: ROS params YAML + device topology + MID360
 |-- proto/                # RoboCommand protobuf wire schema (compiled at build, not committed)
 |-- launch/               # ROS 2 launch files (core status stack, camera, lidar, fusion)
@@ -41,23 +39,10 @@ rx26_asv
 |                         #   model training pipeline, bench instruments
 |-- docker/               # ArduPilot Rover SITL environment (in-container simulation)
 |-- Dockerfile            # the `crusader` container image (ROS 2 Humble + CUDA + livox driver)
-|-- tests/                # unit tests for the target system (orchestrator has its own)
+|-- tests/                # unit tests for the target system
 |-- setup/                # installation scripts per machine role + git remote init
 |-- docs/                 # setup guide, change-impact map, bench procedures (G1, G2)
 ```
-
-### The one distinction that organizes everything: orchestrator vs. target
-
-- The **target system** (`rx26_asv/`, `interfaces/`) is the boat: ROS 2 nodes, built by
-  colcon, launched in the container.
-- The **orchestrator** (`orchestrator/`) is a separate research harness that *edits, runs,
-  and scores* the target from outside. It never imports `rclpy` and is never launched on
-  the boat.
-
-They live in one repo (monorepo decision, plan §4.1) so a mechanism injection and the
-harness state that produced it share one atomic git history — validate-and-revert is a
-single `git revert`, and interface drift is caught at build time instead of on the water
-(the RX24 three-repo split taught us that the hard way).
 
 ## Usage
 
@@ -73,27 +58,15 @@ single `git revert`, and interface drift is caught at build time instead of on t
 
 ### Running the system
 
-Orchestrator scripts run from the **repo root** as plain Python; boat nodes run via ROS 2
-inside the container after a build:
-
 ```bash
-# anywhere (no ROS needed) — one scripted episode with 3-objective metrics:
-python orchestrator/run_episode.py \
-    --scenario orchestrator/scenarios/mission1_transit.json \
-    --backend kinematic --seed 0 --out ep.json
-
 # in-container — build then launch nodes:
 tools/scripts/rebuild.sh          # from the Jetson host; THE one blessed rebuild path
 ros2 run rx26_asv telemetry_bridge --ros-args --params-file config/crusader_params.yaml
 ```
 
-All tests: `python -m pytest orchestrator/tests tests -q` (CI runs this plus gates
-G0/G3/G4/G5 and a colcon build on every push — see
-[.github/workflows/ci.yml](.github/workflows/ci.yml)).
-
 ## Safety constraints (non-negotiable)
 
-These come from hard-won field lessons (CLAUDE.md); tooling enforces most of them, but you
+These come from field test lessons; tooling enforces most of them, but you
 are expected to know them:
 
 1. **One Pixhawk owner.** MAVProxy holds the serial link; everything else consumes its UDP
@@ -130,8 +103,8 @@ are expected to know them:
 
 ### Versioning
 
-Current version: **0.5.0** — "phase" versioning until competition: `0.N` means Phases
-0–N delivered (we are post-Phase-5: autoresearch harness live). At competition freeze this
+Current version: **0.4.0** — "phase" versioning until competition: `0.N` means Phases
+0–N delivered (we are not yet at Phase-5: autoresearch/auto-kinematic config harness live). At competition freeze this
 becomes `1.0.0`; afterwards, small confirmed changes in one area bump the minor, major
 changes in one or more core areas bump the major.
 
@@ -162,10 +135,7 @@ plain Python ≥3.10 + numpy/pyyaml/pytest for the orchestrator anywhere. Instal
 | **Keep-out zone / moving virtual obstacle** | Mission-4 RoboCommand constraints. Static zones → MAVLink exclusion fences (hard backstop) + grid (smooth avoidance); moving objects → 10 m clearance from current AND projected position, grid/APF-only |
 | **Task stack / TaskContext** | Mission-planner interrupt model: suspend the current task as JSON-serializable resumable state, run the interrupt task, resume with progress preserved — never restart |
 | **RoboCommand** | Competition tasking authority; protobuf over RJ-45. Every state transition needs an ack — comms compliance is scored separately from the maneuver |
-| **Level 1 / 1.5 / 2** | Autoresearch loops: parameter tuning / search-strategy redirection (freeze-unfreeze) / new-mechanism generation + injection with validate-and-revert |
 | **Keep-rule** | A change is kept only if it regresses neither collision nor local-minima metrics past safety thresholds and improves stuck-ness or completion. Enforced by the evaluator, never the proposer |
-| **Three objectives** | 1: minimize collision probability (incl. virtual obstacles) · 2: prevent local minima (detect *before* stall) · 3: maximize correct mission completion (incl. comms compliance) |
-| **Episode** | One scenario run (kinematic, SITL, or field) emitting the `rx26-episode-metrics/1` JSON scored on the three objectives |
 | **SITL** | ArduPilot software-in-the-loop — the real firmware in sim; primary simulator (plan §4.6) |
 | **Gates G0–G6** | Phase exit criteria: G0 scripted episode → G1 autonomy-drop → G2 perception trust → G3 avoidance (20 seeds clean) → G4 interrupt/resume → G5 unattended autoresearch + revert drills → G6 on-water suite across 2 days |
 | **Preflight** | `tools/scripts/preflight.py` — the do-not-arm gate run before every session |
@@ -177,11 +147,9 @@ plain Python ≥3.10 + numpy/pyyaml/pytest for the orchestrator anywhere. Instal
 |---|---|---|
 | [rx26_asv/](rx26_asv/README.md) | ArduRover owns actuation/estimation; nodes advise, one bridge talks MAVLink | Free EK3/failsafes/e-stop; no PWM or parallel EKF to maintain (plan §4.2) |
 | [interfaces/](interfaces/README.md) | ROS 2 topics with RX24-proven message shapes | Typed drift-catching at build time vs legacy sockets (§4.3) |
-| [orchestrator/](orchestrator/README.md) | In-repo, COLCON_IGNOREd, plain threading; keep-rule in the evaluator | Atomic history for injections; LLM proposes, measurements decide |
 | [config/](config/README.md) | One YAML, `[RO]`/`[DYN]` postures, anchors tie node↔evaluator values | Config drift between scorer and boat is a silent-failure factory |
 | [proto/](proto/README.md) | Protobuf at the edge, ROS inside; byte-identical mock | Competition mandates the wire format; nothing else should know it (§4.5) |
 | [tools/](tools/README.md) | One blessed path per operation, shared by humans and autoresearch | No drift between "how people do it" and "how Level 2 does it" |
-| [docker/](docker/README.md) | SITL over Gazebo/VRX; kinematic sim for unit speed | Same-firmware fidelity for param effects; throughput for autoresearch (§4.6) |
 | [tests/](tests/README.md) | Hardware-free unit tier of a 4-tier pyramid | A change earns its next tier; never promoted on one green level |
 | [setup/](setup/README.md) | One idempotent, self-verifying script per machine role | Fresh-machine bootstrap must not depend on tribal knowledge |
 
@@ -195,5 +163,7 @@ plain Python ≥3.10 + numpy/pyyaml/pytest for the orchestrator anywhere. Instal
   **harden `gate_navigator`** (still UNTESTED — higher priority than new mechanisms).
 - Mission-planner moving-hazard topic (explicit TODO in `mission_planner_node`; APF core
   already supports projection).
+- Implement and validate Phase 5 autoresearch layer for the Nav2 MPPI plugin critic tuning.
+  Previously formed codebase for the autoresearch orchestrator is now at the sim/orchestrator branch.
 - Phase 6 field campaign per plan §5, then Phase 7 freeze (param freeze via `param_guard`,
   runbooks, spares).
