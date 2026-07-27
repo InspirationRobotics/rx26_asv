@@ -3,7 +3,7 @@
 <package format="3">
   <name>interfaces</name>
   <version>0.1.0</version>
-  <description>RX26 message definitions (ported from RX24 shapes; plan section 3.3)</description>
+  <description>RX26 message definitions (ported from RX24 shapes)</description>
   <maintainer email="brandont3927@gmail.com">Team Inspiration</maintainer>
   <license>MIT</license>
 

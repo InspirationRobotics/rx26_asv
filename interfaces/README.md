@@ -1,11 +1,11 @@
 # `interfaces/` — ROS 2 message definitions (ament_cmake / rosidl)
 
-Typed contracts between nodes. Message *shapes* are ported from the proven RX24 stack
-(engineering plan §2) so legacy-tested semantics carry over; the package builds with
+Typed contracts between nodes. Message *shapes* are ported from the proven RX24 stack 
+so legacy-tested semantics carry over; the package builds with
 `ament_cmake` + `rosidl` (messages can't be ament_python).
 
 **Design choice:** intra-boat comms are ROS 2 topics, not the legacy `comms_core` sockets
-(plan §4.3) — typed messages caught interface drift at `colcon build` in CI instead of on the
+ — typed messages caught interface drift at `colcon build` in CI instead of on the
 water. The RoboCommand link is the one exception: protobuf at the edge (`../proto/`),
 converted to these types at the boundary by `robocomms.py`.
 

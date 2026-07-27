@@ -1,4 +1,4 @@
-# APF advisory output (plan §3.2 — ADVISORY ONLY, never a setpoint).
+# APF advisory output (ADVISORY ONLY, never a setpoint).
 # The active task node (gate_navigator wrapper / dp_hold) blends this into its
 # own output; the mission planner watches at_risk/stalled for escape decisions.
 std_msgs/Header header

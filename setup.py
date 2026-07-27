@@ -21,7 +21,7 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
-        # single source of truth for ROS-side params (Phase 3.5) — installed to
+        # single source of truth for ROS-side params — installed to
         # share so launch files can reference it via get_package_share_directory
         ("share/" + package_name + "/config", [
             "config/crusader_params.yaml",
