@@ -15,8 +15,8 @@ dp_hold and any Level-2-generated override mechanism.
 import rclpy
 from rclpy.node import Node
 
-from ..common.node_main import run_node
-from ..common.override_guard import OverrideGuard
+from robotx_2026.api.common.node_main import run_node
+from robotx_2026.api.common.override_guard import OverrideGuard
 
 NEUTRAL = 1500
 RATE_HZ = 10.0

@@ -24,8 +24,8 @@ from robotx_2026.api.mission.events import (AllClear, AssistanceRequest,   # noq
 from robotx_2026.api.mission.planner import MissionPlanner, PlannerConfig  # noqa: E402
 from robotx_2026.api.mission.tasks.waypoint_mission import WaypointMission  # noqa: E402
 
-from .runner import EpisodeResult, Sample                       # noqa: E402
-from .scenario import KeepOut, MovingObject                     # noqa: E402
+from episodes.runner import EpisodeResult, Sample                       # noqa: E402
+from episodes.scenario import KeepOut, MovingObject                     # noqa: E402
 
 
 class SimComms:

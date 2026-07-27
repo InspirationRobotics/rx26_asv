@@ -12,7 +12,7 @@ from pathlib import Path
 
 from evaluator.keep_rule import Thresholds, aggregate, evaluate
 
-from . import param_space, suite
+from level1 import param_space, suite
 
 
 class Level1Loop:

@@ -23,7 +23,7 @@ mission rules, AVOID_ENABLE=3 (already on).
 import time
 from dataclasses import dataclass
 
-from ..common import geo
+from robotx_2026.api.common import geo
 
 MISSION_TYPE_FENCE = 1                    # MAV_MISSION_TYPE_FENCE
 CMD_FENCE_CIRCLE_EXCLUSION = 5004         # MAV_CMD_NAV_FENCE_CIRCLE_EXCLUSION

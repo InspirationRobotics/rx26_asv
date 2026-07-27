@@ -52,9 +52,10 @@ from std_msgs.msg import Bool
 
 from interfaces.msg import FcuStatus, RcChannels
 
-from ..common import config as crsd_config
-from ..common.node_main import run_node
-from ..common.param_utils import declare_from_config
+from robotx_2026.api.common import config as crsd_config
+from robotx_2026.api.common.node_main import run_node
+from robotx_2026.api.common.param_utils import declare_from_config
+from robotx_2026.api.safety.rc_heartbeat_core import RcHeartbeatCore, WatchdogConfig
 
 # All watchdog params are SAFETY CONFIG -> read_only: `ros2 param set` is
 # rejected; the change path is config/crusader_params.yaml + node restart.
@@ -89,31 +90,29 @@ class RCHeartbeatWatchdog(Node):
         super().__init__("rc_heartbeat_watchdog")
         p = declare_from_config(
             self, crsd_config.node_params("rc_heartbeat_watchdog"), PARAM_SPEC)
-        self.heartbeat_timeout = p["heartbeat_timeout"]
         self.rc_channel = p["rc_channel"]
-        self.min_valid_pwm = p["min_valid_pwm"]
-        self.require_armed = p["require_armed"]
-        self.link_timeout = p["link_timeout"]
-        self.enable_latch = p["enable_latch"]
         self.reset_channel = p["reset_channel"]
-        self.reset_low = p["reset_low_pwm"]
-        self.reset_high = p["reset_high_pwm"]
+        self.min_valid_pwm = p["min_valid_pwm"]
+
+        # All safety logic lives in the ROS-free core (unit-tested in
+        # tests/test_rc_heartbeat_core.py); this node only marshals topics.
+        self.core = RcHeartbeatCore(
+            WatchdogConfig(
+                heartbeat_timeout=p["heartbeat_timeout"],
+                min_valid_pwm=p["min_valid_pwm"],
+                require_armed=p["require_armed"],
+                link_timeout=p["link_timeout"],
+                enable_latch=p["enable_latch"],
+                reset_low=p["reset_low_pwm"],
+                reset_high=p["reset_high_pwm"],
+            ),
+            now=time.monotonic())
 
         self.disarm_pub = self.create_publisher(Bool, "/crsd/force_disarm", 10)
         self.kill_pub = self.create_publisher(Bool, "/crsd/kill_active", 10)
         self.create_subscription(RcChannels, "/crsd/rc_channels", self._rc_cb, 10)
         self.create_subscription(FcuStatus, "/crsd/fcu_status", self._fcu_cb, 10)
 
-        # State. last_bridge_msg starts at 0 so the gateway is deemed DOWN until a
-        # real topic arrives (never disarm on startup silence); last_rc_ok starts
-        # optimistic so a fresh start does not instantly read as an RC dropout.
-        now = time.monotonic()
-        self.armed = False
-        self.killed = False
-        self.reset_armed = False       # saw a valid LOW since the latch engaged
-        self.reset_pwm = 0             # latest reset-channel raw PWM
-        self.last_rc_ok = now          # last valid monitored-channel PWM
-        self.last_bridge_msg = 0.0     # last time ANY bridge topic arrived
         self.last_disarm_req = 0.0
         self.last_kill_published = None
         self.last_status_log = 0.0
@@ -121,107 +120,56 @@ class RCHeartbeatWatchdog(Node):
         self.create_timer(1.0 / TICK_HZ, self.tick)
         self.get_logger().info(
             f"RC watchdog active: ch{self.rc_channel} heartbeat_timeout="
-            f"{self.heartbeat_timeout:.1f}s latch={self.enable_latch}")
+            f"{self.core.cfg.heartbeat_timeout:.1f}s latch={self.core.cfg.enable_latch}")
 
     # ---------------- topic intake ----------------
     def _rc_cb(self, msg: RcChannels):
-        now = time.monotonic()
-        self.last_bridge_msg = now
-        if len(msg.channels) >= self.rc_channel:
-            if msg.channels[self.rc_channel - 1] >= self.min_valid_pwm:
-                self.last_rc_ok = now
-        if len(msg.channels) >= self.reset_channel:
-            self.reset_pwm = msg.channels[self.reset_channel - 1]
+        monitored_valid = (len(msg.channels) >= self.rc_channel
+                           and msg.channels[self.rc_channel - 1] >= self.min_valid_pwm)
+        reset_pwm = (msg.channels[self.reset_channel - 1]
+                     if len(msg.channels) >= self.reset_channel else 0)
+        self.core.note_rc(time.monotonic(), monitored_valid, reset_pwm)
 
     def _fcu_cb(self, msg: FcuStatus):
-        self.last_bridge_msg = time.monotonic()
-        self.armed = msg.armed
-
-    def _poll_latch_reset(self):
-        """Clear the latch on a deliberate LOW->HIGH toggle of the reset channel.
-
-        A valid LOW must be seen first (`reset_armed`) before a HIGH clears the
-        latch, so reconnecting with the switch already HIGH -- or the 0 PWM that
-        appears during link loss -- can never auto-clear the kill.
-        """
-        pwm = self.reset_pwm
-        if pwm < self.min_valid_pwm:
-            return  # no valid RC signal on this channel; not a real toggle
-        if pwm <= self.reset_low:
-            self.reset_armed = True
-        elif pwm >= self.reset_high and self.reset_armed:
-            self.reset_armed = False
-            self.killed = False
-            self._publish_kill(False)
-            self.get_logger().info(
-                "Kill latch cleared by RC reset toggle on channel "
-                f"{self.reset_channel}. Re-arm from the transmitter/GCS.")
+        self.core.note_fcu(time.monotonic(), msg.armed)
 
     # ---------------- watchdog loop ----------------
     def tick(self):
         now = time.monotonic()
-        bridge_ok = (now - self.last_bridge_msg) < self.link_timeout
-        link_lost = (now - self.last_rc_ok) > self.heartbeat_timeout
+        d = self.core.tick(now)
 
-        if self.killed:
-            # Latched: look for the operator's RC reset toggle, otherwise keep
-            # enforcing the kill.
-            self._poll_latch_reset()
-            if self.killed:
-                if self.armed and bridge_ok:
-                    self._request_disarm("re-enforcing latched kill")
-                self._publish_kill(True)
-                self._status_log(now, link_lost, bridge_ok)
-                return
-            # Latch just cleared; fall through and evaluate normally.
-
-        if not link_lost:
-            self._publish_kill(False)
-            self._status_log(now, link_lost, bridge_ok)
-            return
-
-        # RC link is down.
-        if self.require_armed and not self.armed:
-            # Nothing to stop, and we do not want to latch a kill on a boat that
-            # is already safe on the bench.
-            self._publish_kill(False)
-            self._status_log(now, link_lost, bridge_ok)
-            return
-
-        if not bridge_ok:
-            # We have lost telemetry_bridge too and cannot route a disarm through
-            # the gateway; ArduPilot's onboard failsafe must handle this case.
+        if d.latch_cleared:
+            self.get_logger().info(
+                "Kill latch cleared by RC reset toggle on channel "
+                f"{self.reset_channel}. Re-arm from the transmitter/GCS.")
+        if d.gateway_down_in_loss:
             self.get_logger().error(
                 "RC link lost AND no telemetry from telemetry_bridge - cannot "
                 "force-disarm via the gateway; relying on ArduPilot failsafe",
                 throttle_duration_sec=2.0)
-            return
-
-        if self.enable_latch:
-            if not self.killed:
-                self.reset_armed = False  # require a fresh LOW->HIGH after kill
-                self.get_logger().error(
-                    f"RC heartbeat lost for >{self.heartbeat_timeout:.1f}s "
-                    "-> FORCE-DISARMING (latched). Toggle RC channel "
-                    f"{self.reset_channel} low->high to clear.")
-            self.killed = True
-        else:
+        if d.engaged:
+            self.get_logger().error(
+                f"RC heartbeat lost for >{self.core.cfg.heartbeat_timeout:.1f}s "
+                "-> FORCE-DISARMING (latched). Toggle RC channel "
+                f"{self.reset_channel} low->high to clear.")
+        elif d.disarm_request and not self.core.cfg.enable_latch:
             self.get_logger().error(
                 "RC heartbeat lost -> FORCE-DISARMING "
                 "(auto-recovers when the link returns)",
                 throttle_duration_sec=1.0)
 
-        self._request_disarm("RC heartbeat lost")
-        self._publish_kill(True)
+        if d.disarm_request:
+            self._request_disarm(now)
+        self._publish_kill(d.kill_active)
+        self._status_log(now, self.core._link_lost(now), self.core._bridge_ok(now))
 
-    def _request_disarm(self, reason):
-        now = time.monotonic()
+    def _request_disarm(self, now):
         if now - self.last_disarm_req < DISARM_MIN_GAP_S:
             return
         self.last_disarm_req = now
         self.disarm_pub.publish(Bool(data=True))
         self.get_logger().warn(
-            f"force-disarm requested ({reason})", throttle_duration_sec=1.0)
+            "force-disarm requested (RC heartbeat lost)", throttle_duration_sec=1.0)
 
     def _publish_kill(self, active):
         if active == self.last_kill_published:
@@ -234,8 +182,8 @@ class RCHeartbeatWatchdog(Node):
             return
         self.last_status_log = now
         self.get_logger().info(
-            f"armed={self.armed} rc_lost={link_lost} killed={self.killed} "
-            f"bridge_ok={bridge_ok} rc_age={now - self.last_rc_ok:.1f}s")
+            f"armed={self.core.armed} rc_lost={link_lost} killed={self.core.killed} "
+            f"bridge_ok={bridge_ok} rc_age={now - self.core.last_rc_ok:.1f}s")
 
 
 def main(args=None):

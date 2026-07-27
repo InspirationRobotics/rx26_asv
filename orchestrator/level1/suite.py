@@ -19,7 +19,7 @@ from evaluator import metrics
 
 from robotx_2026.api.navigation.apf_core import ApfParams
 
-from . import param_space
+from level1 import param_space
 
 SCENARIO_DIR = Path(__file__).resolve().parents[1] / "scenarios"
 DEFAULT_SUITE = ["mission1_transit.json", "mission1_obstacle_field.json",

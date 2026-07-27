@@ -10,8 +10,12 @@ from robotx_2026.api.perception.lidar_fusion import FusionParams, params_from
 
 
 def test_all_nodes_have_config_sections():
-    for node in ("telemetry_bridge", "perception_node", "lidar_fusion_node",
-                 "occupancy_grid_node", "roa_apf_node", "mission_planner_node"):
+    for node in ("telemetry_bridge", "perception_node",
+                 "occupancy_grid_node", "roa_apf_node", "mission_planner_node",
+                 # operational stack + LiDAR fusion (must not silently drift out
+                 # of the config again — every config-driven node belongs here)
+                 "rc_heartbeat_watchdog", "actuator_node", "ivc_node",
+                 "lidar_fusion_node"):
         params = crsd_config.node_params(node)
         assert params, node
 

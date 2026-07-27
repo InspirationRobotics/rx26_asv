@@ -28,7 +28,7 @@ from pathlib import Path
 from evaluator.keep_rule import Thresholds, aggregate, evaluate
 from level1 import suite as l1_suite
 
-from . import contract
+from level2 import contract
 
 
 @dataclass
