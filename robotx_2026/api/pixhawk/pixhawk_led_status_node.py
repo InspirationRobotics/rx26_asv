@@ -25,9 +25,9 @@ from std_msgs.msg import Int32, Bool
 
 from interfaces.msg import FcuStatus, RcChannels
 
-from ..common import config as crsd_config
-from ..common.node_main import run_node
-from ..common.param_utils import declare_from_config
+from robotx_2026.api.common import config as crsd_config
+from robotx_2026.api.common.node_main import run_node
+from robotx_2026.api.common.param_utils import declare_from_config
 
 PARAM_SPEC = {
     "estop_channel": dict(read_only=True, lo=1, hi=18,

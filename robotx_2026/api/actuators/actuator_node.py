@@ -27,9 +27,15 @@ from threading import Lock
 from rclpy.node import Node
 from std_srvs.srv import Trigger, SetBool
 
-from ..common import config as crsd_config
-from ..common.node_main import run_node
-from ..common.param_utils import declare_from_config
+from robotx_2026.api.actuators.actuator_core import maestro_target_bytes
+from robotx_2026.api.common import config as crsd_config
+from robotx_2026.api.common.node_main import run_node
+from robotx_2026.api.common.param_utils import declare_from_config
+
+# NOTE (test tier): the Maestro wire-protocol encoding is unit-tested in
+# tests/test_actuator_core.py (maestro_target_bytes). The serial I/O and ROS
+# service glue below is inherently hardware-bound — it is validated at the BENCH
+# tier against the real controller, not by unit tests (see FIRMWARE NOTE above).
 
 PARAM_SPEC = {
     "port": dict(read_only=True,
@@ -63,9 +69,7 @@ class MaestroLink:
         self.conn.flush()
 
     def set_pwm(self, channel: int, target_us: int):
-        # Pololu compact protocol (0x84): target is in quarter-microseconds.
-        target = int(target_us) * 4
-        self.conn.write(bytes([0x84, channel, target & 0x7F, (target >> 7) & 0x7F]))
+        self.conn.write(maestro_target_bytes(channel, target_us))
         self.conn.flush()
 
     def close(self):

@@ -6,7 +6,7 @@ keep-rule enforced by the evaluator, never by the proposing LLM).
 import random
 from dataclasses import dataclass
 
-from . import param_space
+from level1 import param_space
 
 PROPOSAL_SCHEMA = {
     "type": "object",

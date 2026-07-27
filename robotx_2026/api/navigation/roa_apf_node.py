@@ -21,13 +21,13 @@ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 
 from interfaces.msg import ApfAdvisory, LatLonHead, Occupancy
 
-from ..common import config as crsd_config
-from ..common import geo
-from ..common.node_main import run_node
-from ..common.param_utils import declare_from_config, make_set_callback
-from .apf_core import ApfParams, ObstaclePoint, compute
-from .occupancy_core import SOURCE_COMMS
-from .progress_monitor import ProgressMonitor
+from robotx_2026.api.common import config as crsd_config
+from robotx_2026.api.common import geo
+from robotx_2026.api.common.node_main import run_node
+from robotx_2026.api.common.param_utils import declare_from_config, make_set_callback
+from robotx_2026.api.navigation.apf_core import ApfParams, ObstaclePoint, compute
+from robotx_2026.api.navigation.occupancy_core import SOURCE_COMMS
+from robotx_2026.api.navigation.progress_monitor import ProgressMonitor
 
 PARAM_SPEC = {
     "rate_hz": dict(read_only=True, lo=1.0, hi=20.0),

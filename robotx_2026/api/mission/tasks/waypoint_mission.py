@@ -21,7 +21,7 @@ No ROS imports; unit-tested.
 """
 import math
 
-from ..task_stack import TaskContext
+from robotx_2026.api.mission.task_stack import TaskContext
 
 
 class WaypointMission:

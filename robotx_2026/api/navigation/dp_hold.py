@@ -34,10 +34,10 @@ from std_msgs.msg import Bool
 
 from interfaces.msg import DetectionArray, LatLonHead, FcuStatus
 
-from ..common import config as crsd_config
-from ..common.node_main import run_node
-from ..common.override_guard import OverrideGuard
-from ..common.param_utils import declare_from_config
+from robotx_2026.api.common import config as crsd_config
+from robotx_2026.api.common.node_main import run_node
+from robotx_2026.api.common.override_guard import OverrideGuard
+from robotx_2026.api.common.param_utils import declare_from_config
 
 # Empirical neutral trim from the operational tune (not exactly 1500).
 STEER_NEUTRAL = 1489

@@ -12,7 +12,7 @@ import math
 import threading
 from dataclasses import dataclass, field
 
-from .scenario import Scenario, KeepOut, MovingObject
+from episodes.scenario import Scenario, KeepOut, MovingObject
 
 
 @dataclass

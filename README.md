@@ -24,17 +24,23 @@ robotx_2026
 |    |-- api/common/      #   shared plumbing: params, safe node lifecycle, autonomy-drop latch
 |    |-- api/navigation/  #   telemetry_bridge (sole MAVProxy consumer), frame transform,
 |    |                    #   occupancy grid, APF advisory, progress monitor, fence writer
-|    |-- api/perception/  #   OAK-D capture -> TensorRT detect -> depth association
+|    |-- api/perception/  #   OAK-D capture -> TensorRT detect -> depth assoc; Livox LiDAR fusion
 |    |-- api/mission/     #   task-stack mission planner + RoboCommand comms (Mission 4)
+|    |-- api/safety/      #   rc_heartbeat_watchdog: force-disarm on RC-link loss (+ core)
+|    |-- api/actuators/   #   Mission-3 effectors: delivery launcher + water cannon (Maestro)
+|    |-- api/ivc/         #   inter-vehicle comms over team WiFi (Bullet AC), separate link
 |    |-- api/testing/     #   bench-only nodes (G1 RC-override smoke)
 |-- interfaces/           # ROS 2 message package (typed contracts between nodes)
 |-- orchestrator/         # THE AUTORESEARCH HARNESS — Levels 1/1.5/2, episodes, evaluator,
 |                         #   gates. COLCON_IGNOREd: plain Python threading, never a ROS node
-|-- config/               # single source of truth: ROS params YAML + device topology
+|-- config/               # single source of truth: ROS params YAML + device topology + MID360
 |-- proto/                # RoboCommand protobuf wire schema (compiled at build, not committed)
+|-- launch/               # ROS 2 launch files (core status stack, camera, lidar, fusion)
+|-- firmware/             # Arduino sketches flashed to peripherals (LED status strip)
 |-- tools/                # udev, systemd, preflight, param_guard, rebuild, mock RoboCommand,
 |                         #   model training pipeline, bench instruments
 |-- docker/               # ArduPilot Rover SITL environment (in-container simulation)
+|-- Dockerfile            # the `crusader` container image (ROS 2 Humble + CUDA + livox driver)
 |-- tests/                # unit tests for the target system (orchestrator has its own)
 |-- setup/                # installation scripts per machine role + git remote init
 |-- docs/                 # setup guide, change-impact map, bench procedures (G1, G2)
