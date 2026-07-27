@@ -50,6 +50,18 @@ tools/training/datasets/
 # The orchestrator's own ignore rules live with it on `sim/orchestrator`.
 *.episode.json
 
+# --- Sim / orchestrator artifacts: never on main ---
+# Nothing here generates these — they live on `sim/orchestrator`. But they are
+# untracked build output, and untracked files survive a branch switch, so work
+# done on that branch reappears here and `git add -A` would commit it. This
+# guard is the reason that cannot happen. See docs/PARKED_SIM.md.
+#
+# Only untracked files are affected: if the branch is merged back, its tracked
+# files land normally and these lines should be deleted.
+tools/sim/worlds/
+orchestrator/
+docker/
+
 # --- Editors / OS ---
 .vscode/
 .idea/

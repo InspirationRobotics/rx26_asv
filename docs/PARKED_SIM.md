@@ -58,6 +58,19 @@ python tools/sim/scenario_to_world.py --all
 git switch main && git merge sim/orchestrator
 ```
 
-Then restore the orchestrator CI job in `.github/workflows/ci.yml` (the `unit` job replaced
-it; the branch's copy has the full version) and re-add the `docker/sitl` shell scripts to the
-`tools-lint` `bash -n` line.
+Then, on main:
+
+1. Delete the `orchestrator/`, `docker/` and `tools/sim/worlds/` lines from `.gitignore`
+   (the "never on main" block). They only ever affected untracked files, so the merge itself
+   is unaffected — but leaving them in place would hide genuinely untracked sim work.
+2. Restore the orchestrator CI job in `.github/workflows/ci.yml`; the `unit` job replaced it,
+   and the branch's copy has the full version.
+3. Re-add the `docker/sitl` shell scripts to the `tools-lint` `bash -n` line.
+
+## Why main ignores paths that do not exist on it
+
+Untracked files survive a branch switch. Generating Gazebo worlds or running episodes on
+`sim/orchestrator` and then switching to `main` leaves that output sitting in the working
+tree, untracked and — without those ignore rules — stageable. A single `git add -A` would
+commit generated sim artifacts onto main, which is exactly what parking the sim was meant to
+prevent. The rules are a guard against that, not a sign the paths belong here.
