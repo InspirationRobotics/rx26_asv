@@ -5,7 +5,7 @@ associate -> /crsd/detections_body. Use this to bench-test the camera path on
 its own; downstream consumers (frame_transform, gate_navigator, dp_hold) read
 /crsd/detections_body directly when no fusion node is running.
 
-  ros2 launch robotx_2026 camera.launch.py
+  ros2 launch rx26_asv camera.launch.py
 """
 import os
 
@@ -16,10 +16,10 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     params = os.path.join(
-        get_package_share_directory("robotx_2026"),
+        get_package_share_directory("rx26_asv"),
         "config", "crusader_params.yaml")
 
     return LaunchDescription([
-        Node(package="robotx_2026", executable="perception_node",
+        Node(package="rx26_asv", executable="perception_node",
              output="screen", parameters=[params]),
     ])

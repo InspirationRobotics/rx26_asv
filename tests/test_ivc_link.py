@@ -8,7 +8,7 @@ import socket
 import threading
 import time
 
-from robotx_2026.api.ivc.ivc_link import IvcClient, IvcServer
+from rx26_asv.api.ivc.ivc_link import IvcClient, IvcServer
 
 
 def free_port():

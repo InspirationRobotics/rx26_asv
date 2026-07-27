@@ -17,7 +17,7 @@ from episodes.runner import EpisodeRunner
 from episodes.scenario import Scenario
 from evaluator import metrics
 
-from robotx_2026.api.navigation.apf_core import ApfParams
+from rx26_asv.api.navigation.apf_core import ApfParams
 
 from level1 import param_space
 

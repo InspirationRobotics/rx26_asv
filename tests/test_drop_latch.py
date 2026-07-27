@@ -1,5 +1,5 @@
 """DropLatch state machine — every rule in the G1 design gets a test."""
-from robotx_2026.api.common.drop_latch import DropLatch, DropState
+from rx26_asv.api.common.drop_latch import DropLatch, DropState
 
 
 def sample(latch, value, t, ch=7):

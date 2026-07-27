@@ -14,7 +14,7 @@ if ! docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q t
 fi
 
 echo "== colcon build inside $CONTAINER =="
-# The repo root is itself the robotx_2026 ament_python package (setup.py at
+# The repo root is itself the rx26_asv ament_python package (setup.py at
 # root), so colcon will not descend into interfaces/ on its own — both base
 # paths must be named explicitly.
 docker exec "$CONTAINER" bash -lc \
@@ -24,6 +24,6 @@ echo "== import smoke test =="
 # Fail loudly if any package doesn't import — a silently-inactive mechanism is a
 # safety issue on this boat, not a nuisance.
 docker exec "$CONTAINER" bash -lc \
-  "cd $WS && source install/setup.bash && python3 -c 'import robotx_2026; print(\"import ok\")'"
+  "cd $WS && source install/setup.bash && python3 -c 'import rx26_asv; print(\"import ok\")'"
 
 echo "== done. Restart affected nodes/launch for changes to take effect. =="

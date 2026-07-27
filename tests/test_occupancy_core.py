@@ -1,4 +1,4 @@
-from robotx_2026.api.navigation.occupancy_core import (
+from rx26_asv.api.navigation.occupancy_core import (
     OccupancyCore, SOURCE_COMMS, SOURCE_PERCEPTION)
 
 

@@ -70,7 +70,7 @@ treat edits there as repo-wide changes.
 | Edit target | Directly affects | Must re-run | Tier |
 |---|---|---|---|
 | `interfaces/*.msg` | every producer/consumer, recorded-bag readability | rebuild both pkgs, full pytest, G3+G4 | U+S |
-| `robotx_2026/api/common/*` | all 16 entry points | full pytest, rebuild, one smoke episode | U+S |
+| `rx26_asv/api/common/*` | all 16 entry points | full pytest, rebuild, one smoke episode | U+S |
 | `config/crusader_params.yaml` (anchored values) | node behavior AND evaluator scoring | `tests/test_config_shared.py`, G3/G4 | U+S |
 | `telemetry_bridge.py` / `fence_core.py` | pose for everyone; fence backstop; autonomy-drop | `test_fence_core.py`; G1 bench if safety path touched | U+B |
 | `perception/*` | grid ingest → APF → objective-1 metrics | perception tests; G2 bench if detector/model | U+B |

@@ -14,7 +14,7 @@ own NIC — set the host/LiDAR IPs in that JSON to the interface's subnet.
 
 Requires livox_ros_driver2 on the ROS path (baked into the crusader image).
 
-  ros2 launch robotx_2026 lidar.launch.py
+  ros2 launch rx26_asv lidar.launch.py
 """
 import os
 
@@ -24,7 +24,7 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    share = get_package_share_directory("robotx_2026")
+    share = get_package_share_directory("rx26_asv")
     params = os.path.join(share, "config", "crusader_params.yaml")
     mid360_cfg = os.path.join(share, "config", "MID360_config.json")
 

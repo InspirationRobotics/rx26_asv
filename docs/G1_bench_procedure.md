@@ -43,5 +43,5 @@ The e-stop is tested first, separately, every session.**
 `dp_hold` must (1) drop any node-local MAVLink/serial path if present — overrides go
 through `OverrideGuard.publish_override()` → `/crsd/rc_override` → `telemetry_bridge`;
 (2) check `guard.allowed` at the top of every control cycle and enter its idle state
-when false. See `robotx_2026/api/testing/rc_override_smoke.py` for the reference
+when false. See `rx26_asv/api/testing/rc_override_smoke.py` for the reference
 pattern.

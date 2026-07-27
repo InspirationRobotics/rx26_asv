@@ -6,7 +6,7 @@
 #
 # Usage:
 #   bash setup/init_git_remote.sh                                  # init only
-#   bash setup/init_git_remote.sh git@github.com:ORG/robotx_2026.git   # + remote
+#   bash setup/init_git_remote.sh git@github.com:ORG/rx26_asv.git   # + remote
 #   bash setup/init_git_remote.sh <url> --push                     # + first push
 #
 # NOTE (merge path): the live boat repo is github.com/chrismartin018/robotx_2026

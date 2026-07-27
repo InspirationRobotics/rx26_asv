@@ -7,7 +7,7 @@
 #   * depthai (OAK-D LR) + MAVProxy        -> installed here
 #   * Livox-SDK2 + livox_ros_driver2 (MID360 LiDAR, camera-LiDAR fusion)
 #
-# The robotx_2026 package itself is NOT copied/built here — it is bind-mounted
+# The rx26_asv package itself is NOT copied/built here — it is bind-mounted
 # at /root/robotx_ws and built at runtime by tools/scripts/rebuild.sh /
 # setup/install_container.sh (the container copies files at build time, so a
 # mounted+runtime build is the blessed path). Only third-party code (the Livox
@@ -82,7 +82,7 @@ RUN mkdir -p /opt/livox && cd /opt/livox \
 
 # ----------------------------------------------------------------------------
 # livox_ros_driver2 (ROS 2 Humble) — third-party, baked into its own workspace
-# so it is NOT rebuilt on every robotx_2026 edit. Publishes /livox/lidar
+# so it is NOT rebuilt on every rx26_asv edit. Publishes /livox/lidar
 # (PointCloud2 / CustomMsg) + /livox/imu for the fusion node to consume.
 # MID360_config.json carries the host/LiDAR IPs — TUNE for Crusader's network
 # (see config/MID360_config.json header notes; the LiDAR needs its own NIC,
@@ -98,7 +98,7 @@ RUN source /opt/ros/humble/setup.bash \
     && ./build.sh humble
 
 # ----------------------------------------------------------------------------
-# Environment sourcing: ROS, the baked Livox ws, then the mounted robotx_2026
+# Environment sourcing: ROS, the baked Livox ws, then the mounted rx26_asv
 # workspace (guarded — it only exists once the mount is built).
 # ----------------------------------------------------------------------------
 RUN echo "source /opt/ros/humble/setup.bash" >> /root/.bashrc \

@@ -18,11 +18,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # repo root
 
-from robotx_2026.api.mission.events import (AllClear, AssistanceRequest,   # noqa: E402
+from rx26_asv.api.mission.events import (AllClear, AssistanceRequest,   # noqa: E402
                                             Clearance, KeepOutZone,
                                             MovingObjectReport)
-from robotx_2026.api.mission.planner import MissionPlanner, PlannerConfig  # noqa: E402
-from robotx_2026.api.mission.tasks.waypoint_mission import WaypointMission  # noqa: E402
+from rx26_asv.api.mission.planner import MissionPlanner, PlannerConfig  # noqa: E402
+from rx26_asv.api.mission.tasks.waypoint_mission import WaypointMission  # noqa: E402
 
 from episodes.runner import EpisodeResult, Sample                       # noqa: E402
 from episodes.scenario import KeepOut, MovingObject                     # noqa: E402

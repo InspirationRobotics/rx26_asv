@@ -1,6 +1,6 @@
 import math
 
-from robotx_2026.api.navigation.progress_monitor import ProgressMonitor
+from rx26_asv.api.navigation.progress_monitor import ProgressMonitor
 
 
 def run(mon, samples):

@@ -13,9 +13,9 @@ from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[2]
 SOURCES = [
-    _REPO / "robotx_2026" / "api" / "navigation" / "apf_core.py",
-    _REPO / "robotx_2026" / "api" / "navigation" / "progress_monitor.py",
-    _REPO / "robotx_2026" / "api" / "mission" / "planner.py",
+    _REPO / "rx26_asv" / "api" / "navigation" / "apf_core.py",
+    _REPO / "rx26_asv" / "api" / "navigation" / "progress_monitor.py",
+    _REPO / "rx26_asv" / "api" / "mission" / "planner.py",
 ]
 
 SYSTEM = """You are the Level-2 mechanism-research loop of an autoresearch \

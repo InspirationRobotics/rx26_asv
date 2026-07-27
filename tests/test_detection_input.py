@@ -1,5 +1,5 @@
 """Pure-logic tests for DetectionInput's fused-vs-camera arbitration (ROS-free)."""
-from robotx_2026.api.common.detection_input import SourceSelector
+from rx26_asv.api.common.detection_input import SourceSelector
 
 
 def test_camera_only_when_no_fusion():

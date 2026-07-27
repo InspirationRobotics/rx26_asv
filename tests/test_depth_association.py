@@ -1,6 +1,6 @@
 import numpy as np
 
-from robotx_2026.api.perception.depth_association import (
+from rx26_asv.api.perception.depth_association import (
     CameraModel, associate, bbox_median_depth, project_to_body)
 
 CAM = CameraModel(fx=800.0, fy=800.0, cx=640.0, cy=360.0)   # 1280x720-ish

@@ -30,7 +30,7 @@ def _shared_thresholds():
     """Objective-2 thresholds from config/crusader_params.yaml — the SAME file
     the onboard roa_apf_node reads, so the scorer and the boat's preventative
     detector cannot drift apart (Phase 3.5 single-source rule)."""
-    from robotx_2026.api.common import config as crsd_config
+    from rx26_asv.api.common import config as crsd_config
     return crsd_config.monitor_kwargs()
 
 
@@ -284,7 +284,7 @@ def assemble(result, scenario, fidelity="sim", params_file=None,
              perception_trusted=False, planner=None):
     """planner: pass the MissionPlanner from a PlannerEpisodeRunner run to
     score the mission4 sub-metrics from its logs."""
-    from robotx_2026.api.common import config as crsd_config
+    from rx26_asv.api.common import config as crsd_config
     mission4 = score_mission4(planner) if planner is not None else None
     return {
         "schema": "rx26-episode-metrics/1",

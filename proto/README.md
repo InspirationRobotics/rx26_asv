@@ -5,7 +5,7 @@ assistance requests, static keep-outs, moving virtual obstacles, All Clear, and 
 acknowledgment/status messages.
 
 **Design choice (plan §4.5): protobuf at the edge, ROS inside.** Only
-`robotx_2026/api/mission/robocomms.py` imports the generated classes; everything else sees
+`rx26_asv/api/mission/robocomms.py` imports the generated classes; everything else sees
 internal events/ROS messages. This keeps the mandated wire format isolated, and lets
 `tools/sim/mock_robocommand.py` exercise **byte-identical framing** before the real link
 exists. Until `protoc` runs, `robocomms.py` uses a JSON fallback with the same
@@ -14,7 +14,7 @@ length-prefixed framing (proven identical in the loopback integration test).
 Compile (inside the container — `setup/install_container.sh` does this):
 
 ```bash
-protoc -I proto --python_out=robotx_2026/api/mission proto/robocommand.proto
+protoc -I proto --python_out=rx26_asv/api/mission proto/robocommand.proto
 ```
 
 Generated `*_pb2.py` files are `.gitignore`d — always regenerated, never committed.

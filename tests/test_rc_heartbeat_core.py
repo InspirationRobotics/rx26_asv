@@ -4,7 +4,7 @@ Safety-critical: this machine decides when the boat is force-disarmed on RC-link
 loss. Every transition below is a behaviour the field procedure depends on, so
 they are asserted here rather than discovered on the water. ROS-free by design —
 these run under plain pytest (Format best-practice #2)."""
-from robotx_2026.api.safety.rc_heartbeat_core import (
+from rx26_asv.api.safety.rc_heartbeat_core import (
     RcHeartbeatCore, WatchdogConfig)
 
 

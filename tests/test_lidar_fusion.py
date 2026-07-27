@@ -10,8 +10,8 @@ import math
 import numpy as np
 import pytest
 
-from robotx_2026.api.perception.depth_association import BodyDetection
-from robotx_2026.api.perception.lidar_fusion import (
+from rx26_asv.api.perception.depth_association import BodyDetection
+from rx26_asv.api.perception.lidar_fusion import (
     NO_POINTS, RANGE_DISAGREE, TOO_FEW_POINTS, FusionParams, LidarExtrinsics,
     _nearest_cluster, config_extrinsic_nonidentity, fuse, params_from,
     passthrough, to_body)

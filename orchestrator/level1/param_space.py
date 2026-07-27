@@ -20,7 +20,7 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO))
 
-from robotx_2026.api.navigation.apf_core import ApfParams  # noqa: E402
+from rx26_asv.api.navigation.apf_core import ApfParams  # noqa: E402
 
 
 def _load_param_guard():

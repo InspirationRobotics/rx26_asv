@@ -50,7 +50,7 @@ def main():
 
     import cv2
     import depthai as dai
-    from robotx_2026.api.perception.oakd_guard import assert_usb_super
+    from rx26_asv.api.perception.oakd_guard import assert_usb_super
 
     os.makedirs(args.out, exist_ok=True)
     print(f"USB: {assert_usb_super()}")

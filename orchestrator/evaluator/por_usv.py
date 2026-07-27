@@ -40,7 +40,7 @@ WHAT SIMULATION CANNOT TELL YOU
     means the autonomy is ready, not that the package is complete.
 
 Thresholds come from config/crusader_params.yaml (`por_usv` section) via
-robotx_2026.api.common.config.por_usv_kwargs(), so they cannot drift from the
+rx26_asv.api.common.config.por_usv_kwargs(), so they cannot drift from the
 run the boat is flown against and are covered by the config sha256 already
 recorded in every metrics JSON. tests/test_config_shared.py asserts agreement.
 
@@ -277,5 +277,5 @@ def score_por_usv(result, scenario, path=None):
     Returns:
         dict: as PorUsvScorer.score().
     """
-    from robotx_2026.api.common import config as crsd_config
+    from rx26_asv.api.common import config as crsd_config
     return PorUsvScorer(**crsd_config.por_usv_kwargs(path)).score(result, scenario)

@@ -21,7 +21,7 @@ sys.path.insert(0, str(REPO / "orchestrator"))
 from episodes.runner import EpisodeResult, Sample          # noqa: E402
 from episodes.scenario import Scenario                     # noqa: E402
 from evaluator.por_usv import PorUsvScorer, score_por_usv  # noqa: E402
-from robotx_2026.api.common import config as crsd_config   # noqa: E402
+from rx26_asv.api.common import config as crsd_config   # noqa: E402
 
 SCENARIO = REPO / "orchestrator" / "scenarios" / "por_usv_gate.json"
 

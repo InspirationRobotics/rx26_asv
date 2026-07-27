@@ -11,7 +11,7 @@ from episodes.scenario import Scenario
 from evaluator import metrics
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from robotx_2026.api.mission.tasks.waypoint_mission import WaypointMission  # noqa: E402
+from rx26_asv.api.mission.tasks.waypoint_mission import WaypointMission  # noqa: E402
 
 SCENARIOS = Path(__file__).parent.parent / "scenarios"
 

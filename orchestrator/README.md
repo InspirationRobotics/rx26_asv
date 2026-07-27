@@ -1,7 +1,7 @@
 # `orchestrator/` — the autoresearch harness (Levels 1 / 1.5 / 2)
 
 This is the **orchestrator**, not the boat: a plain-Python-`threading` harness that proposes
-changes to the target system (`../robotx_2026/` + ArduRover tunables), runs episodes, scores
+changes to the target system (`../rx26_asv/` + ArduRover tunables), runs episodes, scores
 them against the three objectives, and keeps or reverts. It is `COLCON_IGNORE`d — it never
 becomes a ROS node, never imports `rclpy`, and never opens a Pixhawk connection.
 
@@ -67,7 +67,7 @@ sequenceDiagram
 | `level1/param_space.py` | `test_level1.py` | which ArduRover params autoresearch may touch — cross-check `tools/scripts/param_guard.py` PROTECTED list |
 | `level2/validate.py` | `test_level2.py` + G5 revert drills | the safety net for injected code — never weaken a stage |
 | `scenarios/*.json` | G3/G4 gates | comparability of ALL historical results — version, don't mutate |
-| `../robotx_2026/api/navigation/apf_core.py` (target code) | G3 here | the suite runs the boat's real code — target edits show up as episode deltas |
+| `../rx26_asv/api/navigation/apf_core.py` (target code) | G3 here | the suite runs the boat's real code — target edits show up as episode deltas |
 
 **Failure modes actively guarded (CLAUDE.md):** silent fallback on injection failure, orphaned
 threads (Event-based teardown audited per episode), second Pixhawk consumer (auto-reject),

@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # repo root
 
-from robotx_2026.api.navigation.apf_core import (   # noqa: E402
+from rx26_asv.api.navigation.apf_core import (   # noqa: E402
     ApfParams, MovingHazard, ObstaclePoint, compute)
 
 
