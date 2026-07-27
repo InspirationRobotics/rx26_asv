@@ -11,7 +11,7 @@
 # Usage: ./start_mavproxy.sh [LAPTOP_IP]
 set -euo pipefail
 
-LAPTOP_IP="${1:-192.168.8.137}"          # override per field session
+LAPTOP_IP="${1:-192.168.100.109}"          # override per field session
 MASTER="${CRSD_PIXHAWK_DEV:-/dev/crsd-pixhawk}"
 
 if [ ! -e "$MASTER" ]; then

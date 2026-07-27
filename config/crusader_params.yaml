@@ -68,11 +68,19 @@ livox_lidar:
 
 # ---- lidar_fusion_node: Livox MID360 <-> camera detection fusion (perception) ----
 # Subscribes /crsd/detections_body (camera, associate() output) + /livox/lidar
-# (PointCloud2); refines each detection's RANGE with LiDAR returns in its bearing
-# sector, republishes /crsd/detections_fused. Camera-only detections are PASSED
-# THROUGH (never dropped) when no LiDAR support — losing an obstacle is worse than
-# a coarse range (objective 1). Extrinsics [RO] MUST be calibrated vs the OAK-D
-# before fused ranges are trustworthy.
+# (PointCloud2); refines each detection's RANGE with LiDAR returns that share its
+# bearing AND agree with its camera range, republishes /crsd/detections_fused.
+# Camera-only detections are PASSED THROUGH (never dropped) when no LiDAR support —
+# losing an obstacle is worse than a coarse range (objective 1). Extrinsics [RO]
+# MUST be calibrated vs the OAK-D before fused ranges are trustworthy; until then
+# expect /crsd/fusion_health to report `never_agrees` rather than silence.
+#
+# The three association gates run in order (see api/perception/lidar_fusion.py):
+#   bearing_gate_deg -> range_gate_frac/_abs -> cluster_gap_m + min_points
+# Bearing alone is NOT sufficient: the MID360 sees 360 deg, so the wedge behind a
+# buoy usually contains a shoreline that out-votes it and drags the fused range
+# onto the background. Widening range_gate_frac toward its 2.0 ceiling restores
+# that failure — read the module docstring before tuning it up.
 lidar_fusion_node:
   ros__parameters:
     lidar_roll_deg: 0.0        # [RO] LiDAR pose in BODY (calibrate vs OAK-D)
@@ -87,6 +95,9 @@ lidar_fusion_node:
     r_min: 0.5                 # [DYN] ignore returns closer than this [m]
     r_max: 60.0                # [DYN] MID360 range ceiling used for fusion [m]
     min_points: 3              # [DYN] LiDAR returns needed to accept a range fix
+    range_gate_frac: 0.5       # [DYN] range window = max(abs, frac * camera_range)
+    range_gate_abs: 2.0        # [DYN] absolute floor on that window [m]
+    cluster_gap_m: 2.0         # [DYN] radial gap that separates two objects [m]
     cloud_timeout_s: 0.5       # [DYN] older cloud -> pass camera through + WARN
 
 occupancy_grid_node:

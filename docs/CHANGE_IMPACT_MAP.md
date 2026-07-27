@@ -74,6 +74,8 @@ treat edits there as repo-wide changes.
 | `config/crusader_params.yaml` (anchored values) | node behavior AND evaluator scoring | `tests/test_config_shared.py`, G3/G4 | U+S |
 | `telemetry_bridge.py` / `fence_core.py` | pose for everyone; fence backstop; autonomy-drop | `test_fence_core.py`; G1 bench if safety path touched | U+B |
 | `perception/*` | grid ingest → APF → objective-1 metrics | perception tests; G2 bench if detector/model | U+B |
+| `perception/lidar_fusion.py` association gates | every fused RANGE → grid → APF. A gate that is too loose relocates a detection onto background clutter (looks confident, moves a real obstacle out of the avoidance horizon); too tight and fusion silently contributes nothing | `test_lidar_fusion.py` (the "association gates" section is the regression surface) + `test_config_shared.py`; bench-verify against a surveyed buoy with a shoreline behind it | U+B |
+| `config/crusader_params.yaml` `range_gate_*` / `cluster_gap_m` | same as above — these ARE the gates, exposed as [DYN] | `test_config_shared.py`; re-check `/crsd/fusion_health` `never_agrees` after any change | U+B |
 | `occupancy_core.py` / `apf_core.py` | avoidance behavior in **both** boat and orchestrator episodes (episodes run the real cores) | `test_occupancy_core/apf_core.py` + G3 | U+S |
 | `progress_monitor.py` | objective-2 detection + scoring | `test_progress_monitor.py`, `test_config_shared.py` | U |
 | `api/mission/*` | interrupt/resume, comms compliance | planner+robocomms tests + G4 | U+S |
