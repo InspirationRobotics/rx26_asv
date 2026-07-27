@@ -1,6 +1,6 @@
 """Kinematic backend — fast headless episodes for CI and planner unit tests.
 
-Descends from RX24 dev/simple_motion_sim in spirit. Deliberately models ArduRover
+Descends from RX24 dev/simple_motion_sim. Deliberately models ArduRover
 GUIDED-mode behavior on this frame: the boat TURNS toward the target then surges —
 it does not strafe (CLAUDE.md: GUIDED cannot strafe on OmniX Crusader). A holonomic
 mode exists for future dp_hold-style tests but GUIDED emulation is the default.

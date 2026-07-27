@@ -27,6 +27,15 @@ jobs:
           assert not m["objective1"]["auto_fail"]
           print("G0 smoke OK:", m["objective3"]["partial_credit"])
           EOF
+      - name: Gazebo worlds generate and agree with their scenarios
+        run: |
+          python3 tools/sim/scenario_to_world.py --all
+          python3 -m pytest orchestrator/tests/test_gazebo_backend.py -q
+      - name: Venue check — report scenarios still at last season's origin
+        # Informational: exits 1 while any scenario is off-venue. Not a gate
+        # (scenarios are add-don't-mutate), but it must stay visible in CI so
+        # the declination difference is not forgotten before November.
+        run: python3 tools/sim/venue_check.py || true
       - name: Gate G3 — APF advisory, 20 seeds, zero violations
         run: python orchestrator/run_gate_g3.py --seeds 20 --out /tmp/g3.json
       - name: Gate G4 — Mission-4 Core interrupt/resume, 10 seeds
@@ -64,4 +73,5 @@ jobs:
                                 tools/training/*.py tools/bench/*.py \
                                 tools/udev/*.py
           bash -n tools/udev/install_udev.sh tools/scripts/rebuild.sh \
-                  docker/sitl/install_sitl.sh docker/sitl/run_sitl.sh
+                  docker/sitl/install_sitl.sh docker/sitl/run_sitl.sh \
+                  docker/sitl/install_gazebo.sh docker/sitl/run_sitl_gazebo.sh

@@ -96,3 +96,30 @@ def test_check_range_pure_validator():
     assert check_range("unknown_param", 1e9, ranges) is None   # unranged: allowed
     assert "numeric" in check_range("k_rep", "high", ranges)
     assert "numeric" in check_range("k_rep", True, ranges)     # bool is not a number
+
+
+# --- Proof of Readiness (USV, Handbook 3.1.2) -------------------------------
+# Same single-source rule as the monitor thresholds: the PoR acceptance
+# criteria live in config/crusader_params.yaml, and the off-board scorer must
+# construct from them. If these drift, a submission can be scored against
+# thresholds nobody reviewed.
+
+def test_por_usv_section_exists():
+    assert crsd_config.node_params("por_usv")
+
+
+def test_por_usv_kwargs_construct_scorer():
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "orchestrator"))
+    from evaluator.por_usv import PorUsvScorer
+    PorUsvScorer(**crsd_config.por_usv_kwargs())     # raises on rename drift
+
+
+def test_por_usv_thresholds_match_handbook():
+    """Values that come straight from the handbook, not from our judgement."""
+    p = crsd_config.node_params("por_usv")
+    assert p["start_distance_m"] == 3.0        # "start 3m behind the Gate"
+    assert p["max_video_s"] == 300.0           # "no more than 5 minutes"
+    assert p["video_warn_s"] < p["max_video_s"]
+    assert p["contact_margin_m"] == 0.0        # "must not strike any buoys"

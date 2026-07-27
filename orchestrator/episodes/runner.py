@@ -4,7 +4,7 @@ Phase-0 scope: waypoint-following with timed events (keep-out / moving-object
 injection, All Clear). The mission planner (Phase 4) will replace the naive
 waypoint script with real task logic; the trace/metrics contract stays the same.
 
-Threading-model compliance (CLAUDE.md): run() checks a threading.Event every
+Threading-model compliance: run() checks a threading.Event every
 cycle so a supervising harness (Level 1/2 loops, Phase 5) can tear an episode
 down deterministically. Single-threaded otherwise.
 """

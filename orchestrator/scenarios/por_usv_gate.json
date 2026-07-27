@@ -1,0 +1,16 @@
+{
+  "name": "por_usv_gate",
+  "version": "0.1",
+  "_comment": "Proof of Readiness — USV autonomous navigation demonstration (Handbook 3.1.2). SUBMISSION DEADLINE 31 AUGUST 2026. Two gates of red/green markers; the USV starts 3 m behind gate 1 and transits both. Handbook permits any red/green markers ~1 m above the waterline; it references Taylor Made Sur-Mark 950410 (red/port) and 950400 (green/starboard), 0.99 m above waterline, 46 cm diameter -> 0.23 m radius. Origin is San Diego to match the other scenarios; see tools/sim/venue_check.py before the venue migration.",
+  "origin": [32.7020, -117.2510],
+  "waypoints": [[0, 0], [0, 12], [0, 18]],
+  "obstacles": [
+    {"x": -1.5, "y": 0,  "radius": 0.23, "label": "gate1_red_port"},
+    {"x": 1.5,  "y": 0,  "radius": 0.23, "label": "gate1_green_starboard"},
+    {"x": -1.5, "y": 12, "radius": 0.23, "label": "gate2_red_port"},
+    {"x": 1.5,  "y": 12, "radius": 0.23, "label": "gate2_green_starboard"}
+  ],
+  "timeout_s": 300,
+  "wp_radius": 2.0,
+  "avoid_margin": 1.0
+}

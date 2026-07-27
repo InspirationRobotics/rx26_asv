@@ -26,10 +26,14 @@ from evaluator import metrics
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--scenario", required=True)
-    ap.add_argument("--backend", choices=["kinematic", "sitl"], default="kinematic")
+    ap.add_argument("--backend", choices=["kinematic", "sitl", "gazebo"],
+                    default="kinematic")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--dt", type=float, default=0.1)
     ap.add_argument("--mav", default="udp:127.0.0.1:14550")
+    ap.add_argument("--gz-world", default=None,
+                    help="gazebo backend: world SDF, cross-checked against "
+                         "scenario.origin (defaults to $RX26_GZ_WORLD)")
     ap.add_argument("--fidelity", default=None,
                     help="metrics tag; defaults to 'sim' for both backends")
     ap.add_argument("--params-file", default=None, help="hashed into the metrics record")
@@ -45,6 +49,13 @@ def main():
     if args.backend == "kinematic":
         from episodes.backends.kinematic import KinematicBackend
         backend = KinematicBackend(noise_std=args.noise)
+    elif args.backend == "gazebo":
+        # Same ArduRover firmware as `sitl`, but Gazebo supplies the FDM, so
+        # OmniX lateral thrust is modelled. This is the only backend in which
+        # dp_hold / station-keeping dynamics are meaningful — see
+        # episodes/backends/gazebo.py and docker/sitl/run_sitl_gazebo.sh.
+        from episodes.backends.gazebo import GazeboBackend
+        backend = GazeboBackend(endpoint=args.mav, gz_world=args.gz_world)
     else:
         from episodes.backends.sitl import SitlBackend
         backend = SitlBackend(endpoint=args.mav)

@@ -61,6 +61,32 @@ def monitor_kwargs(path=None) -> dict:
     }
 
 
+def por_usv_kwargs(path=None) -> dict:
+    """PorUsvScorer constructor kwargs from the por_usv section.
+
+    Proof of Readiness (Handbook 3.1.2) acceptance thresholds. Scored
+    off-board by orchestrator/evaluator/por_usv.py; they live in the config
+    file so the criteria cannot drift from the run the boat is flown against
+    (Phase 3.5 single-source rule), and so the config sha256 recorded in every
+    episode metrics JSON covers them too.
+
+    Args:
+        path: optional config path override (tests).
+
+    Returns:
+        dict: kwargs accepted by evaluator.por_usv.PorUsvScorer.
+    """
+    p = node_params("por_usv", path)
+    return {
+        "start_distance_m": p["start_distance_m"],
+        "start_tolerance_m": p["start_tolerance_m"],
+        "max_video_s": p["max_video_s"],
+        "video_warn_s": p["video_warn_s"],
+        "gate_centre_tolerance": p["gate_centre_tolerance"],
+        "contact_margin_m": p["contact_margin_m"],
+    }
+
+
 def apf_kwargs(path=None) -> dict:
     """ApfParams constructor kwargs from the roa_apf_node section."""
     p = node_params("roa_apf_node", path)

@@ -30,6 +30,42 @@ shared:
   progress_heading_osc_floor: &progress_heading_osc_floor 0.05
   progress_stall_after_s: &progress_stall_after_s 15.0
 
+# ============================================================================
+# Proof of Readiness — USV autonomous navigation demonstration (Handbook 3.1.2)
+# SUBMISSION DEADLINE 31 AUGUST 2026.
+#
+# Scored OFF-BOARD by orchestrator/evaluator/por_usv.py, not by a ROS node —
+# but the thresholds live here because rule 4 is "parameters live in
+# config/crusader_params.yaml, never hardcoded", and because the PoR criteria
+# must not drift from the scenario the boat is actually flown against.
+# tests/test_config_shared.py asserts code and YAML agree.
+#
+# ASV SCOPE: this repo is the ASV only. The UUV Proof of Readiness (Handbook
+# 3.1.3, including the no-surface-breach / positive-buoyancy tension) is scored
+# in the UUV repo, which owns that vehicle.
+# ============================================================================
+por_usv:
+  ros__parameters:
+    # Handbook: "the USV must start 3m behind the Gate". Tolerance is ours —
+    # you cannot place a boat on a lake to the centimetre.
+    start_distance_m: 3.0            # [RO] handbook value
+    start_tolerance_m: 1.5           # [RO] our acceptance band around it
+
+    # Handbook 3.1.1: one continuous recording, no breaks, <= 5 minutes,
+    # INCLUDING the team-name intro. Warn early so a run that only just fits
+    # is flagged before it becomes a resubmission.
+    max_video_s: 300.0               # [RO] hard handbook limit
+    video_warn_s: 240.0              # [RO] "tight once the intro is added"
+
+    # A gate transit counts only if the boat passes BETWEEN the posts. Fraction
+    # of half-gate-width beyond which a pass is scored as grazing rather than
+    # centred (diagnostic only; does not fail the run).
+    gate_centre_tolerance: 0.6       # [RO]
+
+    # Handbook: "must not strike any buoys". Clearance below this counts as
+    # contact; the scenario's own obstacle radius is added on top.
+    contact_margin_m: 0.0            # [RO] touch = fail, no grace band
+
 telemetry_bridge:
   ros__parameters:
     mav_endpoint: "udp:127.0.0.1:14551"   # [RO] MAVProxy rebroadcast, never serial

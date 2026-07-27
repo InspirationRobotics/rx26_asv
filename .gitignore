@@ -61,3 +61,6 @@ Thumbs.db
 # --- Secrets ---
 .env
 *.key
+
+# Generated Gazebo worlds (build artifacts — tools/sim/scenario_to_world.py)
+tools/sim/worlds/*.sdf

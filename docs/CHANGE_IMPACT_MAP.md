@@ -83,6 +83,12 @@ treat edits there as repo-wide changes.
 | `orchestrator/evaluator/*` | every historical/future keep decision | `test_metrics.py`, `test_keep_rule.py`, G3+G4+G5 | U+S |
 | `orchestrator/level2/validate.py` | the injected-code safety net | `test_level2.py`, G5 revert drills | U+S |
 | `orchestrator/scenarios/*.json` | comparability of all results | add-don't-mutate; affected gates | S |
+| `orchestrator/episodes/backends/gazebo.py` | every dp_hold / lateral-dynamics claim | `test_gazebo_backend.py`; container run vs `--backend sitl` | U+S |
+| `orchestrator/evaluator/por_usv.py` | the 31 Aug PoR submission verdict | `test_por_usv.py`, `test_config_shared.py` | U |
+| `config/crusader_params.yaml` `por_usv:` | PoR acceptance thresholds | `test_config_shared.py`; re-score any submitted run | U |
+| `tools/sim/scenario_to_world.py` | physical course vs scored obstacles | `test_gazebo_backend.py` world/scenario tests | U |
+| `tools/sim/models/crusader_omnix/model.sdf` | all gazebo-backend dynamics | `test_fit_hydro.py`; re-run gazebo episodes (not comparable across a refit) | U+S |
+| `tools/sim/fit_hydro.py` | the coefficients above | `test_fit_hydro.py` | U |
 | `tools/scripts/param_guard.py` | what autoresearch/preflight allow | pytest + safety review vs CLAUDE.md | U |
 | `tools/udev/*`, `config/crusader_devices.json` | device names on the boat | `test_gen_udev.py`, reinstall + replug, preflight | U+B |
 | `tools/systemd/*` | boot order (MAVProxy-first is safety) | reinstall on Jetson, reboot test | B |
