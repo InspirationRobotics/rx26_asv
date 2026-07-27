@@ -11,7 +11,7 @@ Fusion is additive and optional: if you instead run only camera.launch.py, the
 downstream consumers (frame_transform, ...) fall back to /crsd/detections_body
 via DetectionInput. This launch is the "everything on" convenience form.
 
-  ros2 launch robotx_2026 lidar_fusion.launch.py
+  ros2 launch rx26_asv lidar_fusion.launch.py
 """
 import os
 
@@ -23,7 +23,7 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    share = get_package_share_directory("robotx_2026")
+    share = get_package_share_directory("rx26_asv")
     params = os.path.join(share, "config", "crusader_params.yaml")
     launch_dir = os.path.join(share, "launch")
 
@@ -34,6 +34,6 @@ def generate_launch_description():
     return LaunchDescription([
         include("camera.launch.py"),
         include("lidar.launch.py"),
-        Node(package="robotx_2026", executable="lidar_fusion_node",
+        Node(package="rx26_asv", executable="lidar_fusion_node",
              output="screen", parameters=[params]),
     ])

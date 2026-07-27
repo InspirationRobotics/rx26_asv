@@ -17,7 +17,7 @@ reflect real state and for the watchdog to disarm.
 MAVProxy itself (the sole Pixhawk owner) is started outside ROS — see
 scripts/start_mavproxy.sh — before this launch.
 
-  ros2 launch robotx_2026 core.launch.py
+  ros2 launch rx26_asv core.launch.py
 """
 import os
 
@@ -28,16 +28,16 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     params = os.path.join(
-        get_package_share_directory("robotx_2026"),
+        get_package_share_directory("rx26_asv"),
         "config", "crusader_params.yaml")
 
     return LaunchDescription([
-        Node(package="robotx_2026", executable="telemetry_bridge",
+        Node(package="rx26_asv", executable="telemetry_bridge",
              output="screen", parameters=[params]),
-        Node(package="robotx_2026", executable="led_node",
+        Node(package="rx26_asv", executable="led_node",
              output="screen", parameters=[params]),
-        Node(package="robotx_2026", executable="pixhawk_led_status_node",
+        Node(package="rx26_asv", executable="pixhawk_led_status_node",
              output="screen", parameters=[params]),
-        Node(package="robotx_2026", executable="rc_watchdog",
+        Node(package="rx26_asv", executable="rc_watchdog",
              output="screen", parameters=[params]),
     ])

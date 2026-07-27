@@ -13,9 +13,9 @@ import threading
 import time
 from pathlib import Path
 
-from robotx_2026.api.mission.events import (AssistanceRequest, Clearance,
+from rx26_asv.api.mission.events import (AssistanceRequest, Clearance,
                                             KeepOutZone, StatusKind)
-from robotx_2026.api.mission.robocomms import RoboCommandClient, frame
+from rx26_asv.api.mission.robocomms import RoboCommandClient, frame
 
 spec = importlib.util.spec_from_file_location(
     "mock_robocommand",

@@ -9,6 +9,12 @@ the Jetson. It is designed to merge into that repo **without touching existing c
 - New top-level dirs: `interfaces/`, `orchestrator/`, `tools/`, `docker/sitl/`, `proto/`,
   `.github/`.
 
+> **Package-name divergence.** This repo's ROS 2 package was renamed
+> `robotx_2026` → `rx26_asv`. The Jetson repo above still uses `robotx_2026`, so the
+> rsync merge below no longer lands the package directory on the same path. Reconcile
+> the two names before running it — renaming there too is the clean fix, but it needs
+> its own `colcon build` and a `ros2 pkg executables` check on the boat.
+
 ## Merge procedure (on the Jetson host, NOT in-container)
 
 ```bash
@@ -42,7 +48,7 @@ Tests: `python3 -m pytest orchestrator/tests -q` (CI runs this on every push).
 
 ## Phase 1 additions (safety prerequisites & HAL)
 
-New under `robotx_2026/api/` (no collisions with existing nodes):
+New under `rx26_asv/api/` (no collisions with existing nodes):
 
 - `common/drop_latch.py` — autonomy-drop state machine (fail-safe start, latched
   trip on switch/RC-loss/staleness, explicit-reset-only). Pure Python, fully unit-tested.

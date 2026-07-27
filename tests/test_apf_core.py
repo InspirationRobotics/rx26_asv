@@ -1,6 +1,6 @@
 import math
 
-from robotx_2026.api.navigation.apf_core import (
+from rx26_asv.api.navigation.apf_core import (
     ApfParams, MovingHazard, ObstaclePoint, compute)
 
 

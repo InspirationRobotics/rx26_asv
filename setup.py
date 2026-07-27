@@ -1,4 +1,4 @@
-"""ament_python packaging for the robotx_2026 ROS 2 package (Crusader nodes).
+"""ament_python packaging for the rx26_asv ROS 2 package (Crusader nodes).
 
 NOTE (merge caveat): the live Jetson repo may already carry its own setup.py
 (README_PHASE0.md merge procedure uses `rsync --ignore-existing`, so this file
@@ -12,7 +12,7 @@ rebuild path (tools/scripts/rebuild.sh), which builds both explicitly:
 """
 from setuptools import find_packages, setup
 
-package_name = "robotx_2026"
+package_name = "rx26_asv"
 
 setup(
     name=package_name,
@@ -54,29 +54,29 @@ setup(
     entry_points={
         "console_scripts": [
             # Phase 1 — HAL / safety
-            "telemetry_bridge = robotx_2026.api.navigation.telemetry_bridge:main",
-            "frame_transform = robotx_2026.api.navigation.frame_transform:main",
-            "rc_override_smoke = robotx_2026.api.testing.rc_override_smoke:main",
+            "telemetry_bridge = rx26_asv.api.navigation.telemetry_bridge:main",
+            "frame_transform = rx26_asv.api.navigation.frame_transform:main",
+            "rc_override_smoke = rx26_asv.api.testing.rc_override_smoke:main",
             # Phase 2 — perception
-            "perception_node = robotx_2026.api.perception.perception_node:main",
-            "oakd_guard = robotx_2026.api.perception.oakd_guard:main",
-            "lidar_fusion_node = robotx_2026.api.perception.lidar_fusion_node:main",
+            "perception_node = rx26_asv.api.perception.perception_node:main",
+            "oakd_guard = rx26_asv.api.perception.oakd_guard:main",
+            "lidar_fusion_node = rx26_asv.api.perception.lidar_fusion_node:main",
             # Phase 3 — occupancy + reactive avoidance
-            "occupancy_grid_node = robotx_2026.api.navigation.occupancy_grid_node:main",
-            "roa_apf_node = robotx_2026.api.navigation.roa_apf_node:main",
+            "occupancy_grid_node = rx26_asv.api.navigation.occupancy_grid_node:main",
+            "roa_apf_node = rx26_asv.api.navigation.roa_apf_node:main",
             # Phase 4 — mission planner + RoboCommand
-            "mission_planner_node = robotx_2026.api.mission.mission_planner_node:main",
+            "mission_planner_node = rx26_asv.api.mission.mission_planner_node:main",
             # Operational stack (ported from the Crusader boat repo, rewired to
             # consume telemetry_bridge topics / actuate via the sanctioned paths)
-            "led_node = robotx_2026.api.led.led_node:main",
-            "pixhawk_led_status_node = robotx_2026.api.pixhawk.pixhawk_led_status_node:main",
-            "gate_navigator = robotx_2026.api.navigation.gate_navigator:main",
-            "dp_hold = robotx_2026.api.navigation.dp_hold:main",
-            "rc_watchdog = robotx_2026.api.safety.rc_heartbeat_watchdog:main",
+            "led_node = rx26_asv.api.led.led_node:main",
+            "pixhawk_led_status_node = rx26_asv.api.pixhawk.pixhawk_led_status_node:main",
+            "gate_navigator = rx26_asv.api.navigation.gate_navigator:main",
+            "dp_hold = rx26_asv.api.navigation.dp_hold:main",
+            "rc_watchdog = rx26_asv.api.safety.rc_heartbeat_watchdog:main",
             # Mission-3 effectors + inter-vehicle comms (ported from RoboBoat,
             # rewired to this repo's conventions)
-            "actuator_node = robotx_2026.api.actuators.actuator_node:main",
-            "ivc_node = robotx_2026.api.ivc.ivc_node:main",
+            "actuator_node = rx26_asv.api.actuators.actuator_node:main",
+            "ivc_node = rx26_asv.api.ivc.ivc_node:main",
         ],
     },
 )

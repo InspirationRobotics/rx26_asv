@@ -1,4 +1,4 @@
-from robotx_2026.api.perception.pipeline_stats import PipelineStats
+from rx26_asv.api.perception.pipeline_stats import PipelineStats
 
 
 def feed(stats, n, fps, latency_s, t0=0.0):

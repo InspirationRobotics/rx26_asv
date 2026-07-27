@@ -2,12 +2,12 @@ import queue
 
 import pytest
 
-from robotx_2026.api.mission.events import (AllClear, AssistanceRequest,
+from rx26_asv.api.mission.events import (AllClear, AssistanceRequest,
                                             Clearance, KeepOutZone,
                                             MovingObjectReport, StatusKind)
-from robotx_2026.api.mission.planner import MissionPlanner, PlannerConfig
-from robotx_2026.api.mission.task_stack import TaskContext, TaskStack
-from robotx_2026.api.mission.tasks.waypoint_mission import (LoiterAssist,
+from rx26_asv.api.mission.planner import MissionPlanner, PlannerConfig
+from rx26_asv.api.mission.task_stack import TaskContext, TaskStack
+from rx26_asv.api.mission.tasks.waypoint_mission import (LoiterAssist,
                                                             WaypointMission)
 
 

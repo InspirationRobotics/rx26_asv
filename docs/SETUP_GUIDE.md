@@ -74,7 +74,7 @@ LED tells you state at a glance: RED e-stopped · YELLOW armed/manual · GREEN a
 
 ```bash
 docker exec -it crusader bash /root/robotx_ws/setup/install_container.sh
-# pip top-ups → protoc → colcon build (robotx_2026 + interfaces) → import smoke
+# pip top-ups → protoc → colcon build (rx26_asv + interfaces) → import smoke
 ```
 
 ### B4. SITL simulation (in-container, for scenario-level testing)

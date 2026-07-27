@@ -2,11 +2,11 @@
 the system have drifted apart on values that MUST be identical."""
 import dataclasses
 
-from robotx_2026.api.common import config as crsd_config
-from robotx_2026.api.common.param_utils import check_range
-from robotx_2026.api.navigation.apf_core import ApfParams
-from robotx_2026.api.navigation.progress_monitor import ProgressMonitor
-from robotx_2026.api.perception.lidar_fusion import FusionParams, params_from
+from rx26_asv.api.common import config as crsd_config
+from rx26_asv.api.common.param_utils import check_range
+from rx26_asv.api.navigation.apf_core import ApfParams
+from rx26_asv.api.navigation.progress_monitor import ProgressMonitor
+from rx26_asv.api.perception.lidar_fusion import FusionParams, params_from
 
 
 def test_all_nodes_have_config_sections():

@@ -19,8 +19,8 @@ and a change-impact table. The repo-wide "edit X → re-run Y" map is
 [docs/CHANGE_IMPACT_MAP.md](docs/CHANGE_IMPACT_MAP.md).
 
 ```
-robotx_2026
-|-- robotx_2026/          # THE TARGET SYSTEM — ROS 2 python package running on the boat
+rx26_asv
+|-- rx26_asv/          # THE TARGET SYSTEM — ROS 2 python package running on the boat
 |    |-- api/common/      #   shared plumbing: params, safe node lifecycle, autonomy-drop latch
 |    |-- api/navigation/  #   telemetry_bridge (sole MAVProxy consumer), frame transform,
 |    |                    #   occupancy grid, APF advisory, progress monitor, fence writer
@@ -48,7 +48,7 @@ robotx_2026
 
 ### The one distinction that organizes everything: orchestrator vs. target
 
-- The **target system** (`robotx_2026/`, `interfaces/`) is the boat: ROS 2 nodes, built by
+- The **target system** (`rx26_asv/`, `interfaces/`) is the boat: ROS 2 nodes, built by
   colcon, launched in the container.
 - The **orchestrator** (`orchestrator/`) is a separate research harness that *edits, runs,
   and scores* the target from outside. It never imports `rclpy` and is never launched on
@@ -84,7 +84,7 @@ python orchestrator/run_episode.py \
 
 # in-container — build then launch nodes:
 tools/scripts/rebuild.sh          # from the Jetson host; THE one blessed rebuild path
-ros2 run robotx_2026 telemetry_bridge --ros-args --params-file config/crusader_params.yaml
+ros2 run rx26_asv telemetry_bridge --ros-args --params-file config/crusader_params.yaml
 ```
 
 All tests: `python -m pytest orchestrator/tests tests -q` (CI runs this plus gates
@@ -175,7 +175,7 @@ plain Python ≥3.10 + numpy/pyyaml/pytest for the orchestrator anywhere. Instal
 
 | Dir | Core design choice | Why |
 |---|---|---|
-| [robotx_2026/](robotx_2026/README.md) | ArduRover owns actuation/estimation; nodes advise, one bridge talks MAVLink | Free EK3/failsafes/e-stop; no PWM or parallel EKF to maintain (plan §4.2) |
+| [rx26_asv/](rx26_asv/README.md) | ArduRover owns actuation/estimation; nodes advise, one bridge talks MAVLink | Free EK3/failsafes/e-stop; no PWM or parallel EKF to maintain (plan §4.2) |
 | [interfaces/](interfaces/README.md) | ROS 2 topics with RX24-proven message shapes | Typed drift-catching at build time vs legacy sockets (§4.3) |
 | [orchestrator/](orchestrator/README.md) | In-repo, COLCON_IGNOREd, plain threading; keep-rule in the evaluator | Atomic history for injections; LLM proposes, measurements decide |
 | [config/](config/README.md) | One YAML, `[RO]`/`[DYN]` postures, anchors tie node↔evaluator values | Config drift between scorer and boat is a silent-failure factory |

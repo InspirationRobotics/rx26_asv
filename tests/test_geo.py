@@ -1,6 +1,6 @@
 import math
 
-from robotx_2026.api.common import geo
+from rx26_asv.api.common import geo
 
 
 ORIGIN = (32.7020, -117.2510)

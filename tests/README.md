@@ -1,4 +1,4 @@
-# `tests/` — unit tests for the target system (`robotx_2026/` package)
+# `tests/` — unit tests for the target system (`rx26_asv/` package)
 
 Pure-Python unit tests for the boat's core logic — no ROS, no hardware, no Docker needed.
 They run on any dev machine (`python -m pytest tests -q`) and in CI on every push. Tests for

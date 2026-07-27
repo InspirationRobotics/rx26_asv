@@ -12,7 +12,7 @@ state at the moment of parking is tagged `sim-parked-2026-07-26`.
 | `docker/` | ArduPilot Rover SITL install + launch, Gazebo variant |
 | `tools/sim/` (except `mock_robocommand.py`) | scenario→SDF world generation, hydro coefficient fitting, venue check, `crusader_omnix` model |
 | `config/crusader_params.yaml` `por_usv:` | Proof-of-Readiness acceptance thresholds (PoR is complete; the scorer is parked with them) |
-| `robotx_2026/api/common/config.py` `por_usv_kwargs()` | ditto |
+| `rx26_asv/api/common/config.py` `por_usv_kwargs()` | ditto |
 | `.github/workflows/ci.yml` orchestrator job | orchestrator tests, G0 smoke, gates G3/G4/G5 |
 
 `tools/sim/mock_robocommand.py` **stayed on main** — `tests/test_robocomms_integration.py`

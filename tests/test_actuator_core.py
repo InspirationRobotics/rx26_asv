@@ -3,7 +3,7 @@
 A wrong Pololu frame drives the Mission-3 water cannon / launcher to the wrong
 position, so the quarter-microsecond / 7-bit split is pinned with vectors and a
 round-trip decode. ROS-free — runs under plain pytest."""
-from robotx_2026.api.actuators.actuator_core import (
+from rx26_asv.api.actuators.actuator_core import (
     MAESTRO_SET_TARGET, maestro_target_bytes)
 
 

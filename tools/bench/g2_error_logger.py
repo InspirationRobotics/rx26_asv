@@ -27,8 +27,8 @@ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy  # noqa: E
 from std_msgs.msg import String  # noqa: E402
 
 from interfaces.msg import DetectionArray, LatLonHead  # noqa: E402
-from robotx_2026.api.common import geo  # noqa: E402
-from robotx_2026.api.common.node_main import run_node  # noqa: E402
+from rx26_asv.api.common import geo  # noqa: E402
+from rx26_asv.api.common.node_main import run_node  # noqa: E402
 
 
 class G2ErrorLogger(Node):

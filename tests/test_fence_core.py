@@ -1,6 +1,6 @@
 import pytest
 
-from robotx_2026.api.navigation.fence_core import (
+from rx26_asv.api.navigation.fence_core import (
     ACK_ACCEPTED, FenceError, FenceProtocol, items_from_keepouts)
 
 ORIGIN = (32.7020, -117.2510)

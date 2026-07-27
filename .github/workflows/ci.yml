@@ -25,17 +25,17 @@ jobs:
     container: ros:humble
     steps:
       - uses: actions/checkout@v4
-      - name: build interfaces + robotx_2026 packages
+      - name: build interfaces + rx26_asv packages
         shell: bash
         run: |
           mkdir -p /ws/src
           # interfaces copied out separately: the repo root is itself the
-          # robotx_2026 package, and colcon does not descend into packages
+          # rx26_asv package, and colcon does not descend into packages
           cp -r interfaces /ws/src/
-          cp -r . /ws/src/robotx_2026_pkg
+          cp -r . /ws/src/rx26_asv_pkg
           cd /ws
           source /opt/ros/humble/setup.bash
-          colcon build --packages-select interfaces robotx_2026 \
+          colcon build --packages-select interfaces rx26_asv \
                        --event-handlers console_cohesion+
 
   tools-lint:
