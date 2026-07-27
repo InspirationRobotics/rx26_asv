@@ -47,8 +47,7 @@ tools/training/datasets/
 *_pb2.pyi
 
 # --- Episode / autoresearch run outputs (metrics JSON archived elsewhere) ---
-orchestrator/runs/
-orchestrator/history/
+# The orchestrator's own ignore rules live with it on `sim/orchestrator`.
 *.episode.json
 
 # --- Editors / OS ---

@@ -30,14 +30,6 @@ flowchart TD
         MOCK[tools/sim/mock_robocommand.py]
     end
 
-    subgraph orch [orchestrator - runs off-board]
-        EPI[episodes/ backends]
-        EVAL[evaluator/ metrics + keep rule]
-        L1[level1] --> L15[level1_5]
-        L2[level2 pipeline + validate]
-        SCEN[scenarios/*.json]
-    end
-
     subgraph ops [host tooling]
         UDEV[tools/udev] --> PRE[preflight.py]
         SYSD[tools/systemd] --> PRE
@@ -46,7 +38,6 @@ flowchart TD
     end
 
     YAML --> COMMON --> TB & PN & OG & APF & PM & MP
-    YAML --> EVAL
     DEV --> UDEV
     PARAMS --> PG
     IF --> TB & PN & OG & APF & MP
@@ -55,15 +46,17 @@ flowchart TD
     PM --> MP
     PROTO --> MP
     PROTO --> MOCK --> MP
-    APF --> EPI
-    SCEN --> EPI --> EVAL --> L1
-    L1 --> L2 --> RB
-    PG --> L1
 ```
 
 Reading the graph: an edit's blast radius is everything downstream of its node. The three
 highest-fan-out nodes are `interfaces/` msgs, `api/common/`, and `crusader_params.yaml` —
 treat edits there as repo-wide changes.
+
+**Off-board consumers are not shown.** The orchestrator (episodes, evaluator, level1/1.5/2)
+and the SITL/Gazebo environment are parked on the `sim/orchestrator` branch — see
+[PARKED_SIM.md](PARKED_SIM.md). `apf_core.py`, `occupancy_core.py`, `api/mission/*` and the
+anchored values in `crusader_params.yaml` still feed them, so the **S** tier below is only
+verifiable from that branch until it is merged back.
 
 ## Master impact table
 
@@ -84,13 +77,9 @@ treat edits there as repo-wide changes.
 | `api/actuators/*` | Mission-3 launcher + water cannon | `test_actuator_core.py`; bench (real Maestro) | U+B |
 | `api/ivc/*` | inter-vehicle relay (Missions 1/3), team-WiFi link | `test_ivc_link.py`; bench (two radios) | U+B |
 | `proto/robocommand.proto` | robocomms + mock (must stay byte-identical) | recompile, loopback test, G4 | U+S |
-| `orchestrator/evaluator/*` | every historical/future keep decision | `test_metrics.py`, `test_keep_rule.py`, G3+G4+G5 | U+S |
-| `orchestrator/level2/validate.py` | the injected-code safety net | `test_level2.py`, G5 revert drills | U+S |
-| `orchestrator/scenarios/*.json` | comparability of all results | add-don't-mutate; affected gates | S |
 | `tools/scripts/param_guard.py` | what autoresearch/preflight allow | pytest + safety review vs CLAUDE.md | U |
 | `tools/udev/*`, `config/crusader_devices.json` | device names on the boat | `test_gen_udev.py`, reinstall + replug, preflight | U+B |
 | `tools/systemd/*` | boot order (MAVProxy-first is safety) | reinstall on Jetson, reboot test | B |
-| `docker/sitl/*` | SITL fidelity, scenario origins | one SITL episode in-container | S |
 | `setup.py` entry points / `package.xml` | node launchability | CI colcon job, `ros2 pkg executables` in-container | U+S |
 | `setup/*` scripts | fresh-machine bootstrap | run the script on its target machine; keep deps synced with `ci.yml` | U |
 | `.github/workflows/ci.yml` | the gatekeeper itself | push to a branch, watch it go green | — |

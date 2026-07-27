@@ -3,7 +3,8 @@
 Pure-Python unit tests for the boat's core logic — no ROS, no hardware, no Docker needed.
 They run on any dev machine (`python -m pytest tests -q`) and in CI on every push. Tests for
 the autoresearch harness live separately in `orchestrator/tests/` (orchestrator-vs-target
-boundary applies to tests too).
+boundary applies to tests too) — currently parked on the `sim/orchestrator` branch, see
+[../docs/PARKED_SIM.md](../docs/PARKED_SIM.md).
 
 **Design choice:** node files are split into ROS-wrapper (`*_node.py`) and pure-logic core
 (`*_core.py`, `planner.py`, `drop_latch.py` …) precisely so the safety-relevant math is
@@ -27,7 +28,7 @@ testable at this tier of the pyramid (plan §6: unit → SITL → bench/HIL → 
 
 ```mermaid
 flowchart TD
-    U["unit — tests/ + orchestrator/tests (CI, seconds)"] --> S["SITL — fixed scenario suite in container (minutes)"]
+    U["unit — tests/ (CI, seconds)"] --> S["SITL — fixed scenario suite, sim/orchestrator branch (minutes)"]
     S --> B["bench/HIL — real Pixhawk/sensors, props off or tub (weekly)"]
     B --> F["field — scenario suite on water (G6: green across 2 separate days)"]
 ```

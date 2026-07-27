@@ -79,12 +79,9 @@ def test_fusion_config_keys_exactly_cover_the_core():
     assert section - extrinsic - link == core
 
 
-def test_evaluator_reads_same_thresholds_as_node():
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "orchestrator"))
-    from evaluator import metrics
-    assert metrics._shared_thresholds() == crsd_config.monitor_kwargs()
+# NOTE: test_evaluator_reads_same_thresholds_as_node lives on the
+# `sim/orchestrator` branch with the evaluator it guards (docs/PARKED_SIM.md).
+# The YAML side of that contract is still pinned by the monitor tests above.
 
 
 def test_config_hash_stable_and_present():
