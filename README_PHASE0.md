@@ -1,19 +1,9 @@
 # Phase 0–5 scaffold — merge into the Jetson `robotx_2026` repo
 
-This directory is the Phase-0 deliverable from `../RX26_ENGINEERING_PLAN.md`, built on the
-dev laptop because the live repo (`github.com/chrismartin018/robotx_2026`, private) lives on
-the Jetson. It is designed to merge into that repo **without touching existing code**:
-
 - `robotx_2026/api/**` (led, pixhawk, gate_navigator, dp_hold, perception nodes) is NOT
   duplicated here — nothing in this scaffold overwrites an existing file.
 - New top-level dirs: `interfaces/`, `orchestrator/`, `tools/`, `docker/sitl/`, `proto/`,
   `.github/`.
-
-> **Package-name divergence.** This repo's ROS 2 package was renamed
-> `robotx_2026` → `rx26_asv`. The Jetson repo above still uses `robotx_2026`, so the
-> rsync merge below no longer lands the package directory on the same path. Reconcile
-> the two names before running it — renaming there too is the clean fix, but it needs
-> its own `colcon build` and a `ros2 pkg executables` check on the boat.
 
 ## Merge procedure (on the Jetson host, NOT in-container)
 

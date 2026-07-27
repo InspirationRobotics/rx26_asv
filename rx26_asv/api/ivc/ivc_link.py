@@ -1,4 +1,4 @@
-"""Inter-vehicle comms link (IVC) — TCP peer link to a partner vehicle.
+"""Inter-vehicle comms link (IVC) — TCP peer link to UUV.
 
 Ported from RoboBoat's ivc_api (ASVComms/ASVServer/ASVClient) and hardened to this
 repo's threading rules (mirrors mission/robocomms.py):
@@ -15,8 +15,7 @@ Pixhawk telemetry link. Keep the three separate.
 No ROS imports here, so the same link runs under the node, the episode harness, and
 pytest. Messages are newline-delimited UTF-8 strings for now (RoboBoat parity); when
 IVC needs structured tasking (Mission 1 UAV route relay, Mission 3 delivery handoff),
-migrate the payload to the RoboCommand envelope so both links share one schema
-(CLAUDE.md Mission 2 note).
+migrate the payload to the RoboCommand envelope so both links share one schema.
 """
 import queue
 import socket

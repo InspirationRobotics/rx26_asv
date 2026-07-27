@@ -2,7 +2,7 @@
 
 One camera user at a time: stop perception_node first. Run inside the container,
 then open http://<JETSON_IP>:8080 in a browser to confirm the camera streams
-before anything moves (the RX26_ENGINEERING_PLAN day-of runbook step).
+before anything moves
 
   python3 tools/oak_view.py
 

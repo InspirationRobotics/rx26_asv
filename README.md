@@ -3,8 +3,7 @@
 Team Inspiration's codebase for the 2026 RobotX competition. We run a single ASV
 (autonomous surface vessel), **Crusader**: a holonomic 4×T200 boat on ArduRover/Pixhawk with
 a Jetson Orin Nano companion computer running ROS 2 Humble in the `crusader` Docker
-container. This repo implements the `RX26_ENGINEERING_PLAN.md` (kept alongside `CLAUDE.md`
-one directory up); Phases 0–5 are complete — see [README_PHASE0.md](README_PHASE0.md) for
+container. Phases 0–4 are written in — see [README_PHASE0.md](README_PHASE0.md) for
 the phase-by-phase delivery log.
 
 Before developing ANY code, read [Format](#format) and the standing

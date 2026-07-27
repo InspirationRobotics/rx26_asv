@@ -1,6 +1,6 @@
 """Shared frame/geodesy helpers (no ROS imports — used by nodes AND unit tests).
 
-Conventions (match the RX26_ROA diagram and scenario files):
+Conventions:
   WORLD: x = east+ [m], y = north+ [m], anchored at `origin` (lat, lon).
   BODY:  x = starboard+ [m], y = forward+ [m].
   heading: radians, 0 = true north, clockwise positive (compass convention).

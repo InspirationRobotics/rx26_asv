@@ -13,11 +13,9 @@ Read in this order; each step tells you why.
 
 | # | Read | Why first |
 |---|---|---|
-| A1 | `../CLAUDE.md` (repo-adjacent) | The constraints: hardware reality (steering inversion, GPS-only heading, GUIDED can't strafe), safety rules (single Pixhawk owner, autonomy-drop switch, arming params), and the three objectives every change is judged against |
-| A2 | `../RX26_ENGINEERING_PLAN.md` | The plan this repo implements: architecture (§3), tradeoff decisions (§4), phase gates G0–G6 (§5) |
-| A3 | Root [`README.md`](../README.md) | Structure, glossary, per-directory design choices |
-| A4 | [`README_PHASE0.md`](../README_PHASE0.md) | What each phase actually delivered, file by file, plus the Jetson merge procedure |
-| A5 | The README of the directory you'll work in | Its sequence diagram + change-impact table |
+| A1 | Root [`README.md`](../README.md) | Structure, glossary, per-directory design choices |
+| A2 | [`README_PHASE0.md`](../README_PHASE0.md) | What each phase actually delivered, file by file, plus the Jetson merge procedure |
+| A3 | The README of the directory you'll work in | Its sequence diagram + change-impact table |
 
 **The two rules you cannot learn the hard way:**
 1. **One Pixhawk owner.** Only MAVProxy holds the serial device; only `telemetry_bridge`

@@ -1,6 +1,6 @@
 """Autonomy-drop switch latch — the state machine behind the G1 safety gate.
 
-Context (CLAUDE.md standing safety constraint): `dp_hold` overrides RC sticks, and
+Context: `dp_hold` overrides RC sticks, and
 flipping SC to manual does NOT regain control while an override is active. The
 pilot's only recovery paths were Ctrl+C (needs WiFi — not a safety tool) or the
 hardware e-stop. This latch closes that gap: a dedicated RC channel, read via the
