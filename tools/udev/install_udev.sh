@@ -2,6 +2,9 @@
 # Install Crusader udev rules on the Jetson host (NOT inside the container).
 # Also bumps usbfs memory for the OAK-D LR (required for large stereo frames on USB3).
 set -euo pipefail
+# Unmatched globs expand to nothing rather than to the literal pattern, so the
+# device-scan loops below behave when no serial devices are plugged in.
+shopt -s nullglob
 
 RULES_DIR="$(dirname "$0")"
 RULES_SRC="$RULES_DIR/99-crusader.rules"
@@ -16,8 +19,15 @@ if grep -q "TODO_GPS1_SERIAL" "$RULES_SRC"; then
   echo "WARNING: GPS serial placeholders not filled in. Plugged-in candidates:"
   for dev in /dev/ttyACM* /dev/ttyUSB*; do
     [[ -e "$dev" ]] || continue
-    info=$(udevadm info -a -n "$dev" 2>/dev/null | grep -m3 -E 'idVendor|idProduct|\{serial\}' | tr -d ' ' | paste -sd' ' -)
-    echo "  $dev  $info"
+    # DIAGNOSTIC ONLY — this must never abort the install. grep exits 1 when a
+    # device exposes none of these attributes (or when udevadm itself fails),
+    # and under `set -e` + `pipefail` that killed the whole script HERE, before
+    # a single rule was installed — silently, since set -e prints nothing.
+    # That is the opposite of this block's stated intent two lines below.
+    info=$(udevadm info -a -n "$dev" 2>/dev/null \
+             | grep -m3 -E 'idVendor|idProduct|\{serial\}' \
+             | tr -d ' ' | paste -sd' ' - || true)
+    echo "  $dev  ${info:-(no usb attributes readable)}"
   done
   echo "Edit $RULES_SRC, then re-run. (Installing anyway so non-GPS rules take effect.)"
 fi
