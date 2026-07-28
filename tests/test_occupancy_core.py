@@ -72,3 +72,36 @@ def test_msg_dict_shape():
     d = g.to_msg_dict(0.0, origin=(32.7, -117.25), position_xyh=(1.0, 2.0, 0.5))
     assert d["cell_size"] == 0.5 and d["decay_tau"] == 10.0
     assert d["cells"] and {"x_coord", "y_coord", "value", "source"} <= set(d["cells"][0])
+
+
+# --- regression: a detection must never vanish between ingest and the grid ---
+# _disk once tested inclusion against the cell HALF-WIDTH, but a point can sit up
+# to a HALF-DIAGONAL from its own cell's centre. Small-radius detections landing
+# near a cell corner therefore matched zero cells and disappeared with no warning
+# — while depth_association.py floors its radius estimate at exactly 0.05 m, so
+# the clamped case was the exposed one. Losing an obstacle is strictly worse than
+# carrying a coarse one (objective 1); this is the same invariant lidar_fusion
+# upholds when it passes an unfused detection through.
+
+def test_small_radius_detection_always_stamps_a_cell():
+    for i in range(400):                      # sweep sub-cell offsets, incl. corners
+        x = y = i * 0.25 / 400 * 4            # walks across cell boundaries
+        for radius in (0.0, 0.05, 0.103):
+            g = grid()
+            g.ingest_detection(x, y, radius=radius, t=0.0)
+            assert g.cells, \
+                f"detection at ({x:.4f}, {y:.4f}) r={radius} stamped no cells"
+
+
+def test_detection_on_exact_cell_corner_is_kept():
+    g = grid()                                 # cell_size 0.5 -> corner at (1.0, 1.0)
+    g.ingest_detection(1.0, 1.0, radius=0.05, t=0.0)
+    assert g.cells
+    assert g.occupied_points(t=0.0)
+
+
+def test_disk_growth_stays_bounded():
+    """The wider margin must not inflate a normal detection into a blob."""
+    g = grid()
+    g.ingest_detection(5.0, 5.0, radius=1.0, t=0.0)
+    assert len(g.cells) <= 30                  # ~pi*(1+0.354)^2/0.25 = 23 cells
