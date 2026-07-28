@@ -4,7 +4,13 @@
 #
 # Run once after the repo lands in the container mount, and re-run whenever
 # proto/ or package files change. Order matters:
-#   pip deps -> protobuf compile -> colcon build (both packages) -> import smoke.
+#   dep guard -> protobuf compile -> colcon build -> import smoke.
+#
+# This script installs NOTHING. Runtime dependencies live in the image
+# (see Dockerfile) so they are versioned, pinned, and survive `docker rm`.
+# An unpinned `pip install` from here once resolved protobuf out from under
+# TensorFlow on the real Jetson and broke the perception stack — hence the
+# guard below instead of an install step.
 #
 # Usage (from the Jetson host):
 #     docker exec -it crusader bash /root/robotx_ws/src/rx26_asv/setup/install_container.sh
@@ -28,10 +34,25 @@ fi
 echo "   repo:      $REPO"
 echo "   workspace: $WS"
 
-echo "== [1/4] Python deps not in the base image =="
-# base image (ultralytics jetson-jetpack6) already ships CUDA/PyTorch/TensorRT,
-# depthai and MAVProxy per CLAUDE.md — only top up the small pure-python bits.
-pip install --no-cache-dir pyyaml protobuf grpcio-tools pymavlink pytest
+echo "== [1/4] Dependency guard (the image supplies these — we never install) =="
+missing=0
+for mod in yaml google.protobuf pymavlink; do
+  python3 -c "import $mod" 2>/dev/null || { echo "   MISSING: $mod" >&2; missing=1; }
+done
+if [[ "$missing" -ne 0 ]]; then
+  echo "ERROR: the container image is missing runtime deps." >&2
+  echo "       Rebuild the image (docker build -t crusader .) rather than" >&2
+  echo "       pip-installing here — see the Dockerfile comment on pinning." >&2
+  exit 1
+fi
+python3 - <<'PY'
+import google.protobuf as p
+v = p.__version__
+assert v.startswith("5.29"), (
+    "protobuf is %s; the ultralytics base needs 5.29.x for TensorFlow "
+    "(<6.0.0dev). Something moved it — rebuild the image." % v)
+print("   protobuf", v, "ok")
+PY
 
 echo "== [2/4] Compile RoboCommand protobuf (proto/ -> rx26_asv/api/mission/) =="
 # Switches robocomms.py from its JSON fallback framing to real protobuf.
@@ -43,12 +64,14 @@ python3 -m grpc_tools.protoc -I proto \
     --python_out=rx26_asv/rx26_asv/api/mission proto/robocommand.proto \
   || protoc -I proto --python_out=rx26_asv/rx26_asv/api/mission proto/robocommand.proto
 
-echo "== [3/4] colcon build (both packages, from the workspace root) =="
-# Repo root is deliberately NOT a package, so plain discovery under src/ finds
-# rx26_asv AND interfaces — no --base-paths workaround, nothing silently skipped.
+echo "== [3/4] colcon build (this repo's packages only) =="
+# --packages-select, not a bare build: the workspace may hold other package
+# sources (e.g. the robotx_2026 boat repo) whose build state is not ours to
+# change, and whose build failure must not block ours. colcon errors if a
+# selected package is missing, so a discovery regression still fails loudly.
 cd "$WS"
 source /opt/ros/humble/setup.bash
-colcon build --symlink-install
+colcon build --symlink-install --packages-select interfaces rx26_asv
 source install/setup.bash
 
 echo "== [4/4] Import smoke (fail loudly — see tools/scripts/rebuild.sh) =="

@@ -51,7 +51,6 @@ setup(
     description="Crusader USV ROS 2 nodes for RobotX 2026",
     url="https://github.com/InspirationRobotics/rx26_asv",
     license="MIT",
-    tests_require=["pytest"],
     entry_points={
         "console_scripts": [
             # Phase 1 — HAL / safety

@@ -55,20 +55,38 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ----------------------------------------------------------------------------
-# Python deps: the OAK-D lib + MAVProxy, plus the pure-python bits that
-# setup/install_container.sh pins (keeps the image and that script in sync).
+# Python deps. THE IMAGE IS THE ONLY PLACE RUNTIME DEPS ARE INSTALLED — nothing
+# pip-installs into a running container (that state is undocumented and lost on
+# `docker rm`).
+#
+# Everything that can move protobuf is PINNED, and for a specific reason: the
+# ultralytics base ships protobuf 5.29.6, which TensorFlow 2.19 requires
+# (<6.0.0dev). An unpinned `grpcio-tools` resolves to a 7.x-era protobuf and
+# breaks the ML stack this boat's perception runs on. That happened on the real
+# Jetson. Do not unpin these without re-running the guard below.
 #   depthai<3 -> v2 API used by perception (USB3 SUPER-speed check in CLAUDE.md)
 # ----------------------------------------------------------------------------
 RUN uv pip install --system \
         "depthai<3" \
-        pymavlink \
+        "pymavlink==2.4.49" \
         MAVProxy \
         pyserial \
         future \
-        pyyaml \
-        protobuf \
-        grpcio-tools \
+        "pyyaml==6.0.3" \
+        "protobuf==5.29.6" \
+        "grpcio==1.82.1" \
+        "grpcio-tools==1.71.0" \
         pytest
+
+# Fail the BUILD, not the boat, if a dependency resolution moved protobuf out
+# from under TensorFlow/ultralytics. This import is slow (~1 min on TF) and
+# worth every second of it.
+RUN python3 -c "\
+import google.protobuf, tensorflow, ultralytics; \
+v = google.protobuf.__version__; \
+assert v.startswith('5.29'), 'protobuf moved to %s — TF requires <6.0.0dev' % v; \
+print('dep guard ok: protobuf', v, '| tensorflow', tensorflow.__version__, \
+      '| ultralytics', ultralytics.__version__)"
 
 # ----------------------------------------------------------------------------
 # Livox-SDK2 — native SDK for the MID360 (Ethernet/UDP device)
@@ -92,7 +110,7 @@ ENV LIVOX_WS=/opt/livox_ws
 RUN mkdir -p $LIVOX_WS/src && cd $LIVOX_WS/src \
     && git clone https://github.com/Livox-SDK/livox_ros_driver2.git \
     && cd livox_ros_driver2 && git checkout "$LIVOX_DRIVER_REF"
-COPY config/MID360_config.json $LIVOX_WS/src/livox_ros_driver2/config/MID360_config.json
+COPY rx26_asv/config/MID360_config.json $LIVOX_WS/src/livox_ros_driver2/config/MID360_config.json
 RUN source /opt/ros/humble/setup.bash \
     && cd $LIVOX_WS/src/livox_ros_driver2 \
     && ./build.sh humble

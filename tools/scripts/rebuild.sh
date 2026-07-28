@@ -16,11 +16,12 @@ if ! docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q t
 fi
 
 echo "== colcon build inside $CONTAINER =="
-# The repo root is deliberately NOT a colcon package, so normal discovery under
-# src/ finds both rx26_asv and interfaces. If you ever see only one package
-# built, that is a real error — do not paper over it with --base-paths.
+# Build only this repo's packages. The workspace may hold other package sources
+# (e.g. the robotx_2026 boat repo) — rebuilding those is not this script's job,
+# and their build failures must not block ours. colcon still errors if either
+# selected package is missing, so a discovery regression fails loudly.
 docker exec "$CONTAINER" bash -lc \
-  "cd $WS && colcon build --symlink-install"
+  "cd $WS && colcon build --symlink-install --packages-select interfaces rx26_asv"
 
 echo "== import smoke test =="
 # Fail loudly if any package doesn't import — a silently-inactive mechanism is a

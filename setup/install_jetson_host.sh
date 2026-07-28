@@ -25,8 +25,26 @@ echo "== [1/4] udev rules (stable /dev/crsd-* symlinks + OAK-D perms) =="
 bash tools/udev/install_udev.sh
 
 echo "== [2/4] systemd units (crsd-mavproxy = sole Pixhawk owner, then container) =="
-install -m 644 tools/systemd/crsd-mavproxy.service  /etc/systemd/system/
-install -m 644 tools/systemd/crsd-container.service /etc/systemd/system/
+# The units are templates: the service account and repo path differ per Jetson,
+# and a hardcoded /home/<someone> silently fails at boot — which you discover on
+# the water, not at the bench. Substitute the real values at install time.
+CRSD_USER="${SUDO_USER:-$USER}"
+CRSD_REPO="$(pwd)"
+id -u "$CRSD_USER" >/dev/null 2>&1 || {
+  echo "ERROR: user '$CRSD_USER' does not exist — cannot install units." >&2
+  echo "       Run with sudo from that user's session, or set SUDO_USER." >&2
+  exit 1; }
+echo "   service user: $CRSD_USER"
+echo "   repo path:    $CRSD_REPO"
+for unit in crsd-mavproxy crsd-container; do
+  sed -e "s|__CRSD_USER__|$CRSD_USER|g" -e "s|__CRSD_REPO__|$CRSD_REPO|g" \
+      "tools/systemd/$unit.service" > "/etc/systemd/system/$unit.service"
+  chmod 644 "/etc/systemd/system/$unit.service"
+  # Fail loudly rather than enabling a unit that still carries a placeholder.
+  if grep -q "__CRSD_" "/etc/systemd/system/$unit.service"; then
+    echo "ERROR: $unit.service still has unsubstituted placeholders." >&2; exit 1
+  fi
+done
 systemctl daemon-reload
 systemctl enable crsd-mavproxy.service crsd-container.service
 echo "   enabled; start now with: systemctl start crsd-mavproxy crsd-container"
