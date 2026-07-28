@@ -101,4 +101,15 @@ jobs:
             echo "  bash -n $f"
             bash -n "$f" || { echo "SYNTAX FAIL: $f" >&2; fail=1; }
           done
+          # Executable bit, checked in the INDEX not the worktree: contributors
+          # on Windows have core.filemode=false, so a script can be committed
+          # 100644 and nobody notices until the Jetson says "Permission denied"
+          # — or worse, until systemd refuses to start crsd-mavproxy, which
+          # ExecStart's start_mavproxy.sh directly.
+          while read -r mode _ _ path; do
+            case "$mode" in
+              100755) ;;
+              *) echo "NOT EXECUTABLE ($mode): $path" >&2; fail=1 ;;
+            esac
+          done < <(git ls-files -s '*.sh')
           exit $fail
