@@ -14,6 +14,11 @@
 # Usage:   sudo bash setup/install_jetson_host.sh
 # ============================================================================
 set -euo pipefail
+# Fail LOUDLY. `set -e` aborts with no message at all, so a step that dies
+# halfway leaves a partially-installed boot chain looking like a clean run —
+# this exact script once stopped after [1/4] with nothing but a warning on
+# screen, and no systemd units were written.
+trap 'rc=$?; echo >&2; echo "ERROR: install_jetson_host.sh ABORTED at line $LINENO (exit $rc)." >&2; echo "       The install is INCOMPLETE — no step after this one ran." >&2; echo "       Fix the cause and re-run; the script is idempotent." >&2' ERR
 cd "$(dirname "$0")/.."   # repo root (= ~/robotx_ws/src/rx26_asv on the Jetson)
 
 if [[ "$(id -u)" -ne 0 ]]; then
