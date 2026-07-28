@@ -6,7 +6,9 @@
 set -euo pipefail
 
 CONTAINER="crusader"
-WS="/root/robotx_ws"
+# Colcon WORKSPACE root inside the container (not the repo root — this repo is
+# cloned to $WS/src/rx26_asv alongside any other package sources).
+WS="${WS:-/root/robotx_ws}"
 
 if ! docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true; then
   echo "ERROR: '$CONTAINER' container is not running." >&2
@@ -14,11 +16,11 @@ if ! docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q t
 fi
 
 echo "== colcon build inside $CONTAINER =="
-# The repo root is itself the rx26_asv ament_python package (setup.py at
-# root), so colcon will not descend into interfaces/ on its own — both base
-# paths must be named explicitly.
+# The repo root is deliberately NOT a colcon package, so normal discovery under
+# src/ finds both rx26_asv and interfaces. If you ever see only one package
+# built, that is a real error — do not paper over it with --base-paths.
 docker exec "$CONTAINER" bash -lc \
-  "cd $WS && colcon build --symlink-install --base-paths . interfaces"
+  "cd $WS && colcon build --symlink-install"
 
 echo "== import smoke test =="
 # Fail loudly if any package doesn't import — a silently-inactive mechanism is a

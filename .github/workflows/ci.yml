@@ -28,13 +28,23 @@ jobs:
       - name: build interfaces + rx26_asv packages
         shell: bash
         run: |
+          # Mirror the Jetson layout exactly: the repo is ONE source dir inside
+          # a colcon workspace, not the workspace root.
           mkdir -p /ws/src
-          # interfaces copied out separately: the repo root is itself the
-          # rx26_asv package, and colcon does not descend into packages
-          cp -r interfaces /ws/src/
-          cp -r . /ws/src/rx26_asv_pkg
+          cp -r . /ws/src/rx26_asv
           cd /ws
           source /opt/ros/humble/setup.bash
+
+          # Guard the failure mode this layout exists to prevent: if the repo
+          # root ever becomes a package again, colcon stops descending and
+          # `interfaces` is silently skipped. Fail loudly instead.
+          colcon list --names-only | sort > /tmp/pkgs.txt
+          echo "discovered packages:"; cat /tmp/pkgs.txt
+          for p in interfaces rx26_asv; do
+            grep -qx "$p" /tmp/pkgs.txt || {
+              echo "ERROR: colcon did not discover package '$p'" >&2; exit 1; }
+          done
+
           colcon build --packages-select interfaces rx26_asv \
                        --event-handlers console_cohesion+
 

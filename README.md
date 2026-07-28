@@ -17,32 +17,44 @@ Every top-level directory has its own README with a sequence diagram, its design
 and a change-impact table. The repo-wide "edit X → re-run Y" map is
 [docs/CHANGE_IMPACT_MAP.md](docs/CHANGE_IMPACT_MAP.md).
 
+This repo is **one source dir inside a colcon workspace**, not the workspace itself.
+On the Jetson it lives at `~/robotx_ws/src/rx26_asv`, alongside any other package
+sources. The repo root is deliberately **not** a colcon package — that is what lets
+plain `colcon build` discover both packages it ships (`rx26_asv` and `interfaces`)
+instead of stopping at the first one it finds.
+
 ```
-rx26_asv
-|-- config/               # single source of truth: ROS params YAML + device topology + MID360
-|-- docs/                 # setup guide, change-impact map, bench procedures (G1, G2)
-|-- firmware/             # Arduino sketches flashed to peripherals (LED status strip)
-|-- interfaces/           # ROS 2 message package (typed contracts between nodes)
-|-- launch/               # ROS 2 launch files (core status stack, camera, lidar, fusion)
-|-- proto/                # RoboCommand protobuf wire schema (compiled at build, not committed)
-|-- resource/             # registers the package with the ament index so ROS 2 command-line tools
-|                         #   can discover it
-|-- rx26_asv/          # ROS 2 python package running on the boat
-|    |-- api/common/      #   shared plumbing: params, safe node lifecycle, autonomy-drop latch
-|    |-- api/navigation/  #   telemetry_bridge (sole MAVProxy consumer), frame transform,
-|    |                    #   occupancy grid, APF advisory, progress monitor, fence writer
-|    |-- api/perception/  #   OAK-D capture -> TensorRT detect -> depth assoc; Livox LiDAR fusion
-|    |-- api/mission/     #   task-stack mission planner + RoboCommand comms
-|    |-- api/safety/      #   rc_heartbeat_watchdog: force-disarm on RC-link loss (+ core)
-|    |-- api/actuators/   #   Mission-3 effectors: water cannon (Maestro)
-|    |-- api/ivc/         #   inter-vehicle comms over modem communication
-|    |-- api/testing/     #   bench-only nodes
-|-- scripts/              # runnable bash scripts
-|-- setup/                # installation scripts per machine role + git remote init
-|-- tests/                # unit tests for the target system
-|-- tools/                # udev, systemd, preflight, param_guard, rebuild, mock RoboCommand,
-|                         #   model training pipeline, bench instruments
-|-- Dockerfile            # the `crusader` container image (ROS 2 Humble + CUDA + livox driver)
+~/robotx_ws/                   # colcon WORKSPACE (not this repo; holds build/ install/ log/)
+|-- models/                    # per-Jetson TensorRT engines (gitignored, copied in out-of-band)
+|-- src/
+     |-- rx26_asv/             # <- THIS REPO
+     |    |-- rx26_asv/           # ROS 2 python package (colcon package root)
+     |    |    |-- package.xml    #   package manifest + setup.py / setup.cfg
+     |    |    |-- config/        #   single source of truth: ROS params YAML + devices + MID360
+     |    |    |-- launch/        #   launch files (core status stack, camera, lidar, fusion)
+     |    |    |-- resource/      #   registers the package with the ament index
+     |    |    |-- rx26_asv/      #   the importable python module
+     |    |         |-- api/common/      # shared plumbing: params, node lifecycle, drop latch
+     |    |         |-- api/navigation/  # telemetry_bridge (sole MAVProxy consumer), frame
+     |    |         |                    #   transform, occupancy grid, APF advisory, fence writer
+     |    |         |-- api/perception/  # OAK-D -> TensorRT detect -> depth assoc; LiDAR fusion
+     |    |         |-- api/mission/     # task-stack mission planner + RoboCommand comms
+     |    |         |-- api/safety/      # rc_heartbeat_watchdog: force-disarm on RC-link loss
+     |    |         |-- api/actuators/   # Mission-3 effectors: water cannon (Maestro)
+     |    |         |-- api/ivc/         # inter-vehicle comms over modem communication
+     |    |         |-- api/testing/     # bench-only nodes
+     |    |-- interfaces/         # ROS 2 message package (typed contracts between nodes)
+     |    |-- docs/               # setup guide, change-impact map, bench procedures (G1, G2)
+     |    |-- firmware/           # Arduino sketches flashed to peripherals (LED status strip)
+     |    |-- proto/              # RoboCommand protobuf schema (compiled at build, not committed)
+     |    |-- scripts/            # runnable bash scripts
+     |    |-- setup/              # installation scripts per machine role + git remote init
+     |    |-- tests/              # unit tests for the target system
+     |    |-- tools/              # udev, systemd, preflight, param_guard, rebuild, mock
+     |    |                       #   RoboCommand, model training pipeline, bench instruments
+     |    |-- Dockerfile          # `crusader` image (ROS 2 Humble + CUDA + livox driver)
+     |-- <other package sources>  # anything else in the workspace; COLCON_IGNORE what you
+                                  #   are not building (see docs/SETUP_GUIDE.md §B2)
 ```
 
 ## Usage
@@ -54,15 +66,17 @@ rx26_asv
 | Dev laptop (Windows) | `powershell -ExecutionPolicy Bypass -File setup\install_dev.ps1` | [setup/README.md](setup/README.md) |
 | Dev laptop (Linux/macOS) | `bash setup/install_dev.sh` | ” |
 | Jetson host | `sudo bash setup/install_jetson_host.sh` | udev → systemd → checks |
-| Inside `crusader` container | `bash /root/robotx_ws/setup/install_container.sh` | deps → protoc → colcon → smoke |
+| Inside `crusader` container | `bash /root/robotx_ws/src/rx26_asv/setup/install_container.sh` | deps → protoc → colcon → smoke |
 | New/standalone clone, no git yet | `bash setup/init_git_remote.sh <remote-url>` | idempotent init + remote |
 
 ### Running the system
 
 ```bash
-# in-container — build then launch nodes:
-tools/scripts/rebuild.sh          # from the Jetson host; THE one blessed rebuild path
-ros2 run rx26_asv telemetry_bridge --ros-args --params-file config/crusader_params.yaml
+# from the Jetson host — THE one blessed rebuild path (builds the whole workspace):
+tools/scripts/rebuild.sh
+# in-container — launch a node (params ship in the package's share dir):
+ros2 run rx26_asv telemetry_bridge --ros-args \
+  --params-file "$(ros2 pkg prefix rx26_asv)/share/rx26_asv/config/crusader_params.yaml"
 ```
 
 ## Safety constraints (non-negotiable)

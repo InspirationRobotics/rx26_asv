@@ -6,14 +6,15 @@
 # host-side plumbing the boot chain depends on, in dependency order:
 #   udev rules -> systemd units (MAVProxy first, then container) -> verify.
 #
-# Prereqs: repo cloned to ~/robotx_ws, Docker + the `crusader` container image
-# present (container build is the team's existing image; this script does not
-# build it), MAVProxy installed on the host.
+# Prereqs: repo cloned to ~/robotx_ws/src/rx26_asv (it is one package source in
+# the colcon workspace, not the workspace root), Docker + the `crusader`
+# container image present (container build is the team's existing image; this
+# script does not build it), MAVProxy installed on the host.
 #
 # Usage:   sudo bash setup/install_jetson_host.sh
 # ============================================================================
 set -euo pipefail
-cd "$(dirname "$0")/.."   # repo root (= ~/robotx_ws on the Jetson)
+cd "$(dirname "$0")/.."   # repo root (= ~/robotx_ws/src/rx26_asv on the Jetson)
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "ERROR: must run as root (udev + systemd installs)." >&2
@@ -39,5 +40,5 @@ command -v mavproxy.py >/dev/null \
 
 echo "== [4/4] next step =="
 echo "After a reboot (or starting the units), run preflight INSIDE the container:"
-echo "    docker exec -it crusader python3 /root/robotx_ws/tools/scripts/preflight.py"
+echo "    docker exec -it crusader python3 /root/robotx_ws/src/rx26_asv/tools/scripts/preflight.py"
 echo "Exit nonzero = do not arm. Then follow docs/SETUP_GUIDE.md §B.3."

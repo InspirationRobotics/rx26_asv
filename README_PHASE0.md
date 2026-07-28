@@ -8,7 +8,8 @@ Historical note: phases 0–5 were originally developed as a scaffold intended t
 into a separate live boat repo. That merge is complete — every node referenced below now
 lives in this tree, and this repo is standalone (canonical remote:
 `github.com/InspirationRobotics/rx26_asv`). The old rsync-into-another-repo procedure has
-been removed; on the Jetson, `~/robotx_ws` is a plain clone of the canonical remote.
+been removed; on the Jetson the repo is cloned to `~/robotx_ws/src/rx26_asv`, one package
+source inside a colcon workspace.
 
 Build after a pull, inside the `crusader` container:
 `cd /root/robotx_ws && colcon build --symlink-install`

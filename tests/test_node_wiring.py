@@ -15,7 +15,8 @@ from pathlib import Path
 
 import pytest
 
-PKG = Path(__file__).parent.parent / "rx26_asv" / "api"
+# <repo>/rx26_asv (package) / rx26_asv (python module) / api
+PKG = Path(__file__).parent.parent / "rx26_asv" / "rx26_asv" / "api"
 
 
 def module_ast(relpath):
