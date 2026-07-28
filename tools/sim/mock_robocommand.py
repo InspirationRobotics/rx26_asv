@@ -59,6 +59,15 @@ def encode_event(ev: dict) -> bytes:
     elif t == "keep_out_zone":
         m = env.keep_out_zone
         m.zone_id = ev["zone_id"]
+        if "polygon" not in ev:
+            # The proto schema carries ONLY a polygon, so the pre-circled
+            # {x, y, radius} scenario shape cannot be encoded faithfully. Say so
+            # instead of raising a bare KeyError: a script that silently drives
+            # only one of the two framings is how the polygon path went untested.
+            raise ValueError(
+                f"keep_out_zone {ev['zone_id']!r} has no 'polygon' — the "
+                "protobuf framing cannot encode the JSON-only {x, y, radius} "
+                "shape. Use a polygon so one script drives both framings.")
         for lat, lon in ev["polygon"]:
             p = m.polygon.add()
             p.latitude, p.longitude = lat, lon

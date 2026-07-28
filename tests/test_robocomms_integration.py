@@ -49,6 +49,12 @@ def test_client_receives_scripted_events_from_real_mock(tmp_path):
          "domain": "surface", "latitude": 32.70, "longitude": -117.25},
         {"t": 0.2, "type": "keep_out_zone", "zone_id": "K1",
          "x": 6.0, "y": 30.0, "radius": 3.0},
+        # the mock's DOCUMENTED shape: a polygon, which is also the only thing
+        # the proto schema carries. It must arrive with a positive radius —
+        # decoding it to 0.0 turned the zone into its own All Clear.
+        {"t": 0.25, "type": "keep_out_zone", "zone_id": "K2",
+         "polygon": [[32.7010, -117.2510], [32.7020, -117.2510],
+                     [32.7020, -117.2500], [32.7010, -117.2500]]},
         {"t": 0.3, "type": "clearance", "request_id": "A1"},
     ]
     threading.Thread(target=mock.serve,
@@ -60,14 +66,19 @@ def test_client_receives_scripted_events_from_real_mock(tmp_path):
     ok = wait_for(lambda: _try_connect(client))
     assert ok, "could not connect to mock server"
     try:
-        assert wait_for(lambda: q.qsize() >= 3), \
+        assert wait_for(lambda: q.qsize() >= 4), \
             f"only {q.qsize()} events arrived (malformed={client.malformed_count})"
-        ev1, ev2, ev3 = q.get(), q.get(), q.get()
+        ev1, ev2, ev3, ev4 = q.get(), q.get(), q.get(), q.get()
         assert isinstance(ev1, AssistanceRequest) and ev1.request_id == "A1"
         assert ev1.latitude == 32.70
         assert isinstance(ev2, KeepOutZone) and ev2.zone_id == "K1"
         assert ev2.x == 6.0 and ev2.radius == 3.0
-        assert isinstance(ev3, Clearance) and ev3.request_id == "A1"
+        assert isinstance(ev3, KeepOutZone) and ev3.zone_id == "K2"
+        # positive radius or the zone cancels itself downstream (radius <= 0 is
+        # the All Clear sentinel on /crsd/keepouts)
+        assert ev3.radius > 0.0, "polygon keep-out decoded as an All Clear"
+        assert ev3.latitude is not None and ev3.longitude is not None
+        assert isinstance(ev4, Clearance) and ev4.request_id == "A1"
         assert client.malformed_count == 0
 
         # outbound: send every ack kind; mock's reader logs them — just verify

@@ -37,6 +37,8 @@ def frame(payload: bytes) -> bytes:
     return struct.pack(">I", len(payload)) + payload
 
 
+
+
 class RoboCommandClient:
     def __init__(self, host, port, event_queue, vehicle_id="crusader",
                  connect_timeout_s=10.0):
@@ -113,13 +115,11 @@ class RoboCommandClient:
             m = getattr(env, which)
             d = {f.name: getattr(m, f.name) for f in m.DESCRIPTOR.fields}
             if which == "keep_out_zone":
-                # circle approximation: centroid + max vertex distance
-                pts = [(p.latitude, p.longitude) for p in m.polygon]
-                d = {"zone_id": m.zone_id}
-                if pts:
-                    lat = sum(p[0] for p in pts) / len(pts)
-                    lon = sum(p[1] for p in pts) / len(pts)
-                    d.update(latitude=lat, longitude=lon, radius=0.0)
+                # proto KeepOutZone carries only a polygon; from_json_dict
+                # circumscribes it (shared with the JSON path so the two
+                # framings cannot disagree about a zone's size).
+                d = {"zone_id": m.zone_id,
+                     "polygon": [(p.latitude, p.longitude) for p in m.polygon]}
             return from_json_dict({"type": which, **d})
         return from_json_dict(json.loads(payload))
 
