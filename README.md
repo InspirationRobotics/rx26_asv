@@ -26,7 +26,7 @@ rx26_asv
 |-- launch/               # ROS 2 launch files (core status stack, camera, lidar, fusion)
 |-- proto/                # RoboCommand protobuf wire schema (compiled at build, not committed)
 |-- resource/             # registers the package with the ament index so ROS 2 command-line tools
-                          #   can discover it
+|                         #   can discover it
 |-- rx26_asv/          # ROS 2 python package running on the boat
 |    |-- api/common/      #   shared plumbing: params, safe node lifecycle, autonomy-drop latch
 |    |-- api/navigation/  #   telemetry_bridge (sole MAVProxy consumer), frame transform,
