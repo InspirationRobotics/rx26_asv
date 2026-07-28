@@ -108,3 +108,75 @@ def test_full_queue_drops_are_counted_not_blocking():
     finally:
         client.close()
         server.close()
+
+
+# --- regression: a link that comes back up must not still report itself dead ---
+# connect_or_serve() stamped dead_reason on failure and never cleared it on a
+# later success, and `alive` requires dead_reason to be None. One transient
+# failure therefore marked a working link dead for the life of the object.
+#
+# This is what made test_peer_death_is_observable flaky in CI: _connected_pair
+# retries the (non-idempotent) client connect, so whenever the client lost the
+# scheduling race with the server thread's bind/listen it connected on the
+# second attempt and came up permanently "dead". Forced deterministically here
+# rather than left to thread timing.
+
+def _failed_then_successful_client():
+    """A client whose FIRST connect attempt is refused, second succeeds."""
+    port = free_port()                       # nothing listening on it yet
+    client = IvcClient(server_ip="127.0.0.1", port=port, connect_timeout_s=1.0)
+    assert client.connect_or_serve() is False, "expected the first attempt to fail"
+    assert client.dead_reason is not None
+
+    server = IvcServer(port=port)
+    threading.Thread(target=lambda: server.connect_or_serve(accept_timeout_s=5.0),
+                     daemon=True).start()
+    assert wait_for(client.connect_or_serve), "client never reconnected"
+    assert wait_for(lambda: server.alive), "server never accepted"
+    return server, client
+
+
+def test_reconnect_clears_the_previous_failure():
+    server, client = _failed_then_successful_client()
+    try:
+        assert client.dead_reason is None, \
+            f"stale failure survived a successful reconnect: {client.dead_reason}"
+        assert client.alive, "reconnected link reports itself dead"
+        assert client.health()["alive"] is True
+    finally:
+        client.close()
+        server.close()
+
+
+def test_reconnected_link_actually_carries_traffic():
+    """Guards the inverse error: clearing dead_reason must not paper over a
+    link that is not really up."""
+    server, client = _failed_then_successful_client()
+    try:
+        assert client.send("after-reconnect")
+        assert wait_for(lambda: server.queue.qsize() >= 1)
+        assert server.get_next() == "after-reconnect"
+    finally:
+        client.close()
+        server.close()
+
+
+def test_reconnect_does_not_orphan_the_previous_reader():
+    """_start_reader() overwrites _thread, so a reconnect over a live link
+    would leave two readers draining into one queue."""
+    server, client = _connected_pair()
+    try:
+        first_reader = client._thread
+        server2 = IvcServer(port=client.port)
+        server.close()                        # drop the original peer
+        threading.Thread(
+            target=lambda: server2.connect_or_serve(accept_timeout_s=5.0),
+            daemon=True).start()
+        assert wait_for(client.connect_or_serve), "client never reconnected"
+        assert wait_for(lambda: not first_reader.is_alive()), \
+            "previous reader thread still running alongside its replacement"
+        assert client._thread is not first_reader
+        assert client.alive
+    finally:
+        client.close()
+        server2.close()

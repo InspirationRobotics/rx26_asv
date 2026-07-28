@@ -77,8 +77,11 @@ class IvcNode(Node):
         while not self._stop.is_set():
             if not self.link.alive:
                 if self.link.dead_reason:
+                    # report only — connect_or_serve() clears its own failure
+                    # state on success, so the link no longer needs the caller
+                    # to reset it (doing so here used to mask a link that came
+                    # back up still reporting itself dead)
                     self.get_logger().warn(f"IVC link down: {self.link.dead_reason}")
-                    self.link.dead_reason = None
                 if self._connect():
                     self.get_logger().info("IVC peer connected")
                 else:

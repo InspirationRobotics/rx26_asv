@@ -42,7 +42,43 @@ class IvcLink:
 
     # ---------- inbound ----------
 
+    def _retire_reader(self):
+        """Stop and join any previous reader. Call BEFORE opening a new socket.
+
+        _start_reader() overwrites self._thread, so reconnecting over a link
+        that still has a reader would orphan the old thread to run alongside its
+        replacement — two readers draining into one queue, which is exactly the
+        "a replaced mechanism must not leave orphaned logic running" rule the
+        threading model calls out.
+
+        Ordering matters: this must run before connect_or_serve() reassigns
+        self.conn. _listen() resolves self.conn on every recv(), so retiring the
+        old reader afterwards would give it a window to read from — and steal
+        messages off — the NEW socket.
+        """
+        if self._thread is None:
+            return
+        self._stop.set()
+        self._thread.join(timeout=2.0)
+        if self._thread.is_alive():
+            # never silently run two readers on one queue
+            raise RuntimeError(
+                "previous IVC reader thread did not exit within 2s; refusing "
+                "to start a second reader on the same link")
+        self._thread = None
+
     def _start_reader(self):
+        """Attach a reader thread to a freshly-established self.conn.
+
+        Clears the failure state of the previous attempt: a link that just came
+        up is not dead, and `alive` requires dead_reason to be None. Leaving a
+        stale reason behind marks a working link dead for the life of the object
+        after a single transient failure — ivc_node worked around that by
+        reaching in and clearing the field itself before every reconnect, which
+        is the invariant asking to live here instead.
+        """
+        self._stop = threading.Event()   # fresh stop signal for the new reader
+        self.dead_reason = None          # a live link is not a dead one
         self.conn.settimeout(0.5)        # wake to check the stop event
         self._thread = threading.Thread(target=self._listen, daemon=True)
         self._thread.start()
@@ -132,6 +168,7 @@ class IvcServer(IvcLink):
         self._listen_sock = None
 
     def connect_or_serve(self, accept_timeout_s=None) -> bool:
+        self._retire_reader()                  # before self.conn is reassigned
         if self._listen_sock is not None:      # don't leak on retry
             try:
                 self._listen_sock.close()
@@ -169,6 +206,7 @@ class IvcClient(IvcLink):
         self.connect_timeout_s = connect_timeout_s
 
     def connect_or_serve(self) -> bool:
+        self._retire_reader()                  # before self.conn is reassigned
         try:
             self.conn = socket.create_connection(
                 (self.server_ip, self.port), timeout=self.connect_timeout_s)
