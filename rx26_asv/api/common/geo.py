@@ -13,6 +13,18 @@ import math
 M_PER_DEG = 111_139.0
 
 
+def ground_speed_mps(vx_cms: float, vy_cms: float) -> float:
+    """Horizontal ground speed [m/s] from GLOBAL_POSITION_INT's vx/vy.
+
+    MAVLink reports those as int16 cm/s in the NED frame; the unit conversion
+    lives here rather than inline in telemetry_bridge so it is unit-tested and
+    cannot be silently re-derived (wrongly) by a second consumer later.
+    Vertical velocity is deliberately excluded — this is a surface vessel and
+    objective-2's speed floor is a horizontal-progress threshold.
+    """
+    return math.hypot(vx_cms, vy_cms) / 100.0
+
+
 def wrap_pi(a: float) -> float:
     while a > math.pi:
         a -= 2 * math.pi

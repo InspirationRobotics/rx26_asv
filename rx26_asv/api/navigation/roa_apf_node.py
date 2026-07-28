@@ -63,7 +63,7 @@ class RoaApfNode(Node):
         self._p = p
         self.origin = None
         self.pose = None                     # (x, y, heading_rad)
-        self.speed = 0.0
+        self.speed = 0.0                     # m/s, from /crsd/pose ground_speed
         self.goal = None                     # (x, y) world
         self.obstacles = []
 
@@ -105,6 +105,12 @@ class RoaApfNode(Node):
             return
         x, y = geo.latlon_to_xy(msg.latitude, msg.longitude, self.origin)
         self.pose = (x, y, math.radians(msg.heading))
+        # Objective-2's at-risk detector ANDs a speed floor with the progress
+        # and heading tests. This was left at its 0.0 initial value, which
+        # satisfied the floor on every tick and collapsed the detector to two
+        # signals — flagging a boat at full cruise that was merely arcing around
+        # an obstacle. telemetry_bridge sources this from GLOBAL_POSITION_INT.
+        self.speed = msg.ground_speed
 
     def _goal_cb(self, msg):
         if self.origin is None:

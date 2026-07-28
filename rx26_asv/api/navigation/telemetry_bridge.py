@@ -150,7 +150,7 @@ class TelemetryBridge(Node):
         self._fence_thread = threading.Thread(target=self._fence_worker, daemon=True)
 
         self._lock = threading.Lock()
-        self._pose = None            # (lat, lon, heading_deg)
+        self._pose = None            # (lat, lon, heading_deg, ground_speed_mps)
         self._status = None          # (mode_str, armed, system_status)
         self._rc = None              # list[int] 18
 
@@ -198,7 +198,12 @@ class TelemetryBridge(Node):
             with self._lock:
                 if mtype == "GLOBAL_POSITION_INT":
                     hdg = msg.hdg / 100.0 if msg.hdg != 65535 else float("nan")
-                    self._pose = (msg.lat / 1e7, msg.lon / 1e7, hdg)
+                    # vx/vy (cm/s NED) are already in this message — republish
+                    # them as ground speed so consumers do not have to
+                    # finite-difference position (roa_apf_node's objective-2
+                    # monitor needs a real speed, not a placeholder).
+                    self._pose = (msg.lat / 1e7, msg.lon / 1e7, hdg,
+                                  geo.ground_speed_mps(msg.vx, msg.vy))
                 elif mtype == "HEARTBEAT" and msg.get_srcComponent() == 1:
                     mode = self._mavutil.mode_string_v10(msg)
                     armed = bool(msg.base_mode &
@@ -221,7 +226,7 @@ class TelemetryBridge(Node):
         if pose:
             m = LatLonHead()
             m.header.stamp = now
-            m.latitude, m.longitude, m.heading = pose
+            m.latitude, m.longitude, m.heading, m.ground_speed = pose
             self.pose_pub.publish(m)
         if status:
             m = FcuStatus()
