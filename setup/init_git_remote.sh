@@ -6,13 +6,13 @@
 #
 # Usage:
 #   bash setup/init_git_remote.sh                                  # init only
-#   bash setup/init_git_remote.sh git@github.com:ORG/rx26_asv.git   # + remote
+#   bash setup/init_git_remote.sh git@github.com:InspirationRobotics/rx26_asv.git
 #   bash setup/init_git_remote.sh <url> --push                     # + first push
 #
-# NOTE (merge path): the live boat repo is github.com/chrismartin018/robotx_2026
-# (private, lives on the Jetson). If this checkout is destined to MERGE into
-# that repo rather than stand alone, do NOT push here — follow the rsync merge
-# procedure in README_PHASE0.md instead.
+# Canonical remote: github.com/InspirationRobotics/rx26_asv (private).
+# This repo is standalone — it is not a fork and does not merge into any other
+# tree. On the Jetson, `~/robotx_ws` is a plain clone of the canonical remote;
+# this script is only for bootstrapping a fresh checkout that has no git yet.
 # ============================================================================
 set -euo pipefail
 cd "$(dirname "$0")/.."   # repo root

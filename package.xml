@@ -11,6 +11,7 @@
   </description>
   <maintainer email="brandont3927@gmail.com">Team Inspiration</maintainer>
   <license>MIT</license>
+  <url type="repository">https://github.com/InspirationRobotics/rx26_asv</url>
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
