@@ -1,5 +1,7 @@
 import math
 
+import pytest
+
 from rx26_asv.api.common import geo
 
 
@@ -39,3 +41,24 @@ def test_translation_applied():
 def test_wrap_pi():
     assert abs(geo.wrap_pi(3 * math.pi) - math.pi) < 1e-9
     assert abs(geo.wrap_pi(-3 * math.pi) + math.pi) < 1e-9
+
+
+# --- ground speed: the cm/s -> m/s seam between MAVLink and objective 2 ---
+
+def test_ground_speed_converts_cm_s_to_m_s():
+    assert geo.ground_speed_mps(200.0, 0.0) == pytest.approx(2.0)   # CRUISE_SPEED
+    assert geo.ground_speed_mps(0.0, -150.0) == pytest.approx(1.5)
+
+
+def test_ground_speed_combines_both_axes():
+    assert geo.ground_speed_mps(300.0, 400.0) == pytest.approx(5.0)
+
+
+def test_ground_speed_is_zero_when_stopped():
+    assert geo.ground_speed_mps(0.0, 0.0) == 0.0
+
+
+def test_ground_speed_straddles_the_objective2_floor():
+    """The 0.3 m/s speed_floor must sit where the config says it does."""
+    assert geo.ground_speed_mps(20.0, 0.0) < 0.3       # 0.2 m/s -> below floor
+    assert geo.ground_speed_mps(40.0, 0.0) > 0.3       # 0.4 m/s -> above floor

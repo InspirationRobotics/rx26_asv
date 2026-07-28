@@ -14,6 +14,7 @@ comms node exists to publish them — apf_core already supports them; this node
 gains a /crsd/moving_hazards subscription then. Explicit TODO, not a silent gap.
 """
 import math
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -25,12 +26,15 @@ from rx26_asv.api.common import config as crsd_config
 from rx26_asv.api.common import geo
 from rx26_asv.api.common.node_main import run_node
 from rx26_asv.api.common.param_utils import declare_from_config, make_set_callback
+from rx26_asv.api.common.stream_cache import StreamCache
 from rx26_asv.api.navigation.apf_core import ApfParams, ObstaclePoint, compute
 from rx26_asv.api.navigation.occupancy_core import SOURCE_COMMS
 from rx26_asv.api.navigation.progress_monitor import ProgressMonitor
 
 PARAM_SPEC = {
     "rate_hz": dict(read_only=True, lo=1.0, hi=20.0),
+    "pose_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
+                           description="stop advising on a pose older than this"),
     # occupied_threshold must track occupancy_grid_node's value (YAML anchor)
     "occupied_threshold": dict(read_only=False, lo=1.0, hi=100.0),
     # --- APF gains: primary ROS-side Level-1 tunables -> dynamic ---
@@ -62,8 +66,10 @@ class RoaApfNode(Node):
                                 PARAM_SPEC)
         self._p = p
         self.origin = None
-        self.pose = None                     # (x, y, heading_rad)
-        self.speed = 0.0
+        # Pose is age-checked, not just "last seen": advising on a frozen pose
+        # puts the corrected goal in the wrong place while looking healthy.
+        self.pose = StreamCache(p["pose_timeout_s"])   # (x, y, heading_rad)
+        self.speed = 0.0                     # m/s, from /crsd/pose ground_speed
         self.goal = None                     # (x, y) world
         self.obstacles = []
 
@@ -104,7 +110,13 @@ class RoaApfNode(Node):
         if self.origin is None or math.isnan(msg.heading):
             return
         x, y = geo.latlon_to_xy(msg.latitude, msg.longitude, self.origin)
-        self.pose = (x, y, math.radians(msg.heading))
+        self.pose.set((x, y, math.radians(msg.heading)), time.monotonic())
+        # Objective-2's at-risk detector ANDs a speed floor with the progress
+        # and heading tests. This was left at its 0.0 initial value, which
+        # satisfied the floor on every tick and collapsed the detector to two
+        # signals — flagging a boat at full cruise that was merely arcing around
+        # an obstacle. telemetry_bridge sources this from GLOBAL_POSITION_INT.
+        self.speed = msg.ground_speed
 
     def _goal_cb(self, msg):
         if self.origin is None:
@@ -121,9 +133,15 @@ class RoaApfNode(Node):
             for c in msg.grid.cells if c.value >= threshold]
 
     def _tick(self):
-        if self.pose is None or self.goal is None or self.origin is None:
+        mono = time.monotonic()
+        if self.pose.went_stale(mono):
+            self.get_logger().error(
+                f"/crsd/pose stale ({self.pose.age(mono):.1f}s) — APF advisory "
+                "SUSPENDED; avoidance falls back to ArduRover AVOID_*")
+        pose = self.pose.get(mono)
+        if pose is None or self.goal is None or self.origin is None:
             return
-        x, y, heading = self.pose
+        x, y, heading = pose
         t = self.get_clock().now().nanoseconds / 1e9
         adv = compute(x, y, self.goal[0], self.goal[1],
                       obstacles=self.obstacles, params=self.params)

@@ -35,6 +35,15 @@ Parameters:
   drop_threshold   (int,  default 1700)  us; >= trips (or <= if drop_invert)
   drop_invert      (bool, default False)
   rc_stale_timeout (float, default 1.0)  s without RC_CHANNELS -> trip
+  stream_timeout_s (float, default 1.0)  s without a frame on a stream before
+                                         that stream stops being republished
+
+Staleness rule (safety-relevant): each RX stream is republished ONLY while it
+is fresh, and its header carries the stamp captured at RECEIPT. Rebroadcasting
+the last cached frame with a fresh stamp — as this node originally did —
+makes a dead MAVProxy indistinguishable from a healthy one, which silently
+disables rc_heartbeat_watchdog (both its RC-loss and its gateway-down paths)
+and feeds the avoidance stack a frozen pose. Silence must stay silent.
 """
 import json
 import queue
@@ -51,9 +60,11 @@ from interfaces.msg import (LatLonHead, FcuStatus, RcChannels, DetectionArray,
                             GuidedSetpoint)
 
 from rx26_asv.api.common import config as crsd_config
+from rx26_asv.api.common import geo
 from rx26_asv.api.common.drop_latch import DropLatch
 from rx26_asv.api.common.node_main import run_node
 from rx26_asv.api.common.param_utils import declare_from_config
+from rx26_asv.api.common.stream_cache import StreamCache
 from rx26_asv.api.navigation.fence_core import (FenceError, FenceProtocol, MavFenceTransport,
                          items_from_keepouts)
 
@@ -69,6 +80,9 @@ PARAM_SPEC = {
     "drop_invert": dict(read_only=True, description="low = drop position"),
     "rc_stale_timeout": dict(read_only=True, lo=0.2, hi=10.0,
                              description="s without RC before trip"),
+    "stream_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
+                             description="s without a MAVLink frame before "
+                                         "that stream stops being republished"),
 }
 
 MISSION_MSG_TYPES = ("MISSION_REQUEST", "MISSION_REQUEST_INT", "MISSION_ACK",
@@ -149,10 +163,16 @@ class TelemetryBridge(Node):
         self._fence_dirty = threading.Event()
         self._fence_thread = threading.Thread(target=self._fence_worker, daemon=True)
 
+        # Each stream is republished ONLY while it is fresh. Rebroadcasting the
+        # last cached frame with a fresh stamp after MAVProxy dies makes a dead
+        # gateway indistinguishable from a healthy one — it defeats
+        # rc_heartbeat_watchdog's RC-loss AND gateway-down detection, and feeds
+        # the avoidance stack a frozen pose. See stream_cache.py.
         self._lock = threading.Lock()
-        self._pose = None            # (lat, lon, heading_deg)
-        self._status = None          # (mode_str, armed, system_status)
-        self._rc = None              # list[int] 18
+        t_out = p["stream_timeout_s"]
+        self._pose = StreamCache(t_out)    # (lat, lon, heading_deg, speed_mps)
+        self._status = StreamCache(t_out)  # (mode_str, armed, system_status)
+        self._rc = StreamCache(t_out)      # list[int] 18
 
         from pymavlink import mavutil
         self._mavutil = mavutil
@@ -195,42 +215,65 @@ class TelemetryBridge(Node):
             if mtype in MISSION_MSG_TYPES:
                 self._mission_q.put(msg)     # fence dialog msgs -> uploader
                 continue
+            # captured at RECEIPT, not at publish, so a republished frame
+            # carries the age it actually has
+            stamp = self.get_clock().now().to_msg()
             with self._lock:
                 if mtype == "GLOBAL_POSITION_INT":
                     hdg = msg.hdg / 100.0 if msg.hdg != 65535 else float("nan")
-                    self._pose = (msg.lat / 1e7, msg.lon / 1e7, hdg)
+                    # vx/vy (cm/s NED) are already in this message — republish
+                    # them as ground speed so consumers do not have to
+                    # finite-difference position (roa_apf_node's objective-2
+                    # monitor needs a real speed, not a placeholder).
+                    self._pose.set((msg.lat / 1e7, msg.lon / 1e7, hdg,
+                                    geo.ground_speed_mps(msg.vx, msg.vy)),
+                                   t, stamp)
                 elif mtype == "HEARTBEAT" and msg.get_srcComponent() == 1:
                     mode = self._mavutil.mode_string_v10(msg)
                     armed = bool(msg.base_mode &
                                  self._mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
-                    self._status = (mode, armed, msg.system_status)
+                    self._status.set((mode, armed, msg.system_status), t, stamp)
                 elif mtype == "RC_CHANNELS":
-                    self._rc = [getattr(msg, f"chan{i}_raw", 0) or 0
-                                for i in range(1, 19)]
-                    if self.latch.rc_sample(self._rc, t):
+                    rc = [getattr(msg, f"chan{i}_raw", 0) or 0
+                          for i in range(1, 19)]
+                    self._rc.set(rc, t, stamp)
+                    if self.latch.rc_sample(rc, t):
                         self._handle_trip()
 
     # ---------- publishing ----------
 
     def _publish_tick(self):
-        now = self.get_clock().now().to_msg()
+        t = time.monotonic()
         with self._lock:
-            pose, status, rc = self._pose, self._status, self._rc
-            if self.latch.tick(time.monotonic()):
+            pose = self._pose.get(t)
+            status = self._status.get(t)
+            rc = self._rc.get(t)
+            # one loud line per stream the moment it goes stale — a silent
+            # gateway must be diagnosable from the log, and consumers that
+            # judge health by arrival need the silence to be real
+            stale = [name for name, c in (("pose", self._pose),
+                                          ("fcu_status", self._status),
+                                          ("rc_channels", self._rc))
+                     if c.went_stale(t)]
+            if self.latch.tick(t):
                 self._handle_trip()
-        if pose:
+        for name in stale:
+            self.get_logger().error(
+                f"MAVLink stream {name!r} stale (> {self._pose.timeout_s:.1f}s) "
+                "— NOT republishing; is MAVProxy still up?")
+        if pose is not None:
             m = LatLonHead()
-            m.header.stamp = now
-            m.latitude, m.longitude, m.heading = pose
+            m.header.stamp = self._pose.stamp
+            m.latitude, m.longitude, m.heading, m.ground_speed = pose
             self.pose_pub.publish(m)
-        if status:
+        if status is not None:
             m = FcuStatus()
-            m.header.stamp = now
+            m.header.stamp = self._status.stamp
             m.mode, m.armed, m.system_status = status
             self.status_pub.publish(m)
-        if rc:
+        if rc is not None:
             m = RcChannels()
-            m.header.stamp = now
+            m.header.stamp = self._rc.stamp
             m.channels = rc
             self.rc_pub.publish(m)
 

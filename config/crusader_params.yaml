@@ -23,6 +23,12 @@ shared:
   # cells at/above this confidence count as obstacles — used by BOTH the grid
   # node (publisher) and the APF node (consumer); anchor keeps them in lockstep
   occupied_threshold: &occupied_threshold 50.0
+  # age at which a /crsd/pose sample stops being usable. telemetry_bridge uses
+  # it to decide when to STOP republishing a dead MAVLink stream; every consumer
+  # uses the same number to decide when to stop acting on the last pose it saw.
+  # One anchor because a consumer trusting a pose longer than the bridge
+  # vouches for it is exactly the frozen-pose failure this guards against.
+  pose_timeout_s: &pose_timeout_s 1.0
   # progress-monitor thresholds — onboard detector AND episode evaluator
   progress_window_s: &progress_window_s 10.0
   progress_speed_floor: &progress_speed_floor 0.3
@@ -37,6 +43,8 @@ telemetry_bridge:
     drop_threshold: 1700                   # [RO] us; crossing trips the latch
     drop_invert: false                     # [RO]
     rc_stale_timeout: 1.0                  # [RO] s without RC -> trip
+    stream_timeout_s: *pose_timeout_s      # [RO] s before a stale MAVLink stream
+                                           #      stops being republished
 
 perception_node:
   ros__parameters:
@@ -103,6 +111,7 @@ lidar_fusion_node:
 occupancy_grid_node:
   ros__parameters:
     cell_size: 0.5                         # [RO] grid geometry
+    pose_timeout_s: *pose_timeout_s        # [RO] stale pose -> stop ingesting
     decay_tau: 30.0                        # [DYN] perception-cell decay [s]
     occupied_threshold: *occupied_threshold  # [DYN]
 
@@ -120,6 +129,7 @@ mission_planner_node:
 roa_apf_node:
   ros__parameters:
     rate_hz: 5.0                           # [RO]
+    pose_timeout_s: *pose_timeout_s        # [RO] stop advising on a stale pose
     occupied_threshold: *occupied_threshold  # [DYN] must track the grid's value
     # --- APF gains: the primary Level-1 tunables on the ROS side [DYN] ---
     apf_k_att: 1.0
@@ -192,6 +202,7 @@ dp_hold:
     pwm_limit: 120                         # [RO] max PWM deflection from neutral
     dead_yaw_deg: 5.0                      # [RO] ignore smaller yaw errors
     dead_pos_m: 0.15                       # [RO] ignore smaller position errors
+    pose_timeout_s: *pose_timeout_s        # [RO] stale heading -> release override
     rate_hz: 10.0                          # [RO] control rate
 
 # ---- gate_navigator: GUIDED-mode buoy-gate transit (Mission 1) ----
@@ -199,6 +210,7 @@ gate_navigator:
   ros__parameters:
     mission_file: ""                       # [RO] JSON {"waypoints": [[lat,lon],...]}; required
     gate_wp_indices: [0, 1]                # [RO] zero-based waypoints treated as gates
+    pose_timeout_s: *pose_timeout_s        # [RO] stale pose -> stop commanding
     cmd_period_s: 1.0                      # [RO] min seconds between guided setpoints
     rate_hz: 20.0                          # [RO] control rate
 

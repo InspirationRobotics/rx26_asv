@@ -66,6 +66,17 @@ class NodeSink:
         self._node.keepouts_pub.publish(msg)
 
     def keepout(self, zone_id, x, y, radius, t):
+        # radius <= 0 is the All Clear sentinel on this topic, so publishing a
+        # non-positive radius here would CANCEL the zone in both consumers
+        # (bridge fence uploader + occupancy grid) instead of establishing it —
+        # and the KEEPOUT_ACK has already gone out, so it would score as
+        # compliant while nothing is enforced. Refuse loudly rather than emit an
+        # indistinguishable message.
+        if not radius > 0.0:
+            self._node.get_logger().error(
+                f"keep-out {zone_id} has radius={radius} — REFUSING to publish "
+                "(<=0 is the All Clear sentinel); zone is NOT enforced")
+            return
         self._publish(zone_id, x, y, radius)
 
     def clear(self, ref, t):

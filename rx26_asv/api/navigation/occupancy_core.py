@@ -20,6 +20,11 @@ from dataclasses import dataclass
 SOURCE_PERCEPTION = 0
 SOURCE_COMMS = 1
 
+# Half the diagonal of a unit cell. Used both to decide which cells a detection
+# disk touches (_disk) and as the radius each occupied cell reports
+# (occupied_points), so adjacent cells overlap into a continuous barrier.
+HALF_DIAG = 0.7071067811865476
+
 
 @dataclass
 class CellState:
@@ -50,12 +55,20 @@ class OccupancyCore:
         return ((ix + 0.5) * self.cell_size, (iy + 0.5) * self.cell_size)
 
     def _disk(self, x: float, y: float, radius: float):
+        # Inclusion test uses the cell HALF-DIAGONAL, not the half-width: a point
+        # can sit up to half a diagonal from its own cell's centre, so a
+        # half-width test drops small-radius detections entirely (radius <
+        # 0.104 m at cell_size=0.5 could stamp ZERO cells and vanish silently).
+        # Losing an obstacle is strictly worse than an over-wide one — the same
+        # invariant lidar_fusion upholds on passthrough. HALF_DIAG also matches
+        # the radius occupied_points() reports, so the two stay consistent.
+        margin = self.cell_size * HALF_DIAG
         r_cells = max(0, int(math.ceil(radius / self.cell_size)))
         cx, cy = self._index(x, y)
         for ix in range(cx - r_cells, cx + r_cells + 1):
             for iy in range(cy - r_cells, cy + r_cells + 1):
                 px, py = self._center(ix, iy)
-                if math.hypot(px - x, py - y) <= radius + self.cell_size / 2:
+                if math.hypot(px - x, py - y) <= radius + margin:
                     yield (ix, iy)
 
     # ---------- ingest ----------
@@ -102,7 +115,7 @@ class OccupancyCore:
     def occupied_points(self, t: float):
         """[(x, y, radius, source)] for cells above threshold — APF input.
         radius = half cell diagonal so adjacent cells overlap into a barrier."""
-        r = self.cell_size * 0.7071
+        r = self.cell_size * HALF_DIAG
         out = []
         for (ix, iy), c in self.cells.items():
             if self.decayed_value(c, t) >= self.occupied_threshold:
