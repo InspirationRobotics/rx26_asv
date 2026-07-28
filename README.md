@@ -57,6 +57,11 @@ instead of stopping at the first one it finds.
                                   #   are not building (see docs/SETUP_GUIDE.md §B2)
 ```
 
+**Path shorthand used throughout the docs:** package-internal paths are written relative to
+the package dir — `config/crusader_params.yaml` means `rx26_asv/config/crusader_params.yaml`,
+`api/common/config.py` means `rx26_asv/rx26_asv/api/common/config.py`. Repo-level paths
+(`tools/`, `tests/`, `docs/`, `interfaces/`, `proto/`) are written from the repo root.
+
 ## Usage
 
 ### First-time setup
@@ -109,7 +114,7 @@ are expected to know them:
    unit-testable without ROS.
 3. Imports are absolute, never relative.
 4. Parameters live in `config/crusader_params.yaml`, never hardcoded — every param is
-   `[RO]` or `[DYN]` ([config/README.md](config/README.md)); the anti-drift test fails the
+   `[RO]` or `[DYN]` ([config/README.md](rx26_asv/config/README.md)); the anti-drift test fails the
    build if code and YAML disagree.
 5. Every change consults [docs/CHANGE_IMPACT_MAP.md](docs/CHANGE_IMPACT_MAP.md) for its
    blast radius, and lands with its tests in the same commit.
@@ -160,9 +165,9 @@ plain Python ≥3.10 + numpy/pyyaml/pytest for the orchestrator anywhere. Instal
 
 | Dir | Core design choice | Why |
 |---|---|---|
-| [rx26_asv/](rx26_asv/README.md) | ArduRover owns actuation/estimation; nodes advise, one bridge talks MAVLink | Free EK3/failsafes/e-stop; no PWM or parallel EKF to maintain (plan §4.2) |
+| [rx26_asv/](rx26_asv/rx26_asv/README.md) | ArduRover owns actuation/estimation; nodes advise, one bridge talks MAVLink | Free EK3/failsafes/e-stop; no PWM or parallel EKF to maintain (plan §4.2) |
 | [interfaces/](interfaces/README.md) | ROS 2 topics with RX24-proven message shapes | Typed drift-catching at build time vs legacy sockets (§4.3) |
-| [config/](config/README.md) | One YAML, `[RO]`/`[DYN]` postures, anchors tie node↔evaluator values | Config drift between scorer and boat is a silent-failure factory |
+| [config/](rx26_asv/config/README.md) | One YAML, `[RO]`/`[DYN]` postures, anchors tie node↔evaluator values | Config drift between scorer and boat is a silent-failure factory |
 | [proto/](proto/README.md) | Protobuf at the edge, ROS inside; byte-identical mock | Competition mandates the wire format; nothing else should know it (§4.5) |
 | [tools/](tools/README.md) | One blessed path per operation, shared by humans and autoresearch | No drift between "how people do it" and "how Level 2 does it" |
 | [tests/](tests/README.md) | Hardware-free unit tier of a 4-tier pyramid | A change earns its next tier; never promoted on one green level |
