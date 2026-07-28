@@ -35,7 +35,7 @@ def main():
     try:
         print(f"OAK-D USB speed: {assert_usb_super()} — OK")
     except ImportError:
-        print("depthai not installed (run inside the crusader container)")
+        print("depthai not installed (run inside the asv container)")
         sys.exit(2)
     except UsbSpeedError as e:
         print(f"FAIL: {e}")

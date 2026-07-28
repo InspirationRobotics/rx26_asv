@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """train_buoy — fine-tune the buoy detector on Crusader footage + export the engine.
 
-Runs on the Jetson (in the crusader container) or any CUDA machine for training;
+Runs on the Jetson (in the asv container) or any CUDA machine for training;
 ENGINE EXPORT MUST HAPPEN ON THE TARGET JETSON — .engine files are compiled
 per-GPU/per-JetPack (CLAUDE.md). Train elsewhere if convenient, then copy the
 .pt here and run with --export-only.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# setup/install_container.sh — CONTAINER-SIDE setup (inside `crusader`)
+# setup/install_container.sh — CONTAINER-SIDE setup (inside `asv`)
 #
 # Run once after the repo lands in the container mount, and re-run whenever
 # proto/ or package files change. Order matters:
@@ -13,7 +13,7 @@
 # guard below instead of an install step.
 #
 # Usage (from the Jetson host):
-#     docker exec -it crusader bash /root/robotx_ws/src/rx26_asv/setup/install_container.sh
+#     docker exec -it asv bash /root/robotx_ws/src/rx26_asv/setup/install_container.sh
 # Or inside the container:
 #     bash /root/robotx_ws/src/rx26_asv/setup/install_container.sh
 # ============================================================================
@@ -41,7 +41,7 @@ for mod in yaml google.protobuf pymavlink; do
 done
 if [[ "$missing" -ne 0 ]]; then
   echo "ERROR: the container image is missing runtime deps." >&2
-  echo "       Rebuild the image (docker build -t crusader .) rather than" >&2
+  echo "       Rebuild the image (docker build -t asv .) rather than" >&2
   echo "       pip-installing here — see the Dockerfile comment on pinning." >&2
   exit 1
 fi

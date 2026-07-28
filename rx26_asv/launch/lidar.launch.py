@@ -12,7 +12,7 @@ in config/MID360_config.json — the driver requires its own JSON via
 (NOT the copy baked into /opt/livox_ws at image build). The MID360 must be on its
 own NIC — set the host/LiDAR IPs in that JSON to the interface's subnet.
 
-Requires livox_ros_driver2 on the ROS path (baked into the crusader image).
+Requires livox_ros_driver2 on the ROS path (baked into the asv image).
 
   ros2 launch rx26_asv lidar.launch.py
 """

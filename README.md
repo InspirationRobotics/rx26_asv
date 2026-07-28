@@ -2,7 +2,7 @@
 
 Team Inspiration's codebase for the 2026 RobotX competition. We run a single ASV
 (autonomous surface vessel), **Crusader**: a holonomic 4×T200 boat on ArduRover/Pixhawk with
-a Jetson Orin Nano companion computer running ROS 2 Humble in the `crusader` Docker
+a Jetson Orin Nano companion computer running ROS 2 Humble in the `asv` Docker
 container. Phases 0–4 are written in — see [README_PHASE0.md](README_PHASE0.md) for
 the phase-by-phase delivery log.
 
@@ -52,7 +52,7 @@ instead of stopping at the first one it finds.
      |    |-- tests/              # unit tests for the target system
      |    |-- tools/              # udev, systemd, preflight, param_guard, rebuild, mock
      |    |                       #   RoboCommand, model training pipeline, bench instruments
-     |    |-- Dockerfile          # `crusader` image (ROS 2 Humble + CUDA + livox driver)
+     |    |-- Dockerfile          # `asv` image (ROS 2 Humble + CUDA + livox driver)
      |-- <other package sources>  # anything else in the workspace; COLCON_IGNORE what you
                                   #   are not building (see docs/SETUP_GUIDE.md §B2)
 ```
@@ -71,7 +71,7 @@ the package dir — `config/crusader_params.yaml` means `rx26_asv/config/crusade
 | Dev laptop (Windows) | `powershell -ExecutionPolicy Bypass -File setup\install_dev.ps1` | [setup/README.md](setup/README.md) |
 | Dev laptop (Linux/macOS) | `bash setup/install_dev.sh` | ” |
 | Jetson host | `sudo bash setup/install_jetson_host.sh` | udev → systemd → checks |
-| Inside `crusader` container | `bash /root/robotx_ws/src/rx26_asv/setup/install_container.sh` | deps → protoc → colcon → smoke |
+| Inside `asv` container | `bash /root/robotx_ws/src/rx26_asv/setup/install_container.sh` | deps → protoc → colcon → smoke |
 | New/standalone clone, no git yet | `bash setup/init_git_remote.sh <remote-url>` | idempotent init + remote |
 
 ### Running the system
@@ -137,7 +137,7 @@ dual-antenna moving-baseline heading (compass disabled by design); BNO085 IMU; E
 manual / GREEN autonomous).
 
 **Software:** Ubuntu/JetPack 6 on the Jetson; ROS 2 Humble + CUDA/TensorRT/depthai/MAVProxy
-inside the `crusader` container (base: `ultralytics/ultralytics:latest-jetson-jetpack6`);
+inside the `asv` container (base: `ultralytics/ultralytics:latest-jetson-jetpack6`);
 plain Python ≥3.10 + numpy/pyyaml/pytest for the orchestrator anywhere. Install via
 [setup/](setup/README.md).
 

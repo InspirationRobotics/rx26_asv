@@ -15,6 +15,10 @@ import shutil
 import subprocess
 import sys
 
+# Container name. Overridable so a renamed/parallel container (e.g. a
+# "asv-next" built from a new image) can be preflighted without editing code.
+CONTAINER = os.environ.get("CRSD_CONTAINER", "asv")
+
 RESULTS = []  # (name, status, detail)   status in {PASS, FAIL, WARN, SKIP}
 
 def record(name, status, detail=""):
@@ -52,14 +56,14 @@ def check_oakd_usb():
 
 def check_container():
     try:
-        out = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", "crusader"],
+        out = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", CONTAINER],
                              capture_output=True, text=True, timeout=10)
         running = out.stdout.strip() == "true"
-        record("crusader container", "PASS" if running else "FAIL",
+        record(f"{CONTAINER} container", "PASS" if running else "FAIL",
                "" if running else "container not running")
         return running
     except Exception as e:
-        record("crusader container", "FAIL", str(e))
+        record(f"{CONTAINER} container", "FAIL", str(e))
         return False
 
 def check_mavproxy():
@@ -98,7 +102,7 @@ def check_ros(container_ok):
     must_exist = ["/led_state"]  # extend as nodes land: /RX/occupancy_grid, /RX/pose, ...
     try:
         out = subprocess.run(
-            ["docker", "exec", "crusader", "bash", "-lc",
+            ["docker", "exec", CONTAINER, "bash", "-lc",
              "source /root/robotx_ws/install/setup.bash && ros2 topic list"],
             capture_output=True, text=True, timeout=30)
         topics = out.stdout.split()
@@ -113,7 +117,7 @@ def check_engine(container_ok):
         return
     try:
         out = subprocess.run(
-            ["docker", "exec", "crusader", "bash", "-lc",
+            ["docker", "exec", CONTAINER, "bash", "-lc",
              "test -f /root/robotx_ws/models/buoy_v16.engine && echo ok"],
             capture_output=True, text=True, timeout=15)
         ok = "ok" in out.stdout

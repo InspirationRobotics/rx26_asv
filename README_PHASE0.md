@@ -11,7 +11,7 @@ lives in this tree, and this repo is standalone (canonical remote:
 been removed; on the Jetson the repo is cloned to `~/robotx_ws/src/rx26_asv`, one package
 source inside a colcon workspace.
 
-Build after a pull, inside the `crusader` container:
+Build after a pull, inside the `asv` container:
 `cd /root/robotx_ws && colcon build --symlink-install`
 (builds `interfaces`; `orchestrator/` is COLCON_IGNOREd by design).
 
@@ -300,7 +300,7 @@ same commit). These are additive to the Phase 0–5 plan, not new phases:
 - `api/ivc/ivc_node.py` + `ivc_link.py` — inter-vehicle comms over the team WiFi (Bullet AC),
   ROS-free link core with a background connection thread, `tests/test_ivc_link.py`. Separate
   from the RJ-45 RoboCommand link and the Pixhawk link.
-- `Dockerfile` (the `crusader` image, with `livox_ros_driver2` baked in) + `launch/` files
+- `Dockerfile` (the `asv` image, with `livox_ros_driver2` baked in) + `launch/` files
   (`core`, `camera`, `lidar`, `lidar_fusion`) + `config/MID360_config.json`.
 
 New entry points added to `setup.py`: `rc_watchdog`, `actuator_node`, `ivc_node`,

@@ -1,7 +1,7 @@
 # `rx26_asv/` — the ROS 2 package (Crusader's onboard nodes)
 
 This directory is the **target system**: the code that actually runs on the boat, inside the
-`crusader` container. The autoresearch harness (`../orchestrator/`) reads and edits this code
+`asv` container. The autoresearch harness (`../orchestrator/`) reads and edits this code
 from the outside but is never imported by it (orchestrator-vs-target boundary, CLAUDE.md).
 
 **Design rule inherited from the engineering plan (§3.1):** ArduRover on the Pixhawk owns

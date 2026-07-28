@@ -7,7 +7,7 @@ this order. Each script is idempotent where feasible and verifies its own work.
 |---|---|---|
 | `install_dev.sh` / `install_dev.ps1` | dev laptop (Linux/macOS / Windows) | venv + orchestrator/test deps, then proves the install by running the full pytest suite and a Gate-G0 kinematic episode |
 | `install_jetson_host.sh` | Jetson **host** (sudo, outside container) | udev rules → systemd units (MAVProxy-first boot chain) → sanity checks |
-| `install_container.sh` | inside the `crusader` container | pip top-ups → protobuf compile → `colcon build` (both packages) → import smoke |
+| `install_container.sh` | inside the `asv` container | pip top-ups → protobuf compile → `colcon build` (both packages) → import smoke |
 | `init_git_remote.sh` | anywhere | idempotent `git init -b main` + initial commit + optional `origin` remote/push |
 
 ## Which script, in what order?
@@ -16,7 +16,7 @@ this order. Each script is idempotent where feasible and verifies its own work.
 flowchart TD
     A{Which machine?} -->|dev laptop| D[install_dev.sh / .ps1]
     A -->|Jetson| H[sudo install_jetson_host.sh]
-    H --> C[docker exec crusader … install_container.sh]
+    H --> C[docker exec asv … install_container.sh]
     C --> P[preflight.py — exit 0 or DO NOT ARM]
     D --> G[init_git_remote.sh — once, if repo not yet git-wired]
     G -.-> M{standalone repo or merging into live Jetson repo?}

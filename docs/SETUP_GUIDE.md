@@ -88,21 +88,21 @@ cd ~/robotx_ws/src/rx26_asv
 sudo bash setup/install_jetson_host.sh    # udev → systemd → sanity checks
 ```
 
-Boot chain after this: systemd starts MAVProxy (sole Pixhawk owner) → `crusader` container.
+Boot chain after this: systemd starts MAVProxy (sole Pixhawk owner) → `asv` container.
 LED tells you state at a glance: RED e-stopped · YELLOW armed/manual · GREEN autonomous.
 
 ### B3. Inside the container (once, and after proto/package changes)
 
 ```bash
-docker exec -it crusader bash /root/robotx_ws/src/rx26_asv/setup/install_container.sh
+docker exec -it asv bash /root/robotx_ws/src/rx26_asv/setup/install_container.sh
 # pip top-ups → protoc → colcon build (rx26_asv + interfaces) → import smoke
 ```
 
 ### B4. SITL simulation (in-container, for scenario-level testing)
 
 ```bash
-docker exec -it crusader bash /root/robotx_ws/src/rx26_asv/docker/sitl/install_sitl.sh  # one-time
-docker exec -it crusader bash /root/robotx_ws/src/rx26_asv/docker/sitl/run_sitl.sh      # launch
+docker exec -it asv bash /root/robotx_ws/src/rx26_asv/docker/sitl/install_sitl.sh  # one-time
+docker exec -it asv bash /root/robotx_ws/src/rx26_asv/docker/sitl/run_sitl.sh      # launch
 # then, SITL-backend episodes:
 RX26_SITL_OK=1 python3 orchestrator/run_episode.py \
     --scenario orchestrator/scenarios/mission1_transit.json \
@@ -111,7 +111,7 @@ RX26_SITL_OK=1 python3 orchestrator/run_episode.py \
 
 ### B5. Boat bring-up (bench/field — day-of runbook, plan §7)
 
-1. Power on → LED RED → `docker exec -it crusader python3 /root/robotx_ws/src/rx26_asv/tools/scripts/preflight.py`
+1. Power on → LED RED → `docker exec -it asv python3 /root/robotx_ws/src/rx26_asv/tools/scripts/preflight.py`
    — **exit nonzero = do not arm.**
 2. GPS-yaw wait: open sky, 2–3 min (no heading? suspect `GPS1_COM_PORT` first).
 3. ELRS e-stop range test (SB down = hardware kill; WiFi is never a safety tool).

@@ -1,7 +1,7 @@
 # ============================================================================
 # Crusader container image (Jetson Orin Nano, JetPack 6 / arm64).
 #
-# Builds the `crusader` image the rest of the repo assumes:
+# Builds the `asv` image the rest of the repo assumes:
 #   * ROS 2 Humble + build toolchain (colcon, rosdep, rosidl generators)
 #   * CUDA / PyTorch / TensorRT           -> from the ultralytics base
 #   * depthai (OAK-D LR) + MAVProxy        -> installed here
@@ -14,7 +14,7 @@
 # driver) is baked into the image, in its own workspace.
 #
 # Build (on the Jetson host):
-#     docker build -t crusader .
+#     docker build -t asv .
 # ============================================================================
 FROM ultralytics/ultralytics:latest-jetson-jetpack6
 

@@ -1,8 +1,9 @@
 # /etc/systemd/system/crsd-container.service  (Jetson host)
 #
-# TEMPLATE: __CRSD_USER__ is substituted by setup/install_jetson_host.sh at
-# install time. Do NOT `install` this file verbatim.
-# Starts the crusader ROS 2 container after MAVProxy owns the Pixhawk, so no
+# TEMPLATE: __CRSD_USER__ / __CRSD_CONTAINER__ are substituted by
+# setup/install_jetson_host.sh at install time. Do NOT `install` this file
+# verbatim — the placeholders must be expanded.
+# Starts the __CRSD_CONTAINER__ ROS 2 container after MAVProxy owns the Pixhawk, so no
 # node ever races MAVProxy for the serial device.
 [Unit]
 Description=Crusader ROS 2 container
@@ -13,8 +14,8 @@ Wants=crsd-mavproxy.service
 [Service]
 Type=simple
 User=__CRSD_USER__
-ExecStart=/usr/bin/docker start -a crusader
-ExecStop=/usr/bin/docker stop -t 10 crusader
+ExecStart=/usr/bin/docker start -a __CRSD_CONTAINER__
+ExecStop=/usr/bin/docker stop -t 10 __CRSD_CONTAINER__
 Restart=on-failure
 RestartSec=5
 

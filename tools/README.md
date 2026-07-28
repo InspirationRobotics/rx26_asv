@@ -22,7 +22,7 @@ sequenceDiagram
     participant OP as Operator
     participant SYS as systemd (host)
     participant MAV as MAVProxy
-    participant CT as crusader container
+    participant CT as asv container
     participant PF as preflight.py
 
     OP->>SYS: power on

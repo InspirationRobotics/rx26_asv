@@ -7,7 +7,7 @@ timestamped RGB frames from the OAK-D LR plus a JSONL sidecar with GPS position
 (read from MAVProxy's rebroadcast, UDP only — never the Pixhawk serial), so
 frames can later be bucketed by range/lighting/geometry for labeling.
 
-Run inside the crusader container during bench/water days:
+Run inside the asv container during bench/water days:
 
     python3 collect_footage.py --out /root/footage/$(date +%Y%m%d) \
         --interval 0.5 --mav udp:127.0.0.1:14551

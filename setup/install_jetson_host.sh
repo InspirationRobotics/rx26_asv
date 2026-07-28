@@ -7,9 +7,9 @@
 #   udev rules -> systemd units (MAVProxy first, then container) -> verify.
 #
 # Prereqs: repo cloned to ~/robotx_ws/src/rx26_asv (it is one package source in
-# the colcon workspace, not the workspace root), Docker + the `crusader`
-# container image present (container build is the team's existing image; this
-# script does not build it), MAVProxy installed on the host.
+# the colcon workspace, not the workspace root), Docker + the `asv` container
+# image present (build it from this repo's Dockerfile: `docker build -t asv .`;
+# this script does not build it), MAVProxy installed on the host.
 #
 # Usage:   sudo bash setup/install_jetson_host.sh
 # ============================================================================
@@ -30,14 +30,19 @@ echo "== [2/4] systemd units (crsd-mavproxy = sole Pixhawk owner, then container
 # the water, not at the bench. Substitute the real values at install time.
 CRSD_USER="${SUDO_USER:-$USER}"
 CRSD_REPO="$(pwd)"
+# Container name is a deployment choice, not a constant — override to stage a
+# replacement image (e.g. CRSD_CONTAINER=asv-next) without editing units.
+CRSD_CONTAINER="${CRSD_CONTAINER:-asv}"
 id -u "$CRSD_USER" >/dev/null 2>&1 || {
   echo "ERROR: user '$CRSD_USER' does not exist — cannot install units." >&2
   echo "       Run with sudo from that user's session, or set SUDO_USER." >&2
   exit 1; }
 echo "   service user: $CRSD_USER"
 echo "   repo path:    $CRSD_REPO"
+echo "   container:    $CRSD_CONTAINER"
 for unit in crsd-mavproxy crsd-container; do
   sed -e "s|__CRSD_USER__|$CRSD_USER|g" -e "s|__CRSD_REPO__|$CRSD_REPO|g" \
+      -e "s|__CRSD_CONTAINER__|$CRSD_CONTAINER|g" \
       "tools/systemd/$unit.service" > "/etc/systemd/system/$unit.service"
   chmod 644 "/etc/systemd/system/$unit.service"
   # Fail loudly rather than enabling a unit that still carries a placeholder.
@@ -51,12 +56,12 @@ echo "   enabled; start now with: systemctl start crsd-mavproxy crsd-container"
 
 echo "== [3/4] host sanity checks =="
 command -v docker >/dev/null || { echo "ERROR: docker not installed" >&2; exit 1; }
-docker image inspect crusader >/dev/null 2>&1 \
-  || echo "WARN: no 'crusader' image found — build/load the team image before boot."
+docker image inspect "$CRSD_CONTAINER" >/dev/null 2>&1 \
+  || echo "WARN: no '$CRSD_CONTAINER' image found — build it (docker build -t $CRSD_CONTAINER .) before boot."
 command -v mavproxy.py >/dev/null \
   || echo "WARN: mavproxy.py not on PATH — crsd-mavproxy.service will fail."
 
 echo "== [4/4] next step =="
 echo "After a reboot (or starting the units), run preflight INSIDE the container:"
-echo "    docker exec -it crusader python3 /root/robotx_ws/src/rx26_asv/tools/scripts/preflight.py"
+echo "    docker exec -it $CRSD_CONTAINER python3 /root/robotx_ws/src/rx26_asv/tools/scripts/preflight.py"
 echo "Exit nonzero = do not arm. Then follow docs/SETUP_GUIDE.md §B.3."

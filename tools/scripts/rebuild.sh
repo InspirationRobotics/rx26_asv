@@ -5,7 +5,7 @@
 # Used identically by humans and by the Level-2 validate-and-revert step.
 set -euo pipefail
 
-CONTAINER="crusader"
+CONTAINER="${CRSD_CONTAINER:-asv}"
 # Colcon WORKSPACE root inside the container (not the repo root — this repo is
 # cloned to $WS/src/rx26_asv alongside any other package sources).
 WS="${WS:-/root/robotx_ws}"

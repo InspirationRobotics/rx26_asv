@@ -21,7 +21,7 @@
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <!-- depthai, pymavlink, ultralytics have no reliable rosdep keys on the
-       Jetson image; they are provided by the crusader container base image
+       Jetson image; they are provided by the asv container base image
        and pinned in setup/install_container.sh -->
 
   <test_depend>python3-pytest</test_depend>
