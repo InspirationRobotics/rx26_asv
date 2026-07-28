@@ -11,8 +11,9 @@
 #
 # Canonical remote: github.com/InspirationRobotics/rx26_asv (private).
 # This repo is standalone — it is not a fork and does not merge into any other
-# tree. On the Jetson, `~/robotx_ws` is a plain clone of the canonical remote;
-# this script is only for bootstrapping a fresh checkout that has no git yet.
+# tree. On the Jetson it is cloned to `~/robotx_ws/src/rx26_asv` — one package
+# source inside a colcon workspace, NOT the workspace root. This script is only
+# for bootstrapping a fresh checkout that has no git yet.
 # ============================================================================
 set -euo pipefail
 cd "$(dirname "$0")/.."   # repo root

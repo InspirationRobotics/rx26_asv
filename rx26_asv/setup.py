@@ -1,13 +1,14 @@
 """ament_python packaging for the rx26_asv ROS 2 package (Crusader nodes).
 
-This repo is standalone and is the single source of truth for the package —
-on the Jetson, `~/robotx_ws` is a plain clone of it. There is no separate
-upstream setup.py to reconcile against.
+This repo is standalone and is the single source of truth for the package.
+On the Jetson it is cloned to `~/robotx_ws/src/rx26_asv` — one package source
+inside a colcon workspace, not the workspace root.
 
-Because this file makes the repo ROOT a colcon package, plain `colcon build`
-from the root will no longer descend into `interfaces/`. Use the blessed
-rebuild path (tools/scripts/rebuild.sh), which builds both explicitly:
-    colcon build --symlink-install --base-paths . interfaces
+This file sits in <repo>/rx26_asv/, NOT at the repo root, so that the repo root
+is not itself a colcon package. That is deliberate: colcon stops descending as
+soon as it finds a package, so a package.xml at the repo root would hide the
+sibling `interfaces/` package and silently build against stale messages. Keep
+it this way — plain `colcon build` from the workspace root finds both.
 """
 from setuptools import find_packages, setup
 

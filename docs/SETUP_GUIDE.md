@@ -60,8 +60,31 @@ LLM-driven autoresearch additionally needs `pip install anthropic` + `ANTHROPIC_
 
 ### B2. Jetson host (once per Jetson, and after cabling changes)
 
+**Workspace layout.** `~/robotx_ws` is a colcon *workspace*, not this repo. Clone into
+`src/`, alongside whatever else lives there:
+
 ```bash
-cd ~/robotx_ws
+mkdir -p ~/robotx_ws/src && cd ~/robotx_ws/src
+git clone https://github.com/InspirationRobotics/rx26_asv.git
+```
+
+If the workspace holds package sources you are **not** building (e.g. an older boat
+repo kept for reference), mark them so colcon skips them entirely — otherwise
+duplicate package names such as `interfaces` will collide at build time and
+same-named executables become ambiguous at `ros2 run` time:
+
+```bash
+touch ~/robotx_ws/src/<other-repo>/COLCON_IGNORE
+# check for overlaps first:
+find ~/robotx_ws/src -name package.xml -exec grep -h "<name>" {} \; | sort | uniq -d
+```
+
+Per-Jetson TensorRT engines live at the **workspace** level (`~/robotx_ws/models/`), not
+in the repo — they are gitignored and copied in out-of-band. See §B5 and
+[G2_bench_procedure.md](G2_bench_procedure.md).
+
+```bash
+cd ~/robotx_ws/src/rx26_asv
 sudo bash setup/install_jetson_host.sh    # udev → systemd → sanity checks
 ```
 
@@ -71,15 +94,15 @@ LED tells you state at a glance: RED e-stopped · YELLOW armed/manual · GREEN a
 ### B3. Inside the container (once, and after proto/package changes)
 
 ```bash
-docker exec -it crusader bash /root/robotx_ws/setup/install_container.sh
+docker exec -it crusader bash /root/robotx_ws/src/rx26_asv/setup/install_container.sh
 # pip top-ups → protoc → colcon build (rx26_asv + interfaces) → import smoke
 ```
 
 ### B4. SITL simulation (in-container, for scenario-level testing)
 
 ```bash
-docker exec -it crusader bash /root/robotx_ws/docker/sitl/install_sitl.sh   # one-time
-docker exec -it crusader bash /root/robotx_ws/docker/sitl/run_sitl.sh       # launch
+docker exec -it crusader bash /root/robotx_ws/src/rx26_asv/docker/sitl/install_sitl.sh  # one-time
+docker exec -it crusader bash /root/robotx_ws/src/rx26_asv/docker/sitl/run_sitl.sh      # launch
 # then, SITL-backend episodes:
 RX26_SITL_OK=1 python3 orchestrator/run_episode.py \
     --scenario orchestrator/scenarios/mission1_transit.json \
@@ -88,7 +111,7 @@ RX26_SITL_OK=1 python3 orchestrator/run_episode.py \
 
 ### B5. Boat bring-up (bench/field — day-of runbook, plan §7)
 
-1. Power on → LED RED → `docker exec -it crusader python3 /root/robotx_ws/tools/scripts/preflight.py`
+1. Power on → LED RED → `docker exec -it crusader python3 /root/robotx_ws/src/rx26_asv/tools/scripts/preflight.py`
    — **exit nonzero = do not arm.**
 2. GPS-yaw wait: open sky, 2–3 min (no heading? suspect `GPS1_COM_PORT` first).
 3. ELRS e-stop range test (SB down = hardware kill; WiFi is never a safety tool).
