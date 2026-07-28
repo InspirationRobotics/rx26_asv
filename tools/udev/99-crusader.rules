@@ -10,7 +10,10 @@
 # --- Pixhawk (autopilot). Owned exclusively by MAVProxy; everything else uses the
 #     rebroadcast. The symlink exists so mavproxy.service never chases ttyACM numbering.
 #     Common VID/PIDs: 3DR 26ac:*, Holybro/ArduPilot 1209:5740/5741, CubePilot 2dae:*
+#     5741 is what Crusader's board actually enumerates as (confirmed on the
+#     Jetson: usb-ArduPilot_Pixhawk1_3A001F00...). 5740 stays for other boards.
 SUBSYSTEM=="tty", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="5740", SYMLINK+="crsd-pixhawk", MODE="0660", GROUP="dialout"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="5741", SYMLINK+="crsd-pixhawk", MODE="0660", GROUP="dialout"
 SUBSYSTEM=="tty", ATTRS{idVendor}=="26ac", SYMLINK+="crsd-pixhawk", MODE="0660", GROUP="dialout"
 SUBSYSTEM=="tty", ATTRS{idVendor}=="2dae", SYMLINK+="crsd-pixhawk", MODE="0660", GROUP="dialout"
 

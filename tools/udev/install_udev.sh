@@ -50,4 +50,12 @@ udevadm control --reload-rules
 udevadm trigger
 
 echo "Installed. Verify symlinks:"
-ls -l /dev/crsd-* 2>/dev/null || echo "  (none yet — plug/replug devices or check serials)"
+# NOT `ls -l /dev/crsd-*`: with nullglob an unmatched glob expands to NOTHING,
+# so ls would get no arguments and cheerfully list the current directory —
+# which reads as success. Collect into an array and test it.
+crsd_links=(/dev/crsd-*)
+if (( ${#crsd_links[@]} )); then
+  ls -l "${crsd_links[@]}"
+else
+  echo "  (none yet — plug/replug devices, or the rules match no attached device)"
+fi
