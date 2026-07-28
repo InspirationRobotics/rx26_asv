@@ -19,6 +19,14 @@ and a change-impact table. The repo-wide "edit X → re-run Y" map is
 
 ```
 rx26_asv
+|-- config/               # single source of truth: ROS params YAML + device topology + MID360
+|-- docs/                 # setup guide, change-impact map, bench procedures (G1, G2)
+|-- firmware/             # Arduino sketches flashed to peripherals (LED status strip)
+|-- interfaces/           # ROS 2 message package (typed contracts between nodes)
+|-- launch/               # ROS 2 launch files (core status stack, camera, lidar, fusion)
+|-- proto/                # RoboCommand protobuf wire schema (compiled at build, not committed)
+|-- resource/             # registers the package with the ament index so ROS 2 command-line tools
+                          #   can discover it
 |-- rx26_asv/          # ROS 2 python package running on the boat
 |    |-- api/common/      #   shared plumbing: params, safe node lifecycle, autonomy-drop latch
 |    |-- api/navigation/  #   telemetry_bridge (sole MAVProxy consumer), frame transform,
@@ -29,18 +37,12 @@ rx26_asv
 |    |-- api/actuators/   #   Mission-3 effectors: water cannon (Maestro)
 |    |-- api/ivc/         #   inter-vehicle comms over modem communication
 |    |-- api/testing/     #   bench-only nodes
-|-- interfaces/           # ROS 2 message package (typed contracts between nodes)
-|-- config/               # single source of truth: ROS params YAML + device topology + MID360
-|-- proto/                # RoboCommand protobuf wire schema (compiled at build, not committed)
-|-- launch/               # ROS 2 launch files (core status stack, camera, lidar, fusion)
-|-- firmware/             # Arduino sketches flashed to peripherals (LED status strip)
+|-- scripts/              # runnable bash scripts
+|-- setup/                # installation scripts per machine role + git remote init
+|-- tests/                # unit tests for the target system
 |-- tools/                # udev, systemd, preflight, param_guard, rebuild, mock RoboCommand,
 |                         #   model training pipeline, bench instruments
-|-- docker/               # ArduPilot Rover SITL environment (in-container simulation)
 |-- Dockerfile            # the `crusader` container image (ROS 2 Humble + CUDA + livox driver)
-|-- tests/                # unit tests for the target system
-|-- setup/                # installation scripts per machine role + git remote init
-|-- docs/                 # setup guide, change-impact map, bench procedures (G1, G2)
 ```
 
 ## Usage
