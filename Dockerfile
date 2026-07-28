@@ -18,7 +18,10 @@
 # ============================================================================
 FROM ultralytics/ultralytics:latest-jetson-jetpack6
 
-ENV DEBIAN_FRONTEND=noninteractive
+# ARG, not ENV: ENV persists into the running container, so every later `apt`
+# run inside the boat's container would silently accept defaults instead of
+# prompting. Build-time only is what we actually want.
+ARG DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash", "-c"]
 
 # Pin the third-party Livox sources so the image is reproducible (CLAUDE.md
@@ -46,12 +49,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #   ros-dev-tools brings colcon, rosdep, and the rosidl generators. cmake +
 #   build-essential are also needed for Livox-SDK2. libusb for depthai/OAK-D.
 # ----------------------------------------------------------------------------
+#   libpcl-dev + pcl_conversions are REQUIRED by livox_ros_driver2:
+#   its CMakeLists does find_package(PCL REQUIRED), and without it the driver
+#   build fails at configure time. It is a heavy dependency (pulls VTK/Boost/
+#   FLANN) but there is no building the MID360 driver without it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-humble-ros-base \
         ros-dev-tools \
         python3-colcon-common-extensions \
         build-essential cmake git \
         libusb-1.0-0-dev \
+        libpcl-dev \
+        ros-humble-pcl-conversions \
     && rm -rf /var/lib/apt/lists/*
 
 # ----------------------------------------------------------------------------
@@ -111,9 +120,22 @@ RUN mkdir -p $LIVOX_WS/src && cd $LIVOX_WS/src \
     && git clone https://github.com/Livox-SDK/livox_ros_driver2.git \
     && cd livox_ros_driver2 && git checkout "$LIVOX_DRIVER_REF"
 COPY rx26_asv/config/MID360_config.json $LIVOX_WS/src/livox_ros_driver2/config/MID360_config.json
+# build.sh EXITS 0 EVEN WHEN COLCON FAILS. A missing PCL made the configure step
+# error out, colcon returned rc=1, build.sh swallowed it, and the image shipped
+# with an empty install space — `ls /opt/livox_ws/install` looked fine while
+# `ros2 pkg list` had no livox at all. Never trust build.sh's exit code; assert
+# the package is actually discoverable, and dump the log if it is not.
 RUN source /opt/ros/humble/setup.bash \
     && cd $LIVOX_WS/src/livox_ros_driver2 \
-    && ./build.sh humble
+    && ./build.sh humble; \
+    source $LIVOX_WS/install/setup.bash 2>/dev/null || true; \
+    if ! ros2 pkg list 2>/dev/null | grep -qx livox_ros_driver2; then \
+        echo "ERROR: livox_ros_driver2 is not on the ROS path after build.sh." >&2; \
+        echo "       (build.sh exits 0 even when colcon fails — log tail below)" >&2; \
+        tail -60 "$LIVOX_WS"/log/latest_build/events.log >&2 2>/dev/null || true; \
+        exit 1; \
+    fi; \
+    echo "livox guard ok: livox_ros_driver2 built and discoverable"
 
 # ----------------------------------------------------------------------------
 # Environment sourcing: ROS, the baked Livox ws, then the mounted rx26_asv
