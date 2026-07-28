@@ -39,6 +39,7 @@ from rx26_asv.api.common import geo
 from rx26_asv.api.common.detection_input import DetectionInput
 from rx26_asv.api.common.node_main import run_node
 from rx26_asv.api.common.param_utils import declare_from_config
+from rx26_asv.api.common.stream_cache import StreamCache
 
 # Canonical perception labels (class_map.json): red/green flashing gate buoys.
 RED_CLASSES = {"buoy_flash_red"}
@@ -64,6 +65,8 @@ PARAM_SPEC = {
                          description='JSON {"waypoints": [[lat,lon],...]}'),
     "gate_wp_indices": dict(read_only=True,
                             description="zero-based waypoint indices treated as gates"),
+    "pose_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
+                           description="stale pose -> stop commanding setpoints"),
     "cmd_period_s": dict(read_only=True, lo=0.1, hi=5.0,
                          description="min seconds between guided setpoints"),
     "rate_hz": dict(read_only=True, lo=1.0, hi=50.0),
@@ -103,6 +106,9 @@ class GateNavigator(Node):
         self._det_input = DetectionInput(self, self._det_cb)
 
         self.lat = self.lon = self.heading = None
+        # Gate midpoints come from rotating BODY detections through the boat
+        # heading, so a stale heading aims the setpoint where the gate is not.
+        self.pose_age = StreamCache(p["pose_timeout_s"])
         self.mode = ""
         self.wp_index = 0
         self.done = False
@@ -131,15 +137,19 @@ class GateNavigator(Node):
     # ---------- inputs ----------
 
     def _pose_cb(self, msg: LatLonHead):
+        if math.isnan(msg.heading):
+            return       # GPS yaw unresolved: a position without a heading
+                         # cannot place a gate, and a STALE heading is worse
         self.lat, self.lon = msg.latitude, msg.longitude
-        if not math.isnan(msg.heading):
-            self.heading = msg.heading
+        self.heading = msg.heading
+        self.pose_age.set(True, time.monotonic())
 
     def _fcu_cb(self, msg: FcuStatus):
         self.mode = msg.mode
 
     def _det_cb(self, msg: DetectionArray):
         if (msg.frame != "body" or self.lat is None or self.heading is None
+                or self.pose_age.get(time.monotonic()) is None
                 or self.wp_index not in self.gate_wp_indices or self.gate_locked):
             return
         candidate = self._select_gate_candidate(msg.detections)
@@ -152,7 +162,13 @@ class GateNavigator(Node):
     # ---------- control ----------
 
     def _tick(self):
+        mono = time.monotonic()
+        if self.pose_age.went_stale(mono):
+            self.get_logger().error(
+                f"/crsd/pose stale ({self.pose_age.age(mono):.1f}s) — "
+                "HOLDING: no further guided setpoints until pose returns")
         if (self.done or self.lat is None or self.heading is None
+                or self.pose_age.get(mono) is None
                 or self.mode != "GUIDED"):
             return
         if self.wp_index >= len(self.waypoints):

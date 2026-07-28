@@ -38,6 +38,7 @@ from rx26_asv.api.common import config as crsd_config
 from rx26_asv.api.common.node_main import run_node
 from rx26_asv.api.common.override_guard import OverrideGuard
 from rx26_asv.api.common.param_utils import declare_from_config
+from rx26_asv.api.common.stream_cache import StreamCache
 
 # Empirical neutral trim from the operational tune (not exactly 1500).
 STEER_NEUTRAL = 1489
@@ -68,6 +69,8 @@ PARAM_SPEC = {
     "dead_yaw_deg": dict(read_only=True, lo=0.0, hi=45.0),
     "dead_pos_m": dict(read_only=True, lo=0.0, hi=2.0),
     "rate_hz": dict(read_only=True, lo=1.0, hi=50.0),
+    "pose_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
+                           description="stale heading -> release the override"),
 }
 
 
@@ -92,6 +95,10 @@ class DPHold(Node):
         self.create_subscription(FcuStatus, "/crsd/fcu_status", self._fcu_cb, 10)
 
         self.heading = None
+        # The yaw PD runs on this heading and drives RC overrides. Holding
+        # the last value forever means thrusting against an angle the boat no
+        # longer has, so heading FRESHNESS gates the override, not presence.
+        self.heading_age = StreamCache(p["pose_timeout_s"])
         self.mode = ""
         self.yaw_rate = 0.0
         self._last_hdg = None
@@ -120,6 +127,7 @@ class DPHold(Node):
                 self.yaw_rate = 0.7 * self.yaw_rate + 0.3 * rate
         self._last_hdg, self._last_hdg_t = h, now
         self.heading = h
+        self.heading_age.set(True, now)
 
     def _fcu_cb(self, msg: FcuStatus):
         self.mode = msg.mode
@@ -153,7 +161,13 @@ class DPHold(Node):
             self.engaged = True
             self.last_seen = now
 
-        if (self.mode != "MANUAL" or self.heading is None or not self.engaged
+        if self.heading_age.went_stale(now):
+            self.get_logger().error(
+                f"heading stale ({self.heading_age.age(now):.1f}s) — "
+                "RELEASING override; cannot hold yaw against an unknown "
+                "heading")
+        if (self.mode != "MANUAL" or self.heading is None
+                or self.heading_age.get(now) is None or not self.engaged
                 or now - self.last_seen > self.p["grace_s"]):
             self.engaged = False
             self._release()

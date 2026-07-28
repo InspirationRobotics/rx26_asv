@@ -23,11 +23,14 @@ from rx26_asv.api.common import config as crsd_config
 from rx26_asv.api.common import geo
 from rx26_asv.api.common.node_main import run_node
 from rx26_asv.api.common.param_utils import declare_from_config, make_set_callback
+from rx26_asv.api.common.stream_cache import StreamCache
 from rx26_asv.api.navigation.occupancy_core import OccupancyCore, SOURCE_COMMS, SOURCE_PERCEPTION
 
 PARAM_SPEC = {
     "cell_size": dict(read_only=True, lo=0.1, hi=5.0,
                       description="grid geometry — restart to change"),
+    "pose_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
+                           description="stale pose -> stop ingesting detections"),
     "decay_tau": dict(read_only=False, lo=1.0, hi=600.0,
                       description="perception-cell decay [s]"),
     "occupied_threshold": dict(read_only=False, lo=1.0, hi=100.0,
@@ -50,7 +53,10 @@ class OccupancyGridNode(Node):
         self.add_on_set_parameters_callback(
             make_set_callback(self, DYNAMIC_RANGES, self._apply_params))
         self.origin = None
-        self.pose_xyh = (0.0, 0.0, 0.0)
+        # World-frame detections are only meaningful against the pose they
+        # were transformed with. Ingesting them against a frozen pose writes
+        # obstacles at coordinates the boat has already left (objective 1).
+        self.pose = StreamCache(p["pose_timeout_s"])   # (x, y, heading_rad)
 
         latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -77,12 +83,20 @@ class OccupancyGridNode(Node):
         if self.origin is None or math.isnan(msg.heading):
             return
         x, y = geo.latlon_to_xy(msg.latitude, msg.longitude, self.origin)
-        self.pose_xyh = (x, y, math.radians(msg.heading))
+        self.pose.set((x, y, math.radians(msg.heading)), time.monotonic())
 
     def _detections_cb(self, msg: DetectionArray):
         if msg.frame != "world":
             return
         t = time.monotonic()
+        if self.pose.get(t) is None:
+            # frame_transform should already have stopped publishing, but do
+            # not rely on an upstream guard for a grid-poisoning failure
+            self.get_logger().error(
+                "detections DROPPED: pose stale — refusing to ingest "
+                "obstacles positioned against an unknown boat pose",
+                throttle_duration_sec=2.0)
+            return
         for d in msg.detections:
             self.core.ingest_detection(d.x, d.y, d.radius, t,
                                        confidence=d.confidence,
@@ -103,7 +117,8 @@ class OccupancyGridNode(Node):
     def _publish(self):
         t = time.monotonic()
         self.core.prune(t)
-        d = self.core.to_msg_dict(t, self.origin or (0.0, 0.0), self.pose_xyh)
+        d = self.core.to_msg_dict(t, self.origin or (0.0, 0.0),
+                                  self.pose.value or (0.0, 0.0, 0.0))
         msg = Occupancy()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.origin = d["origin"]
