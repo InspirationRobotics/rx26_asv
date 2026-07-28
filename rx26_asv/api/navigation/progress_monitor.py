@@ -15,6 +15,28 @@ import math
 from collections import deque
 from statistics import pstdev
 
+from rx26_asv.api.common import geo
+
+
+def heading_spread(headings) -> float:
+    """Standard deviation of a set of headings, computed on the CIRCLE.
+
+    A plain pstdev over raw angles breaks at the wrap: roa_apf_node feeds
+    math.radians(compass_deg), i.e. 0..2*pi, so the discontinuity sits at due
+    NORTH. Half a degree of jitter around north reads as ~3.13 rad of
+    "oscillation" against a 0.05 rad floor, and objective-2 flags become a
+    function of which way the course points.
+
+    Unwrapping each sample against the first via wrap_pi removes the
+    discontinuity. Off the wrap this is numerically identical to the old
+    pstdev, so config/crusader_params.yaml thresholds (and the evaluator that
+    shares them by anchor) need no retuning.
+    """
+    if len(headings) < 2:
+        return 0.0
+    ref = headings[0]
+    return pstdev([ref + geo.wrap_pi(h - ref) for h in headings])
+
 
 class ProgressMonitor:
     OK, AT_RISK, STALLED = "ok", "at_risk", "stalled"
@@ -50,7 +72,7 @@ class ProgressMonitor:
         progress = self._buf[0][5] - gdist
         at_risk = (sum(speeds) / len(speeds) < self.speed_floor
                    and progress < self.progress_floor
-                   and pstdev(headings) > self.heading_osc_floor)
+                   and heading_spread(headings) > self.heading_osc_floor)
 
         if at_risk:
             if self.state == self.OK:
