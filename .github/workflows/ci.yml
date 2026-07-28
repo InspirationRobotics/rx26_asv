@@ -28,11 +28,13 @@ jobs:
       - name: build interfaces + rx26_asv packages
         shell: bash
         run: |
-          # Mirror the Jetson layout exactly: the repo is ONE source dir inside
-          # a colcon workspace, not the workspace root.
-          mkdir -p /ws/src
-          cp -r . /ws/src/rx26_asv
-          cd /ws
+          # Reproduce the Jetson's workspace SHAPE: the repo is one source dir
+          # inside a colcon workspace, not the workspace root. That nesting is
+          # what the discovery guard below actually tests. The path matches the
+          # boat for readability; colcon does not care what it is called.
+          mkdir -p /root/robotx_ws/src
+          cp -r . /root/robotx_ws/src/rx26_asv
+          cd /root/robotx_ws
           source /opt/ros/humble/setup.bash
 
           # Guard the failure mode this layout exists to prevent: if the repo
@@ -58,4 +60,13 @@ jobs:
           python3 -m py_compile tools/scripts/*.py tools/sim/*.py \
                                 tools/training/*.py tools/bench/*.py \
                                 tools/udev/*.py
-          bash -n tools/udev/install_udev.sh tools/scripts/rebuild.sh
+          # Every tracked shell script, so a new one is covered the day it lands
+          # rather than the day someone remembers to add it here. setup/*.sh in
+          # particular was uncovered: it carries the repo-vs-workspace path
+          # derivation and the "not a colcon workspace" guard.
+          fail=0
+          for f in $(git ls-files '*.sh'); do
+            echo "  bash -n $f"
+            bash -n "$f" || { echo "SYNTAX FAIL: $f" >&2; fail=1; }
+          done
+          exit $fail
