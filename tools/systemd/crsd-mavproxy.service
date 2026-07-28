@@ -1,4 +1,8 @@
 # /etc/systemd/system/crsd-mavproxy.service  (Jetson host)
+#
+# TEMPLATE: __CRSD_USER__ / __CRSD_REPO__ are substituted by
+# setup/install_jetson_host.sh at install time (invoking user + repo path).
+# Do NOT `install` this file verbatim — the placeholders must be expanded.
 # MAVProxy is the SOLE owner of the Pixhawk serial link. Everything else —
 # ROS nodes, Mission Planner/QGC on the laptop, preflight, autoresearch —
 # consumes its rebroadcast. Nothing may open /dev/crsd-pixhawk directly.
@@ -9,11 +13,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=jetson
+User=__CRSD_USER__
 # LAPTOP_IP set in /etc/default/crusader (EnvironmentFile) so field IP changes
 # don't require a unit edit.
 EnvironmentFile=-/etc/default/crusader
-ExecStart=/home/jetson/robotx_ws/scripts/start_mavproxy.sh ${LAPTOP_IP}
+ExecStart=__CRSD_REPO__/scripts/start_mavproxy.sh ${LAPTOP_IP}
 Restart=on-failure
 RestartSec=3
 

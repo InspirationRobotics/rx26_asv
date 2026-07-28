@@ -50,6 +50,38 @@ jobs:
           colcon build --packages-select interfaces rx26_asv \
                        --event-handlers console_cohesion+
 
+  dockerfile:
+    name: dockerfile paths
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: COPY sources exist
+        # The image itself cannot be built here — the base is arm64 JetPack and
+        # these runners are x86_64. What CI *can* catch is the failure that
+        # actually happened: a file moved in the repo and the Dockerfile's COPY
+        # kept pointing at the old path, so `docker build` broke on the Jetson
+        # with nothing upstream noticing.
+        run: |
+          python3 - <<'PY'
+          import os, sys
+          bad = []
+          for n, line in enumerate(open("Dockerfile"), 1):
+              s = line.strip()
+              if not s.upper().startswith("COPY "):
+                  continue
+              args = [a for a in s.split()[1:] if not a.startswith("--")]
+              if any(a.startswith("--from") for a in s.split()):
+                  continue          # copying from another stage, not the context
+              for src in args[:-1]:
+                  if "$" in src or "*" in src:
+                      continue      # variable/glob — cannot check statically
+                  if not os.path.exists(src):
+                      bad.append((n, src))
+          for n, src in bad:
+              print(f"Dockerfile:{n}: COPY source does not exist: {src}")
+          sys.exit(1 if bad else 0)
+          PY
+
   tools-lint:
     name: tools syntax check
     runs-on: ubuntu-latest
