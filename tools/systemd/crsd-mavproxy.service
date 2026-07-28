@@ -14,6 +14,12 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=__CRSD_USER__
+# MAVProxy writes mav.tlog / mav.parm into its CWD. systemd's default CWD is /,
+# which the service user cannot write — it errored on every start. StateDirectory
+# creates /var/lib/crsd-mavproxy owned by User= on each start; telemetry logs land
+# there (they are .gitignored and were never meant to sit in the repo).
+StateDirectory=crsd-mavproxy
+WorkingDirectory=/var/lib/crsd-mavproxy
 # LAPTOP_IP set in /etc/default/crusader (EnvironmentFile) so field IP changes
 # don't require a unit edit.
 EnvironmentFile=-/etc/default/crusader
