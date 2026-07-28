@@ -1,9 +1,8 @@
 """ament_python packaging for the rx26_asv ROS 2 package (Crusader nodes).
 
-NOTE (merge caveat): the live Jetson repo may already carry its own setup.py
-(README_PHASE0.md merge procedure uses `rsync --ignore-existing`, so this file
-will NOT overwrite it). If the Jetson repo has one, reconcile by copying the
-`entry_points` block below into it rather than replacing the file.
+This repo is standalone and is the single source of truth for the package —
+on the Jetson, `~/robotx_ws` is a plain clone of it. There is no separate
+upstream setup.py to reconcile against.
 
 Because this file makes the repo ROOT a colcon package, plain `colcon build`
 from the root will no longer descend into `interfaces/`. Use the blessed
@@ -49,6 +48,7 @@ setup(
     maintainer="Team Inspiration",
     maintainer_email="brandont3927@gmail.com",
     description="Crusader USV ROS 2 nodes for RobotX 2026",
+    url="https://github.com/InspirationRobotics/rx26_asv",
     license="MIT",
     tests_require=["pytest"],
     entry_points={

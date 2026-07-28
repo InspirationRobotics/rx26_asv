@@ -1,21 +1,17 @@
-# Phase 0–5 scaffold — merge into the Jetson `robotx_2026` repo
+# Phase 0–5 build log (historical)
 
-- `robotx_2026/api/**` (led, pixhawk, gate_navigator, dp_hold, perception nodes) is NOT
-  duplicated here — nothing in this scaffold overwrites an existing file.
-- New top-level dirs: `interfaces/`, `orchestrator/`, `tools/`, `docker/sitl/`, `proto/`,
-  `.github/`.
+**This is a changelog, not a procedure.** It records what landed in each phase and the
+gate criteria each phase was signed off against. For setup and day-to-day workflow use
+[README.md](README.md) and [docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md) instead.
 
-## Merge procedure (on the Jetson host, NOT in-container)
+Historical note: phases 0–5 were originally developed as a scaffold intended to be merged
+into a separate live boat repo. That merge is complete — every node referenced below now
+lives in this tree, and this repo is standalone (canonical remote:
+`github.com/InspirationRobotics/rx26_asv`). The old rsync-into-another-repo procedure has
+been removed; on the Jetson, `~/robotx_ws` is a plain clone of the canonical remote.
 
-```bash
-cd ~/robotx_ws            # repo root
-git checkout -b phase0-scaffold
-# copy this directory's contents over the repo root (no existing file collides)
-rsync -av --ignore-existing /path/to/scaffold/ .
-git add -A && git commit -m "Phase 0: interfaces, orchestrator, tools, SITL, CI"
-```
-
-Then inside the `crusader` container: `cd /root/robotx_ws && colcon build --symlink-install`
+Build after a pull, inside the `crusader` container:
+`cd /root/robotx_ws && colcon build --symlink-install`
 (builds `interfaces`; `orchestrator/` is COLCON_IGNOREd by design).
 
 ## Gate G0 (definition of done for Phase 0)
