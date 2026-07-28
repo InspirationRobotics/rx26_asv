@@ -21,8 +21,17 @@ if [ ! -e "$MASTER" ]; then
   exit 1
 fi
 
+# --daemon is REQUIRED under systemd, not a preference. MAVProxy runs an
+# interactive console by default; with stdin on /dev/null it prints the "MAV> "
+# prompt, immediately reads EOF, treats that as "quit", and unloads every module
+# and exits 1. systemd restarts it, and you get a clean-looking crash loop whose
+# log ends in an orderly shutdown rather than an error. Confirmed on the boat:
+# identical invocation stays up in a terminal and dies under systemd.
+# Run it by hand (a TTY) and you get the console; drop --daemon here and the
+# service will loop forever.
 exec mavproxy.py \
   --master="$MASTER" \
+  --daemon \
   --out=udp:127.0.0.1:14551 \
   --out=udp:127.0.0.1:14550 \
   --out=udp:"${LAPTOP_IP}":14550
