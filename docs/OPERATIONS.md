@@ -1,6 +1,6 @@
 # CRUSADER USV — OPERATIONS MANUAL (RobotX 2026)
 
-**Updated 2026-07-28.** Field/day-of manual for the `rx26_asv` stack.
+**Updated 2026-07-28.** Field manual for the `rx26_asv` stack.
 
 For first-time installation on a machine, use [SETUP_GUIDE.md](SETUP_GUIDE.md).
 For "if I change X, what do I re-run?", use [CHANGE_IMPACT_MAP.md](CHANGE_IMPACT_MAP.md).
@@ -23,8 +23,8 @@ This document assumes the boat is already installed and you are operating it.
   **edited** outside the container. Both see the same files via a bind mount.
 - The **Pixhawk is owned by exactly one program, MAVProxy**, which rebroadcasts
   over UDP to everything else (our nodes, Mission Planner/QGC on your laptop).
-  Nothing else may open the serial device. Ever.
-- The **LED strip** shows boat status: **RED** = e-stopped, **YELLOW** = armed/manual,
+  Nothing else may open the serial device.
+- The **LED strip** shows boat status: **RED** = e-stopped, **YELLOW** = manual,
   **GREEN** = autonomous.
 
 ### Boot chain (automatic, since 2026-07-28)
@@ -63,7 +63,7 @@ systemctl show crsd-mavproxy -p NRestarts -p ActiveState
 
 1. Connect your laptop to the boat's WiFi (`TeamInspirationField_2.0` or `MESAFSD`).
    **Credentials are not stored in this repo** — they're in the team drive. Do not
-   commit them here; a private repo is not a secret store, and the history is forever.
+   commit them here.
 2. SSH in. Use `-A` so git operations on the Jetson use *your* key (see §10):
 
 ```bash
@@ -74,6 +74,8 @@ If mDNS doesn't resolve, use the IP directly:
 
 ```bash
 ssh -A crusader@<JETSON_IP>
+# latest:
+ssh -A crusader@192.168.100.109
 ```
 
 You're on the Jetson when the prompt reads `crusader@crusader-asv`.
