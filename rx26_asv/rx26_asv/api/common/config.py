@@ -14,8 +14,46 @@ this loader only supplies defaults and non-ROS consumers.
 import hashlib
 from pathlib import Path
 
-DEFAULT_CONFIG_PATH = (Path(__file__).resolve().parents[3]
+# Where this file sits relative to the config differs between the two layouts,
+# and NO fixed number of `parents` satisfies both:
+#
+#   source tree   <repo>/rx26_asv/rx26_asv/api/common/config.py
+#                 <repo>/rx26_asv/config/crusader_params.yaml        -> parents[3]
+#
+#   installed     install/rx26_asv/lib/python3.10/site-packages/rx26_asv/api/common/config.py
+#                 install/rx26_asv/share/rx26_asv/config/crusader_params.yaml
+#
+# lib/ and share/ are siblings, so path arithmetic from the module cannot reach
+# the installed config at all — parents[3] lands in site-packages/ and every
+# node dies at __init__ with FileNotFoundError. Ask ament where the package's
+# share dir is, and keep the relative path only for the source tree (unit tests,
+# and any non-ROS consumer like the episode evaluator).
+_SOURCE_CONFIG_PATH = (Path(__file__).resolve().parents[3]
                        / "config" / "crusader_params.yaml")
+
+
+def _resolve_config_path(get_share_dir=None) -> Path:
+    """Installed share dir if available, else the source-tree path.
+
+    `get_share_dir` is injectable so the resolution order is testable off-boat,
+    where ament_index_python is not installed.
+    """
+    if get_share_dir is None:
+        try:
+            from ament_index_python.packages import (
+                get_package_share_directory as get_share_dir)
+        except ImportError:
+            return _SOURCE_CONFIG_PATH        # no ROS here: source tree it is
+    try:
+        # PackageNotFoundError when the workspace is not sourced; fall through
+        # rather than fail, so `python -m pytest` in a container still works.
+        p = Path(get_share_dir("rx26_asv")) / "config" / "crusader_params.yaml"
+    except Exception:
+        return _SOURCE_CONFIG_PATH
+    return p if p.is_file() else _SOURCE_CONFIG_PATH
+
+
+DEFAULT_CONFIG_PATH = _resolve_config_path()
 
 _cache = {}
 
@@ -27,8 +65,20 @@ def load(path=None) -> dict:
     key = str(p)
     if key not in _cache:
         import yaml
-        with open(p) as f:
-            _cache[key] = yaml.safe_load(f)
+        try:
+            with open(p) as f:
+                _cache[key] = yaml.safe_load(f)
+        except FileNotFoundError as e:
+            # The bare errno message names one path and gives no hint which
+            # layout was assumed — that cost a boat-side debugging session.
+            raise FileNotFoundError(
+                f"crusader_params.yaml not found at {p}.\n"
+                f"  installed layout: <install>/share/rx26_asv/config/ "
+                f"(via ament; is the workspace sourced?)\n"
+                f"  source layout:    {_SOURCE_CONFIG_PATH}\n"
+                f"If running from the install space, check setup.py still "
+                f"installs config/ into share/ and that colcon build succeeded."
+            ) from e
     return _cache[key]
 
 
