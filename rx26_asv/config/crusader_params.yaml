@@ -16,25 +16,49 @@
 #   [DYN] dynamic — accepted at runtime via `ros2 param set`, range-validated;
 #        this is the knob path for test-day tuning and the Level-1 loop.
 #
-# YAML anchors (&name / *name) tie values that MUST stay equal across sections.
+# ---------------------------------------------------------------------------
+# TWO HARD FORMAT RULES — rcl's parser is stricter than PyYAML. Break either and
+# EVERY node in the launch dies at rclpy.init() with "Couldn't parse params
+# file", before a single line of node code runs (this happened on the boat on
+# 2026-07-29 and grounded the whole stack, LEDs included):
+#
+#   1. NO YAML anchors/aliases (&name / *name). rcl_yaml_param_parser rejects
+#      them outright — it is a token-level parser, not a YAML document loader.
+#      Values that MUST stay equal across sections are therefore written out
+#      LITERALLY and pinned by tests/test_config_shared.py instead. If you
+#      change one, change every copy the test names.
+#   2. EVERY top-level key must be a node name whose only child is
+#      `ros__parameters:`. A bare scalar at top level is what produced
+#      "Cannot have a value before ros__parameters". That is why the `shared`
+#      block below — which is documentation, not a real node — still carries a
+#      `ros__parameters:` level: no node is named `shared`, so rcl parses the
+#      section, matches it to nothing, and ignores it.
+#
+# tests/test_config_shared.py enforces both rules in CI. Do not "tidy" this file
+# back into anchors.
 # ============================================================================
 
+# Canonical values for anything duplicated below. NOT a real node (see rule 2) —
+# this section is the single source of truth by convention + test, and is never
+# loaded by any running node.
 shared:
-  # cells at/above this confidence count as obstacles — used by BOTH the grid
-  # node (publisher) and the APF node (consumer); anchor keeps them in lockstep
-  occupied_threshold: &occupied_threshold 50.0
-  # age at which a /crsd/pose sample stops being usable. telemetry_bridge uses
-  # it to decide when to STOP republishing a dead MAVLink stream; every consumer
-  # uses the same number to decide when to stop acting on the last pose it saw.
-  # One anchor because a consumer trusting a pose longer than the bridge
-  # vouches for it is exactly the frozen-pose failure this guards against.
-  pose_timeout_s: &pose_timeout_s 1.0
-  # progress-monitor thresholds — onboard detector AND episode evaluator
-  progress_window_s: &progress_window_s 10.0
-  progress_speed_floor: &progress_speed_floor 0.3
-  progress_floor: &progress_floor 0.5
-  progress_heading_osc_floor: &progress_heading_osc_floor 0.05
-  progress_stall_after_s: &progress_stall_after_s 15.0
+  ros__parameters:
+    # cells at/above this confidence count as obstacles — used by BOTH the grid
+    # node (publisher) and the APF node (consumer); they must stay in lockstep
+    occupied_threshold: 50.0
+    # age at which a /crsd/pose sample stops being usable. telemetry_bridge uses
+    # it to decide when to STOP republishing a dead MAVLink stream; every
+    # consumer uses the same number to decide when to stop acting on the last
+    # pose it saw. One value because a consumer trusting a pose longer than the
+    # bridge vouches for it is exactly the frozen-pose failure this guards
+    # against.
+    pose_timeout_s: 1.0
+    # progress-monitor thresholds — onboard detector AND episode evaluator
+    progress_window_s: 10.0
+    progress_speed_floor: 0.3
+    progress_floor: 0.5
+    progress_heading_osc_floor: 0.05
+    progress_stall_after_s: 15.0
 
 telemetry_bridge:
   ros__parameters:
@@ -43,7 +67,8 @@ telemetry_bridge:
     drop_threshold: 1700                   # [RO] us; crossing trips the latch
     drop_invert: false                     # [RO]
     rc_stale_timeout: 1.0                  # [RO] s without RC -> trip
-    stream_timeout_s: *pose_timeout_s      # [RO] s before a stale MAVLink stream
+    stream_timeout_s: 1.0                  # [RO] = shared.pose_timeout_s; s
+                                           #      before a stale MAVLink stream
                                            #      stops being republished
 
 perception_node:
@@ -111,9 +136,10 @@ lidar_fusion_node:
 occupancy_grid_node:
   ros__parameters:
     cell_size: 0.5                         # [RO] grid geometry
-    pose_timeout_s: *pose_timeout_s        # [RO] stale pose -> stop ingesting
+    pose_timeout_s: 1.0                    # [RO] = shared.pose_timeout_s;
+                                           #      stale pose -> stop ingesting
     decay_tau: 30.0                        # [DYN] perception-cell decay [s]
-    occupied_threshold: *occupied_threshold  # [DYN]
+    occupied_threshold: 50.0               # [DYN] = shared.occupied_threshold
 
 mission_planner_node:
   ros__parameters:
@@ -129,8 +155,10 @@ mission_planner_node:
 roa_apf_node:
   ros__parameters:
     rate_hz: 5.0                           # [RO]
-    pose_timeout_s: *pose_timeout_s        # [RO] stop advising on a stale pose
-    occupied_threshold: *occupied_threshold  # [DYN] must track the grid's value
+    pose_timeout_s: 1.0                    # [RO] = shared.pose_timeout_s; stop
+                                           #      advising on a stale pose
+    occupied_threshold: 50.0                # [DYN] = shared.occupied_threshold;
+                                            #       must track the grid's value
     # --- APF gains: the primary Level-1 tunables on the ROS side [DYN] ---
     apf_k_att: 1.0
     apf_k_rep: 5.0
@@ -141,14 +169,15 @@ roa_apf_node:
     apf_trap_ratio: 0.15
     apf_tangent_gain: 0.8
     apf_project_s: 5.0
-    # --- progress monitor (shared with evaluator via anchors) [RO] ---
+    # --- progress monitor: mirrors the `shared` section, pinned by
+    #     tests/test_config_shared.py (rcl forbids anchors — see header) [RO] ---
     # read-only because the monitor is stateful; changing thresholds mid-episode
     # would corrupt flag/stall accounting. Tune here + restart between runs.
-    monitor_window_s: *progress_window_s
-    monitor_speed_floor: *progress_speed_floor
-    monitor_progress_floor: *progress_floor
-    monitor_heading_osc_floor: *progress_heading_osc_floor
-    monitor_stall_after_s: *progress_stall_after_s
+    monitor_window_s: 10.0                 # = shared.progress_window_s
+    monitor_speed_floor: 0.3               # = shared.progress_speed_floor
+    monitor_progress_floor: 0.5            # = shared.progress_floor
+    monitor_heading_osc_floor: 0.05        # = shared.progress_heading_osc_floor
+    monitor_stall_after_s: 15.0            # = shared.progress_stall_after_s
 
 # ---- LED status stack (operational nodes, ported from the Crusader boat repo) ----
 led_node:
@@ -202,7 +231,8 @@ dp_hold:
     pwm_limit: 120                         # [RO] max PWM deflection from neutral
     dead_yaw_deg: 5.0                      # [RO] ignore smaller yaw errors
     dead_pos_m: 0.15                       # [RO] ignore smaller position errors
-    pose_timeout_s: *pose_timeout_s        # [RO] stale heading -> release override
+    pose_timeout_s: 1.0                    # [RO] = shared.pose_timeout_s;
+                                           #      stale heading -> release override
     rate_hz: 10.0                          # [RO] control rate
 
 # ---- gate_navigator: GUIDED-mode buoy-gate transit (Mission 1) ----
@@ -210,7 +240,8 @@ gate_navigator:
   ros__parameters:
     mission_file: ""                       # [RO] JSON {"waypoints": [[lat,lon],...]}; required
     gate_wp_indices: [0, 1]                # [RO] zero-based waypoints treated as gates
-    pose_timeout_s: *pose_timeout_s        # [RO] stale pose -> stop commanding
+    pose_timeout_s: 1.0                    # [RO] = shared.pose_timeout_s;
+                                           #      stale pose -> stop commanding
     cmd_period_s: 1.0                      # [RO] min seconds between guided setpoints
     rate_hz: 20.0                          # [RO] control rate
 

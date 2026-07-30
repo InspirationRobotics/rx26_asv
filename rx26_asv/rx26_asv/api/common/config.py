@@ -40,6 +40,19 @@ def config_hash(path=None):
         return None
 
 
+def shared_params(path=None) -> dict:
+    """The `shared` section: canonical values for anything duplicated across
+    node sections.
+
+    Not a real node — rcl forbids YAML aliases in a params file, so values that
+    must stay equal are written out literally per-node and pinned to this
+    section by tests/test_config_shared.py. The section carries a
+    `ros__parameters` level only because rcl rejects a top-level scalar; no node
+    is named `shared`, so nothing ever loads it.
+    """
+    return node_params("shared", path)
+
+
 def node_params(node_name: str, path=None) -> dict:
     """Flat {param_name: default} for one node's ros__parameters section."""
     cfg = load(path)

@@ -32,6 +32,21 @@ if grep -q "TODO_GPS1_SERIAL" "$RULES_SRC"; then
   echo "Edit $RULES_SRC, then re-run. (Installing anyway so non-GPS rules take effect.)"
 fi
 
+# Purge installed rules that no longer exist in the repo. `install` only ever
+# ADDS files, so deleting a rules file from the repo left the old copy live in
+# /etc/udev/rules.d forever — and re-running this script looked like it had
+# resolved the problem. That is how 99-crusader-devpath.rules kept mapping
+# crsd-ball-launcher onto the Pixhawk's tty after the repo dropped it: a stale
+# port-chain rule outliving the cabling it described. Rules removed here, not
+# just overwritten, so the collision guard below reflects the repo's intent.
+for installed in /etc/udev/rules.d/99-crusader*.rules; do
+  name="$(basename "$installed")"
+  if [[ ! -e "$RULES_DIR/$name" ]]; then
+    echo "removing stale $name (no longer in the repo)"
+    rm -f "$installed"
+  fi
+done
+
 # install the hand-maintained VID rules AND any generated per-boat rules
 # (99-crusader-devpath.rules from gen_udev_rules.py + a boat config JSON)
 for f in "$RULES_DIR"/99-crusader*.rules; do

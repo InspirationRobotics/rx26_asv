@@ -20,16 +20,57 @@ def test_all_nodes_have_config_sections():
         assert params, node
 
 
-def test_occupied_threshold_anchor_holds():
+def test_params_file_parses_under_rcl_rules():
+    """rcl_yaml_param_parser is stricter than PyYAML, and it fails CLOSED: an
+    illegal params file kills every node in the launch at rclpy.init(), before
+    any node code runs. Both rules below were violated on 2026-07-29 and
+    grounded the whole stack (LEDs included) with "Couldn't parse params file".
+
+    Rule 1: every top-level key is a node name whose only child is
+            `ros__parameters` (a bare top-level scalar -> "Cannot have a value
+            before ros__parameters").
+    Rule 2: no YAML anchors/aliases anywhere — rcl parses tokens, not documents,
+            and rejects an alias outright.
+
+    PyYAML accepts both mistakes happily, which is exactly why this test exists:
+    every other test in this file loads the YAML through PyYAML and would stay
+    green while the boat could not launch a single node.
+    """
+    cfg = crsd_config.load()
+    for name, section in cfg.items():
+        assert isinstance(section, dict), f"{name}: top-level value is not a map"
+        assert list(section) == ["ros__parameters"], (
+            f"{name}: sole child must be `ros__parameters`, got {list(section)}")
+
+    # anchors/aliases: check the raw text, since PyYAML resolves them away
+    for lineno, line in enumerate(
+            crsd_config.DEFAULT_CONFIG_PATH.read_text().splitlines(), 1):
+        code = line.split("#", 1)[0]
+        assert "&" not in code and "*" not in code, (
+            f"line {lineno}: YAML anchor/alias — rcl rejects these, write the "
+            f"value out literally and pin it in this file's shared-value tests")
+
+
+def test_occupied_threshold_matches_shared():
     # grid publisher and APF consumer must agree on what "occupied" means
-    grid = crsd_config.node_params("occupancy_grid_node")
-    apf = crsd_config.node_params("roa_apf_node")
-    assert grid["occupied_threshold"] == apf["occupied_threshold"]
+    want = crsd_config.shared_params()["occupied_threshold"]
+    for node in ("occupancy_grid_node", "roa_apf_node"):
+        assert crsd_config.node_params(node)["occupied_threshold"] == want, node
+
+
+def test_pose_timeout_consumers_match_shared():
+    """A consumer that trusts a pose longer than telemetry_bridge vouches for it
+    is the frozen-pose failure this value exists to prevent."""
+    want = crsd_config.shared_params()["pose_timeout_s"]
+    for node in ("occupancy_grid_node", "roa_apf_node", "dp_hold",
+                 "gate_navigator"):
+        assert crsd_config.node_params(node)["pose_timeout_s"] == want, node
+    bridge = crsd_config.node_params("telemetry_bridge")
+    assert bridge["stream_timeout_s"] == want
 
 
 def test_monitor_thresholds_match_shared_section():
-    cfg = crsd_config.load()
-    shared = cfg["shared"]
+    shared = crsd_config.shared_params()
     mk = crsd_config.monitor_kwargs()
     assert mk["window_s"] == shared["progress_window_s"]
     assert mk["speed_floor"] == shared["progress_speed_floor"]

@@ -99,7 +99,10 @@ def check_ros(container_ok):
     if not container_ok:
         record("ROS topics", "SKIP", "container down")
         return
-    must_exist = ["/led_state"]  # extend as nodes land: /RX/occupancy_grid, /RX/pose, ...
+    # core.launch.py topics. All /crsd-namespaced — the bare /led_state this
+    # checked for was the boat repo's name and always reported FAIL.
+    must_exist = ["/crsd/led_state", "/crsd/pose", "/crsd/fcu_status",
+                  "/crsd/rc_channels"]
     try:
         out = subprocess.run(
             ["docker", "exec", CONTAINER, "bash", "-lc",
