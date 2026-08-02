@@ -21,6 +21,7 @@ import argparse
 import json
 import subprocess
 import time
+from ultralytics import YOLO
 from pathlib import Path
 
 
@@ -33,7 +34,6 @@ def git_sha():
 
 
 def export_engine(weights: str):
-    from ultralytics import YOLO
     model = YOLO(weights)
     path = model.export(format="engine", device=0, half=True)
     print(f"engine exported: {path}")
@@ -61,7 +61,6 @@ def main():
     if not args.data:
         ap.error("--data required for training")
 
-    from ultralytics import YOLO
     model = YOLO(args.base)
     results = model.train(data=args.data, epochs=args.epochs, imgsz=args.imgsz,
                           patience=15)

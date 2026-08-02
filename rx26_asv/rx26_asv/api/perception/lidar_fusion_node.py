@@ -32,6 +32,7 @@ telemetry_bridge (not this node) owns the MAVProxy link.
 import json
 import math
 import time
+import os
 
 import numpy as np
 
@@ -40,6 +41,8 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import String
+
+from ament_index_python.packages import get_package_share_directory
 
 from interfaces.msg import Detection, DetectionArray
 
@@ -149,11 +152,6 @@ class LidarFusionNode(Node):
         driver's MID360_config.json must stay identity. Fail LOUD when both are
         non-identity (points would be transformed twice); WARN if only the driver
         is (safe, but off-convention)."""
-        import json
-        import os
-
-        from ament_index_python.packages import get_package_share_directory
-
         try:
             cfg_path = os.path.join(get_package_share_directory("rx26_asv"),
                                     "config", "MID360_config.json")

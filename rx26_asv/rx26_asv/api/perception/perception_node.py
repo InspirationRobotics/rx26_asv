@@ -5,6 +5,9 @@ Deliberately ONE process (plan §3.5 modules composed in-process): shipping 1080
 frames over DDS at 30 fps would eat the latency budget; only the small
 DetectionArray leaves this node. A throttled annotated debug image is optional.
 
+NOTE: depthai is imported only inside the _start_camera function for CI purposes
+as it is only available in the asv container, installed in the Jetson. 
+
 Startup order (all fail loudly, node exits nonzero — never degrades silently):
   1. oakd_guard.assert_usb_super()      — USB2 would silently halve throughput
   2. Detector(engine)                   — refuses on missing/unmapped classes

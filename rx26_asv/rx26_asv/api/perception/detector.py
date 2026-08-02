@@ -15,6 +15,7 @@ Engines are per-Jetson/per-JetPack: regenerate with tools/training/train_buoy.py
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from ultralytics import YOLO   # available in the asv container
 
 CANONICAL_LABELS = {
     "buoy_off", "buoy_flash_red", "buoy_flash_green", "buoy_flash_blue",
@@ -41,7 +42,6 @@ class Box:
 
 class Detector:
     def __init__(self, model_path: str, class_map_path=None, conf: float = 0.4):
-        from ultralytics import YOLO   # available in the asv container
         self.model = YOLO(model_path)
         self.conf = conf
         self.class_map = load_class_map(class_map_path)

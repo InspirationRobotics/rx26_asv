@@ -1,5 +1,8 @@
 """oakd_guard — OAK-D LR USB3 assertion (fail loudly, never degrade silently).
 
+NOTE: depthai is imported only inside the get_usb_speed function for CI purposes
+as it is only available in the asv container, installed in the Jetson. 
+
 The OAK-D LR must enumerate at USB3 ("SUPER"); at "HIGH" (USB2) stereo throughput
 collapses and the perception pipeline silently underperforms — which corrupts
 objective-1 metrics rather than failing an episode. So the camera node MUST call
