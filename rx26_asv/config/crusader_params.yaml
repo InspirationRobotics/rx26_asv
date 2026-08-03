@@ -68,8 +68,18 @@ telemetry_bridge:
     drop_invert: false                     # [RO]
     rc_stale_timeout: 1.0                  # [RO] s without RC -> trip
     stream_timeout_s: 1.0                  # [RO] = shared.pose_timeout_s; s
-                                           #      before a stale MAVLink stream
-                                           #      stops being republished
+                                           #      before a stale FAST stream
+                                           #      (pose, RC) stops being
+                                           #      republished
+    status_timeout_s: 3.0                  # [RO] same, for the SLOW autopilot
+                                           #      status streams. HEARTBEAT is a
+                                           #      FIXED 1 Hz (no SR* raises it)
+                                           #      and SYS_STATUS runs at
+                                           #      SR*_EXT_STAT (2 Hz here), so
+                                           #      1.0 marks both stale on jitter
+                                           #      alone: /crsd/fcu_status flapped
+                                           #      continuously and consumers
+                                           #      froze on their last value.
 
 perception_node:
   ros__parameters:
@@ -189,21 +199,42 @@ led_node:
 pixhawk_led_status_node:
   ros__parameters:
     estop_channel: 7                       # [RO] SB e-stop switch channel (RC reference)
-    estop_threshold: 1200                  # [RO] us; below = e-stopped (RC loss reads 0)
+    estop_threshold: 1200                  # [RO] us; below = e-stopped. NOT a
+                                           #      reliable RC-loss signal on its
+                                           #      own — an ELRS receiver set to
+                                           #      "Last Position" holds ch7 high
+                                           #      through a dead TX. The node
+                                           #      also fails RED on the
+                                           #      /crsd/rc_link_health bit.
     autonomy_hold_s: 1.0                   # [RO] stay GREEN this long after last autonomy beat
+    input_timeout_s: 2.0                   # [RO] s without a bridge topic -> RED.
+                                           #      Must exceed the bridge's own
+                                           #      status_timeout_s margin; the
+                                           #      bridge republishes at 20 Hz
+                                           #      while a stream is fresh, so 2.0
+                                           #      is ~40 missed messages.
     rate_hz: 5.0                           # [RO] LED state evaluation rate
 
 # ---- rc_heartbeat_watchdog: force-disarm on RC-transmitter link loss (safety) ----
-# Consumes telemetry_bridge topics (/crsd/rc_channels, /crsd/fcu_status) and routes
-# a force-disarm back through the bridge (/crsd/force_disarm) — no own MAVLink conn.
+# Consumes telemetry_bridge topics (/crsd/rc_channels, /crsd/fcu_status,
+# /crsd/rc_link_health) and routes a force-disarm back through the bridge
+# (/crsd/force_disarm) — no own MAVLink conn.
 # Complements ArduPilot FS_THR/FS_GCS and the hardware SB e-stop (defense in depth).
 # All params [RO]: safety config, change here + restart. rc_channel/reset_channel
 # share ch7 (the SB switch) with telemetry_bridge/pixhawk_led as read-only inputs.
+#
+# RECEIVER PREREQUISITE: the ELRS receiver's failsafe must be set to "No Pulses",
+# not "Last Position". Measured on Crusader 2026-08-02 with Last Position, ch7 held
+# 1995 through a full TX power-down and the PWM path below never fired. The
+# /crsd/rc_link_health signal now catches that case, but it is a second line of
+# defense — do not rely on it to paper over a misconfigured receiver.
 rc_heartbeat_watchdog:
   ros__parameters:
     heartbeat_timeout: 1.0                 # [RO] s of stale monitored-channel PWM -> RC link lost
     rc_channel: 7                          # [RO] channel whose valid PWM is the RC heartbeat
-    min_valid_pwm: 900                     # [RO] us; below = no pulses (RC loss reads 0)
+    min_valid_pwm: 900                     # [RO] us; below = no pulses. Only fires
+                                           #      if the receiver actually stops
+                                           #      output — see prerequisite above.
     require_armed: true                    # [RO] only force-disarm when armed
     link_timeout: 3.0                      # [RO] s without any bridge topic -> gateway deemed down
     enable_latch: false                    # [RO] true = hold kill until RC reset toggle clears it

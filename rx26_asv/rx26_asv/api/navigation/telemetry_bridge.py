@@ -4,13 +4,26 @@ Plan §3.1/§3.2. Two jobs, deliberately fused into one node:
 
 1. RX: consume MAVProxy's rebroadcast (pymavlink over UDP — NEVER a serial device;
    the Pixhawk has exactly one owner and it is MAVProxy) and republish as topics:
-     /crsd/pose          interfaces/LatLonHead   (GLOBAL_POSITION_INT)
-     /crsd/fcu_status    interfaces/FcuStatus    (HEARTBEAT)
-     /crsd/rc_channels   interfaces/RcChannels   (RC_CHANNELS)
-     /crsd/autonomy_drop std_msgs/Bool           (latched, TRANSIENT_LOCAL)
+     /crsd/pose           interfaces/LatLonHead  (GLOBAL_POSITION_INT)
+     /crsd/fcu_status     interfaces/FcuStatus   (HEARTBEAT)
+     /crsd/rc_channels    interfaces/RcChannels  (RC_CHANNELS)
+     /crsd/rc_link_health std_msgs/Bool          (SYS_STATUS RC-receiver bit)
+     /crsd/autonomy_drop  std_msgs/Bool          (latched, TRANSIENT_LOCAL)
    Other nodes subscribe to these topics instead of opening their own MAVLink
    connection — this node existing is what keeps the "no second consumer racing
    the ROS graph" rule enforceable.
+
+   Why SYS_STATUS is republished (measured on Crusader, 2026-08-02): the RC-loss
+   detection in rc_heartbeat_watchdog and pixhawk_led_status_node both rested on
+   "ArduPilot reports 0 PWM on the monitored channel when the transmitter dies".
+   That is NOT true on this airframe. With the ELRS receiver holding last
+   position, ch7 stayed at 1995 through a full transmitter power-down: the
+   watchdog never declared link loss, never force-disarmed, and the LED sat
+   YELLOW on a boat with no pilot. SYS_STATUS's MAV_SYS_STATUS_SENSOR_RC_RECEIVER
+   health bit is ArduPilot's OWN failsafe verdict and does not depend on what the
+   receiver puts on the wire, so it catches the case the PWM check cannot. It is
+   strictly ADDITIVE — consumers OR it with the PWM check and fall back to
+   PWM-only when the bit is absent, so it can never mask a detection.
 
 2. TX: the ONLY sanctioned path for RC overrides. Nodes publish
    interfaces/RcChannels on /crsd/rc_override; this node forwards them to the
@@ -35,8 +48,19 @@ Parameters:
   drop_threshold   (int,  default 1700)  us; >= trips (or <= if drop_invert)
   drop_invert      (bool, default False)
   rc_stale_timeout (float, default 1.0)  s without RC_CHANNELS -> trip
-  stream_timeout_s (float, default 1.0)  s without a frame on a stream before
-                                         that stream stops being republished
+  stream_timeout_s (float, default 1.0)  s without a frame on a FAST stream
+                                         (pose, RC) before it stops being
+                                         republished
+  status_timeout_s (float, default 3.0)  same, for the SLOW autopilot status
+                                         streams (HEARTBEAT, SYS_STATUS)
+
+Why two timeouts: HEARTBEAT is a FIXED 1 Hz that no SR* parameter can raise, and
+SYS_STATUS runs at SR*_EXT_STAT (2 Hz on Crusader). Judging either against the
+1.0 s pose/RC timeout marks it stale on jitter alone — /crsd/fcu_status then
+flapped in and out of republication continuously, spamming the "is MAVProxy still
+up?" error over real faults and leaving every consumer to freeze on its last
+cached value. The fast streams keep the tight timeout because that is where
+frozen data is most dangerous.
 
 Staleness rule (safety-relevant): each RX stream is republished ONLY while it
 is fresh, and its header carries the stamp captured at RECEIPT. Rebroadcasting
@@ -83,6 +107,9 @@ PARAM_SPEC = {
     "stream_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
                              description="s without a MAVLink frame before "
                                          "that stream stops being republished"),
+    "status_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
+                             description="stream_timeout_s for the slow status "
+                                         "streams (HEARTBEAT 1 Hz, SYS_STATUS)"),
 }
 
 MISSION_MSG_TYPES = ("MISSION_REQUEST", "MISSION_REQUEST_INT", "MISSION_ACK",
@@ -128,6 +155,9 @@ class TelemetryBridge(Node):
         self.pose_pub = self.create_publisher(LatLonHead, "/crsd/pose", 10)
         self.status_pub = self.create_publisher(FcuStatus, "/crsd/fcu_status", 10)
         self.rc_pub = self.create_publisher(RcChannels, "/crsd/rc_channels", 10)
+        # ArduPilot's own RC-receiver failsafe verdict — the signal that catches
+        # a dead transmitter whose receiver keeps putting valid PWM on the wire.
+        self.rc_health_pub = self.create_publisher(Bool, "/crsd/rc_link_health", 10)
         self.drop_pub = self.create_publisher(Bool, "/crsd/autonomy_drop", latched_qos)
 
         self.create_subscription(RcChannels, "/crsd/rc_override",
@@ -169,10 +199,18 @@ class TelemetryBridge(Node):
         # rc_heartbeat_watchdog's RC-loss AND gateway-down detection, and feeds
         # the avoidance stack a frozen pose. See stream_cache.py.
         self._lock = threading.Lock()
-        t_out = p["stream_timeout_s"]
-        self._pose = StreamCache(t_out)    # (lat, lon, heading_deg, speed_mps)
-        self._status = StreamCache(t_out)  # (mode_str, armed, system_status)
-        self._rc = StreamCache(t_out)      # list[int] 18
+        t_fast = p["stream_timeout_s"]
+        t_slow = p["status_timeout_s"]
+        self._pose = StreamCache(t_fast)        # (lat, lon, heading_deg, speed_mps)
+        self._rc = StreamCache(t_fast)          # list[int] 18
+        # Slow streams: HEARTBEAT is a fixed 1 Hz, SYS_STATUS runs at
+        # SR*_EXT_STAT. Timing either against t_fast flaps permanently.
+        self._status = StreamCache(t_slow)      # (mode_str, armed, system_status)
+        self._rc_health = StreamCache(t_slow)   # bool: RC receiver healthy
+        # Set once if SYS_STATUS never advertises the RC-receiver bit, so a
+        # PWM-only fallback is LOUD rather than an unnoticed missing safety input.
+        self._rc_health_absent = False
+        self._rc_health_warned = False
 
         from pymavlink import mavutil
         self._mavutil = mavutil
@@ -239,6 +277,20 @@ class TelemetryBridge(Node):
                     self._rc.set(rc, t, stamp)
                     if self.latch.rc_sample(rc, t):
                         self._handle_trip()
+                elif mtype == "SYS_STATUS":
+                    # Only the RC-receiver health bit is republished; the rest of
+                    # SYS_STATUS has no consumer here and shipping it would just
+                    # be another stream to keep fresh.
+                    bit = self._mavutil.mavlink.MAV_SYS_STATUS_SENSOR_RC_RECEIVER
+                    if msg.onboard_control_sensors_present & bit:
+                        self._rc_health.set(
+                            bool(msg.onboard_control_sensors_health & bit),
+                            t, stamp)
+                    else:
+                        # Autopilot does not report RC health at all: consumers
+                        # degrade to the PWM check. Never publish a fabricated
+                        # True — absence must look like absence.
+                        self._rc_health_absent = True
 
     # ---------- publishing ----------
 
@@ -248,19 +300,32 @@ class TelemetryBridge(Node):
             pose = self._pose.get(t)
             status = self._status.get(t)
             rc = self._rc.get(t)
+            rc_health = self._rc_health.get(t)
             # one loud line per stream the moment it goes stale — a silent
             # gateway must be diagnosable from the log, and consumers that
             # judge health by arrival need the silence to be real
-            stale = [name for name, c in (("pose", self._pose),
-                                          ("fcu_status", self._status),
-                                          ("rc_channels", self._rc))
+            stale = [(name, c.timeout_s)
+                     for name, c in (("pose", self._pose),
+                                     ("fcu_status", self._status),
+                                     ("rc_channels", self._rc),
+                                     ("rc_link_health", self._rc_health))
                      if c.went_stale(t)]
+            warn_absent = self._rc_health_absent and not self._rc_health_warned
+            if warn_absent:
+                self._rc_health_warned = True
             if self.latch.tick(t):
                 self._handle_trip()
-        for name in stale:
+        for name, timeout_s in stale:
             self.get_logger().error(
-                f"MAVLink stream {name!r} stale (> {self._pose.timeout_s:.1f}s) "
+                f"MAVLink stream {name!r} stale (> {timeout_s:.1f}s) "
                 "— NOT republishing; is MAVProxy still up?")
+        if warn_absent:
+            self.get_logger().warn(
+                "SYS_STATUS does not advertise MAV_SYS_STATUS_SENSOR_RC_RECEIVER "
+                "— /crsd/rc_link_health will not be published and RC-loss "
+                "detection degrades to the ch7 PWM check alone. On a receiver "
+                "whose failsafe holds last position that check cannot see a dead "
+                "transmitter.")
         if pose is not None:
             m = LatLonHead()
             m.header.stamp = self._pose.stamp
@@ -276,6 +341,8 @@ class TelemetryBridge(Node):
             m.header.stamp = self._rc.stamp
             m.channels = rc
             self.rc_pub.publish(m)
+        if rc_health is not None:
+            self.rc_health_pub.publish(Bool(data=rc_health))
 
     def _publish_drop_state(self):
         self.drop_pub.publish(Bool(data=not self.latch.allowed))

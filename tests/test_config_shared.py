@@ -69,6 +69,32 @@ def test_pose_timeout_consumers_match_shared():
     assert bridge["stream_timeout_s"] == want
 
 
+def test_slow_status_streams_get_a_looser_timeout_than_pose():
+    """HEARTBEAT is a FIXED 1 Hz — no SR* parameter raises it — and SYS_STATUS
+    runs at SR*_EXT_STAT (2 Hz on Crusader). Judging either against the 1.0 s
+    pose/RC timeout marks it stale on jitter alone, which flaps /crsd/fcu_status
+    in and out of republication and leaves consumers frozen on a cached value.
+    Two clear HEARTBEAT periods is the floor."""
+    bridge = crsd_config.node_params("telemetry_bridge")
+    assert bridge["status_timeout_s"] >= 2.0, \
+        "status_timeout_s must clear at least two 1 Hz HEARTBEAT periods"
+    assert bridge["status_timeout_s"] > bridge["stream_timeout_s"], \
+        "the slow status streams need a looser timeout than pose/RC, not tighter"
+
+
+def test_led_input_timeout_outlives_the_bridge_status_timeout():
+    """The LED must not call an input stale before telemetry_bridge would have
+    stopped vouching for it, or it fails RED on streams the bridge still
+    considers healthy — a red strip on a working boat teaches the crew to
+    ignore the strip."""
+    led = crsd_config.node_params("pixhawk_led_status_node")
+    bridge = crsd_config.node_params("telemetry_bridge")
+    assert led["input_timeout_s"] >= bridge["stream_timeout_s"], \
+        "LED input_timeout_s is tighter than the bridge's fast-stream timeout"
+    assert led["input_timeout_s"] > 1.0, \
+        "input_timeout_s must clear normal 20 Hz republish jitter"
+
+
 def test_monitor_thresholds_match_shared_section():
     shared = crsd_config.shared_params()
     mk = crsd_config.monitor_kwargs()

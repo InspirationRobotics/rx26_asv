@@ -12,22 +12,35 @@ topics and routes its one command — a force-disarm — back through the bridge
 it adds no MAVLink connection and cannot race the graph (single-gateway rule,
 rx26_asv/README.md).
 
-  in:  /crsd/rc_channels   (RcChannels)  monitored-channel PWM = the RC heartbeat
-       /crsd/fcu_status    (FcuStatus)   armed state
+  in:  /crsd/rc_channels    (RcChannels) monitored-channel PWM = the RC heartbeat
+       /crsd/fcu_status     (FcuStatus)  armed state
+       /crsd/rc_link_health (Bool)       ArduPilot's RC-receiver failsafe verdict
   out: /crsd/force_disarm  (Bool)        request bridge to force-disarm (UN-gated
                                          by the autonomy-drop latch on purpose)
        /crsd/kill_active   (Bool)        watchdog kill state, for observability
 
-How link health is judged: the RC link is alive as long as the monitored channel
-(`rc_channel`, the SB arm/e-stop switch by default) carries a valid PWM. On this
-hardware ArduPilot reports 0 for that channel when the transmitter is out of range
-or powered off — the same "RC loss reads 0" behaviour `pixhawk_led_status_node`
-relies on — so a dropout shows up as `pwm < min_valid_pwm`, republished by
-telemetry_bridge on `/crsd/rc_channels`. (The boat-repo original also consulted
-the SYS_STATUS RC-receiver health bit; telemetry_bridge does not republish
-SYS_STATUS, so that path is dropped. The PWM-zero signal is this repo's canonical
-RC-loss indicator; add SYS_STATUS republishing to the bridge if a second signal
-is ever wanted.)
+How link health is judged — TWO independent signals, OR'd:
+
+  1. `rc_channel` PWM below `min_valid_pwm` on /crsd/rc_channels.
+  2. ArduPilot's SYS_STATUS RC-receiver health bit, republished by
+     telemetry_bridge on /crsd/rc_link_health.
+
+Signal 2 is not optional belt-and-braces; signal 1 alone is BROKEN on this boat.
+The original code (and the comment that used to sit here) asserted "ArduPilot
+reports 0 for that channel when the transmitter is out of range or powered off",
+and dropped the SYS_STATUS path the boat-repo original had. Measured on Crusader
+2026-08-02: with the ELRS receiver's failsafe holding last position, ch7 read
+1995 continuously through a full transmitter power-down. `monitored_valid` never
+went false, `_link_lost` never fired, and this watchdog did not force-disarm a
+boat with no pilot. Whether a receiver zeroes its outputs on link loss is a
+RECEIVER CONFIG choice (ELRS "No Pulses" vs "Last Position"), so it can never be
+the sole basis for a safety interlock. The SYS_STATUS bit is ArduPilot's own
+failsafe state and is independent of what the receiver puts on the wire.
+
+Signal 2 is strictly ADDITIVE: unknown (autopilot does not advertise the bit) and
+stale both fall back to the PWM check, so it can only ever add a way to notice RC
+loss, never mask one. Set the receiver to "No Pulses" as well — defense in depth
+means both signals working, not one covering for the other.
 
 If nothing confirms the link for `heartbeat_timeout` seconds while the vehicle is
 ARMED, the watchdog requests a force-disarm (motors off, same as the kill button).
@@ -112,7 +125,10 @@ class RCHeartbeatWatchdog(Node):
         self.kill_pub = self.create_publisher(Bool, "/crsd/kill_active", 10)
         self.create_subscription(RcChannels, "/crsd/rc_channels", self._rc_cb, 10)
         self.create_subscription(FcuStatus, "/crsd/fcu_status", self._fcu_cb, 10)
+        self.create_subscription(Bool, "/crsd/rc_link_health", self._health_cb, 10)
 
+        self.rc_link_healthy = None    # None = autopilot does not report the bit
+        self.health_t = 0.0
         self.last_disarm_req = 0.0
         self.last_kill_published = None
         self.last_status_log = 0.0
@@ -123,12 +139,42 @@ class RCHeartbeatWatchdog(Node):
             f"{self.core.cfg.heartbeat_timeout:.1f}s latch={self.core.cfg.enable_latch}")
 
     # ---------------- topic intake ----------------
+    def _health_cb(self, msg: Bool):
+        self.rc_link_healthy = msg.data
+        self.health_t = time.monotonic()
+
+    def _rc_health_ok(self, now: float) -> bool:
+        """The SYS_STATUS RC-receiver verdict, or True when we do not have one.
+
+        False ONLY on a fresh, explicit unhealthy report. Unknown (the autopilot
+        never advertised the bit — telemetry_bridge warns loudly about that) and
+        stale both return True so the PWM check remains the decider. This signal
+        may only ever ADD a detection, never suppress one.
+        """
+        if self.rc_link_healthy is None:
+            return True
+        if (now - self.health_t) > self.core.cfg.link_timeout:
+            return True
+        return self.rc_link_healthy
+
     def _rc_cb(self, msg: RcChannels):
-        monitored_valid = (len(msg.channels) >= self.rc_channel
-                           and msg.channels[self.rc_channel - 1] >= self.min_valid_pwm)
+        now = time.monotonic()
+        pwm_ok = (len(msg.channels) >= self.rc_channel
+                  and msg.channels[self.rc_channel - 1] >= self.min_valid_pwm)
+        # A receiver whose failsafe holds last position keeps pwm_ok True through
+        # a dead transmitter — see the module docstring. The autopilot's own
+        # RC-receiver health bit is the signal that does not lie about that.
+        health_ok = self._rc_health_ok(now)
+        if pwm_ok and not health_ok:
+            self.get_logger().error(
+                f"RC link declared LOST by ArduPilot (SYS_STATUS RC-receiver "
+                f"unhealthy) while ch{self.rc_channel} still reads valid PWM — "
+                "receiver failsafe is holding last position; set it to No Pulses",
+                throttle_duration_sec=2.0)
+        monitored_valid = pwm_ok and health_ok
         reset_pwm = (msg.channels[self.reset_channel - 1]
                      if len(msg.channels) >= self.reset_channel else 0)
-        self.core.note_rc(time.monotonic(), monitored_valid, reset_pwm)
+        self.core.note_rc(now, monitored_valid, reset_pwm)
 
     def _fcu_cb(self, msg: FcuStatus):
         self.core.note_fcu(time.monotonic(), msg.armed)
@@ -181,9 +227,12 @@ class RCHeartbeatWatchdog(Node):
         if now - self.last_status_log < 5.0:
             return
         self.last_status_log = now
+        health = ("unknown" if self.rc_link_healthy is None
+                  else ("ok" if self._rc_health_ok(now) else "LOST"))
         self.get_logger().info(
             f"armed={self.core.armed} rc_lost={link_lost} killed={self.core.killed} "
-            f"bridge_ok={bridge_ok} rc_age={now - self.core.last_rc_ok:.1f}s")
+            f"bridge_ok={bridge_ok} rc_health={health} "
+            f"rc_age={now - self.core.last_rc_ok:.1f}s")
 
 
 def main(args=None):
