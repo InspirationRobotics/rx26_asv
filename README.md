@@ -26,7 +26,7 @@ instead of stopping at the first one it finds.
 ```
 ~/robotx_ws/                   # colcon WORKSPACE (not this repo; holds build/ install/ log/)
 |-- missions/                  # mission JSON files containing path waypoints, converted to 
-                               #   JSON from imported .plan files
+|                              #   JSON from imported .plan files
 |-- models/                    # per-Jetson TensorRT engines (gitignored, copied in out-of-band)
 |-- src/
      |-- rx26_asv/             # <- THIS REPO
