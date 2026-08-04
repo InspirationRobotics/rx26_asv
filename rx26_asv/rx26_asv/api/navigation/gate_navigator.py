@@ -129,10 +129,45 @@ class GateNavigator(Node):
 
     @staticmethod
     def _load_waypoints(mission_file):
+        """Parse the mission file, or raise naming the exact problem.
+
+        Every failure here is FATAL by design. gate_wp_indices is positional, so
+        a partially-loaded course renumbers which waypoints are gates — the node
+        would hunt for a gate at the wrong place instead of failing. Same reason
+        the .plan converter refuses to emit a short list.
+        """
         if not mission_file:
             return []
-        data = json.loads(Path(mission_file).read_text())
-        return [(float(a), float(b)) for a, b in data.get("waypoints", [])]
+        path = Path(mission_file)
+        try:
+            data = json.loads(path.read_text())
+        except FileNotFoundError:
+            raise RuntimeError(
+                f"mission_file {path} does not exist. Generate one from a QGC "
+                f".plan:\n  python3 tools/scripts/plan_to_mission.py "
+                f"<course.plan> -o {path}")
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"mission_file {path} is not valid JSON: {e}")
+
+        if not isinstance(data, dict) or "waypoints" not in data:
+            raise RuntimeError(
+                f'mission_file {path} has no "waypoints" key — expected '
+                '{"waypoints": [[lat, lon], ...]}')
+
+        waypoints = []
+        for i, pair in enumerate(data["waypoints"]):
+            try:
+                lat, lon = (float(v) for v in pair)
+            except (TypeError, ValueError):
+                raise RuntimeError(
+                    f"mission_file {path} waypoint {i} is not a [lat, lon] "
+                    f"pair: {pair!r}")
+            if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+                raise RuntimeError(
+                    f"mission_file {path} waypoint {i} = ({lat}, {lon}) out of "
+                    "range — lat/lon transposed?")
+            waypoints.append((lat, lon))
+        return waypoints
 
     # ---------- inputs ----------
 

@@ -604,8 +604,14 @@ buoy-gate midpoints. **Status: UNTESTED on water.**
 
 Order of operations:
 
+Order of operations:
+
 1. Boot chain up (§1) — MAVProxy and container are automatic.
-2. Upload initial waypoints from QGC / Mission Planner.
+2. Plan the course in QGC / Mission Planner, save the `.plan`, and convert it —
+   `gate_navigator` reads a **file**, not a MAVLink mission download:
+
+   ```bash
+   python3 tools/scripts/plan_to_mission.py course.plan -o ~/missions/mission_1.json
 3. Core stack: `ros2 launch rx26_asv core.launch.py`
 4. Perception: `ros2 launch rx26_asv camera.launch.py`
 5. Confirm detections before anything moves.

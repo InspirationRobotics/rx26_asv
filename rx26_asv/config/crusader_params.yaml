@@ -63,7 +63,7 @@ shared:
 telemetry_bridge:
   ros__parameters:
     mav_endpoint: "udp:127.0.0.1:14551"   # [RO] MAVProxy rebroadcast, never serial
-    drop_channel: 7                        # [RO] autonomy-drop RC channel (1..18)
+    drop_channel: 9                        # [RO] RC-override drop RC channel (1..18)
     drop_threshold: 1700                   # [RO] us; crossing trips the latch
     drop_invert: false                     # [RO]
     rc_stale_timeout: 1.0                  # [RO] s without RC -> trip
@@ -158,6 +158,14 @@ mission_planner_node:
     vehicle_id: "crusader"                 # [RO]
     tick_rate_hz: 5.0                      # [RO]
     mission_file: ""                       # [RO] JSON {"waypoints": [[lat,lon],..]}
+                                           #      To generate from a QGC .plan:
+                                           #      tools/scripts/plan_to_mission.py
+                                           #      Convention: ~/missions/<name>.json
+                                           #      — per-venue data, kept OUT of the
+                                           #      repo. Deliberately left empty: the
+                                           #      node then fails at startup with
+                                           #      instructions, which beats a default
+                                           #      path that dies on FileNotFoundError.
     wp_radius: 2.0                         # [RO] mirrors ArduRover WP_RADIUS
     loiter_radius: 3.0                     # [RO] Mission-4 assist loiter
     loiter_min_s: 5.0                      # [RO] dwell before READINESS
