@@ -160,9 +160,17 @@ mission_planner_node:
     mission_file: ""                       # [RO] JSON {"waypoints": [[lat,lon],..]}
                                            #      To generate from a QGC .plan:
                                            #      tools/scripts/plan_to_mission.py
-                                           #      Convention: ~/missions/<name>.json
-                                           #      — per-venue data, kept OUT of the
-                                           #      repo. Deliberately left empty: the
+                                           #      Convention:
+                                           #      /root/robotx_ws/missions/<name>.json
+                                           #      — workspace level, beside models/;
+                                           #      per-venue data, kept OUT of the repo.
+                                           #      ~/robotx_ws is the only bind-mounted
+                                           #      host path, so anywhere else is either
+                                           #      invisible to the node or lost on
+                                           #      `docker rm`. Absolute path only: the
+                                           #      node does NOT expand `~`, so a tilde
+                                           #      here is a directory literally named
+                                           #      `~`. Deliberately left empty: the
                                            #      node then fails at startup with
                                            #      instructions, which beats a default
                                            #      path that dies on FileNotFoundError.
@@ -278,7 +286,17 @@ dp_hold:
 gate_navigator:
   ros__parameters:
     mission_file: ""                       # [RO] JSON {"waypoints": [[lat,lon],...]}; required
-    gate_wp_indices: [0, 1]                # [RO] zero-based waypoints treated as gates
+                                           #      Same convention as
+                                           #      mission_planner_node above:
+                                           #      /root/robotx_ws/missions/<name>.json
+                                           #      (workspace level, absolute path — `~`
+                                           #      is NOT expanded). Generate with
+                                           #      tools/scripts/plan_to_mission.py.
+    gate_wp_indices: [0, 1]                # [RO] zero-based waypoints treated as gates;
+                                           #      positional, so they renumber if the
+                                           #      waypoint list changes — re-read the
+                                           #      converter's printed indices after any
+                                           #      re-plan.
     pose_timeout_s: 1.0                    # [RO] = shared.pose_timeout_s;
                                            #      stale pose -> stop commanding
     cmd_period_s: 1.0                      # [RO] min seconds between guided setpoints

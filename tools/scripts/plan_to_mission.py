@@ -10,7 +10,15 @@ coordinate lives in `params[4]` (lat) and `params[5]` (lon) — MAVLink param5/6
 zero-indexed. This converts one to the other so the QGC planning workflow still
 produces something the ROS nodes can load.
 
-    python3 plan_to_mission.py buoy_field.plan -o ~/missions/mission_1.json
+    python3 plan_to_mission.py buoy_field.plan -o ~/robotx_ws/missions/mission_1.json
+
+WHERE THE OUTPUT GOES: the workspace root, beside `models/` — NOT `~/missions/`.
+`~/robotx_ws` is the only host directory bind-mounted into the `asv` container, so
+it is the only place a mission file is both persistent across `docker rm` and
+visible from host and container alike. Set the node's `mission_file` param to the
+CONTAINER path, `/root/robotx_ws/missions/<name>.json`: neither gate_navigator nor
+mission_planner_node expands `~`, so a literal tilde in that param is a directory
+named `~` and fails.
 
 The printed index list is what `gate_wp_indices` refers to (zero-based), so read
 it before setting that param.

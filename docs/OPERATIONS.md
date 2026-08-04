@@ -599,10 +599,8 @@ needs to read — confirm what option 165 maps to in Rover 4.6.3 before building
 
 ## 19. `gate_navigator` — Mission 1 transit
 
-GUIDED-mode gate navigation: drives QGC-uploaded waypoints and corrects toward
-buoy-gate midpoints. **Status: UNTESTED on water.**
-
-Order of operations:
+GUIDED-mode gate navigation: drives waypoints from a **mission file** and corrects
+toward buoy-gate midpoints. **Status: UNTESTED on water.**
 
 Order of operations:
 
@@ -611,7 +609,25 @@ Order of operations:
    `gate_navigator` reads a **file**, not a MAVLink mission download:
 
    ```bash
-   python3 tools/scripts/plan_to_mission.py course.plan -o ~/missions/mission_1.json
+   python3 tools/scripts/plan_to_mission.py course.plan -o ~/robotx_ws/missions/mission_1.json
+   ```
+
+   Mission files live at the **workspace** level (`~/robotx_ws/missions/`), beside
+   `models/` — see §13's note on why per-venue and per-device artifacts stay out of
+   the repo. `~/robotx_ws` is the only host path bind-mounted into the container, so
+   anywhere else is either invisible to the nodes or lost on `docker rm`.
+
+   Then point the node at the **container** path and restart it (`mission_file` is
+   `[RO]`, so `ros2 param set` is rejected):
+
+   ```yaml
+   gate_navigator:
+     ros__parameters:
+       mission_file: "/root/robotx_ws/missions/mission_1.json"
+   ```
+
+   Use the absolute path, not `~` — the node does not expand it.
+   The converter prints each waypoint's index; those are what `gate_wp_indices` refers to.
 3. Core stack: `ros2 launch rx26_asv core.launch.py`
 4. Perception: `ros2 launch rx26_asv camera.launch.py`
 5. Confirm detections before anything moves.
