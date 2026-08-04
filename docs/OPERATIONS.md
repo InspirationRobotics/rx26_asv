@@ -212,10 +212,17 @@ QGroundControl connects by itself.
 | **SA** | 5 | pressed in = Pixhawk control, released = Teensy control. **Keep pressed in** — the Teensy is not in use. |
 | **SB** | 7 | down = **e-stop** (RED, ~994) · middle = released (~1498) · up = **arm** (YELLOW + arming tune, ~1995). `RCx_OPTION=165`. |
 | **SC** | 8 | down = Manual · middle = Hold (boat actively stops) · up = **Guided** (GREEN — needs a mission loaded and GPS lock, else the mode change is rejected). |
-| **SE** | 9 | **PROPOSED, NOT BUILT** — autonomy-drop for RC-override nodes. See §18. |
+| **SE** | 9 | **autonomy-drop** for RC-override nodes — software side built and wired (`drop_channel: 9`), **detents not yet bench-verified**. See §18. |
 
 **SB down is the real e-stop.** It kills motors instantly in any mode,
 independent of any node or software, at full RC range.
+
+> **ch7 is arm/e-stop only — never the autonomy-drop channel.** The latch used to
+> read ch7, whose normal *armed* position (1995) is above `drop_threshold`. It
+> therefore sat permanently tripped and silently dropped every RC override and
+> every GUIDED setpoint exactly when the boat was armed, so `dp_hold` and
+> `gate_navigator` could not actuate at all. Pinned by
+> `tests/test_config_shared.py::test_drop_channel_is_not_the_estop_channel`.
 
 ---
 
@@ -583,17 +590,32 @@ While `dp_hold` (or any RC-override node) runs, it overrides your sticks.
 Flipping SC to Manual does **not** return control — the override keeps winning.
 To take back control you must Ctrl+C the node (needs WiFi) **or** e-stop.
 
-**Until the autonomy-drop switch exists, do not run `dp_hold` — or any
-RC-override mechanism — beyond WiFi range.** This is a standing constraint, not
-a field-ops preference.
+**Until Gate G1 is signed off, do not run `dp_hold` — or any RC-override
+mechanism — beyond WiFi range.** This is a standing constraint, not a field-ops
+preference. Software being wired is not the gate; the bench matrix is.
 
-The planned fix is an RC-based, software-latched autonomy-drop switch read via a
-Pixhawk RC channel, so it works out of WiFi range. `api/common/drop_latch.py` and
-`telemetry_bridge`'s latched `/crsd/autonomy_drop` implement the software side;
-the switch assignment and bench sign-off are Gate G1
-([G1_bench_procedure.md](G1_bench_procedure.md)). **RC7 already carries
-arm/e-stop** (`RCx_OPTION=165`, 994/1498/1995), which is most of what the latch
-needs to read — confirm what option 165 maps to in Rover 4.6.3 before building on it.
+The fix is an RC-based, software-latched autonomy-drop switch read via a Pixhawk
+RC channel, so it works out of WiFi range. `api/common/drop_latch.py` and
+`telemetry_bridge`'s latched `/crsd/autonomy_drop` implement the software side.
+
+**Status: software wired, bench sign-off outstanding.**
+
+- Assigned to **SE / ch9** (`telemetry_bridge.drop_channel: 9`). Deliberately not
+  ch7 — see the note under §6. ch9 is also outside the 1–8 window
+  `RC_CHANNELS_OVERRIDE` can write, so no override mechanism in the graph can
+  drive the latch's own input.
+- The latch trips on: switch crossing `drop_threshold`, channel value 0, RC data
+  stale, **and** a fresh `SYS_STATUS` RC-receiver *unhealthy* verdict. That last
+  one is not redundancy — with an ELRS receiver set to "Last Position", the PWM
+  and staleness checks are both blind to a dead transmitter (§ the 2026-08-02
+  session report). The verdict is strictly additive: unknown and stale both fall
+  back to the PWM checks, so it can only add a trip, never mask one.
+- **Not yet verified:** that SE actually drives ch9 on this transmitter, and what
+  µs each detent produces. Record them in
+  [G1_bench_procedure.md](G1_bench_procedure.md) test 3 before relying on it — a
+  drop switch that silently does nothing is worse than no drop switch, because
+  the crew believes they have one.
+- Still open: confirm what `RC7_OPTION=165` maps to in Rover 4.6.3.
 
 ---
 
@@ -684,7 +706,9 @@ Honest list — these are known-wrong, not merely untested:
 - **Buoy model not retrained** on our buoys (§13). This bottlenecks every
   collision-avoidance number.
 - **MID360 not yet on its own NIC**, extrinsic not calibrated (§14).
-- **Autonomy-drop switch not built** (§18) — blocks `dp_hold` field testing.
+- **Autonomy-drop switch not bench-verified** (§18). Software is wired and
+  assigned to SE/ch9, but nobody has confirmed SE drives ch9 or recorded its
+  detent values. Gate G1 is unsigned, so `dp_hold` field testing stays blocked.
 
 ### Confirmed hardware (2026-07-28)
 

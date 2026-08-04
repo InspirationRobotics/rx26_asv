@@ -2,7 +2,8 @@
 from rx26_asv.api.common.drop_latch import DropLatch, DropState
 
 
-def sample(latch, value, t, ch=7):
+def sample(latch, value, t, ch=None):
+    ch = latch.channel if ch is None else ch
     channels = [1500] * 18
     channels[ch - 1] = value
     return latch.rc_sample(channels, t)
@@ -76,3 +77,98 @@ def test_short_channel_list_counts_as_lost():
     l = DropLatch(channel=7)
     assert l.rc_sample([1500] * 4, 0.0) in (True, False)
     assert not l.allowed                       # missing channel -> value 0 path
+
+
+def test_default_channel_is_outside_the_override_writable_range():
+    """_send_override truncates to 8 channels, so a default drop channel <= 8
+    would be one an override mechanism could drive."""
+    assert DropLatch().channel >= 9
+
+
+# --- SYS_STATUS RC-receiver health verdict (the 2026-08-02 blind spot) ---
+#
+# The scenario every test below encodes: ELRS receiver failsafe set to "Last
+# Position", transmitter powered OFF. RC_CHANNELS keeps arriving at 20 Hz with
+# the held stick values, so neither the zero check nor the staleness check can
+# fire. Only ArduPilot's own verdict sees it.
+
+
+def test_held_pwm_through_dead_tx_does_not_trip_without_the_health_bit():
+    """Documents the defect itself: with PWM alone, a dead transmitter whose
+    receiver holds last position leaves the latch ACTIVE. If this ever starts
+    failing, the PWM path gained a detection and this test should be revisited —
+    it is not asserting desirable behaviour, it is pinning the gap the health
+    verdict exists to close."""
+    l = DropLatch(threshold=1700, stale_timeout=1.0)
+    sample(l, 1000, t=0.0)
+    assert l.allowed
+    for i in range(1, 40):                     # 2 s of held, valid PWM
+        sample(l, 1000, t=i * 0.05)
+        assert l.tick(i * 0.05) is False
+    assert l.allowed                           # <-- the boat has no pilot
+
+
+def test_unhealthy_verdict_trips_the_same_scenario():
+    l = DropLatch(threshold=1700, stale_timeout=1.0, health_timeout=3.0)
+    sample(l, 1000, t=0.0)
+    assert l.allowed
+    assert l.note_rc_health(False, t=0.5) is True
+    assert l.dropped and "UNHEALTHY" in l.trip_reason
+    sample(l, 1000, t=0.6)                     # held PWM keeps arriving
+    assert not l.allowed                       # latched, as designed
+
+
+def test_unknown_verdict_is_never_treated_as_healthy_or_unhealthy():
+    """None = the autopilot never advertised the bit. Strictly additive: it must
+    neither trip nor promote, leaving the PWM checks the sole decider."""
+    l = DropLatch(threshold=1700)
+    assert l.note_rc_health(None, t=0.0) is False
+    sample(l, 1000, t=0.1)
+    assert l.allowed                           # PWM path still governs
+    assert l.tick(0.2) is False
+
+
+def test_stale_verdict_falls_back_to_the_pwm_checks():
+    """A verdict older than health_timeout must stop trip-ing on its own, or a
+    single unhealthy report would latch the boat forever after SYS_STATUS
+    recovers or stops."""
+    l = DropLatch(threshold=1700, stale_timeout=1.0, health_timeout=3.0)
+    sample(l, 1000, t=0.0)
+    l.note_rc_health(False, t=0.1)             # trips
+    ok, reason = l.reset(t=0.2)
+    assert not ok and "unhealthy" in reason    # fresh verdict blocks reset
+    sample(l, 1000, t=5.0)                     # verdict now stale (>3 s)
+    ok, _ = l.reset(t=5.1)
+    assert ok and l.allowed                    # falls back to PWM, reset allowed
+
+
+def test_unhealthy_at_boot_blocks_without_latching():
+    """A benign boot order (nodes up before the transmitter) must not require an
+    operator service call — stay STARTUP, promote once the link is real."""
+    l = DropLatch(threshold=1700, health_timeout=3.0)
+    assert l.note_rc_health(False, t=0.0) is False
+    sample(l, 1000, t=0.1)                     # valid-looking held PWM
+    assert not l.allowed                       # must NOT promote on a dead link
+    assert l.state == DropState.STARTUP        # blocked, not latched
+    l.note_rc_health(True, t=0.2)              # transmitter comes up
+    sample(l, 1000, t=0.3)
+    assert l.allowed
+
+
+def test_tick_enforces_health_regardless_of_arrival_order():
+    l = DropLatch(threshold=1700, stale_timeout=1.0, health_timeout=3.0)
+    sample(l, 1000, t=0.0)
+    assert l.allowed
+    l._health, l._health_t = False, 0.1        # verdict landed without a trip
+    assert l.tick(0.2) is True                 # tick must still catch it
+    assert "UNHEALTHY" in l.trip_reason
+
+
+def test_health_verdict_can_only_add_trips_never_suppress_one():
+    """A HEALTHY verdict must not rescue a latch the PWM path already tripped."""
+    l = DropLatch(threshold=1700)
+    sample(l, 1000, t=0.0)
+    sample(l, 1900, t=1.0)                     # pilot commanded drop
+    assert l.dropped
+    l.note_rc_health(True, t=1.1)
+    assert l.dropped and not l.allowed

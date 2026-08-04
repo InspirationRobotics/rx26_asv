@@ -95,6 +95,43 @@ def test_led_input_timeout_outlives_the_bridge_status_timeout():
         "input_timeout_s must clear normal 20 Hz republish jitter"
 
 
+def test_drop_channel_is_not_the_estop_channel():
+    """ch7 carries RC7_OPTION=165 (arm/e-stop). Its NORMAL ARMED position (1995)
+    is above drop_threshold, so pointing the autonomy-drop latch at ch7 leaves it
+    permanently tripped: every RC override and every GUIDED setpoint is dropped
+    at the bridge exactly when the boat is armed and expected to move. dp_hold
+    and gate_navigator could not actuate at all, and nothing in the logs says
+    "your drop channel is your arm channel" — it just looks like the nodes do
+    nothing. Found in the 2026-08-02 session review."""
+    bridge = crsd_config.node_params("telemetry_bridge")
+    led = crsd_config.node_params("pixhawk_led_status_node")
+    assert bridge["drop_channel"] != led["estop_channel"], (
+        f"drop_channel and estop_channel are both ch{bridge['drop_channel']} — "
+        "the switch position that clears the e-stop also trips the drop latch")
+
+
+def test_drop_channel_cannot_be_written_by_an_override():
+    """telemetry_bridge's _send_override truncates to 8 channels, so a drop
+    channel >= 9 is unreachable by ANY override the graph can emit. Below 9, a
+    mechanism could drive the latch's own input — a feedback path where the
+    thing being stopped controls the stop signal."""
+    bridge = crsd_config.node_params("telemetry_bridge")
+    assert bridge["drop_channel"] >= 9, (
+        "drop_channel must sit outside the 1-8 window RC_CHANNELS_OVERRIDE can "
+        "write, so no override mechanism can drive the latch's input")
+
+
+def test_latch_health_window_matches_the_bridge_status_timeout():
+    """The latch trusts a SYS_STATUS RC-receiver verdict for health_timeout, and
+    telemetry_bridge constructs it from status_timeout_s. SYS_STATUS is a SLOW
+    stream (SR*_EXT_STAT, 2 Hz); judging it against the 1 s RC window would
+    discard a usable safety signal on jitter alone."""
+    bridge = crsd_config.node_params("telemetry_bridge")
+    assert bridge["status_timeout_s"] > bridge["rc_stale_timeout"], (
+        "the SYS_STATUS health window must be looser than the RC window, or the "
+        "verdict expires before the next SYS_STATUS arrives")
+
+
 def test_monitor_thresholds_match_shared_section():
     shared = crsd_config.shared_params()
     mk = crsd_config.monitor_kwargs()

@@ -147,7 +147,18 @@ class TelemetryBridge(Node):
             channel=p["drop_channel"],
             threshold=p["drop_threshold"],
             invert=p["drop_invert"],
-            stale_timeout=p["rc_stale_timeout"])
+            stale_timeout=p["rc_stale_timeout"],
+            # SYS_STATUS is a SLOW stream — trust its verdict on the same window
+            # this node uses to keep republishing it, not the 1 s RC window.
+            health_timeout=p["status_timeout_s"])
+        # The override TX truncates to 8 channels (see _send_override), so a drop
+        # channel above 8 cannot be written by ANY node in the graph — the switch
+        # the latch watches is unreachable by the thing it is meant to stop.
+        if self.latch.channel <= 8:
+            self.get_logger().warn(
+                f"drop_channel {self.latch.channel} is within the 1-8 range that "
+                "RC_CHANNELS_OVERRIDE can write — an override mechanism could "
+                "drive the latch's own input. Prefer a channel >= 9.")
 
         latched_qos = QoSProfile(depth=1,
                                  reliability=ReliabilityPolicy.RELIABLE,
@@ -283,9 +294,13 @@ class TelemetryBridge(Node):
                     # be another stream to keep fresh.
                     bit = self._mavutil.mavlink.MAV_SYS_STATUS_SENSOR_RC_RECEIVER
                     if msg.onboard_control_sensors_present & bit:
-                        self._rc_health.set(
-                            bool(msg.onboard_control_sensors_health & bit),
-                            t, stamp)
+                        healthy = bool(msg.onboard_control_sensors_health & bit)
+                        self._rc_health.set(healthy, t, stamp)
+                        # Same verdict the watchdog and the LED act on, now also
+                        # feeding the latch: a receiver holding last position
+                        # keeps the PWM checks blind, and this is what sees it.
+                        if self.latch.note_rc_health(healthy, t):
+                            self._handle_trip()
                     else:
                         # Autopilot does not report RC health at all: consumers
                         # degrade to the PWM check. Never publish a fabricated

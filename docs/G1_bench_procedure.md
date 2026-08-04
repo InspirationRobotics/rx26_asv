@@ -10,9 +10,18 @@ The e-stop is tested first, separately, every session.**
 ## Prerequisites
 
 - [ ] Boat on stands, **props removed** (not just disarmed).
-- [ ] Radio: a free switch mapped to the drop channel (default ch7; set
-      `drop_channel` param on `telemetry_bridge` to match your mapping, and record
-      the chosen channel + polarity here: ch ____, high/low = drop: ____).
+- [ ] Radio: a free switch mapped to the drop channel (default **ch9 / SE**; set
+      `drop_channel` on `telemetry_bridge` to match your mapping, and record the
+      chosen channel + polarity here: ch ____, high/low = drop: ____).
+      **Must not be ch7** — that is arm/e-stop (`RC7_OPTION=165`) and its armed
+      position trips the latch permanently. **Should be >= 9** — the bridge
+      truncates overrides to 8 channels, so a channel above 8 cannot be written
+      by any override mechanism in the graph.
+- [ ] Record the actual detent values before test 1, by flipping the switch
+      through every position while watching `ros2 topic echo /crsd/rc_channels`:
+      safe = ____ us, drop = ____ us. A channel that never moves means the switch
+      is not mapped, and every test below would pass vacuously against a drop
+      switch that does nothing.
 - [ ] `telemetry_bridge` and `rc_override_smoke` built and launched in the container
       (`tools/scripts/rebuild.sh` first — always).
 - [ ] Laptop running Mission Planner/QGC on MAVProxy's rebroadcast, RC monitor open
@@ -28,9 +37,16 @@ The e-stop is tested first, separately, every session.**
 | 4 | Latch holds | Flip switch back to safe, wait 10 s | Still BLOCKED (no auto-clear) |
 | 5 | Reset refused while unsafe | Flip switch to drop, call `/crsd/autonomy_drop_reset` | Service returns failure with "switch still in drop position" |
 | 6 | Reset works | Switch to safe, call reset service | Success; override resumes |
-| 7 | RC loss | Turn transmitter off mid-override | Trip within `rc_stale_timeout` (default 1 s); logs "link lost" or "stale" |
+| 7 | RC loss | Turn transmitter off mid-override | Trip within `rc_stale_timeout` (1 s) **or** on the RC-receiver health verdict (see 7b); `telemetry_bridge` logs the reason. **Which path fired is data — record it.** |
+| 7b | **RC loss with a receiver that holds last position** | Same as 7, with the ELRS receiver failsafe deliberately set to "Last Position". Watch `ros2 topic echo /crsd/rc_channels` — the drop channel keeps reading its held value | Latch still trips, with reason `ArduPilot reports RC receiver UNHEALTHY`. This is the 2026-08-02 case the PWM and staleness checks are both blind to; if the latch stays ACTIVE here, **stop — the interlock does not work.** Restore the receiver to "No Pulses" afterwards |
 | 8 | **Range test** | Repeat tests 3 and 7 with the operator + transmitter beyond WiFi range (>150 m, WiFi disassociated on the laptop to prove no WiFi dependency) | Same behavior, observed on return via logs (`ros2 topic echo /crsd/autonomy_drop` recorded with `ros2 bag`) |
 | 9 | Bypass attempt | Kill `rc_override_smoke`, publish directly to `/crsd/rc_override` while dropped (`ros2 topic pub`) | Nothing reaches the Pixhawk (RC monitor unchanged) — bridge-level enforcement holds |
+| 10 | Drop stops GUIDED too | While dropped, publish a `/crsd/guided_setpoint` (`ros2 topic pub`) | No `SET_POSITION_TARGET_GLOBAL_INT` reaches the autopilot — the latch gates GUIDED motion as well as RC override |
+
+> **If `/crsd/rc_link_health` never publishes**, `telemetry_bridge` logs a one-shot
+> WARN that the autopilot does not advertise the bit. Test 7b then cannot pass on
+> this airframe, and the receiver failsafe **must** be "No Pulses" — record that
+> as a finding rather than signing off around it.
 
 ## Sign-off
 

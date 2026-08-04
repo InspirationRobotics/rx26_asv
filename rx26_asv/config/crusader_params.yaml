@@ -63,7 +63,28 @@ shared:
 telemetry_bridge:
   ros__parameters:
     mav_endpoint: "udp:127.0.0.1:14551"   # [RO] MAVProxy rebroadcast, never serial
-    drop_channel: 9                        # [RO] RC-override drop RC channel (1..18)
+    drop_channel: 9                        # [RO] autonomy-drop RC channel (1..18);
+                                           #      SE per OPERATIONS §6.
+                                           #      NOT ch7: ch7 is RC7_OPTION=165
+                                           #      (arm/e-stop) and its NORMAL ARMED
+                                           #      position (1995) is >= the
+                                           #      threshold below, so a ch7 latch
+                                           #      sat permanently tripped and
+                                           #      blocked every RC override AND
+                                           #      GUIDED setpoint whenever the boat
+                                           #      was armed — i.e. dp_hold and
+                                           #      gate_navigator could never
+                                           #      actuate.
+                                           #      >= 9 is also structurally safer:
+                                           #      _send_override truncates to 8
+                                           #      channels, so no override in the
+                                           #      graph can write the very input
+                                           #      the latch reads.
+                                           #      BENCH-VERIFY the SE detent us
+                                           #      values before trusting this
+                                           #      (G1 test 3) — a drop switch that
+                                           #      silently does nothing is worse
+                                           #      than none.
     drop_threshold: 1700                   # [RO] us; crossing trips the latch
     drop_invert: false                     # [RO]
     rc_stale_timeout: 1.0                  # [RO] s without RC -> trip
