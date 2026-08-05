@@ -306,14 +306,14 @@ dp_hold:
 # ---- gate_navigator: GUIDED-mode buoy-gate transit (Mission 1) ----
 gate_navigator:
   ros__parameters:
-    mission_file: ""                       # [RO] JSON {"waypoints": [[lat,lon],...]}; required
+    mission_file: "/root/robotx_ws/missions/20260804_Pool_Gate.json"                       # [RO] JSON {"waypoints": [[lat,lon],...]}; required
                                            #      Same convention as
                                            #      mission_planner_node above:
                                            #      /root/robotx_ws/missions/<name>.json
                                            #      (workspace level, absolute path — `~`
                                            #      is NOT expanded). Generate with
                                            #      tools/scripts/plan_to_mission.py.
-    gate_wp_indices: [0, 1]                # [RO] zero-based waypoints treated as gates;
+    gate_wp_indices: [0]                   # [RO] zero-based waypoints treated as gates;
                                            #      positional, so they renumber if the
                                            #      waypoint list changes — re-read the
                                            #      converter's printed indices after any
