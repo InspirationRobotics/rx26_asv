@@ -26,7 +26,12 @@ DEFAULT_CLASS_MAP = Path(__file__).parent / "config" / "class_map.json"
 
 def load_class_map(path=None):
     with open(path or DEFAULT_CLASS_MAP) as f:
-        cmap = json.load(f)
+        raw = json.load(f)
+    # JSON has no comments: keys starting with "_" are documentation, not model
+    # classes. Dropping them here keeps the fail-loud check below about REAL
+    # entries — a "_comment" string was being read as a canonical label and
+    # crashed the detector at startup.
+    cmap = {k: v for k, v in raw.items() if not k.startswith("_")}
     bad = {v for v in cmap.values() if v is not None} - CANONICAL_LABELS
     if bad:
         raise ValueError(f"class_map maps to unknown canonical labels: {bad}")

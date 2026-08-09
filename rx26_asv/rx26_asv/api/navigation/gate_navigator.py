@@ -22,6 +22,25 @@ Detections are body-frame positions (x=starboard+, y=forward+) with canonical
 labels from class_map.json — so pairing uses geometry, not pixel coordinates as
 the camera-coupled original did. Still UNTESTED end-to-end (CLAUDE.md): hardening
 it against the fixed scenario suite is the Mission-1 priority.
+
+PARAMETER PROVENANCE. The operational node was one file, so its tune sat in one
+constant block. Splitting it across this repo's nodes put four of those knobs
+elsewhere — they are NOT missing, and re-adding them here would double-apply:
+  CONF_SHOW=0.40        -> perception_node.conf_threshold  (crusader_params.yaml)
+  CAMERA_*_OFFSET_M     -> perception_node.mount_offset_x/_y, applied by
+                           depth_association.project_to_body before publish
+  CMD_PERIOD=1.0        -> gate_navigator.cmd_period_s     (same file)
+  timer 0.05 s          -> gate_navigator.rate_hz = 20.0   (same file)
+  GATE_WP_INDICES={0,1} -> gate_navigator.gate_wp_indices; per-venue, tracks the
+                           mission JSON, so it is config and not a constant here
+Two originals have NO home yet and are tracked as gaps, not silently dropped:
+  RANGE_MAX=25.0        -- the original rejected depth returns beyond 25 m;
+                           depth_association.bbox_median_depth accepts any depth
+                           > 0, so a shoreline return can still become a buoy
+                           position. Belongs in the perception core, not here.
+  CAMERA_YAW_OFFSET_DEG -- no camera-yaw extrinsic exists in this stack (the
+                           LiDAR has one; the OAK-D does not). It was 0.0
+                           operationally, so behaviour matches today.
 """
 import json
 import math
@@ -41,15 +60,31 @@ from rx26_asv.api.common.node_main import run_node
 from rx26_asv.api.common.param_utils import declare_from_config
 from rx26_asv.api.common.stream_cache import StreamCache
 
-# Canonical perception labels (class_map.json): red/green flashing gate buoys.
+# Canonical perception labels (class_map.json). The operational node matched three
+# model classes per side (red_buoy/red_pole_buoy/red_light_buoy and the green
+# equivalents); class_map.json now folds each trio into one canonical label, so a
+# single-element set here is equivalent to the original's three-name sets.
 RED_CLASSES = {"buoy_flash_red"}
 GREEN_CLASSES = {"buoy_flash_green"}
 
 # --- gate geometry: the operational tune, kept as constants (not per-run knobs) ---
+# Values below are the operational node's, carried over unchanged unless annotated.
 CONF_MIN = 0.60             # confidence floor for a buoy to count in a gate pair
+RANGE_MIN = 0.30            # m; a midpoint nearer than this is behind/under the bow
 GATE_MIN_WIDTH = 1.0        # m
 GATE_MAX_WIDTH = 8.0        # m
 PAIR_MAX_DEPTH_DIFF = 5.0   # m; rejects unlikely red/green pairings
+# CONVERTED UNIT — the original rejected pairs closer than PAIR_MIN_PIXEL_SEP=12 px
+# in image columns, guarding against two boxes landing on ONE buoy. This node sees
+# body-frame metres, not pixels, and a column difference IS a bearing difference, so
+# the guard ports as a minimum bearing separation: 12 px / fx, with fx ~= 410 for the
+# original's 640x400 ISP-scaled OAK-D LR stream -> 0.029 rad ~= 1.7 deg. Range-
+# independent by construction, unlike a metric lateral threshold. GATE_MIN_WIDTH does
+# NOT subsume this: two boxes on one buoy share a bearing but can have depth medians
+# metres apart, which passes the width test as a bogus fore-aft "gate".
+# Re-derive if the gate range envelope grows: at 25 m a genuine GATE_MIN_WIDTH gate
+# subtends only ~2.3 deg, so this threshold starts competing with it.
+PAIR_MIN_BEARING_DEG = 1.7
 MAX_CORRECTION = 15.0       # m; midpoint must be this close to the planned waypoint
 MIDPOINT_SHIFT_RATIO = 0.5  # shift target toward the RIGHT-side buoy by this fraction
 PAIR_CONFIRM_FRAMES = 6
@@ -59,6 +94,8 @@ GATE_EXIT_DISTANCE = 0.2    # m beyond the gate for the exit target
 MIDPOINT_SWITCH_RADIUS = 1.0
 EXIT_ARRIVE_RADIUS = 1.0
 NORMAL_WP_ARRIVE_RADIUS = 1.0
+
+PAIR_MIN_BEARING_RAD = math.radians(PAIR_MIN_BEARING_DEG)
 
 PARAM_SPEC = {
     "mission_file": dict(read_only=True,
@@ -305,6 +342,13 @@ class GateNavigator(Node):
         best, best_score = None, float("inf")
         for red_fwd, red_right in reds:
             for grn_fwd, grn_right in greens:
+                # same bearing => two boxes on one buoy, not a gate (was a
+                # 12-pixel column-separation test on the camera-coupled original)
+                bearing_sep = abs(math.atan2(red_right, red_fwd)
+                                  - math.atan2(grn_right, grn_fwd))
+                if bearing_sep < PAIR_MIN_BEARING_RAD:
+                    continue
+
                 depth_diff = abs(red_fwd - grn_fwd)
                 if depth_diff > PAIR_MAX_DEPTH_DIFF:
                     continue
@@ -323,7 +367,7 @@ class GateNavigator(Node):
                 else:
                     mid_fwd += MIDPOINT_SHIFT_RATIO * (grn_fwd - red_fwd)
                     mid_right += MIDPOINT_SHIFT_RATIO * (grn_right - red_right)
-                if mid_fwd <= 0.3:
+                if mid_fwd <= RANGE_MIN:
                     continue
 
                 mid_world = self._body_to_latlon(mid_fwd, mid_right)

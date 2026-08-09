@@ -1,9 +1,8 @@
 """PipelineStats — perception health accounting (fps, latency budget, drop counts).
 
-Phase-2 budget (plan): capture -> published BODY position <= 100 ms, >= 15 fps
-end-to-end at G2. The node publishes these numbers every second and WARNs when
-over budget — quiet degradation of perception corrupts objective-1 metrics, so
-health is a first-class output, not a debug print.
+capture -> published BODY position <= 100 ms, >= 15 fps
+end-to-end at G2. The node publishes these numbers every second and warns when
+over budget. Health is a first-class output, not a debug print.
 
 No ROS imports; unit-tested.
 """

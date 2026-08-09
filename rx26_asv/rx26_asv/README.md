@@ -2,12 +2,12 @@
 
 This directory is the **target system**: the code that actually runs on the boat, inside the
 `asv` container. The autoresearch harness (`../orchestrator/`) reads and edits this code
-from the outside but is never imported by it (orchestrator-vs-target boundary, CLAUDE.md).
+from the outside but is never imported by it.
 
-**Design rule inherited from the engineering plan (§3.1):** ArduRover on the Pixhawk owns
+**Design rule:** ArduRover on the Pixhawk owns
 actuation and state estimation. **No node here ever produces PWM, opens a serial link to the
 Pixhawk, or runs its own EKF.** Everything reads/writes through MAVProxy's UDP rebroadcast,
-and exactly one node (`telemetry_bridge`) touches that link.
+and exactly one node (`telemetry_bridge`) touches that link. 
 
 ## Module map
 
