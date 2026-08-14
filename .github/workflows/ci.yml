@@ -140,7 +140,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: python compile + shell -n
         run: |
-          python3 -m py_compile tools/scripts/*.py
+          # tools/*.py too, not just tools/scripts/*.py — the bench viewers
+          # (oak_view, lidar_view, mjpeg_server) were never compiled here, so a
+          # syntax error in one would have surfaced on the Jetson at the moment
+          # someone reached for it. py_compile does not import, so their
+          # numpy/cv2/rclpy dependencies do not need to exist on the runner.
+          python3 -m py_compile tools/*.py tools/scripts/*.py
           # Every tracked shell script, so a new one is covered the day it lands
           # rather than the day someone remembers to add it here. setup/*.sh in
           # particular carries the repo-vs-workspace path derivation and the

@@ -35,46 +35,17 @@ see the publisher.
 """
 import argparse
 import sys
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage, Image
 
+import mjpeg_server                       # sibling module; see its docstring
+
 DEFAULT_TOPIC = "/oak/rgb/image_raw/compressed"
 DEFAULT_PORT = 8080
 JPEG_QUALITY = 70
-
-
-class FrameBuffer:
-    """Latest JPEG frame + a condition to wake waiting HTTP clients.
-
-    Only ever holds ONE frame. A queue would let a slow browser build a backlog
-    and start showing the past, which for a bring-up tool is worse than dropping
-    frames — you want to see what the camera sees NOW.
-    """
-
-    def __init__(self):
-        self._cond = threading.Condition()
-        self._jpeg = None
-        self._seq = 0
-
-    def put(self, jpeg: bytes):
-        with self._cond:
-            self._jpeg = jpeg
-            self._seq += 1
-            self._cond.notify_all()
-
-    def get_after(self, last_seq, timeout=5.0):
-        """Block until a frame newer than `last_seq` arrives. Returns
-        (jpeg, seq), or (None, last_seq) on timeout so the caller can notice a
-        dead stream instead of hanging forever."""
-        with self._cond:
-            if not self._cond.wait_for(lambda: self._seq > last_seq, timeout):
-                return None, last_seq
-            return self._jpeg, self._seq
 
 
 class CameraRelay(Node):
@@ -143,56 +114,6 @@ class CameraRelay(Node):
             self.buf.put(jpg.tobytes())
 
 
-def make_handler(buffer, topic):
-    class Handler(BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.0"
-
-        def do_GET(self):
-            if self.path in ("/", "/index.html"):
-                return self._page()
-            return self._stream()
-
-        def _page(self):
-            body = (f"<html><head><title>oak_view</title></head>"
-                    f"<body style='margin:0;background:#111'>"
-                    f"<img src='/stream' style='width:100%'>"
-                    f"<p style='color:#888;font:12px monospace'>{topic}</p>"
-                    f"</body></html>").encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def _stream(self):
-            self.send_response(200)
-            self.send_header("Content-Type",
-                             "multipart/x-mixed-replace; boundary=frame")
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            seq = 0
-            try:
-                while True:
-                    jpeg, seq = buffer.get_after(seq)
-                    if jpeg is None:
-                        continue          # no frames for a while; keep waiting
-                    self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n"
-                                     b"Content-Length: " + str(len(jpeg)).encode()
-                                     + b"\r\n\r\n")
-                    self.wfile.write(jpeg)
-                    self.wfile.write(b"\r\n")
-            except ConnectionError:
-                pass                      # browser closed the tab; normal.
-                                          # ConnectionError covers every flavor:
-                                          # BrokenPipe/Reset on Linux, Aborted
-                                          # (WinError 10053) on Windows.
-
-        def log_message(self, *args):
-            pass                          # keep the console for ROS logs
-
-    return Handler
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--topic", default=DEFAULT_TOPIC,
@@ -202,13 +123,10 @@ def main():
     args, ros_args = ap.parse_known_args()
 
     rclpy.init(args=ros_args)
-    buffer = FrameBuffer()
+    buffer = mjpeg_server.FrameBuffer()
     node = CameraRelay(args.topic, buffer)
 
-    server = ThreadingHTTPServer(("0.0.0.0", args.port),
-                                 make_handler(buffer, args.topic))
-    server.daemon_threads = True
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    server = mjpeg_server.start(buffer, args.port, args.topic, "oak_view")
     print(f"Open http://<JETSON_IP>:{args.port} in a browser (Ctrl+C to stop).",
           file=sys.stderr)
 

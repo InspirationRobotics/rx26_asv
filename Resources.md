@@ -35,3 +35,27 @@ Jetson WIFI IP: 192.168.100.109
 Jetson ETH IP: 192.168.1.5
 LiDar IP: 192.168.1.166
 
+# Mounting Information
+LiDar(LiDar is mounted upside down, so its +z axis is downward instead of updward):
+    Orientation:
+        +x = forward
+        +y = left
+        +z = downward
+    Displacement from vehicle geometry center:
+        x = 32 cm
+        y = 5 cm
+    Height above ground:
+        z = 52 cm
+OAK D LR Camera:
+    Orientation:
+        +x = forward
+        +y = left
+        +z = upward
+    Displacement from vehicle geometry center:
+        x = 37 cm
+        y = 0
+    Height above ground:
+        z = 65 cm
+
+
+
