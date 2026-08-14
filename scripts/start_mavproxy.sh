@@ -8,6 +8,8 @@
 #                           Planner both listen on 14550 for traffic from any
 #                           sender, so nothing needs to be typed in on the laptop
 #                           side and no per-laptop/per-day IP has to be passed here.
+#   <each GCS_IPS>:14550 -> explicit unicast, for the laptops broadcast does not
+#                           reach. See "when broadcast is not enough" below.
 #
 # CAVEAT: broadcast is subnet-scoped, not laptop-scoped. If two teams share the
 # same field network, every laptop on it sees every broadcasting boat's telemetry
@@ -16,10 +18,27 @@
 # BCAST_ADDR to match (it must be that subnet's broadcast address, i.e. network
 # address with the host bits set to 1 — .255 for a /24).
 #
+# WHEN BROADCAST IS NOT ENOUGH. A subnet broadcast only reaches hosts ON that
+# subnet, and only if nothing between drops it — an AP with client isolation, a
+# laptop on the other side of the Bullet AC bridge, or a machine on the wired
+# 192.168.1.0/24 all see nothing while the boat looks perfectly healthy from the
+# Jetson. GCS_IPS adds an explicit unicast --out per address for exactly those:
+#
+#     GCS_IPS="192.168.100.50 192.168.1.20" ./start_mavproxy.sh
+#
+# Space-separated. Under systemd put it in /etc/default/crusader (the unit's
+# EnvironmentFile), quoted, and it reaches this script through the environment
+# with no unit edit:
+#
+#     GCS_IPS="192.168.100.50 192.168.1.20"
+#
+# Unicast is additive, not a replacement — broadcast stays on, so a laptop that
+# was already working keeps working whether or not its address is listed here.
+#
 # Uses the stable udev symlink /dev/crsd-pixhawk (tools/udev/99-crusader.rules)
 # instead of a per-boat /dev/serial/by-id path.
 #
-# Usage: ./start_mavproxy.sh [BCAST_ADDR]
+# Usage: ./start_mavproxy.sh [BCAST_ADDR]        (env: GCS_IPS, CRSD_PIXHAWK_DEV)
 set -euo pipefail
 
 BCAST_ADDR="${1:-192.168.100.255}"         # override if the field subnet changes
@@ -32,6 +51,23 @@ if [ ! -e "$MASTER" ]; then
   exit 1
 fi
 
+# Built as an array so each --out is one argv element. 14551 stays FIRST because
+# it is the one output the boat cannot run without: telemetry_bridge is the sole
+# ROS-side consumer, and everything downstream of it (LEDs, RC watchdog, pose,
+# attitude) goes dark if it is missing.
+OUTS=(--out=udp:127.0.0.1:14551
+      --out=udp:127.0.0.1:14550
+      --out=udpbcast:"${BCAST_ADDR}":14550)
+
+# UNQUOTED on purpose: GCS_IPS is a space-separated list and this relies on word
+# splitting to turn it into one --out per address. Quoting "${GCS_IPS}" would
+# produce a single bogus --out containing spaces, and MAVProxy would fail to
+# parse the address rather than obviously ignoring it. The :- keeps `set -u`
+# happy when the variable is unset, which is the normal case.
+for ip in ${GCS_IPS:-}; do
+  OUTS+=(--out=udp:"${ip}":14550)
+done
+
 # --daemon is REQUIRED under systemd, not a preference. MAVProxy runs an
 # interactive console by default; with stdin on /dev/null it prints the "MAV> "
 # prompt, immediately reads EOF, treats that as "quit", and unloads every module
@@ -40,6 +76,7 @@ fi
 # identical invocation stays up in a terminal and dies under systemd.
 # Run it by hand (a TTY) and you get the console; drop --daemon here and the
 # service will loop forever.
+#
 # --streamrate=-1 means "request NOTHING; leave the vehicle's own SRx_* rates
 # alone". It is not a tuning choice — without it MAVProxy sends
 # REQUEST_DATA_STREAM(MAV_DATA_STREAM_ALL, 4Hz) on every connect and after every
@@ -60,6 +97,4 @@ exec mavproxy.py \
   --master="$MASTER" \
   --daemon \
   --streamrate=-1 \
-  --out=udp:127.0.0.1:14551 \
-  --out=udp:127.0.0.1:14550 \
-  --out=udpbcast:"${BCAST_ADDR}":14550
+  "${OUTS[@]}"

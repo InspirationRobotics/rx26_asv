@@ -134,6 +134,30 @@ absent, `start_mavproxy.sh` falls back to its built-in default.
 > network, every laptop sees every broadcasting boat. Pick the right vehicle in
 > the GCS connection list.
 
+### When a laptop still sees nothing — `GCS_IPS`
+
+A subnet broadcast only reaches hosts **on that subnet**, and only if nothing in
+between drops it. An AP with client isolation, a laptop on the far side of the
+Bullet bridge, or a machine on the wired `192.168.1.0/24` all see nothing while
+the boat looks perfectly healthy from the Jetson. Add explicit unicast targets —
+space-separated, quoted, in the same file:
+
+```bash
+echo 'GCS_IPS="192.168.100.50 192.168.1.20"' | sudo tee -a /etc/default/crusader && sudo systemctl restart crsd-mavproxy
+```
+
+`start_mavproxy.sh` adds one `--out` per address. This is **additive**: broadcast
+stays on, so a laptop that already worked keeps working whether or not it is
+listed. Confirm on the *running process* — the `--out` flags are built inside the
+script, so `systemctl show ... -p ExecStart` will not show them:
+
+```bash
+pgrep -af mavproxy | tr ' ' '\n' | grep -- --out
+```
+
+> Note `tee -a` — the earlier command uses plain `tee`, which would replace the
+> file and drop `CRSD_BCAST_ADDR`.
+
 ---
 
 ## 4. Docker: in and out
