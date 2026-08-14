@@ -44,6 +44,8 @@ Manual check (from any ROS container on the boat network):
   ros2 topic hz /oak/rgb
   python3 tools/oak_view.py --topic /oak/rgb        # raw topic: needs cv2+numpy
 """
+import time
+
 import numpy as np
 from rclpy.duration import Duration
 from rclpy.node import Node
@@ -120,6 +122,7 @@ class OakDPublisher(Node):
         self.frames = 0
         self.incomplete = 0
         self.last_health_frames = 0
+        self.last_health_time = time.monotonic()
 
         self._open_device(p)
 
@@ -274,11 +277,26 @@ class OakDPublisher(Node):
     def _health(self):
         """A camera that stops delivering looks exactly like a camera that was
         never plugged in — from the consumer's side, both are silence."""
-        if self.frames == self.last_health_frames:
+        now = time.monotonic()
+        delivered = self.frames - self.last_health_frames
+        elapsed = max(now - self.last_health_time, 1e-6)
+        self.last_health_frames = self.frames
+        self.last_health_time = now
+
+        if delivered == 0:
             self.get_logger().warn(
                 f"no frames since last check (total={self.frames}, "
                 f"incomplete={self.incomplete}) — camera stalled or unplugged")
-        self.last_health_frames = self.frames
+            return
+
+        # The publish rate AT THE SOURCE. Without this line the only number
+        # anyone has is `ros2 topic hz`, which measures a Python subscriber and
+        # the DDS transport as much as it measures this node — for 768 kB raw
+        # frames the two disagree hard, and the gap sends people hunting for a
+        # camera fault that is really a transport one.
+        self.get_logger().info(
+            f"{delivered / elapsed:.1f} fps published "
+            f"(total={self.frames}, incomplete={self.incomplete})")
 
     def destroy_node(self):
         # Close the device explicitly. The OAK-D admits ONE client: a lingering
