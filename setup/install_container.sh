@@ -61,6 +61,10 @@ source install/setup.bash
 echo "== [3/3] Import smoke (fail loudly — see tools/scripts/rebuild.sh) =="
 python3 -c "import crusader_common, crusader_fcu, crusader_behavior; print('code packages ok')"
 python3 -c "import crusader_perception, crusader_world_model; print('domain packages ok')"
+# crusader_sensors builds here but never RUNS here (no depthai in this image by
+# design). Importing the package proves the build landed; the device SDK import
+# is function-local in the node, so this stays honest in a container with no SDK.
+python3 -c "import crusader_sensors; print('sensor drivers ok (run them in the sensor container)')"
 python3 -c "from crusader_msgs.msg import FcuStatus; print('crusader_msgs ok')"
 # The params file must be reachable from the INSTALL space, not just the source
 # tree — resolving it is the failure that grounded the stack on 2026-07-29.

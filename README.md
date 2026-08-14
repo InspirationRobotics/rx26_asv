@@ -18,14 +18,17 @@ Before developing ANY code, read [Format](#format) and the standing
 
 ## Packages
 
-Seven packages, laid out along the architecture: sensors → perception → world model →
-cognition → behavior, with a shared library underneath and a bringup package on top.
+Eight packages, laid out along the architecture: sensors → perception → world model →
+cognition → behavior, with a shared library underneath and a bringup package on top. All
+eight build together (`--packages-up-to crusader_bringup`); `crusader_sensors` is the one
+that **runs** elsewhere — it owns devices, so it runs in the sensor container.
 
 | Package | Contains | State |
 |---|---|---|
 | [`crusader_msgs`](crusader_msgs/README.md) | Message definitions. Depends on nothing but `std_msgs`, so the sensor container can build it cheaply | 3 msgs |
 | [`crusader_common`](crusader_common/README.md) | Shared plumbing: params loader, node lifecycle, stream cache, drop latch, geodesy. No nodes | library |
 | [`crusader_fcu`](crusader_fcu/README.md) | `telemetry_bridge` — the only thing that speaks MAVLink. Localization source *and* Movement actuator | **field** |
+| [`crusader_sensors`](crusader_sensors/README.md) | Device drivers; runs in the **sensor container**: `oakd_publisher` → `oak/rgb`, `oak/depth` | 1 node |
 | [`crusader_perception`](crusader_perception/README.md) | Detection + ranging from the sensor container's raw topics | **empty** |
 | [`crusader_world_model`](crusader_world_model/README.md) | Fusion → 3D object positions; occupancy grid. Sensor-agnostic, verifiable without a camera | **empty** |
 | [`crusader_behavior`](crusader_behavior/README.md) | `safety/` RC-loss force-disarm watchdog; `indicator/` LED status stack | **field** |
@@ -41,7 +44,7 @@ Every package has its own README with its design rationale and a change-impact t
 This repo is **a set of source dirs inside a colcon workspace**, not the workspace itself.
 On the Jetson it lives at `~/robotx_ws/src/rx26_asv`, alongside any other package sources.
 The repo root is deliberately **not** a colcon package — that is what lets `colcon build`
-discover all seven packages instead of stopping at the first one it finds.
+discover all eight packages instead of stopping at the first one it finds.
 
 ```
 ~/robotx_ws/                    # colcon WORKSPACE (not this repo; holds build/ install/ log/)
@@ -50,6 +53,7 @@ discover all seven packages instead of stopping at the first one it finds.
      |    |-- crusader_msgs/        # ament_cmake: msg/ + CMakeLists
      |    |-- crusader_common/      # ament_python: the shared library
      |    |-- crusader_fcu/         # ament_python: telemetry_bridge
+     |    |-- crusader_sensors/     # ament_python: OAK-D driver (runs in sensor container)
      |    |-- crusader_perception/  # ament_python: EMPTY, scaffolded
      |    |-- crusader_world_model/ # ament_python: EMPTY, scaffolded
      |    |-- crusader_behavior/    # ament_python: safety/ + indicator/

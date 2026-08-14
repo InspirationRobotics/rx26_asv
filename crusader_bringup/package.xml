@@ -16,6 +16,13 @@
 
   <exec_depend>crusader_fcu</exec_depend>
   <exec_depend>crusader_behavior</exec_depend>
+  <!-- Built with the rest of the stack even though it RUNS in the sensor
+       container: a "packages-up-to crusader_bringup" build must cover every
+       package we ship, or one silently stops being built and its compile errors
+       surface on the boat instead of at build time. Safe to build in `asv`:
+       ament_python builds without importing depthai, and the node's device
+       import is function-local. -->
+  <exec_depend>crusader_sensors</exec_depend>
   <exec_depend>crusader_perception</exec_depend>
   <exec_depend>crusader_world_model</exec_depend>
   <exec_depend>ros2launch</exec_depend>

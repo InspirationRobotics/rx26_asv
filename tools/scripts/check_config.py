@@ -34,7 +34,8 @@ PARAMS_BASELINE = REPO / "params" / "working_crusader.params"
 # exists is a parameter set nobody reviews, and it reads as a capability the boat
 # still has; a node with no section fails at startup instead.
 CONFIG_DRIVEN_NODES = {"telemetry_bridge", "led_node",
-                       "pixhawk_led_status_node", "rc_heartbeat_watchdog"}
+                       "pixhawk_led_status_node", "rc_heartbeat_watchdog",
+                       "oakd_publisher"}
 
 failures = []
 

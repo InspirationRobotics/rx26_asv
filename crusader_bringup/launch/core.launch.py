@@ -15,6 +15,11 @@ Perception and world-model nodes are NOT here: those packages are scaffolded and
 empty (see their READMEs). Add a node to this launch once it has run on the boat,
 not when it compiles.
 
+`crusader_sensors/oakd_publisher` is not here either, for a different reason: it
+owns the OAK-D and runs in the SENSOR container. This launch runs in `asv`, which
+has no depthai by design, so starting it from here could only fail. bringup still
+exec_depends on that package so it is built and checked with the rest.
+
 MAVProxy itself (the sole Pixhawk owner) is started outside ROS by systemd — see
 scripts/start_mavproxy.sh — before this launch.
 

@@ -75,6 +75,32 @@ pixhawk_led_status_node:
     autonomy_hold_s: 1.0                   # [RO] stay GREEN this long after last autonomy beat
     rate_hz: 5.0                           # [RO] LED state evaluation rate
 
+# ---- Sensor drivers ----
+# oakd_publisher RUNS IN THE SENSOR CONTAINER, not `asv` (which has no depthai by
+# design). It still reads this file: one params file for the boat, whichever
+# container a node lives in. That means the sensor container must have
+# crusader_bringup built in its workspace, or $CRUSADER_PARAMS pointed at this
+# file — crusader_common/config.py resolves it in that order and falls back to
+# the source tree, which the mounted repo satisfies.
+#
+# The image geometry is not a preference: depth is aligned to the RGB camera and
+# both are emitted at 1920x1200 / isp_denominator, so consumers may use the RGB
+# intrinsics on the depth image and read depth at an RGB pixel. Changing
+# isp_denominator changes every downstream pixel-space threshold.
+oakd_publisher:
+  ros__parameters:
+    rgb_topic: "oak/rgb"                   # [RO] relative name; namespace/remap moves the pair
+    depth_topic: "oak/depth"               # [RO] relative name; 16UC1 millimetres
+    frame_id: "oak_rgb_camera_optical_frame"  # [RO] shared by both images (depth is aligned)
+    fps: 30.0                              # [RO] camera frame rate [Hz]
+    isp_denominator: 3                     # [RO] 1/N of 1920x1200; 3 -> 640x400 (stereo-native)
+    sync_threshold_ms: 50                  # [RO] max RGB/depth gap the device Sync will pair
+    subpixel: true                         # [RO] finer far-range depth
+    lr_check: true                         # [RO] left/right check; rejects occlusions
+    poll_period_s: 0.01                    # [RO] output-queue poll; keep well under 1/fps
+    queue_size: 4                          # [RO] device output queue depth (non-blocking)
+    health_period_s: 5.0                   # [RO] warn if no frames arrived since last check
+
 # ---- rc_heartbeat_watchdog: force-disarm on RC-transmitter link loss (safety) ----
 # Consumes telemetry_bridge topics (/crsd/rc_channels, /crsd/fcu_status) and routes
 # a force-disarm back through the bridge (/crsd/force_disarm) — no own MAVLink conn.
