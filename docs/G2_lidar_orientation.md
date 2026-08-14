@@ -70,6 +70,27 @@ wrong side of every gate.
       only thing at that bearing; a target in front of a wall proves nothing.
 - [ ] Tape measure. Record the actual placement: range ____ m, bearing ____° to port.
 
+## Reading the viewer
+
+Three tabs — **Plan**, **Elevation**, **Both**. Only the visible one streams, and a panel
+nobody is watching is never rendered, so leave it on whichever you are using.
+
+Two filters are on by default and both are **drawn** on the plan panel rather than applied
+invisibly:
+
+| Filter | Default | Drawn as | Why |
+|---|---|---|---|
+| `--r-min` | 0.5 m | circle around the sensor | The mount, cabling and deck directly under the LiDAR return on every sweep. Not the world; a permanent cluster at arm's length if kept. 3D sphere, not horizontal — the strongest self-returns from an upside-down sensor point straight down. |
+| `--fov` | 180° | wedge edges from the sensor | The hull blocks the view aft of the beam, so returns behind it are the boat. |
+
+Both run in the **raw sensor frame**, before any transform — so `--frame raw` and
+`--frame body` show the same population of points, which is what makes comparing them a
+valid check rather than two different pictures.
+
+Run `--fov 360 --r-min 0` if you want to see everything, including what is normally cut.
+Doing that once is worth it: seeing the hull and mount returns is how you confirm the
+filters are removing the right things.
+
 ## Procedure
 
 ### 1. Look at the raw frame first
