@@ -16,7 +16,7 @@ fi
 
 echo "== colcon build inside $CONTAINER =="
 # --packages-up-to crusader_bringup, not a bare build: the workspace may hold
-# other package sources (the robotx_2026 boat repo, the sensor container's
+# other package sources (the robotx_2026 boat repo, the livox container's
 # sources) whose build state is not ours to change and whose build failure must
 # not block ours. crusader_bringup exec_depends on every package we ship, so
 # "up-to" is the whole stack — and it stays correct when a package is added,
@@ -32,7 +32,7 @@ docker exec "$CONTAINER" bash -lc \
   "cd $WS && source install/setup.bash && python3 -c '
 import crusader_common, crusader_fcu, crusader_behavior
 import crusader_perception, crusader_world_model
-from crusader_msgs.msg import FcuStatus, LatLonHead, RcChannels
+from crusader_msgs.msg import Attitude, FcuStatus, LatLonHead, RcChannels
 print(\"import ok\")'"
 
 echo "== done. Restart affected nodes/launch for changes to take effect. =="

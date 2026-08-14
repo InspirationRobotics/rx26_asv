@@ -139,7 +139,7 @@ flowchart LR
 | Add a ROS node | Pick the package by domain (see the root README table). Write `*_core.py` (pure logic) + `*_node.py` (wrapper via `crusader_common.node_main`), add a params section in the YAML and to `CONFIG_DRIVEN_NODES` in `check_config.py`. Add the `console_scripts` entry and the `core.launch.py` line **only after it has run on the boat**. |
 | Add a message | `crusader_msgs/msg/` + its `CMakeLists.txt` line, then `rebuild.sh`, and update all producers/consumers in one commit. A `.msg` not listed in CMakeLists is silently not generated. |
 | Add a package | `package.xml` + `setup.py` + `setup.cfg` + `resource/<name>`, then add it to `crusader_bringup/package.xml`'s exec_depends and to CI's discovery list — or it silently stops being built by every path. |
-| Bring a mission node back | Define the topic contract with the sensor container first; port the algorithm from [robotx_2026](https://github.com/InspirationRobotics/robotx_2026) (prequal-proven), not from this repo's deleted rewrite. |
+| Bring a mission node back | Define the topic contract with the livox container first; port the algorithm from [robotx_2026](https://github.com/InspirationRobotics/robotx_2026) (prequal-proven), not from this repo's deleted rewrite. |
 
 ### Git / remote
 

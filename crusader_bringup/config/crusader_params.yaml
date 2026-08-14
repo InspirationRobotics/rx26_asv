@@ -75,13 +75,10 @@ pixhawk_led_status_node:
     autonomy_hold_s: 1.0                   # [RO] stay GREEN this long after last autonomy beat
     rate_hz: 5.0                           # [RO] LED state evaluation rate
 
-# ---- Sensor drivers ----
-# oakd_publisher RUNS IN THE SENSOR CONTAINER, not `asv` (which has no depthai by
-# design). It still reads this file: one params file for the boat, whichever
-# container a node lives in. That means the sensor container must have
-# crusader_bringup built in its workspace, or $CRUSADER_PARAMS pointed at this
-# file — crusader_common/config.py resolves it in that order and falls back to
-# the source tree, which the mounted repo satisfies.
+# ---- Perception: the OAK-D nodes ----
+# Both run in `asv`, which carries depthai for exactly this reason. They are not
+# in core.launch.py: they contend for the one OAK-D, so which one runs is an
+# operator choice, started by hand.
 #
 # The image geometry is not a preference: depth is aligned to the RGB camera and
 # both are emitted at 1920x1200 / isp_denominator, so consumers may use the RGB

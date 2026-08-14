@@ -11,14 +11,17 @@ Starts (all reading config/crusader_params.yaml from THIS package's share dir):
                             loss; consumes telemetry_bridge topics and routes the
                             disarm back through the bridge (/crsd/force_disarm)
 
-Perception and world-model nodes are NOT here: those packages are scaffolded and
-empty (see their READMEs). Add a node to this launch once it has run on the boat,
-not when it compiles.
+World-model nodes are NOT here: that package is scaffolded and empty (see its
+README). Add a node to this launch once it has run on the boat, not when it
+compiles.
 
-`crusader_sensors/oakd_publisher` is not here either, for a different reason: it
-owns the OAK-D and runs in the SENSOR container. This launch runs in `asv`, which
-has no depthai by design, so starting it from here could only fail. bringup still
-exec_depends on that package so it is built and checked with the rest.
+`crusader_perception`'s nodes (`oakd_publisher`, `buoy_detector`) run in `asv`
+like everything else here, but are still NOT in this launch, for a different
+reason: they contend for the same OAK-D and the device admits exactly one
+client. Which of the two runs is an operator choice per session — frames for a
+human, or detections for the stack — so it cannot be a constant in a launch
+file. Start the one you want by hand. bringup still exec_depends on the package
+so it is built and checked with the rest.
 
 MAVProxy itself (the sole Pixhawk owner) is started outside ROS by systemd — see
 scripts/start_mavproxy.sh — before this launch.

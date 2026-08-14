@@ -1,14 +1,15 @@
 # `crusader_msgs` — ROS 2 message package
 
-The typed contracts between nodes. Three telemetry messages produced by
+The typed contracts between nodes. Four telemetry messages produced by
 `telemetry_bridge` from MAVProxy's rebroadcast, plus the perception pair that
-`crusader_sensors/buoy_detector` fills.
+`crusader_perception/buoy_detector` fills.
 
 ## Messages
 
 | Message | Producer → consumer | Notes |
 |---|---|---|
 | `LatLonHead` | `telemetry_bridge` → any consumer | lat/lon/heading + `ground_speed`, taken from `GLOBAL_POSITION_INT`'s own vx/vy so nobody has to finite-difference position. `heading` is NaN when GPS yaw is unresolved — that is a value to check, not to smooth over |
+| `Attitude` | `telemetry_bridge` → mapping/fusion | roll/pitch/yaw + body rates [rad, rad/s] from `ATTITUDE`, in the **autopilot's** NED axes, not REP-103. Its own topic because `ATTITUDE` and `GLOBAL_POSITION_INT` are separate MAVLink streams that go stale separately. `yaw` is the same EKF estimate `LatLonHead.heading` carries in degrees |
 | `FcuStatus` | `telemetry_bridge` → LED status, watchdog | mode string, armed flag, system status, from `HEARTBEAT` |
 | `RcChannels` | `telemetry_bridge` → LED status, watchdog; and any override publisher → `telemetry_bridge` | 18 raw PWM values. Also the TX direction: an override publisher fills channels 1–8 |
 | `Detection3D` | inside `Detection3DArray` | one object: label, confidence, position, source bbox. Position is REP-103 body axes (x forward, y left, z up) in the frame the array declares — never optical axes |
@@ -36,9 +37,10 @@ removed seven of them (detections, occupancy grid, APF advisory, guided setpoint
 with the nodes that used them; they are in git at `8c4ffa5`. Re-add one when the node that
 fills it is landing.
 
-This package is also the **contract with the sensor container**: it publishes against
-these definitions, so keep the dependency list at `std_msgs` and nothing more — anything
-heavier makes it expensive for another image to build.
+Keep the dependency list at `std_msgs` and nothing more. Nothing outside `asv` builds this
+today — the livox container publishes a stock `PointCloud2` — but the moment one needs to,
+a heavier dependency list is what makes that expensive, and this package is small enough
+that staying cheap costs nothing.
 
 ## Change impact
 
@@ -46,3 +48,4 @@ heavier makes it expensive for another image to build.
 |---|---|
 | any `.msg` field | full `colcon build` of both packages (`tools/scripts/rebuild.sh`), then restart every node — a mismatched message is a silent deserialization failure |
 | `LatLonHead.ground_speed` | `telemetry_bridge` is its only producer — check it still populates the field |
+| `Attitude` axes or units | `crusader_common/geo.py:body_to_world_ypr` is the only thing that interprets them; re-check its FRD conversion, then anything mapping detections |

@@ -4,9 +4,8 @@
   <name>crusader_msgs</name>
   <version>0.5.0</version>
   <description>
-    Crusader message definitions: the typed contracts between packages, and
-    the contract the sensor-driver container publishes against. Depends on
-    nothing but std_msgs, so any container can build it cheaply.
+    Crusader message definitions: the typed contracts between packages.
+    Depends on nothing but std_msgs, so any container can build it cheaply.
   </description>
   <maintainer email="brandont3927@gmail.com">Team Inspiration</maintainer>
   <license>MIT</license>

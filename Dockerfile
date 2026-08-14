@@ -4,15 +4,20 @@
 # Builds the `asv` image the rest of the repo assumes:
 #   * CUDA / PyTorch / TensorRT   -> from the ultralytics base (detection runs HERE)
 #   * ROS 2 Humble + build toolchain (colcon, rosdep, rosidl generators)
-#   * cv_bridge + sensor_msgs_py  -> consume Image/PointCloud2 from the sensor container
+#   * depthai                     -> crusader_perception OWNS the OAK-D, in here
+#   * cv_bridge + sensor_msgs_py  -> Image/PointCloud2 <-> numpy
 #   * MAVProxy + pymavlink + pyserial -> the autopilot and LED serial links
 #
-# WHAT IS DELIBERATELY ABSENT: depthai and the Livox SDK/driver. A SEPARATE
-# sensor-driver container owns the OAK-D and the MID360 and publishes their raw
-# data as ROS topics; this image consumes those topics. It should therefore be
-# impossible to open either device from here even by accident. If you find
-# yourself adding a device SDK to this file, the node you are writing belongs in
-# the sensor container instead.
+# There are exactly TWO containers on this Jetson:
+#   `asv`  (this one) — everything in this repo, INCLUDING the OAK-D nodes.
+#   livox             — the MID360 driver and nothing else; publishes PointCloud2.
+#
+# So depthai belongs here and the Livox SDK does not. That is the reverse of the
+# original plan, in which a single sensor container owned both devices and this
+# image was forbidden depthai: `buoy_detector` needs the camera AND TensorRT in
+# one process, because shipping 1.28 MB frames across a container boundary to
+# produce a few hundred bytes of detection is the wrong trade. The absence guard
+# below now protects the boundary that is actually real.
 #
 # The rx26_asv packages are NOT copied/built here — they are bind-mounted at
 # /root/robotx_ws and built at runtime by tools/scripts/rebuild.sh /
@@ -45,9 +50,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ROS 2 Humble + full build toolchain.
 #   ros-base alone can't build the `crusader_msgs` ament_cmake/rosidl package;
 #   ros-dev-tools brings colcon, rosdep, and the rosidl generators.
-#   cv_bridge + sensor_msgs_py are the seam with the sensor container: Image ->
-#   numpy for the detector, PointCloud2 -> numpy for the world model. Without
-#   them this image can build the packages but not consume a single frame.
+#   cv_bridge + sensor_msgs_py: Image -> numpy for the detector's bring-up
+#   frames, PointCloud2 -> numpy for the MID360 cloud the livox container
+#   publishes. Without them this image builds the packages but cannot consume a
+#   single frame or point.
 # ----------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-humble-ros-base \
@@ -71,30 +77,42 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Nothing here may move protobuf. The ultralytics base ships protobuf 5.29.x,
 # which its TensorFlow requires (<6.0.0dev); an unpinned package that drags in a
 # newer protobuf breaks the ML stack the detector runs on. That happened on the
-# real Jetson, via grpcio-tools. The guard below is what catches a recurrence.
+# real Jetson, via grpcio-tools. The guard below is what catches a recurrence —
+# and depthai is exactly the kind of package that could do it again, which is
+# why it goes in HERE, above the guard, rather than being pip-installed into a
+# running container where nothing would check.
 # ----------------------------------------------------------------------------
 RUN uv pip install --system \
+        depthai \
         "pymavlink==2.4.49" \
         MAVProxy \
         pyserial \
         future \
         "pyyaml==6.0.3"
 
-# Fail the BUILD, not the boat, if the ML stack or the MAVLink stack is broken.
-# The TensorFlow import is slow (~1 min) and worth every second of it.
+# Fail the BUILD, not the boat, if the ML stack, the MAVLink stack or the camera
+# SDK is broken. The TensorFlow import is slow (~1 min) and worth every second.
 RUN python3 -c "\
-import google.protobuf, tensorflow, ultralytics, pymavlink, serial, yaml; \
+import google.protobuf, tensorflow, ultralytics, pymavlink, serial, yaml, depthai; \
 from pymavlink import mavutil; \
 v = google.protobuf.__version__; \
 assert v.startswith('5.29'), 'protobuf moved to %s — TF requires <6.0.0dev' % v; \
 print('dep guard ok: protobuf', v, '| tensorflow', tensorflow.__version__, \
-      '| ultralytics', ultralytics.__version__, '| pymavlink', pymavlink.__version__)"
+      '| ultralytics', ultralytics.__version__, '| pymavlink', pymavlink.__version__, \
+      '| depthai', depthai.__version__)"
 
-# Guard the absence, too: a device SDK reappearing here means perception drifted
-# back into the wrong container. Cheap to check, and it fails at build time
-# rather than as a mystery second client on the boat.
-RUN ! python3 -c "import depthai" 2>/dev/null || \
-    { echo "ERROR: depthai is in this image. The sensor container owns the OAK-D." >&2; exit 1; }
+# The depthai absence guard that used to live here is GONE: this image owns the
+# OAK-D now, so asserting depthai is absent would fail the build it exists to
+# protect. It is replaced by the positive import check above.
+#
+# The equivalent boundary that IS still real is the MID360 — the livox container
+# owns it, and two processes opening one LiDAR is the same failure the old guard
+# was about. No check is written for it yet ON PURPOSE: the marker would be a
+# guess at the Livox SDK's installed name, and a guard that never fires because
+# the name is wrong is worse than no guard (same reasoning as check_config.py's
+# param-baseline parse check). Add it here once someone confirms, in the livox
+# container, what the SDK actually installs — a `ros2 pkg prefix
+# livox_ros_driver2` or the SDK's real library path.
 
 # ----------------------------------------------------------------------------
 # Environment sourcing: ROS, then the mounted workspace (guarded — it only

@@ -24,23 +24,24 @@ InspirationRobotics/robotx_2026. Keeping the geometry identical means the RGB
 intrinsics apply to the depth image unchanged, which is the property that makes
 `depth[v, u]` legal for an (u, v) taken off an RGB detection box.
 
-WHICH CONTAINER THIS RUNS IN
-----------------------------
-The SENSOR container, never `asv`. `asv` asserts at build time that depthai is
-absent (Dockerfile), because the OAK-D admits exactly one client and perception
-grabbing the device would take it away from this node. The package still builds
-everywhere — `depthai` is imported inside `_open_device`, not at module scope,
-so `colcon build` and an import smoke test pass in a container that has no SDK
-and no camera.
+ONLY ONE OAK-D CLIENT
+---------------------
+Runs in `asv`, which carries depthai for this package. The device admits exactly
+one client, so this node and `buoy_detector` CONTEND: whichever starts first gets
+the camera and the other fails to open it. That is why neither is in
+core.launch.py — which one runs is an operator choice per session, not a
+constant. Prefer `buoy_detector` unless you specifically want raw pixels; this
+node costs ~38 MB/s at 30fps to publish frames nothing but a human reads.
+
+`depthai` is imported inside `_open_device`, not at module scope, so `colcon
+build` and CI's import check still pass on a machine with no SDK and no camera.
 
 Parameters come from crusader_bringup's `crusader_params.yaml` like every other
-node here: one params file for the boat, whichever container a node lives in, so
-a value can never drift between a code default and the launched file. The sensor
-container therefore needs crusader_bringup built in its workspace or
-$CRUSADER_PARAMS pointed at the file (crusader_common/config.py resolves env ->
-installed share -> source tree, and the mounted repo satisfies the last one).
+node here, so a value can never drift between a code default and the launched
+file (crusader_common/config.py resolves $CRUSADER_PARAMS -> installed share ->
+source tree).
 
-Manual check (from any ROS container on the boat network):
+Manual check:
   ros2 topic hz /oak/rgb
   python3 tools/oak_view.py --topic /oak/rgb        # raw topic: needs cv2+numpy
 """
@@ -55,7 +56,7 @@ from sensor_msgs.msg import Image
 from crusader_common import config as crsd_config
 from crusader_common.node_main import run_node
 from crusader_common.param_utils import declare_from_config
-from crusader_sensors import oak_pipeline
+from crusader_perception import oak_pipeline
 
 # Frames published per poll tick. At the default 10 ms poll that is 300/s of
 # capacity against a 30 fps camera — headroom to catch up after a hiccup, with a
@@ -140,7 +141,7 @@ class OakDPublisher(Node):
         """Build the pipeline and open the camera. Failure raises: run_node lets
         the exception propagate, so a missing/held camera is a loud startup
         failure rather than a node that sits there publishing nothing."""
-        import depthai as dai                     # sensor container only
+        import depthai as dai                     # function-local: see docstring
 
         pipeline, self.width, self.height = oak_pipeline.build_rgbd(
             isp_denominator=p["isp_denominator"], fps=p["fps"],

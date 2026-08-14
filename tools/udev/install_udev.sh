@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Install Crusader udev rules on the Jetson host (NOT inside the container).
-# Also bumps usbfs memory for the OAK-D LR. That camera belongs to a DIFFERENT
-# container, but usbfs is a host-kernel setting and udev rules are host state:
-# dropping them here would silently break the camera on a shared Jetson. Move
-# both to the camera container's own installer when it grows one.
+# Also bumps usbfs memory for the OAK-D LR, which crusader_perception opens from
+# inside `asv`. Both are host state — usbfs is a kernel setting and udev rules
+# are host-level — so they belong here even though the code that needs them runs
+# in a container.
 set -euo pipefail
 # Unmatched globs expand to nothing rather than to the literal pattern, so the
 # device-scan loops below behave when no serial devices are plugged in.

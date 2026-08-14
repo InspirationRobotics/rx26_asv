@@ -6,11 +6,11 @@ with a Jetson Orin Nano companion computer running ROS 2 Humble in the `asv` Doc
 container.
 
 **What runs today:** the status, telemetry and safety layer — four nodes that have all
-been on the water. **What is scaffolded and empty:** perception and the world model, being
-rebuilt after v0.5 removed the unverified versions. **What is deliberately elsewhere:** the
-sensor drivers. A separate container owns the OAK-D and the MID360 and publishes their raw
-frames and point clouds as ROS topics; everything done *with* that data — detection,
-ranging, fusion, mapping — happens here.
+been on the water — plus `crusader_perception`, which owns the OAK-D and publishes
+detections rather than frames. **What is scaffolded and empty:** the world model (fusion,
+occupancy grid), being rebuilt after v0.5 removed the unverified version. **What is
+elsewhere:** the MID360 only. A second container drives that LiDAR and publishes its point
+cloud; consuming it is the unwritten half of perception.
 
 Before developing ANY code, read [Format](#format) and the standing
 [safety constraints](#safety-constraints-non-negotiable). Before your **first day**, follow
@@ -18,18 +18,16 @@ Before developing ANY code, read [Format](#format) and the standing
 
 ## Packages
 
-Eight packages, laid out along the architecture: sensors → perception → world model →
-cognition → behavior, with a shared library underneath and a bringup package on top. All
-eight build together (`--packages-up-to crusader_bringup`); `crusader_sensors` is the one
-that **runs** elsewhere — it owns devices, so it runs in the sensor container.
+Seven packages, laid out along the architecture: perception → world model → cognition →
+behavior, with a shared library underneath and a bringup package on top. All seven build
+and run in the `asv` container (`--packages-up-to crusader_bringup`).
 
 | Package | Contains | State |
 |---|---|---|
-| [`crusader_msgs`](crusader_msgs/README.md) | Message definitions. Depends on nothing but `std_msgs`, so the sensor container can build it cheaply | 5 msgs |
+| [`crusader_msgs`](crusader_msgs/README.md) | Message definitions. Depends on nothing but `std_msgs`, so any image can build it cheaply | 6 msgs |
 | [`crusader_common`](crusader_common/README.md) | Shared plumbing: params loader, node lifecycle, stream cache, drop latch, geodesy. No nodes | library |
 | [`crusader_fcu`](crusader_fcu/README.md) | `telemetry_bridge` — the only thing that speaks MAVLink. Localization source *and* Movement actuator | **field** |
-| [`crusader_sensors`](crusader_sensors/README.md) | Device drivers, camera-side: `oakd_publisher` → raw frames; `buoy_detector` → `oak/detections` in `camera_link` | 2 nodes |
-| [`crusader_perception`](crusader_perception/README.md) | Detection + ranging from the sensor container's raw topics | **empty** |
+| [`crusader_perception`](crusader_perception/README.md) | Owns the OAK-D and detects in it: `oakd_publisher` → raw frames; `buoy_detector` → `oak/detections` in `camera_link`. Not launched — the two contend for the camera | 2 nodes |
 | [`crusader_world_model`](crusader_world_model/README.md) | Fusion → 3D object positions; occupancy grid. Sensor-agnostic, verifiable without a camera | **empty** |
 | [`crusader_behavior`](crusader_behavior/README.md) | `safety/` RC-loss force-disarm watchdog; `indicator/` LED status stack | **field** |
 | [`crusader_bringup`](crusader_bringup/README.md) | Launch files + the params YAML. Ships no code; build entry point | — |
@@ -44,7 +42,7 @@ Every package has its own README with its design rationale and a change-impact t
 This repo is **a set of source dirs inside a colcon workspace**, not the workspace itself.
 On the Jetson it lives at `~/robotx_ws/src/rx26_asv`, alongside any other package sources.
 The repo root is deliberately **not** a colcon package — that is what lets `colcon build`
-discover all eight packages instead of stopping at the first one it finds.
+discover all seven packages instead of stopping at the first one it finds.
 
 ```
 ~/robotx_ws/                    # colcon WORKSPACE (not this repo; holds build/ install/ log/)
@@ -53,8 +51,7 @@ discover all eight packages instead of stopping at the first one it finds.
      |    |-- crusader_msgs/        # ament_cmake: msg/ + CMakeLists
      |    |-- crusader_common/      # ament_python: the shared library
      |    |-- crusader_fcu/         # ament_python: telemetry_bridge
-     |    |-- crusader_sensors/     # ament_python: OAK-D driver (runs in sensor container)
-     |    |-- crusader_perception/  # ament_python: EMPTY, scaffolded
+     |    |-- crusader_perception/  # ament_python: OAK-D driver + buoy detection
      |    |-- crusader_world_model/ # ament_python: EMPTY, scaffolded
      |    |-- crusader_behavior/    # ament_python: safety/ + indicator/
      |    |-- crusader_bringup/     # ament_cmake: launch/ + config/
@@ -65,7 +62,7 @@ discover all eight packages instead of stopping at the first one it finds.
      |    |-- setup/                # installation scripts per machine role
      |    |-- tools/                # udev, systemd, preflight, param_guard, rebuild, oak_view
      |    |-- Dockerfile            # `asv` image (ROS 2 + CUDA/TensorRT; no device SDKs)
-     |-- <sensor container sources, robotx_2026, ...>   # COLCON_IGNORE what you don't build
+     |-- <livox container sources, robotx_2026, ...>    # COLCON_IGNORE what you don't build
 ```
 
 ## The stack
@@ -165,13 +162,14 @@ At competition freeze this becomes `1.0.0`.
 **Hardware:** Crusader — Jetson Orin Nano; Pixhawk (ArduRover 4.6.3, `FRAME_TYPE=2` OmniX);
 4×T200; RTK GPS + dual-antenna moving-baseline heading (compass disabled by design);
 ELRS RC (e-stop path); 5.8GHz Ubiquiti + 915MHz telemetry; LED status strip
-(RED e-stop / YELLOW manual / GREEN autonomous). The OAK-D LR and Livox MID360 are
-attached to the same Jetson but driven by the **sensor container**.
+(RED e-stop / YELLOW manual / GREEN autonomous). The OAK-D LR is driven from `asv` by
+`crusader_perception`; the Livox MID360 is on the same Jetson but driven by the **livox
+container**.
 
-**Software:** Ubuntu/JetPack 6 on the Jetson; ROS 2 Humble + CUDA/TensorRT (detection runs
-here) + MAVProxy/pymavlink/pyserial inside the `asv` container, base
-`ultralytics/ultralytics:latest-jetson-jetpack6`; no depthai and no Livox SDK by design.
-Plain Python ≥3.10 + pyyaml anywhere. Install via [setup/](setup/README.md).
+**Software:** Ubuntu/JetPack 6 on the Jetson; ROS 2 Humble + CUDA/TensorRT + depthai +
+MAVProxy/pymavlink/pyserial inside the `asv` container, base
+`ultralytics/ultralytics:latest-jetson-jetpack6`; no Livox SDK, by design. Plain
+Python ≥3.10 + pyyaml anywhere. Install via [setup/](setup/README.md).
 
 ## Glossary
 
@@ -180,7 +178,8 @@ Plain Python ≥3.10 + pyyaml anywhere. Install via [setup/](setup/README.md).
 | **ASV / USV** | Autonomous/unmanned surface vessel — the boat |
 | **GUIDED / MANUAL** | ArduRover modes. GUIDED = autopilot drives to pushed setpoints (cannot strafe on this frame — it turns instead) |
 | **MAVProxy rebroadcast** | MAVProxy owns the Pixhawk serial link and re-serves telemetry on UDP (14550 GCS + broadcast, 14551 ROS). The only way anything else talks to the autopilot |
-| **Sensor container** | Separate container owning the OAK-D and MID360. Publishes raw frames and point clouds; does no detection |
+| **`asv` container** | Where this whole repo runs, OAK-D included. Has ROS 2, CUDA/TensorRT, depthai, MAVProxy |
+| **livox container** | The only other container. Drives the MID360 and nothing else; publishes its `PointCloud2` |
 | **Autonomy-drop switch** | RC-channel-triggered software latch that kills any RC override within one control cycle, working beyond WiFi range. Gate G1 deliverable |
 | **Preflight** | `tools/scripts/preflight.py` — the do-not-arm gate run before every session |
 | **Rebuild discipline** | Every edit needs `tools/scripts/rebuild.sh`. "The change did nothing" = you skipped it |
@@ -200,8 +199,10 @@ prequal — that is the version to port from when mission work restarts.
 
 ## Future development
 
-- **Topic contract with the sensor container** — names, types, QoS, frame ids. Blocks
-  everything in `crusader_perception`.
+- **Topic contract with the livox container** — name, type, QoS, frame id for the MID360
+  cloud. Blocks the LiDAR half of `crusader_perception`.
+- **Mission-element mapping** — `/crsd/pose` + `/crsd/attitude` + `oak/detections` through
+  `geo.body_to_world_ypr` into a world-frame object list. The inputs all exist now.
 - **Gate G1**: build + sign off the RC autonomy-drop switch. The enforcement point exists;
   the bench harness needs rewriting ([docs/G1_bench_procedure.md](docs/G1_bench_procedure.md)).
 - Rebuild fusion and the occupancy grid in `crusader_world_model`, verified off-boat before

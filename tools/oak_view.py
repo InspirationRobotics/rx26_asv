@@ -1,34 +1,37 @@
 #!/usr/bin/env python3
 """oak_view.py — forward the camera stream to a laptop as MJPEG over HTTP.
 
-Subscribes to the camera topic published by the CAMERA CONTAINER (which runs
-`depthai_ros_driver` and owns the OAK-D), and re-serves it at
-http://<JETSON_IP>:8080 so anyone on the boat's network can see what the camera
-sees in a browser. Field bring-up tool: the one question it answers is "is the
-camera alive and pointing where I think?".
+Subscribes to a camera topic and re-serves it at http://<JETSON_IP>:8080 so
+anyone on the boat's network can see what the camera sees in a browser. Field
+bring-up tool: the one question it answers is "is the camera alive and pointing
+where I think?".
 
-    python3 tools/oak_view.py                       # default topic, port 8080
+    python3 tools/oak_view.py --topic /oak/rgb        # what oakd_publisher emits
     python3 tools/oak_view.py --topic /oak/rgb/image_raw/compressed
     python3 tools/oak_view.py --port 8081
 
-This does NOT open the camera. The OAK-D allows a single client and the camera
-container is it — that is the whole reason this reads a topic instead of talking
-to depthai directly. Any number of these can run at once, and starting one can
-never take the camera away from perception.
+This does NOT open the camera. The OAK-D allows a single client and
+`crusader_perception`'s node is it — that is the whole reason this reads a topic
+instead of talking to depthai directly. Any number of these can run at once, and
+starting one can never take the camera away from perception.
 
-TOPIC NAMES come from `depthai_ros_driver`, whose camera node is named `oak` by
-default, giving `/oak/rgb/image_raw` and (via image_transport) the JPEG-encoded
-`/oak/rgb/image_raw/compressed`. Compressed is the default here: those bytes are
-already a JPEG, so they go straight to the browser with no decode, no re-encode,
-and no cv2/numpy on this side. If the camera container renames its node, pass
-`--topic`.
+REACH FOR `buoy_detector`'s OWN VIEW FIRST. It serves the same port with boxes,
+ranges and depth-sample patches drawn on, which answers "is the camera alive"
+*and* "is the detector working". This script is for the case where you want a
+raw topic — a bare `oakd_publisher` run — and they cannot both bind 8080.
+
+TOPIC NAMES: `oakd_publisher` publishes `oak/rgb` (raw `bgr8`) and `oak/depth`.
+The DEFAULT here is instead the `/compressed` variant of `depthai_ros_driver`'s
+naming, kept because those bytes are already a JPEG and go straight to the
+browser with no decode, no re-encode and no cv2/numpy on this side. Against our
+own node you must therefore pass `--topic /oak/rgb`, and that path needs cv2.
 
 REQUIREMENTS: rclpy + sensor_msgs, i.e. any container with ROS 2 on the path —
 including `asv`. Raw (uncompressed) topics additionally need cv2 + numpy to
 encode each frame; the script says so plainly rather than failing obscurely.
 
 Run it from a container started with `--network host` (ours are), or DDS will not
-see the camera container's publisher.
+see the publisher.
 """
 import argparse
 import sys
@@ -100,7 +103,7 @@ class CameraRelay(Node):
     def _health(self):
         if self.frames == 0:
             self.get_logger().warn(
-                "no frames yet — is the camera container publishing? check "
+                "no frames yet — is oakd_publisher running? check "
                 "`ros2 topic list` and that this container has --network host",
                 throttle_duration_sec=10.0)
 

@@ -14,11 +14,13 @@ setup(
     zip_safe=False,
     maintainer="Team Inspiration",
     maintainer_email="brandont3927@gmail.com",
-    description="Crusader perception (detection and ranging)",
+    description="Crusader perception: OAK-D frames, detection and ranging",
     url="https://github.com/InspirationRobotics/rx26_asv",
     license="MIT",
     entry_points={
         "console_scripts": [
+            "oakd_publisher = crusader_perception.oakd_publisher:main",
+            "buoy_detector = crusader_perception.buoy_detector:main",
         ],
     },
 )

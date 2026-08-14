@@ -8,7 +8,7 @@ way to do the same operation is how two machines end up configured differently.
 | `udev/` | `99-crusader.rules` (VID/PID → stable `/dev/crsd-*` symlinks + permissions), `install_udev.sh` | Device identity resolved by the kernel at plug time, so nothing chases `ttyACM` numbering. Matching is by VID/PID, not USB port chain: it survives recabling, and the two devices aboard are distinguishable. **Only hardware actually on the boat gets a rule** — a symlink for absent hardware makes a config look satisfied while pointing at whatever else enumerated. |
 | `systemd/` | `crsd-mavproxy.service`, `crsd-container.service` (templates; `__PLACEHOLDERS__` expanded by `setup/install_jetson_host.sh`) | The boot chain is ordered so MAVProxy owns the Pixhawk before any node starts. A power cycle brings the boat up with no typed commands. |
 | `scripts/` | `check_config.py` (static config guards), `param_guard.py` (PROTECTED vs TUNABLE param diff), `preflight.py` (do-not-arm gate), `rebuild.sh` (the one blessed rebuild) | Fail loudly and early: a check that cannot fail is worse than no check. |
-| `oak_view.py` | Subscribes to the camera container's ROS topic and re-serves it as MJPEG to a laptop browser | A viewer, not a driver. It never opens the OAK-D, so it cannot take the camera away from perception, and any number can run at once. Runs anywhere with ROS on the path, `asv` included. |
+| `oak_view.py` | Subscribes to a raw camera topic and re-serves it as MJPEG to a laptop browser. `buoy_detector`'s own annotated view is usually the better tool | A viewer, not a driver. It never opens the OAK-D, so it cannot take the camera away from perception, and any number can run at once. Runs anywhere with ROS on the path, `asv` included. |
 
 ## The param baseline
 

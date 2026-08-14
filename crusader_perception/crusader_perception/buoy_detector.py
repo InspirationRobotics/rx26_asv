@@ -20,16 +20,17 @@ it. Run `oakd_publisher` when a human needs to see frames; run this when the
 boat needs to see buoys. `publish_frames` exists for the case where you want
 both during bring-up, and it costs exactly the bandwidth it says it does.
 
-CONTAINER REQUIREMENT — READ THIS BEFORE DEPLOYING
---------------------------------------------------
-This node needs BOTH depthai (the camera) and ultralytics/TensorRT (the engine),
-and today NEITHER container has both: `asv` asserts at build time that depthai is
-absent, and the sensor container carries no CUDA stack. Co-locating detection
-with the device is exactly the split this repo drew on purpose, so running this
-node means deliberately redrawing it — add depthai to `asv` (and delete the
-Dockerfile guard that forbids it) or add the CUDA/TensorRT stack to the sensor
-image. That is an architecture decision, not a build fix, and it should be made
-explicitly rather than discovered when the import fails on the water.
+WHERE THIS RUNS
+---------------
+`asv`, which is the only image with both of the things this node needs: depthai
+(the camera) and ultralytics/TensorRT (the engine). It used to be neither —
+`asv` asserted depthai was absent, under an older plan where a separate container
+owned the OAK-D and published raw frames for detection to consume. This node is
+what retired that plan: 1.28 MB frames at ~38 MB/s across a container boundary,
+to produce a few hundred bytes of Detection3DArray, is the wrong trade. depthai
+is now installed by the Dockerfile and the absence guard is gone.
+
+It CONTENDS with `oakd_publisher` for the one OAK-D — only one may run.
 
 FRAME CONVENTION
 ----------------
@@ -52,7 +53,7 @@ from crusader_common import config as crsd_config
 from crusader_common.node_main import run_node
 from crusader_common.param_utils import declare_from_config
 from crusader_msgs.msg import Detection3D, Detection3DArray
-from crusader_sensors import oak_pipeline
+from crusader_perception import oak_pipeline
 
 MAX_GROUPS_PER_TICK = 2
 

@@ -59,7 +59,7 @@ jobs:
           # a module that moved builds clean and dies at `ros2 run` — on the
           # boat, at the worst moment. This is the check that the seven-package
           # split most needs, since imports now cross package boundaries.
-          ros2 pkg executables crusader_fcu crusader_behavior
+          ros2 pkg executables crusader_fcu crusader_behavior crusader_perception
           python3 - <<'PY'
           import importlib, sys
           mods = ["crusader_common.config", "crusader_common.node_main",
@@ -71,6 +71,13 @@ jobs:
                   "crusader_behavior.indicator.led_node",
                   "crusader_behavior.indicator.pixhawk_led_status_node",
                   "crusader_perception", "crusader_world_model",
+                  # oak_pipeline only: it is the one perception module that is
+                  # SAFE TO IMPORT ANYWHERE (every `import depthai` inside it is
+                  # function-local), so a break in it must fail here rather than
+                  # at runtime on the boat. The two node modules deliberately
+                  # are not listed — they pull numpy/sensor_msgs, and this job's
+                  # value is proving the ament/entry-point wiring, not the SDK.
+                  "crusader_perception.oak_pipeline",
                   "crusader_msgs.msg"]
           bad = []
           for m in mods:

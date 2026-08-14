@@ -13,8 +13,8 @@ This document assumes the boat is already installed and you are operating it.
 > **v0.5 removed everything that had never run on the boat** — perception,
 > avoidance, mission planning, station keeping, gate transit — and split what
 > remained into seven `crusader_*` packages. What is documented here is what
-> exists. The camera and LiDAR *devices* are now driven by a separate sensor
-> container; what we do with their data still happens here (§13).
+> exists. The OAK-D is driven from `asv` by `crusader_perception`, which also
+> detects in it; only the MID360 lives in a second container (§13).
 
 ---
 
@@ -26,8 +26,9 @@ This document assumes the boat is already installed and you are operating it.
   directory inside `src/`, alongside any others.
 - Code **runs** inside a Docker container named **`asv`** (ROS 2 Humble + CUDA);
   code is **edited** outside the container. Both see the same files via a bind mount.
-- A **second container drives the sensors** (OAK-D, MID360) and publishes their raw
-  frames and clouds as ROS topics. It does no detection — that runs in `asv` (§13).
+- A **second container drives the MID360 LiDAR** and nothing else, publishing its
+  point cloud as a ROS topic. The OAK-D is **not** in it — `crusader_perception`
+  owns that camera from inside `asv`, and detects in it there (§13).
 - The **Pixhawk is owned by exactly one program, MAVProxy**, which rebroadcasts
   over UDP to everything else (our nodes, Mission Planner/QGC on your laptop).
   Nothing else may open the serial device.
@@ -192,20 +193,29 @@ change together.
 
 ### Camera
 
-The **sensor container** owns the OAK-D and publishes its frames to ROS; detection
-and fusion run here, in `asv` (§13). To see what the camera sees from a laptop:
+`crusader_perception` owns the OAK-D from inside `asv` (§13). Two nodes, and only
+one may run — the device admits a single client:
 
 ```bash
-python3 /root/robotx_ws/src/rx26_asv/tools/oak_view.py
+ros2 run crusader_perception buoy_detector    # detections; what the stack wants
+ros2 run crusader_perception oakd_publisher   # raw frames; for a human, ~38 MB/s
 ```
 
-Then open `http://<JETSON_IP>:8080`. It subscribes to the camera topic and
-re-serves it as MJPEG — it never opens the device, so it cannot take the camera
-away from anything, and any number can run at once. Pass `--topic` if the sensor
-container renames its node away from the `depthai_ros_driver` default.
+`buoy_detector` serves its own annotated view at `http://<JETSON_IP>:8080` — boxes,
+ranges, and where depth was sampled. That is the one to use when checking the
+camera. `tools/oak_view.py` is the alternative for a *raw* topic:
 
-> Perception and world-model nodes are **not** in `core.launch.py`: those packages
-> are scaffolded and empty while they are rebuilt (§13).
+```bash
+python3 /root/robotx_ws/src/rx26_asv/tools/oak_view.py --topic /oak/rgb
+```
+
+It subscribes rather than opening the device, so it cannot take the camera away
+from anything and any number can run at once. It cannot share port 8080 with
+`buoy_detector`'s view, and they are never both useful at once.
+
+> Neither perception node is in `core.launch.py` — they contend for the one
+> camera, so which runs is an operator choice per session. World-model nodes are
+> not there either: that package is still scaffolded and empty (§13).
 
 ### Laptop side
 
@@ -261,12 +271,13 @@ Watch the camera from a laptop browser — then open `http://<JETSON_IP>:8080`,
 Ctrl+C to stop:
 
 ```bash
-python3 /root/robotx_ws/src/rx26_asv/tools/oak_view.py
+python3 /root/robotx_ws/src/rx26_asv/tools/oak_view.py --topic /oak/rgb
 ```
 
-> This subscribes to the camera container's topic and re-serves it; it never
-> opens the device, so it cannot take the camera away from anything. Run as many
-> as you like. `--topic` overrides the `depthai_ros_driver` default name.
+> This subscribes to a topic and re-serves it; it never opens the device, so it
+> cannot take the camera away from anything. Run as many as you like. Against
+> `oakd_publisher` you must pass `--topic /oak/rgb` — the built-in default is a
+> `/compressed` name that our node does not publish.
 
 Confirm MAVLink actually reaches container-side code — this is the single best
 end-to-end health check:
@@ -301,7 +312,7 @@ cd /root/robotx_ws && source /opt/ros/humble/setup.bash && colcon build --symlin
 ```
 
 > **`--packages-up-to crusader_bringup` is deliberate.** The workspace holds other
-> package sources (`robotx_2026`, the sensor container's) whose build state is not
+> package sources (`robotx_2026`, the livox container's) whose build state is not
 > ours to change and whose build failure must not block ours. bringup depends on
 > every package we ship, so "up-to" is exactly our stack — and it stays correct
 > when a package is added, which a `--packages-select` list does not.
@@ -368,10 +379,10 @@ cd ~/robotx_ws/src/rx26_asv && git add -A && git commit -m "short description" &
 ~/robotx_ws/                        # colcon WORKSPACE — holds build/ install/ log/
 └── src/
     ├── rx26_asv/                   # <- THIS REPO (seven packages, not one)
-    │   ├── crusader_msgs/          # ament_cmake — msg definitions (3)
+    │   ├── crusader_msgs/          # ament_cmake — msg definitions (6)
     │   ├── crusader_common/        # shared lib: params, lifecycle, latch, geo
     │   ├── crusader_fcu/           # telemetry_bridge — the only MAVLink talker
-    │   ├── crusader_perception/    # EMPTY — detection + ranging (being rebuilt)
+    │   ├── crusader_perception/    # OAK-D driver + buoy detection
     │   ├── crusader_world_model/   # EMPTY — fusion + occupancy grid
     │   ├── crusader_behavior/      # safety/ watchdog + indicator/ LED stack
     │   ├── crusader_bringup/       # ament_cmake — launch/ + config/; build entry point
@@ -381,7 +392,7 @@ cd ~/robotx_ws/src/rx26_asv && git add -A && git commit -m "short description" &
     │   ├── tools/                  # udev, systemd, preflight, param_guard, rebuild, oak_view
     │   └── Dockerfile              # builds the `asv` image
     ├── robotx_2026/                # legacy boat repo — NOT built by us (see §19)
-    └── <sensor container sources>  # drivers for the OAK-D and MID360
+    └── <livox container sources>   # MID360 driver only
 ```
 
 Build with `colcon build --packages-up-to crusader_bringup` — bringup depends on
@@ -427,46 +438,50 @@ Re-export it from QGC after any deliberate param change.
 
 ---
 
-## 13. Camera and LiDAR — sensor container vs this one
+## 13. The two containers
 
-The split is by **device ownership, not by responsibility**:
+There are exactly two, and the boundary is **one device**:
 
-| | Sensor container | `asv` (this repo) |
+| | `asv` (this repo) | livox container |
 |---|---|---|
-| Owns | OAK-D LR, Livox MID360 | Pixhawk, LED Arduino |
-| Has | depthai, Livox SDK, the drivers | CUDA/TensorRT, cv_bridge, MAVProxy |
-| Publishes | raw `Image`, `PointCloud2` | detections, world model, boat state |
-| Does NOT | detect, fuse, or map | open a camera or a LiDAR |
+| Owns | Pixhawk, LED Arduino, **OAK-D LR** | Livox MID360, and nothing else |
+| Has | ROS 2, CUDA/TensorRT, **depthai**, cv_bridge, MAVProxy | the Livox SDK/driver |
+| Publishes | `oak/detections`, boat state, world model | `PointCloud2` |
+| Does NOT | open the LiDAR | detect, fuse, or map |
 
-So detection runs **here**, on this container's GPU, against the raw topics the sensor
-container publishes. That is why the `asv` image carries the CUDA/TensorRT stack and
-`cv_bridge`, and why it deliberately carries no depthai and no Livox SDK — the Dockerfile
-fails the build if depthai reappears in it.
+This is not the split the repo originally described. The old plan had a single sensor
+container owning *both* devices and publishing raw frames, with detection running in `asv`
+against those topics — and the `asv` Dockerfile asserted depthai was absent to enforce it.
+**`buoy_detector` made that untenable**: shipping 1.28 MB frames (~38 MB/s at 30fps) across
+a container boundary to produce a few hundred bytes of `Detection3DArray` is the wrong
+trade, so the camera and the inference belong in one process. That process needs depthai
+*and* TensorRT, and `asv` is the only image with the CUDA stack — so depthai moved in and
+the guard came out. The package formerly called `crusader_sensors` is now
+`crusader_perception` for the same reason: it does both jobs.
 
-Two packages hold that work, both currently **empty and scaffolded** while it is rebuilt:
+- `crusader_perception` — owns the OAK-D, publishes detections with ranges in
+  `camera_link`. Runs in `asv`. Its LiDAR half is unwritten.
+- `crusader_world_model` — sensor-agnostic: fusion into 3D object positions, occupancy
+  grid. Still **empty and scaffolded**.
 
-- `crusader_perception` — sensor-coupled: frames and clouds become detections with ranges.
-- `crusader_world_model` — sensor-agnostic: fusion into 3D object positions, occupancy grid.
+The pre-v0.5 LiDAR fusion was removed unverified. It is recoverable from git at `8c4ffa5`
+and worth reading before rewriting — see each package's README.
 
-The pre-v0.5 pipeline was removed unverified (its buoy model was trained on another team's
-buoys, and none of it had run end-to-end). It is recoverable from git at `8c4ffa5` and
-worth reading before rewriting — see each package's README.
-
-**Before any of it comes back, the topic contract with the sensor container has to be
-agreed**: topic names, message types, QoS, frame ids. A QoS mismatch is silent — a
+**Before the LiDAR half comes back, the topic contract with the livox container has to be
+agreed**: topic name, message type, QoS, frame id. A QoS mismatch is silent — a
 BEST_EFFORT publisher and a RELIABLE subscriber match nothing, `ros2 topic list` looks
 perfect, and no data flows.
 
 ### Watching the camera from a laptop
 
 ```bash
-python3 /root/robotx_ws/src/rx26_asv/tools/oak_view.py
+python3 /root/robotx_ws/src/rx26_asv/tools/oak_view.py --topic /oak/rgb
 ```
 
 Then open `http://<JETSON_IP>:8080`. It subscribes to the camera topic and re-serves it as
 MJPEG; it never opens the device, so it cannot take the camera away from anything, and any
-number can run at once. Pass `--topic` if the sensor container renames its node away from
-the `depthai_ros_driver` default.
+number can run at once. Pass `--topic` to point it at `/oak/rgb` — it defaults to a
+`/compressed` topic, which `oakd_publisher` does not publish.
 
 ### Host-level bits that stay with us
 
@@ -502,8 +517,10 @@ Image `asv`, built **from this repo's Dockerfile** — not a hand-made container
 Base is `ultralytics/ultralytics:latest-jetson-jetpack6` (CUDA + PyTorch + TensorRT),
 plus ROS 2 Humble, `cv_bridge`/`sensor_msgs_py`, and MAVProxy/pymavlink/pyserial.
 
-**No depthai, no Livox SDK** — the sensor container owns those devices (§13). The build
-asserts depthai is absent, so perception cannot quietly drift back into the wrong place.
+**depthai yes, Livox SDK no** — this image owns the OAK-D and the livox container owns the
+MID360 (§13). The build imports depthai as a positive check; the depthai *absence* guard
+that used to be here was written for the old split and would now fail the build it was
+meant to protect.
 
 Rebuild it on the Jetson host:
 
@@ -522,7 +539,7 @@ Those create flags are not optional:
 
 | Flag | Why |
 |---|---|
-| `--network host` | MAVProxy loopback rebroadcast, DDS multicast, and the cross-container topics from the sensor container |
+| `--network host` | MAVProxy loopback rebroadcast, DDS multicast, and the MID360 cloud from the livox container |
 | `--privileged` + `-v /dev:/dev` | the Pixhawk and LED serial devices |
 | `--runtime nvidia` | GPU for TensorRT — detection runs in this container |
 | `-it` | keeps `CMD ["bash"]` alive so `docker start -a` works |
@@ -547,8 +564,7 @@ water.
 
 The field-proven versions — the ones that completed prequal — live in
 [robotx_2026](https://github.com/InspirationRobotics/robotx_2026). That is what
-to port from when mission work restarts, against an agreed detections topic from
-the camera container.
+to port from when mission work restarts, against `oak/detections`.
 
 The ArduRover-side lesson from `dp_hold` is worth keeping regardless: **GUIDED
 cannot strafe on this frame** — it turns instead of translating laterally. RC
@@ -645,8 +661,9 @@ Honest list — these are known-wrong or known-missing, not merely untested:
 - **`MOT_THST_ASYM` / `MOT_THST_EXPO` were mid-tuning** when §16's work stopped
   (≈1.5 and ≈0.65 in progress); the baseline has 1.0 and 0.0. Tunable, not
   protected — but know which one you are running.
-- **No topic contract with the camera container** yet. Until there is one,
-  nothing that consumes detections can come back (§13).
+- **No topic contract with the livox container** yet, so the MID360 cloud has no
+  agreed name, type, QoS or frame id and nothing can consume it (§13). The
+  camera side is settled: `oak/detections`, `Detection3DArray`, `camera_link`.
 
 ### Confirmed hardware (2026-07-28)
 
@@ -654,7 +671,7 @@ Honest list — these are known-wrong or known-missing, not merely untested:
 |---|---|---|
 | Pixhawk | ArduPilot Pixhawk1, `1209:5741` | `/dev/crsd-pixhawk` |
 | LED Arduino | CH340 `1a86:7523`, **no serial number** | `/dev/crsd-led` |
-| OAK-D LR | MX ID `194430101110C82F00` | (not a tty; camera container's device) |
+| OAK-D LR | MX ID `194430101110C82F00` | (not a tty; opened by `crusader_perception`) |
 
 A Teensy (`16c0:0483`) and a Prolific PL2303 (`067b:23a3`) also enumerate but are
 **not on the official hardware list** — treat as unused until someone traces the
