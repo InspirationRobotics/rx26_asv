@@ -1,7 +1,8 @@
 # `crusader_msgs` — ROS 2 message package
 
-The typed contracts between nodes. Three messages, all produced by `telemetry_bridge`
-from MAVProxy's rebroadcast and consumed by everything else.
+The typed contracts between nodes. Three telemetry messages produced by
+`telemetry_bridge` from MAVProxy's rebroadcast, plus the perception pair that
+`crusader_sensors/buoy_detector` fills.
 
 ## Messages
 
@@ -10,6 +11,8 @@ from MAVProxy's rebroadcast and consumed by everything else.
 | `LatLonHead` | `telemetry_bridge` → any consumer | lat/lon/heading + `ground_speed`, taken from `GLOBAL_POSITION_INT`'s own vx/vy so nobody has to finite-difference position. `heading` is NaN when GPS yaw is unresolved — that is a value to check, not to smooth over |
 | `FcuStatus` | `telemetry_bridge` → LED status, watchdog | mode string, armed flag, system status, from `HEARTBEAT` |
 | `RcChannels` | `telemetry_bridge` → LED status, watchdog; and any override publisher → `telemetry_bridge` | 18 raw PWM values. Also the TX direction: an override publisher fills channels 1–8 |
+| `Detection3D` | inside `Detection3DArray` | one object: label, confidence, position, source bbox. Position is REP-103 body axes (x forward, y left, z up) in the frame the array declares — never optical axes |
+| `Detection3DArray` | `buoy_detector` → fusion, world model | everything one camera frame saw. **Published every frame, empty or not**: empty means "alive, saw nothing", silence means the producer died |
 
 Every message carries a `std_msgs/Header`. **The stamp is the time the MAVLink frame was
 RECEIVED**, not the time it was republished — a consumer judging freshness needs the age

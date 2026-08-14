@@ -101,6 +101,52 @@ oakd_publisher:
     queue_size: 4                          # [RO] device output queue depth (non-blocking)
     health_period_s: 5.0                   # [RO] warn if no frames arrived since last check
 
+# buoy_detector OWNS THE SAME CAMERA as oakd_publisher — the OAK-D admits one
+# client, so exactly one of the two runs at a time. It publishes detections, not
+# frames: a few hundred bytes per frame instead of 1.28 MB, which is the point.
+# The camera block below is duplicated from oakd_publisher and MUST stay equal to
+# it (rcl forbids YAML anchors; tools/scripts/check_config.py pins the pair) —
+# the two nodes have to produce identical geometry or a range measured under one
+# does not mean the same thing under the other.
+buoy_detector:
+  ros__parameters:
+    engine: "/root/robotx_ws/models/buoy_v16.engine"   # [RO] TensorRT engine
+    labels:                                # [RO] IN ENGINE ORDER — a wrong order
+                                           #      silently mislabels every buoy
+      - "black_buoy"
+      - "black_cross"
+      - "black_target_boat"
+      - "black_triangle"
+      - "blue_buoy"
+      - "green_buoy"
+      - "green_light_buoy"
+      - "green_pole_buoy"
+      - "red_buoy"
+      - "red_light_buoy"
+      - "red_pole_buoy"
+      - "yellow_buoy"
+      - "yellow_target_boat"
+    conf_min: 0.40                         # [RO] publish above this; consumers
+                                           #      re-threshold for their own use
+    imgsz_height: 352                      # [RO] engine input height
+    imgsz_width: 640                       # [RO] engine input width
+    range_min_m: 0.30                      # [RO] depth below this is invalid
+    range_max_m: 25.0                      # [RO] depth above this is invalid
+    min_depth_samples: 5                   # [RO] valid pixels needed to range a box
+    frame_id: "camera_link"                # [RO] REP-103 body axes: x fwd, y left, z up
+    detections_topic: "oak/detections"     # [RO] Detection3DArray, every frame
+    publish_frames: false                  # [RO] BRING-UP ONLY: +38 MB/s at 30fps
+    rgb_topic: "oak/rgb"                   # [RO] only used if publish_frames
+    depth_topic: "oak/depth"               # [RO] only used if publish_frames
+    fps: 30.0                              # [RO] = oakd_publisher.fps
+    isp_denominator: 3                     # [RO] = oakd_publisher.isp_denominator
+    sync_threshold_ms: 50                  # [RO] = oakd_publisher.sync_threshold_ms
+    subpixel: true                         # [RO] = oakd_publisher.subpixel
+    lr_check: true                         # [RO] = oakd_publisher.lr_check
+    poll_period_s: 0.01                    # [RO] output-queue poll period [s]
+    queue_size: 4                          # [RO] device output queue depth
+    health_period_s: 5.0                   # [RO] rate/health log period [s]
+
 # ---- rc_heartbeat_watchdog: force-disarm on RC-transmitter link loss (safety) ----
 # Consumes telemetry_bridge topics (/crsd/rc_channels, /crsd/fcu_status) and routes
 # a force-disarm back through the bridge (/crsd/force_disarm) — no own MAVLink conn.

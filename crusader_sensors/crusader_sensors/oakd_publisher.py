@@ -55,13 +55,7 @@ from sensor_msgs.msg import Image
 from crusader_common import config as crsd_config
 from crusader_common.node_main import run_node
 from crusader_common.param_utils import declare_from_config
-
-# The OAK-D LR sensor is 1920x1200; every ISP scale is 1/N of that. Both stereo
-# cameras and the depth output are held to the SAME size as the colour frame —
-# that equality is what the aligned-depth contract rests on, so it is asserted
-# at runtime rather than assumed.
-SENSOR_WIDTH = 1920
-SENSOR_HEIGHT = 1200
+from crusader_sensors import oak_pipeline
 
 # Frames published per poll tick. At the default 10 ms poll that is 300/s of
 # capacity against a 30 fps camera — headroom to catch up after a hiccup, with a
@@ -114,8 +108,7 @@ class OakDPublisher(Node):
                                 PARAM_SPEC)
 
         self.frame_id = p["frame_id"]
-        self.width = SENSOR_WIDTH // p["isp_denominator"]
-        self.height = SENSOR_HEIGHT // p["isp_denominator"]
+        self.width, self.height = oak_pipeline.output_size(p["isp_denominator"])
 
         self.pub_rgb = self.create_publisher(Image, p["rgb_topic"],
                                              qos_profile_sensor_data)
@@ -148,52 +141,11 @@ class OakDPublisher(Node):
         the exception propagate, so a missing/held camera is a loud startup
         failure rather than a node that sits there publishing nothing."""
         import depthai as dai                     # sensor container only
-        from datetime import timedelta
 
-        pipeline = dai.Pipeline()
-
-        rgb = pipeline.create(dai.node.ColorCamera)
-        rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
-        rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1200_P)
-        rgb.setIspScale(1, p["isp_denominator"])
-        rgb.setInterleaved(False)
-        rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
-        rgb.setFps(p["fps"])
-
-        # OAK-D LR: the stereo pair are colour sensors too, so they are
-        # ColorCamera nodes scaled identically to CAM_A.
-        left = pipeline.create(dai.node.ColorCamera)
-        left.setCamera("left")
-        left.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1200_P)
-        left.setIspScale(1, p["isp_denominator"])
-        left.setFps(p["fps"])
-
-        right = pipeline.create(dai.node.ColorCamera)
-        right.setCamera("right")
-        right.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1200_P)
-        right.setIspScale(1, p["isp_denominator"])
-        right.setFps(p["fps"])
-
-        stereo = pipeline.create(dai.node.StereoDepth)
-        stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.DEFAULT)
-        stereo.setLeftRightCheck(p["lr_check"])
-        stereo.setSubpixel(p["subpixel"])
-        stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)   # depth in RGB pixels
-        stereo.setOutputSize(self.width, self.height)
-
-        left.isp.link(stereo.left)
-        right.isp.link(stereo.right)
-
-        # Pair the two streams ON THE DEVICE. Anything the device cannot pair
-        # within the threshold never leaves it — see the module docstring.
-        sync = pipeline.create(dai.node.Sync)
-        sync.setSyncThreshold(timedelta(milliseconds=p["sync_threshold_ms"]))
-        rgb.isp.link(sync.inputs["rgb"])
-        stereo.depth.link(sync.inputs["depth"])
-
-        xout = pipeline.create(dai.node.XLinkOut)
-        xout.setStreamName("rgbd")
-        sync.out.link(xout.input)
+        pipeline, self.width, self.height = oak_pipeline.build_rgbd(
+            isp_denominator=p["isp_denominator"], fps=p["fps"],
+            subpixel=p["subpixel"], lr_check=p["lr_check"],
+            sync_threshold_ms=p["sync_threshold_ms"])
 
         self.dai = dai
         self.device = dai.Device(pipeline)
@@ -202,16 +154,12 @@ class OakDPublisher(Node):
         self.queue = self.device.getOutputQueue("rgbd", maxSize=p["queue_size"],
                                                 blocking=False)
 
-        speed = self.device.getUsbSpeed()
         self.get_logger().info(
-            f"OAK-D open: mxid={self.device.getMxId()}, usb={speed.name}")
-        if speed not in (dai.UsbSpeed.SUPER, dai.UsbSpeed.SUPER_PLUS):
-            # USB2 does not carry 640x400 RGB + subpixel depth at 30fps. It will
-            # "work" at a fraction of the rate, which reads as a perception bug
-            # three layers downstream — so say it here, at the source.
-            self.get_logger().warn(
-                f"link negotiated {speed.name}, not SUPER — expect dropped "
-                "frames. Check the cable and the port (blue/SS).")
+            f"OAK-D open: mxid={self.device.getMxId()}, "
+            f"usb={self.device.getUsbSpeed().name}")
+        warning = oak_pipeline.usb_warning(self.device)
+        if warning:
+            self.get_logger().warn(warning)
 
     # ---------------- frame pump ----------------
     def _drain(self):

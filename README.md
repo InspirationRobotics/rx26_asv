@@ -25,10 +25,10 @@ that **runs** elsewhere — it owns devices, so it runs in the sensor container.
 
 | Package | Contains | State |
 |---|---|---|
-| [`crusader_msgs`](crusader_msgs/README.md) | Message definitions. Depends on nothing but `std_msgs`, so the sensor container can build it cheaply | 3 msgs |
+| [`crusader_msgs`](crusader_msgs/README.md) | Message definitions. Depends on nothing but `std_msgs`, so the sensor container can build it cheaply | 5 msgs |
 | [`crusader_common`](crusader_common/README.md) | Shared plumbing: params loader, node lifecycle, stream cache, drop latch, geodesy. No nodes | library |
 | [`crusader_fcu`](crusader_fcu/README.md) | `telemetry_bridge` — the only thing that speaks MAVLink. Localization source *and* Movement actuator | **field** |
-| [`crusader_sensors`](crusader_sensors/README.md) | Device drivers; runs in the **sensor container**: `oakd_publisher` → `oak/rgb`, `oak/depth` | 1 node |
+| [`crusader_sensors`](crusader_sensors/README.md) | Device drivers, camera-side: `oakd_publisher` → raw frames; `buoy_detector` → `oak/detections` in `camera_link` | 2 nodes |
 | [`crusader_perception`](crusader_perception/README.md) | Detection + ranging from the sensor container's raw topics | **empty** |
 | [`crusader_world_model`](crusader_world_model/README.md) | Fusion → 3D object positions; occupancy grid. Sensor-agnostic, verifiable without a camera | **empty** |
 | [`crusader_behavior`](crusader_behavior/README.md) | `safety/` RC-loss force-disarm watchdog; `indicator/` LED status stack | **field** |

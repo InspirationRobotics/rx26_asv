@@ -20,6 +20,7 @@ setup(
     entry_points={
         "console_scripts": [
             "oakd_publisher = crusader_sensors.oakd_publisher:main",
+            "buoy_detector = crusader_sensors.buoy_detector:main",
         ],
     },
 )

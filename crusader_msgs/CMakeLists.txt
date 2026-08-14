@@ -11,6 +11,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/LatLonHead.msg"
   "msg/RcChannels.msg"
   "msg/FcuStatus.msg"
+  "msg/Detection3D.msg"
+  "msg/Detection3DArray.msg"
   DEPENDENCIES std_msgs
 )
 

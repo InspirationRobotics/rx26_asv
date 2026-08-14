@@ -6,6 +6,61 @@ interprets anything: no detection, no fusion, no filtering. Raw data out, and th
 | Node | Owns | Publishes |
 |---|---|---|
 | `oakd_publisher` | OAK-D LR (depthai) | `oak/rgb` (`bgr8`), `oak/depth` (`16UC1`, mm, aligned) |
+| `buoy_detector` | OAK-D LR + TensorRT engine | `oak/detections` (`crusader_msgs/Detection3DArray`, `camera_link`) |
+
+## The two nodes are alternatives, not a pipeline
+
+The OAK-D admits exactly **one** client. Whichever of these starts first gets the camera
+and the other fails to open it — by design, not by accident.
+
+- `oakd_publisher` — frames on the wire, for a human looking at pixels. 1.28 MB per frame,
+  ~38 MB/s at 30fps, and that traffic is the reason the raw-frame path is hard to scale
+  across containers.
+- `buoy_detector` — **raw in, detections out.** Inference runs beside the device, so
+  nothing large ever leaves the process; a `Detection3DArray` is a few hundred bytes.
+  This is the shape the rest of the stack should consume.
+
+`buoy_detector` has `publish_frames` for bring-up, when you want detections *and* a picture
+from one process. It costs exactly the bandwidth `oakd_publisher` costs, and it defaults
+off.
+
+Both build their device pipeline from
+[`oak_pipeline.py`](crusader_sensors/oak_pipeline.py) — one builder, because depth is
+aligned to the RGB camera at one specific geometry and two copies would drift into ranges
+that are quietly wrong rather than obviously broken. `check_config.py` pins their shared
+camera params too.
+
+## `buoy_detector` needs a container that does not exist yet
+
+It imports **both** depthai (camera) and ultralytics/TensorRT (engine). Today neither
+container has both: `asv` fails its own build if depthai appears, and the sensor image
+carries no CUDA stack. Co-locating detection with the device is a deliberate reversal of
+that split — add depthai to `asv` and drop the Dockerfile guard, or add the CUDA/TensorRT
+stack to the sensor image. Decide it explicitly; the failure mode otherwise is an
+ImportError on the water.
+
+Engine path defaults to `/root/robotx_ws/models/buoy_v16.engine` and is a parameter.
+
+## Detection output
+
+`oak/detections` carries positions in `camera_link`, REP-103 body axes — **x forward,
+y left, z up** — converted from the camera's optical frame (z forward, x right, y down)
+inside the node, so no consumer has to remember which convention it holds. If your URDF
+puts `camera_link` somewhere other than the RGB sensor's optical centre, that offset
+belongs in TF, not here.
+
+Two properties fusion depends on:
+
+- **Published every frame, empty or not.** An empty array means "alive, saw nothing";
+  silence means the producer is dead. A consumer that cannot tell those apart will steer
+  on a ten-second-old detection.
+- **`header.stamp` is the camera instant** — device timestamp with transport latency
+  removed, not publish time — because that is what a LiDAR sweep gets associated against.
+
+Boxes that the detector sees but depth cannot range are **dropped, not published with a
+guessed position**, and counted in the health line as `no_depth`. A detector that sees
+buoys but cannot range them otherwise looks identical, from downstream, to one that sees
+nothing.
 
 ## Builds everywhere, runs in the sensor container
 

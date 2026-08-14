@@ -35,7 +35,16 @@ PARAMS_BASELINE = REPO / "params" / "working_crusader.params"
 # still has; a node with no section fails at startup instead.
 CONFIG_DRIVEN_NODES = {"telemetry_bridge", "led_node",
                        "pixhawk_led_status_node", "rc_heartbeat_watchdog",
-                       "oakd_publisher"}
+                       "oakd_publisher", "buoy_detector"}
+
+# oakd_publisher and buoy_detector each build the SAME OAK-D pipeline (only one
+# runs at a time — the camera admits one client). These params decide the image
+# geometry, and depth is aligned to the RGB camera at exactly this size, so the
+# RGB intrinsics are only valid on the depth image while both agree. Let them
+# drift and nothing fails: ranges measured under one node just quietly stop
+# meaning what they meant under the other.
+CAMERA_PARAMS = ("fps", "isp_denominator", "sync_threshold_ms",
+                 "subpixel", "lr_check")
 
 failures = []
 
@@ -107,6 +116,23 @@ def check_params_yaml():
             ok("shared pose_timeout_s consistent")
     except KeyError as e:
         fail("shared pose_timeout_s", f"missing key {e}")
+
+    # The two OAK-D nodes must describe the same camera (see CAMERA_PARAMS).
+    try:
+        publisher = cfg["oakd_publisher"]["ros__parameters"]
+        detector = cfg["buoy_detector"]["ros__parameters"]
+        differing = {name: (publisher[name], detector[name])
+                     for name in CAMERA_PARAMS
+                     if publisher[name] != detector[name]}
+        if differing:
+            fail("oak camera params consistent",
+                 f"oakd_publisher vs buoy_detector differ: {differing} — depth "
+                 "is aligned at this geometry, so a range means different "
+                 "things under each node")
+        else:
+            ok("oak camera params consistent across both OAK-D nodes")
+    except KeyError as e:
+        fail("oak camera params consistent", f"missing key {e}")
 
 
 # ------------------------------------------------------------ param baseline
