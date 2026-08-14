@@ -63,6 +63,11 @@ from crusader_common.param_utils import declare_from_config
 SENSOR_WIDTH = 1920
 SENSOR_HEIGHT = 1200
 
+# Frames published per poll tick. At the default 10 ms poll that is 300/s of
+# capacity against a 30 fps camera — headroom to catch up after a hiccup, with a
+# hard ceiling so the callback always returns to the executor.
+MAX_GROUPS_PER_TICK = 3
+
 RGB_ENCODING = "bgr8"
 # 16UC1 in millimetres is what StereoDepth emits and what depth_image_proc and
 # every OpenCV consumer expect. Do NOT "helpfully" convert to 32FC1 metres here:
@@ -210,8 +215,18 @@ class OakDPublisher(Node):
 
     # ---------------- frame pump ----------------
     def _drain(self):
-        """Publish every complete group waiting in the queue."""
-        while True:
+        """Publish up to MAX_GROUPS_PER_TICK complete groups.
+
+        The bound is not an optimization, it is the difference between a node
+        and a hang. Draining "everything waiting" looks right until publishing
+        is slower than the camera: the queue then never empties, this callback
+        never returns, and a single-threaded executor runs NOTHING else — no
+        health log, no parameter service, no clean Ctrl+C. The node still
+        publishes, so from outside it looks alive and merely slow, which is the
+        worst way to be broken. Bounded, a backlog costs latency instead of
+        control, and the health line reports the rate that reveals it.
+        """
+        for _ in range(MAX_GROUPS_PER_TICK):
             group = self.queue.tryGet()
             if group is None:
                 return
