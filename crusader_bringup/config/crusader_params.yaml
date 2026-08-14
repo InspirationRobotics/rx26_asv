@@ -146,6 +146,13 @@ buoy_detector:
     poll_period_s: 0.01                    # [RO] output-queue poll period [s]
     queue_size: 4                          # [RO] device output queue depth
     health_period_s: 5.0                   # [RO] rate/health log period [s]
+    stream_enable: true                    # [RO] annotated MJPEG view over HTTP;
+                                           #      frames are only drawn while a
+                                           #      browser is actually connected
+    stream_port: 8080                      # [RO] same default as tools/oak_view.py —
+                                           #      they cannot both bind it, and they
+                                           #      are never both useful at once
+    stream_quality: 60                     # [RO] JPEG quality for that view
 
 # ---- rc_heartbeat_watchdog: force-disarm on RC-transmitter link loss (safety) ----
 # Consumes telemetry_bridge topics (/crsd/rc_channels, /crsd/fcu_status) and routes

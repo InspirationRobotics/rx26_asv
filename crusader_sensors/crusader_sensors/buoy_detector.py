@@ -39,6 +39,7 @@ here, once, so no consumer ever has to remember which convention it is holding.
 If your URDF puts camera_link somewhere other than the RGB sensor's optical
 centre, that offset belongs in TF, not in this node.
 """
+import threading
 import time
 
 import numpy as np
@@ -105,7 +106,54 @@ PARAM_SPEC = {
                        description="device output queue depth (non-blocking)"),
     "health_period_s": dict(read_only=True, lo=1.0, hi=60.0,
                             description="rate/health log period [s]"),
+    "stream_enable": dict(read_only=True,
+                          description="serve the annotated MJPEG view over HTTP"),
+    "stream_port": dict(read_only=True, lo=1024, hi=65535,
+                        description="HTTP port for the annotated MJPEG view"),
+    "stream_quality": dict(read_only=True, lo=10, hi=100,
+                           description="JPEG quality for the MJPEG view"),
 }
+
+# Box colour by class family. Getting red and green right matters more than it
+# looks: a gate is defined by which side each colour is on, so a viewer that
+# draws them wrong will have you "confirming" a correct detection as broken.
+FAMILY_COLORS = (("red", (0, 0, 255)), ("green", (0, 255, 0)),
+                 ("yellow", (0, 255, 255)), ("blue", (255, 128, 0)),
+                 ("black", (60, 60, 60)))
+
+
+class FrameBuffer:
+    """Latest annotated frame + a condition to wake waiting HTTP clients.
+
+    Holds exactly ONE frame, like tools/oak_view.py: a queue would let a slow
+    browser build a backlog and start showing the past, and the only question a
+    bring-up viewer answers is what the camera sees NOW.
+
+    `viewers` is read by the detection loop to skip annotation entirely when
+    nobody is watching — drawing and copying every frame for an audience of zero
+    is CPU taken from inference on a Jetson that has none to spare.
+    """
+
+    def __init__(self):
+        self._cond = threading.Condition()
+        self._frame = None
+        self._seq = 0
+        self.viewers = 0
+
+    def put(self, frame):
+        with self._cond:
+            self._frame = frame
+            self._seq += 1
+            self._cond.notify_all()
+
+    def get_after(self, last_seq, timeout=5.0):
+        """Block until a frame newer than `last_seq`. Returns (frame, seq), or
+        (None, last_seq) on timeout so a dead stream is visible as a stall
+        rather than a hang."""
+        with self._cond:
+            if not self._cond.wait_for(lambda: self._seq > last_seq, timeout):
+                return None, last_seq
+            return self._frame, self._seq
 
 
 class BuoyDetector(Node):
@@ -132,6 +180,10 @@ class BuoyDetector(Node):
                 "publish_frames is ON — raw frames on the wire, bring-up only")
 
         self.device = None
+        self.server = None
+        self.buffer = FrameBuffer()
+        self.cv2 = None
+        self.fps = 0.0
         self.frames = 0
         self.detections = 0
         self.no_depth = 0
@@ -140,6 +192,8 @@ class BuoyDetector(Node):
 
         self._load_model()
         self._open_device()
+        if p["stream_enable"]:
+            self._start_stream(int(p["stream_port"]), int(p["stream_quality"]))
 
         self.create_timer(p["poll_period_s"], self._drain)
         self.create_timer(p["health_period_s"], self._health)
@@ -228,6 +282,7 @@ class BuoyDetector(Node):
         array = Detection3DArray()
         array.header.stamp = stamp
         array.header.frame_id = self.frame_id
+        drawn = []
 
         for box in result.boxes:
             class_index = int(box.cls[0])
@@ -242,7 +297,15 @@ class BuoyDetector(Node):
                 continue
 
             x1, y1, x2, y2 = (int(v) for v in box.xyxy[0])
-            position = self._position((x1, y1, x2, y2), depth_frame)
+            label = self.labels[class_index]
+            confidence = float(box.conf[0])
+            position, sample = self._position((x1, y1, x2, y2), depth_frame)
+
+            # Recorded whether or not it ranged: a box the viewer shows with no
+            # range is the single most useful thing on the stream when tuning.
+            drawn.append({"box": (x1, y1, x2, y2), "label": label,
+                          "conf": confidence, "pos": position, "sample": sample})
+
             if position is None:
                 # No usable depth: sky behind the box, featureless water, or the
                 # object beyond stereo range. A detection without a position is
@@ -251,8 +314,8 @@ class BuoyDetector(Node):
                 continue
 
             detection = Detection3D()
-            detection.label = self.labels[class_index]
-            detection.confidence = float(box.conf[0])
+            detection.label = label
+            detection.confidence = confidence
             detection.x, detection.y, detection.z = position
             detection.bbox = [max(0, x1), max(0, y1), max(0, x2), max(0, y2)]
             array.detections.append(detection)
@@ -262,8 +325,12 @@ class BuoyDetector(Node):
         # nothing" and "dead" must not look the same to a consumer.
         self.pub_detections.publish(array)
 
+        if self.buffer.viewers > 0:
+            self.buffer.put(self._annotate(rgb_frame, drawn))
+
     def _position(self, box, depth_frame):
-        """(x, y, z) in camera_link metres, or None if the box has no depth.
+        """((x, y, z) or None, sample) — position in camera_link metres, plus
+        where the depth was read so the viewer can show it.
 
         Median over a small patch rather than the centre pixel: one pixel of
         stereo noise on a buoy edge is metres of range error, and the median
@@ -276,7 +343,7 @@ class BuoyDetector(Node):
         y1 = max(0, min(height - 1, y1))
         y2 = max(0, min(height - 1, y2))
         if x2 <= x1 or y2 <= y1:
-            return None
+            return None, None
 
         u = int((x1 + x2) / 2)
         v = int(y1 + SAMPLE_V_RATIO * (y2 - y1))
@@ -287,15 +354,149 @@ class BuoyDetector(Node):
                             max(0, u - half_w):min(width, u + half_w + 1)]
         valid = patch[(patch >= self.p["range_min_m"] * 1000.0)
                       & (patch <= self.p["range_max_m"] * 1000.0)]
+        sample = (u, v, half_w, half_h, int(valid.size))
+
         if valid.size < self.p["min_depth_samples"]:
-            return None
+            return None, sample
 
         forward = float(np.median(valid)) / 1000.0          # mm -> m
         right = (u - self.cx) * forward / self.fx           # optical x
         down = (v - self.cy) * forward / self.fy            # optical y
 
         # Optical (z fwd, x right, y down) -> REP-103 body (x fwd, y left, z up).
-        return forward, -right, -down
+        return (forward, -right, -down), sample
+
+    # ---------------- annotated MJPEG view ----------------
+    def _annotate(self, rgb_frame, drawn):
+        """A copy of the frame with boxes, ranges and depth sample points.
+
+        Copies rather than drawing in place: the caller may still be publishing
+        that array's source frame, and a viewer must never be able to alter what
+        the detector saw.
+        """
+        cv2 = self.cv2
+        image = rgb_frame.copy()
+
+        for item in drawn:
+            x1, y1, x2, y2 = item["box"]
+            color = next((c for prefix, c in FAMILY_COLORS
+                          if item["label"].startswith(prefix)), (200, 200, 200))
+            cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
+
+            if item["pos"] is None:
+                text = f"{item['label']} {item['conf'] * 100:.0f}% NO DEPTH"
+            else:
+                x, y, z = item["pos"]
+                # Range first: it is what you check against a tape measure.
+                text = (f"{item['label']} {item['conf'] * 100:.0f}% "
+                        f"{(x * x + y * y + z * z) ** 0.5:.1f}m "
+                        f"[{x:.1f},{y:+.1f},{z:+.1f}]")
+            cv2.putText(image, text, (x1, max(y1 - 6, 12)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, color, 1)
+
+            sample = item["sample"]
+            if sample is not None:
+                # Where depth was actually read, and how many pixels survived
+                # the range gate. A box sitting over sky shows an empty patch
+                # here, which is the difference between "detector is wrong" and
+                # "stereo had nothing to match".
+                u, v, half_w, half_h, valid = sample
+                patch_color = (0, 0, 255) if item["pos"] is None else (255, 255, 255)
+                cv2.rectangle(image, (u - half_w, v - half_h),
+                              (u + half_w, v + half_h), patch_color, 1)
+                cv2.circle(image, (u, v), 2, patch_color, -1)
+                cv2.putText(image, str(valid), (u + half_w + 3, v),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, patch_color, 1)
+
+        ranged = sum(1 for item in drawn if item["pos"] is not None)
+        status = (f"{self.fps:.0f}fps  {ranged}/{len(drawn)} ranged  "
+                  f"no_depth={self.no_depth}  {self.width}x{self.height}  "
+                  f"frame={self.frame_id}")
+        cv2.putText(image, status, (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                    (255, 255, 255), 1)
+        return image
+
+    def _start_stream(self, port, quality):
+        """Serve the annotated frames as MJPEG over HTTP.
+
+        Failure to bind is a WARNING, not a fatal error. This is a bring-up
+        viewer; a busy port (an oak_view left running, a second detector) must
+        not stop the boat from detecting buoys. The detections topic is the
+        product — this is a convenience.
+        """
+        import cv2
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        self.cv2 = cv2
+        buffer = self.buffer
+        logger = self.get_logger()
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+
+            def do_GET(self):
+                if self.path in ("/", "/index.html"):
+                    return self._page()
+                return self._stream()
+
+            def _page(self):
+                body = ("<html><head><title>buoy_detector</title></head>"
+                        "<body style='margin:0;background:#111'>"
+                        "<img src='/stream' style='width:100%'>"
+                        "</body></html>").encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _stream(self):
+                self.send_response(200)
+                self.send_header("Content-Type",
+                                 "multipart/x-mixed-replace; boundary=frame")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                with buffer._cond:
+                    buffer.viewers += 1
+                seq = 0
+                try:
+                    while True:
+                        frame, seq = buffer.get_after(seq)
+                        if frame is None:
+                            continue          # no frames yet; keep waiting
+                        ok, jpeg = cv2.imencode(
+                            ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+                        if not ok:
+                            continue
+                        payload = jpeg.tobytes()
+                        self.wfile.write(
+                            b"--frame\r\nContent-Type: image/jpeg\r\n"
+                            b"Content-Length: " + str(len(payload)).encode()
+                            + b"\r\n\r\n")
+                        self.wfile.write(payload)
+                        self.wfile.write(b"\r\n")
+                except ConnectionError:
+                    pass                      # tab closed; normal
+                finally:
+                    # Must always run: a leaked viewer count keeps the detector
+                    # annotating every frame for nobody, forever.
+                    with buffer._cond:
+                        buffer.viewers -= 1
+
+            def log_message(self, *args):
+                pass                          # keep the console for ROS logs
+
+        try:
+            self.server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+        except OSError as e:
+            self.server = None
+            logger.warn(f"MJPEG view disabled — cannot bind port {port}: {e}")
+            return
+
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        logger.info(f"annotated view on http://<JETSON_IP>:{port} "
+                    "(frames are only drawn while a browser is connected)")
 
     # ---------------- helpers ----------------
     def _ros_stamp(self, message):
@@ -326,19 +527,31 @@ class BuoyDetector(Node):
         self.last_health_time = now
 
         if delivered == 0:
+            self.fps = 0.0
             self.get_logger().warn(
                 f"no frames since last check (total={self.frames}) — camera "
                 "stalled, unplugged, or inference wedged")
             return
 
+        self.fps = delivered / elapsed
         # no_depth is the number worth watching in the field: a detector that
         # sees buoys but cannot range them produces empty arrays and looks, from
         # downstream, exactly like a detector that sees nothing.
         self.get_logger().info(
-            f"{delivered / elapsed:.1f} fps  "
-            f"detections={self.detections}  no_depth={self.no_depth}")
+            f"{self.fps:.1f} fps  detections={self.detections}  "
+            f"no_depth={self.no_depth}  viewers={self.buffer.viewers}")
 
     def destroy_node(self):
+        if self.server is not None:
+            # shutdown() before the device close: serve_forever runs on a daemon
+            # thread that touches the frame buffer, and tearing the camera out
+            # from under a mid-write handler is how a clean exit becomes a hang.
+            try:
+                self.server.shutdown()
+                self.server.server_close()
+            except Exception as e:
+                self.get_logger().warn(f"stream shutdown failed: {e}")
+            self.server = None
         if self.device is not None:
             try:
                 self.device.close()      # one client only: a leaked handle

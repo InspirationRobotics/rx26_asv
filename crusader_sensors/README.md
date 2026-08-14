@@ -62,6 +62,37 @@ guessed position**, and counted in the health line as `no_depth`. A detector tha
 buoys but cannot range them otherwise looks identical, from downstream, to one that sees
 nothing.
 
+## Watching it work
+
+`buoy_detector` serves its own annotated MJPEG view — open `http://<JETSON_IP>:8080` in a
+browser on the boat network. No ROS on the laptop, no topic subscription, no second client
+on the camera.
+
+What's drawn, and why each part is there:
+
+| Overlay | Tells you |
+|---|---|
+| Box, coloured by class family | what the engine found, and whether red/green are the right way round — a gate is defined by which colour is on which side |
+| `red_buoy 87% 12.4m [12.4,-1.8,+0.2]` | range first (check it against a tape measure), then the `camera_link` position published on the topic |
+| `NO DEPTH` in place of a range | the engine saw it, stereo could not range it — this box is **not** on the detections topic |
+| Small rectangle + dot inside the box | exactly where depth was sampled, with the count of pixels that survived the range gate |
+
+That last one is the reason this view exists rather than a plain `oak_view`. When
+`no_depth` climbs, the picture tells you immediately whether the sample patch is sitting on
+sky above a buoy (raise `SAMPLE_V_RATIO`), on water past `range_max_m`, or on a genuinely
+featureless surface that stereo cannot match.
+
+**Frames are only drawn while a browser is connected.** With no viewer the annotation and
+copy are skipped entirely — that CPU belongs to inference. `stream_enable: false` removes
+the server altogether.
+
+Port 8080 is also `tools/oak_view.py`'s default. They cannot both bind it, and they are
+never both useful at once: this one already has the frames.
+
+If the port is busy the node **warns and keeps detecting** rather than failing to start.
+The detections topic is the product; the view is a convenience, and a bring-up viewer must
+never be able to stop the boat from seeing buoys.
+
 ## Builds everywhere, runs in the sensor container
 
 `crusader_bringup` exec_depends on this package, so `--packages-up-to crusader_bringup`
