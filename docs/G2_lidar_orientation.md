@@ -19,15 +19,25 @@ one of these is true:
 
 | Hypothesis | Raw `/livox/lidar` for a target on the **port bow** | `lidar_sign_y` |
 |---|---|---|
-| **A** — frame as written (driver mirrors, or the note means something else) | y **positive** | `+1` |
+| **A** — frame as written | y **positive** | `+1` |
 | **B** — plain 180° roll about the forward axis | y **negative** | `-1` |
-
-The stack currently ships **A** (`lidar_sign_y: +1.0`), because that is what the mounting
-notes say. This procedure confirms or refutes it.
 
 Getting it wrong swaps port and starboard for every object on the map. In Mission Task 1
 that inverts every red/green pass-side decision — the boat drives confidently through the
 wrong side of every gate.
+
+> ## ✅ SETTLED — 2026-08-14: hypothesis **B**
+>
+> Observed on the boat: **starboard reads +y** in the raw frame. So the mount is the
+> ordinary 180° roll about the forward axis — x forward, y right, z down, right-handed and
+> physically consistent — and `Resources.md`'s original "y left, z down" was the impossible
+> left-handed reading.
+>
+> **`lidar_sign_y = -1.0`, `lidar_sign_z = -1.0`.** Both negate into REP-103 body.
+> `Resources.md` and the tool's fallback are updated to match.
+>
+> Re-run the rest of this procedure after any remount. The steps below stand as the method;
+> the boxed values above are the current answer.
 
 ## Prerequisites
 
@@ -136,16 +146,22 @@ it is measured, that filter is guesswork.
 
 ## Results
 
-| Item | Value | Confirmed by |
-|---|---|---|
-| `lidar_sign_y` | ______ | plan quadrant, step 1 |
-| `lidar_sign_z` | ______ | ground plane, step 1 |
-| `water_z` | ______ m | step 4 |
-| Range agrees with tape to | ______ m | step 3 |
-| Hypothesis | A / B | |
+| Item | Value | Confirmed by | Date |
+|---|---|---|---|
+| `lidar_sign_y` | **−1.0** | starboard reads +y in raw frame | 2026-08-14 |
+| `lidar_sign_z` | **−1.0** | mounted upside down; ground below sensor | 2026-08-14 |
+| Hypothesis | **B** (180° roll about forward) | | 2026-08-14 |
+| `water_z` | ______ m | step 4 — **still outstanding** | |
+| Range agrees with tape to | ______ m | step 3 — **still outstanding** | |
 
-- Performed by: ____________  date: ________
-- `crusader_params.yaml` updated to match: yes / no (if no, **stop** — the map will be wrong)
+- Performed by: ____________
+- `crusader_params.yaml` updated to match: **n/a until `lidar_cluster_node` exists**; the
+  values above are carried in `tools/lidar_view.py`'s `FALLBACK_EXTRINSIC` and go into the
+  params file when that node lands.
+
+**`water_z` is the one number still blocking the clustering filter.** Without it, the
+water-return rejection threshold is a guess, and on this mount most of the field of view is
+water.
 
 ## Notes
 

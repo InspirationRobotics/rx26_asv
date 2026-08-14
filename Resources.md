@@ -36,25 +36,36 @@ Jetson ETH IP: 192.168.1.5
 LiDar IP: 192.168.1.166
 
 # Mounting Information
-LiDar(LiDar is mounted upside down, so its +z axis is downward instead of updward):
-    Orientation:
+LiDar (mounted upside down at the BOW — a 180 deg roll about the forward axis,
+so both +y and +z flip relative to an upright sensor):
+    Orientation (raw /livox/lidar, CONFIRMED ON THE BENCH 2026-08-14, docs/G2):
         +x = forward
-        +y = left
+        +y = starboard          <- NOT left. See note below.
         +z = downward
     Displacement from vehicle geometry center:
-        x = 32 cm
-        y = 5 cm
-    Height above ground:
+        x = 32 cm forward
+        y = 5 cm to port
+    Height above ground (boat on the cart, measured to the hull-bottom plane):
         z = 52 cm
+    Occlusion: the hull blocks most of the view aft of the beam, so returns
+        behind it are the boat's own structure, not the world. Everything
+        downstream works on the forward 180 deg only.
+
+    NOTE: this file previously said "+y = left", which is left-handed (with x
+    forward and y left, the right-hand rule puts z UP) and so could not describe
+    a rigid sensor. The bench check settled it: a target on the starboard bow
+    reads +y. Conversion to REP-103 body (x fwd, y left, z up) therefore negates
+    BOTH y and z -> lidar_sign_y = -1, lidar_sign_z = -1.
+
 OAK D LR Camera:
-    Orientation:
+    Orientation (already REP-103; NOT yet bench-confirmed the way the LiDAR was):
         +x = forward
         +y = left
         +z = upward
     Displacement from vehicle geometry center:
-        x = 37 cm
+        x = 37 cm forward
         y = 0
-    Height above ground:
+    Height above ground (same hull-bottom datum as the LiDAR):
         z = 65 cm
 
 

@@ -23,6 +23,15 @@ TWO PANELS, and the pair is the whole diagnostic:
         The ground/water plane must sit BELOW the sensor marker. If it is above,
         the z sign is wrong.
 
+FORWARD SECTOR BY DEFAULT (`--fov 180`). The MID360 sees 360 degrees, but it is
+mounted at the bow and the hull blocks most of the aft view, so returns behind
+the beam are the boat's own structure rather than the world. Excluding them is
+not cosmetic: left in, they cluster as a large obstacle half a metre away that
+never moves. With --fov <= 180 the plan panel puts the boat at the BOTTOM and
+spends its whole height on the range ahead — twice the resolution of a centred
+360 view whose lower half is hull. Both axes keep the same scale, so range rings
+still match a tape measure. Pass `--fov 360` to see everything.
+
 Points are coloured by height, so the ground plane reads as a single flat band
 of colour rather than something you have to infer.
 
@@ -73,11 +82,16 @@ DEFAULT_PORT = 8081                       # 8080 belongs to the camera views
 PANEL = 620                               # px per panel; canvas is 2*PANEL wide
 JPEG_QUALITY = 75
 
-# Fallback extrinsic — Resources.md, "Mounting Information". Overridden by
-# crusader_params.yaml once `lidar_cluster_node` exists there, and by CLI flags
-# always. sign_y = +1 encodes the frame AS WRITTEN; if the bench check shows a
-# target on the port bow landing to starboard, this is the number to flip.
-FALLBACK_EXTRINSIC = dict(sign_y=1.0, sign_z=-1.0, x=0.32, y=0.05, z=0.52)
+# Extrinsic fallback. Overridden by crusader_params.yaml once
+# `lidar_cluster_node` exists there, and by CLI flags always.
+#
+# sign_y = -1 is BENCH-CONFIRMED (G2, 2026-08-14): the raw frame has +y to
+# STARBOARD, so it negates into REP-103's y-left. Resources.md originally
+# described the mount as "y left, z down", which is left-handed and could not
+# come from rotating a rigid sensor; the truth is the plain 180-degree roll
+# about the forward axis, giving x forward / y right / z down. Right-handed,
+# and consistent with what "mounted upside down" physically means.
+FALLBACK_EXTRINSIC = dict(sign_y=-1.0, sign_z=-1.0, x=0.32, y=0.05, z=0.52)
 
 BG = 18                                   # panel background grey
 GRID = (58, 58, 58)
@@ -162,6 +176,23 @@ def to_body(pts: np.ndarray, ext: dict) -> np.ndarray:
     return out
 
 
+def fov_mask(pts: np.ndarray, fov_deg: float) -> np.ndarray:
+    """Keep points within +/- fov/2 of dead ahead.
+
+    The MID360 sees 360 degrees, but this LiDAR is mounted at the bow and the
+    hull blocks most of the aft view — so returns behind the beam are the boat's
+    own structure, not the world. Left in, they cluster as a large obstacle at
+    half a metre that never moves and never goes away.
+
+    Symmetric about the x axis, so it does not care which way y points: the
+    filter is valid in the raw frame and the body frame alike.
+    """
+    if pts.shape[0] == 0 or fov_deg >= 360.0:
+        return np.ones(pts.shape[0], dtype=bool)
+    half = math.radians(fov_deg) / 2.0
+    return np.abs(np.arctan2(pts[:, 1], pts[:, 0])) <= half
+
+
 def _scatter(img, rows, cols, colors):
     """Plot points, dropping anything off-panel."""
     h, w = img.shape[:2]
@@ -182,22 +213,35 @@ def render(pts, ext, args, mode):
 
     body = mode == "body"
     rng, z_lo, z_hi = args.range, args.z_lo, args.z_hi
+    fwd_only = args.fov <= 180.0
     plan = np.full((PANEL, PANEL, 3), BG, np.uint8)
     elev = np.full((PANEL, PANEL, 3), BG, np.uint8)
+
+    # Forward-sector layout puts the boat at the BOTTOM of the plan panel and
+    # spends the whole height on the range ahead — double the resolution of a
+    # centred 360 view, whose lower half would be nothing but hull returns.
+    # Scale stays EQUAL on both axes: a distorted plan would break the "does the
+    # range ring match the tape measure" check this tool exists for.
+    if fwd_only:
+        s = PANEL / rng                  # full height = rng ahead
+        ox, oy = PANEL / 2, PANEL        # origin bottom-centre
+        ex_scale, ex_off = PANEL / rng, 0.0          # elevation: x in 0..rng
+    else:
+        s = (PANEL / 2) / rng
+        ox, oy = PANEL / 2, PANEL / 2
+        ex_scale, ex_off = PANEL / (2 * rng), rng    # elevation: x in -rng..rng
 
     if pts.shape[0]:
         colors = _height_colors(pts[:, 2], z_lo, z_hi)
         # plan: x forward -> UP, y left -> LEFT (nautical)
-        s = (PANEL / 2) / rng
-        c = PANEL / 2
         _scatter(plan,
-                 (c - pts[:, 0] * s).astype(np.int32),
-                 (c - pts[:, 1] * s).astype(np.int32), colors)
+                 (oy - pts[:, 0] * s).astype(np.int32),
+                 (ox - pts[:, 1] * s).astype(np.int32), colors)
         # elevation: x forward -> RIGHT, z up -> UP
-        sx, sz = PANEL / (2 * rng), PANEL / max(z_hi - z_lo, 1e-6)
+        sz = PANEL / max(z_hi - z_lo, 1e-6)
         _scatter(elev,
                  (PANEL - (pts[:, 2] - z_lo) * sz).astype(np.int32),
-                 ((pts[:, 0] + rng) * sx).astype(np.int32), colors)
+                 ((pts[:, 0] + ex_off) * ex_scale).astype(np.int32), colors)
         # one dilate makes single returns visible; a lone point on a 620px panel
         # is otherwise a pixel nobody sees, which is fatal for a tool whose job
         # is showing you a buoy that returned four of them
@@ -205,32 +249,50 @@ def render(pts, ext, args, mode):
         plan, elev = cv2.dilate(plan, k), cv2.dilate(elev, k)
 
     # ---- plan overlay (after dilation, so it stays crisp) ----
-    ctr = PANEL // 2
-    cv2.line(plan, (ctr, 0), (ctr, PANEL), AXIS, 1)
-    cv2.line(plan, (0, ctr), (PANEL, ctr), AXIS, 1)
+    oxi, oyi = int(ox), int(oy)
+    cv2.line(plan, (oxi, 0), (oxi, oyi), AXIS, 1)
+    cv2.line(plan, (0, oyi), (PANEL, oyi), AXIS, 1)
     for ring in range(5, int(rng) + 1, 5):
-        rpx = int(ring * (PANEL / 2) / rng)
-        cv2.circle(plan, (ctr, ctr), rpx, GRID, 1)
-        cv2.putText(plan, f"{ring}m", (ctr + 4, ctr - rpx + 14),
+        rpx = int(ring * s)
+        if rpx < 8:
+            continue
+        cv2.circle(plan, (oxi, oyi), rpx, GRID, 1)
+        cv2.putText(plan, f"{ring}m", (oxi + 4, oyi - rpx + 14),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, GRID, 1, cv2.LINE_AA)
+    # FOV wedge edges, so what the filter excluded is visible rather than implied
+    if args.fov < 360.0:
+        half = math.radians(args.fov) / 2.0
+        reach = PANEL * 1.5
+        for sign in (-1, 1):
+            cv2.line(plan, (oxi, oyi),
+                     (int(oxi - sign * math.sin(half) * reach),
+                      int(oyi - math.cos(half) * reach)), (70, 70, 110), 1)
     # boat marker: a triangle pointing up (+x). Only meaningful in body frame.
     if body:
-        cv2.drawContours(plan, [np.array([[ctr, ctr - 13], [ctr - 8, ctr + 10],
-                                          [ctr + 8, ctr + 10]])], 0, ACCENT, -1)
-    fwd, left, right, aft = (("BOW +x", "PORT +y", "STBD -y", "AFT -x") if body
-                             else ("+x", "+y", "-y", "-x"))
-    for txt, org in ((fwd, (ctr + 8, 22)), (aft, (ctr + 8, PANEL - 10)),
-                     (left, (8, ctr - 8)), (right, (PANEL - 78, ctr - 8))):
+        tip = oyi - 13 if not fwd_only else oyi - 26
+        base = oyi + 10 if not fwd_only else oyi - 3
+        cv2.drawContours(plan, [np.array([[oxi, tip], [oxi - 8, base],
+                                          [oxi + 8, base]])], 0, ACCENT, -1)
+    fwd, left, right = (("BOW +x", "PORT +y", "STBD -y") if body
+                        else ("+x", "+y", "-y"))
+    labels = [(fwd, (oxi + 8, 22)), (left, (8, oyi - 8)),
+              (right, (PANEL - 78, oyi - 8))]
+    if not fwd_only:
+        labels.append(("AFT -x" if body else "-x", (oxi + 8, PANEL - 10)))
+    for txt, org in labels:
         cv2.putText(plan, txt, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, TEXT, 1,
                     cv2.LINE_AA)
-    cv2.putText(plan, "PLAN (looking down)", (8, PANEL - 34),
+    sub = (f"PLAN  fwd 0..{rng:.0f}m  lateral +/-{rng / 2:.0f}m" if fwd_only
+           else "PLAN (looking down)")
+    cv2.putText(plan, sub, (8, PANEL - 34),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, TEXT, 1, cv2.LINE_AA)
 
     # ---- elevation overlay ----
     def z_row(z):
         return int(PANEL - (z - z_lo) * PANEL / max(z_hi - z_lo, 1e-6))
 
-    cv2.line(elev, (PANEL // 2, 0), (PANEL // 2, PANEL), AXIS, 1)
+    x0_col = int(ex_off * ex_scale)                  # where x=0 sits
+    cv2.line(elev, (x0_col, 0), (x0_col, PANEL), AXIS, 1)
     for zt in range(int(math.floor(z_lo)), int(math.ceil(z_hi)) + 1):
         r = z_row(zt)
         if 0 <= r < PANEL:
@@ -252,7 +314,7 @@ def render(pts, ext, args, mode):
                             cv2.FONT_HERSHEY_SIMPLEX, 0.42, (220, 160, 90), 1,
                             cv2.LINE_AA)
         # where the sensor itself sits — returns must fall BELOW this
-        sr, sc = z_row(ext["z"]), int((ext["x"] + rng) * PANEL / (2 * rng))
+        sr, sc = z_row(ext["z"]), int((ext["x"] + ex_off) * ex_scale)
         if 0 <= sr < PANEL and 0 <= sc < PANEL:
             cv2.drawMarker(elev, (sc, sr), ACCENT, cv2.MARKER_TILTED_CROSS, 14, 2)
             cv2.putText(elev, "LiDAR", (sc + 10, sr - 6),
@@ -382,6 +444,7 @@ class LidarView(Node):
         import cv2
         if self.args.frame == "body":
             pts = to_body(pts, self.ext)
+        pts = pts[fov_mask(pts, self.args.fov)]
         # Accumulation is NOT motion-compensated — valid only with the boat
         # stationary, which the bench is. The clustering node does this properly.
         self.sweeps.append(pts)
@@ -405,8 +468,15 @@ def main():
     ap.add_argument("--frame", choices=("raw", "body"), default="body",
                     help="raw = cloud as the driver sends it; body = extrinsic "
                          "applied (default). Compare the two.")
+    ap.add_argument("--fov", type=float, default=180.0,
+                    help="keep points within +/- FOV/2 of dead ahead (default "
+                         "180 = forward half). The hull blocks the aft view, so "
+                         "returns behind the beam are the boat itself. Pass 360 "
+                         "to see everything, including those self-returns.")
     ap.add_argument("--range", type=float, default=25.0,
-                    help="plan/elevation half-width [m] (default 25)")
+                    help="forward range [m] (default 25). With --fov <= 180 the "
+                         "plan panel puts the boat at the bottom and shows 0..R "
+                         "ahead by +/-R/2 abeam, at equal scale.")
     ap.add_argument("--z-lo", type=float, default=-1.0, dest="z_lo")
     ap.add_argument("--z-hi", type=float, default=3.0, dest="z_hi")
     ap.add_argument("--water-z", type=float, default=None, dest="water_z",
