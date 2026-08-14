@@ -14,6 +14,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/FcuStatus.msg"
   "msg/Detection3D.msg"
   "msg/Detection3DArray.msg"
+  "msg/Cluster3D.msg"
+  "msg/Cluster3DArray.msg"
   DEPENDENCIES std_msgs
 )
 

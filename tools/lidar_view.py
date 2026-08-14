@@ -72,6 +72,20 @@ from sensor_msgs.msg import PointCloud2
 
 import mjpeg_server                       # sibling module
 
+# The transform and the filters come FROM THE NODE'S CORE, not a copy. A bench
+# check that proves the orientation of a second implementation proves nothing
+# about what lidar_cluster_node actually does with the cloud. Import-only, no
+# rclpy in that module — it runs on a laptop too.
+try:
+    from crusader_perception.lidar_cluster_core import (      # noqa: F401
+        ClusterParams, fov_mask, near_mask, to_body)
+except ImportError as _e:                                     # pragma: no cover
+    raise SystemExit(
+        f"lidar_view needs crusader_perception on the ROS path ({_e}).\n"
+        "Build the workspace first:  tools/scripts/rebuild.sh\n"
+        "(the geometry is shared with lidar_cluster_node on purpose — a bench "
+        "check against a private copy of the transform proves nothing)")
+
 DEFAULT_TOPIC = "/livox/lidar"
 DEFAULT_PORT = 8081                       # 8080 belongs to the camera views
 DEFAULT_PANEL = 700                       # px per panel
@@ -86,7 +100,9 @@ JPEG_QUALITY = 75
 # come from rotating a rigid sensor; the truth is the plain 180-degree roll
 # about the forward axis, giving x forward / y right / z down. Right-handed,
 # and consistent with what "mounted upside down" physically means.
-FALLBACK_EXTRINSIC = dict(sign_y=-1.0, sign_z=-1.0, x=0.32, y=0.05, z=0.52)
+_P = ClusterParams()          # the node's defaults, not a second opinion
+FALLBACK_EXTRINSIC = dict(sign_y=_P.sign_y, sign_z=_P.sign_z,
+                          x=_P.tx, y=_P.ty, z=_P.tz)
 
 BG = 18                                   # panel background grey
 GRID = (58, 58, 58)
@@ -114,6 +130,13 @@ def load_extrinsic():
     except Exception:
         pass
     return dict(FALLBACK_EXTRINSIC), "built-in fallback"
+
+
+def as_params(ext: dict) -> ClusterParams:
+    """The viewer's extrinsic dict as the core's ClusterParams, so `to_body`
+    here is byte-for-byte the transform the node applies."""
+    return ClusterParams(sign_y=ext["sign_y"], sign_z=ext["sign_z"],
+                         tx=ext["x"], ty=ext["y"], tz=ext["z"])
 
 
 def custommsg_to_xyz(msg) -> np.ndarray:
@@ -156,53 +179,7 @@ def pointcloud2_to_xyz(msg: PointCloud2) -> np.ndarray:
     return xyz[np.isfinite(xyz).all(axis=1)]
 
 
-def to_body(pts: np.ndarray, ext: dict) -> np.ndarray:
-    """Sensor frame -> REP-103 body (x fwd, y left, z up).
 
-    Sign flips first, then translation — the offsets in Resources.md are
-    measured in BODY directions, so applying them before the flip would move the
-    sensor the wrong way along any flipped axis.
-    """
-    if pts.shape[0] == 0:
-        return pts
-    out = np.empty_like(pts)
-    out[:, 0] = pts[:, 0] + ext["x"]
-    out[:, 1] = pts[:, 1] * ext["sign_y"] + ext["y"]
-    out[:, 2] = pts[:, 2] * ext["sign_z"] + ext["z"]
-    return out
-
-
-def near_mask(pts: np.ndarray, r_min: float) -> np.ndarray:
-    """Drop returns inside a sphere of `r_min` around the SENSOR.
-
-    Run in the RAW sensor frame, where the origin is the sensor itself — the
-    mount, the cabling and the deck directly beneath it return on every sweep.
-    They are not the world, and left in they form a permanent cluster at arm's
-    length that no amount of downstream gating removes.
-
-    3D range, not horizontal: the strongest self-returns are straight down from
-    an upside-down sensor, and a horizontal-only test would keep every one.
-    """
-    if pts.shape[0] == 0 or r_min <= 0.0:
-        return np.ones(pts.shape[0], dtype=bool)
-    return (pts ** 2).sum(axis=1) >= r_min * r_min
-
-
-def fov_mask(pts: np.ndarray, fov_deg: float) -> np.ndarray:
-    """Keep points within +/- fov/2 of dead ahead.
-
-    The MID360 sees 360 degrees, but this LiDAR is mounted at the bow and the
-    hull blocks most of the aft view — so returns behind the beam are the boat's
-    own structure, not the world. Left in, they cluster as a large obstacle at
-    half a metre that never moves and never goes away.
-
-    Symmetric about the x axis, so it does not care which way y points: the
-    filter is valid in the raw frame and the body frame alike.
-    """
-    if pts.shape[0] == 0 or fov_deg >= 360.0:
-        return np.ones(pts.shape[0], dtype=bool)
-    half = math.radians(fov_deg) / 2.0
-    return np.abs(np.arctan2(pts[:, 1], pts[:, 0])) <= half
 
 
 def _scatter(img, rows, cols, colors):
@@ -391,6 +368,7 @@ class LidarView(Node):
     def __init__(self, args, ext, bufs):
         super().__init__("lidar_view")
         self.args, self.ext, self.bufs = args, ext, bufs
+        self.cparams = as_params(ext)       # the node's own transform
         self.frames = 0
         self.sweeps = deque(maxlen=max(1, args.accumulate))
         self.last_stats = ""
@@ -495,7 +473,7 @@ class LidarView(Node):
         pts = pts[near_mask(pts, self.args.r_min)]
         pts = pts[fov_mask(pts, self.args.fov)]
         if self.args.frame == "body":
-            pts = to_body(pts, self.ext)
+            pts = to_body(pts, self.cparams)
 
         # Accumulation is NOT motion-compensated — valid only with the boat
         # stationary, which the bench is. The clustering node does this properly.

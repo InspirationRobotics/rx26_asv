@@ -14,6 +14,8 @@ The typed contracts between nodes. Four telemetry messages produced by
 | `RcChannels` | `telemetry_bridge` → LED status, watchdog; and any override publisher → `telemetry_bridge` | 18 raw PWM values. Also the TX direction: an override publisher fills channels 1–8 |
 | `Detection3D` | inside `Detection3DArray` | one object: label, confidence, position, source bbox. Position is REP-103 body axes (x forward, y left, z up) in the frame the array declares — never optical axes |
 | `Detection3DArray` | `buoy_detector` → fusion, world model | everything one camera frame saw. **Published every frame, empty or not**: empty means "alive, saw nothing", silence means the producer died |
+| `Cluster3D` | inside `Cluster3DArray` | one LiDAR object: centroid, AABB extent, point count, range. **No label and no confidence** — a cluster is a thing that is *there*, which is all the LiDAR can say; naming it is the camera's job |
+| `Cluster3DArray` | `lidar_cluster_node` → fusion, world model | one accumulated window, **nearest first** so a consumer that truncates keeps the near ones. Same every-window-empty-or-not contract as `Detection3DArray` |
 
 Every message carries a `std_msgs/Header`. **The stamp is the time the MAVLink frame was
 RECEIVED**, not the time it was republished — a consumer judging freshness needs the age

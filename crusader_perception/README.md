@@ -3,10 +3,11 @@
 Sensor-**coupled** processing: raw data in, detections out. This package owns the OAK-D
 and everything that turns its frames into positioned objects.
 
-| Node | Owns | Publishes |
+| Node | Consumes | Publishes |
 |---|---|---|
 | `oakd_publisher` | OAK-D LR (depthai) | `oak/rgb` (`bgr8`), `oak/depth` (`16UC1`, mm, aligned) |
 | `buoy_detector` | OAK-D LR + TensorRT engine | `oak/detections` (`crusader_msgs/Detection3DArray`, `camera_link`) |
+| `lidar_cluster_node` | `/livox/lidar` + `/crsd/attitude` + `/crsd/pose` | `crsd/lidar_clusters` (`crusader_msgs/Cluster3DArray`, `base_link`) |
 
 Code that is device-coupled, model-coupled, frame-coupled or calibration-coupled goes
 here. Anything that could be checked with made-up numbers and no camera belongs in
@@ -226,21 +227,94 @@ topic, which this node does not publish — pass `--topic` as above.
 - **Compressed transports.** No `image_transport` republishing here; add a `republish` node
   if a laptop-side viewer needs JPEG.
 
-## The LiDAR half is still missing
+## `lidar_cluster_node` — the LiDAR half
 
-The MID360 is driven by the **livox container** — the only other container on the Jetson,
-and the only device boundary this repo still has. It publishes a `PointCloud2`; consuming
-that and detecting in it is this package's other half, and it is unwritten.
+The MID360 is driven by the **livox container** (the only other container on the Jetson,
+and the only device boundary this repo still has). It publishes `/livox/lidar` as a
+`sensor_msgs/PointCloud2`; this node clusters it into 3D objects. It opens no device.
 
-Agree the **topic contract** with that container first: topic name, message type, QoS,
-frame id. A mismatched QoS profile is silent — a BEST_EFFORT publisher and a RELIABLE
-subscriber match nothing at all, `ros2 topic list` looks perfect, and no data flows.
+**The geometry lives in [`lidar_cluster_core.py`](crusader_perception/lidar_cluster_core.py)
+— no rclpy, exercised against invented clouds on a laptop.** `tools/lidar_view.py` imports
+the transform and the filters *from that same module*, so the bench orientation check
+(docs/G2) proves something about what this node actually does rather than about a second
+copy of the maths.
+
+The pipeline, and the order is load-bearing:
+
+| Stage | Frame | Why here |
+|---|---|---|
+| `near_mask` (0.5 m sphere), `fov_mask` (forward 180°) | **sensor** | The origin here *is* the sensor, which is what "0.5 m from the LiDAR" means. Both describe what the sensor can physically see: the mount and deck beneath it, and the hull blocking the view aft. |
+| `to_body` — sign flips, then translation | body | Offsets are measured in body directions, so translating before flipping moves the sensor the wrong way along every flipped axis. |
+| `level` — de-rotate roll/pitch, keep yaw | levelled | The water gate **must** run here. Under power the boat pitches bow-up, and a z gate in the tilted body frame slices the water at a different height on every wave. |
+| water / sky / range gates | levelled | Most of this mount's FOV is water — see below. |
+| voxel-grid DBSCAN | levelled | Isotropic metric: "0.4 m apart" means the same at any attitude. |
+
+Centroids come back out in **body** frame, not levelled. The camera is bolted to the same
+hull so `oak/detections` is body-frame too, and fusion compares them directly; whoever
+projects into the world applies attitude once, there. Publishing levelled positions would
+apply it twice.
+
+### Why DBSCAN, and why `eps` stays small
+
+Plain Euclidean cluster extraction is pure connectivity, which fails two ways on water: a
+thin trail of spray can **chain** a buoy to the shoreline behind it into one cluster centred
+on neither, and every isolated glint becomes its own tiny cluster. Requiring a density
+before a point may *seed* a cluster kills both and labels the rest noise.
+
+The tempting mistake is to widen `eps` for distant objects. It is backwards: a buoy is
+0.3 m wide at every range, so its returns are always ~0.3 m apart, while the neighbourhood
+volume grows as `eps³` and sweeps in proportionally more scattered noise. Widening helps the
+noise more than the buoy. What actually changes with range is the *spacing* between returns
+on one object, which the gentle `eps(r) = eps_0 · max(1, r/eps_r_ref)` growth covers.
+
+Density is counted in **raw points, not occupied voxels** — voxelising discards exactly the
+quantity the core test needs, so each voxel carries its point count as a weight.
+
+### Accumulation is not optional
+
+The MID360 returns ~200k points/s spread over 360°×59°, so a 0.3 m × 1 m buoy gives roughly:
+
+| Range | Points per sweep | 1 sweep | 5 sweeps |
+|---|---|---|---|
+| 5 m | ~37 | ✅ | ✅ |
+| 10 m | ~9 | ✅ | ✅ |
+| 15 m | ~4 | ❌ | ✅ |
+| 20 m | ~2 | ❌ | ✅ |
+
+(✅/❌ measured against this core, not estimated.) One *sweep* is one `PointCloud2` message —
+the driver bundles ~100 ms of scanning at 10 Hz. Livox's **non-repetitive** pattern means
+each sweep covers different parts of the FOV instead of retracing the same rings, so
+stacking five genuinely triples the reach rather than resampling the same returns.
+
+**But only with motion compensation.** Each retained sweep is stored with the pose it was
+taken at and transformed into the current body frame before clustering. Without it, a boat
+moving 1.5 m between sweeps reports one buoy as **two phantom objects 1.5 m apart**; moving
+slower it smears one cluster to more than double its true width. If `/crsd/pose` goes stale
+the node falls back to a single sweep and says so — a sparser correct cloud beats a denser
+smeared one, and range drops to ~10 m.
+
+Accumulation also smears anything *actually moving*, which matters for Mission Task 4's
+moving surface object. Lower `accumulate_sweeps` when tracking movers.
+
+### Upside-down mounting: most of the FOV is water
+
+The 180° roll flips the vertical FOV from `−7°..+52°` to `−52°..+7°`, so the great majority
+of returns are water or ground. The `water_z` gate therefore does real work, and
+**`water_z` is currently a placeholder of 0.10 m** — measure it floating (G2 step 4) before
+trusting the filter.
+
+### Health
+
+`crsd/lidar_cluster_health` carries JSON: how many points each stage dropped, sweeps in the
+window, whether the cloud was compensated and levelled. A stage silently eating the whole
+cloud is indistinguishable from a dead sensor downstream, so the node also logs loudly when
+it produces zero clusters from a non-empty cloud.
+
+### Still to come
 
 The pre-v0.5 `lidar_fusion.py` is recoverable from git at `8c4ffa5` and is worth reading
-before rewriting — particularly its bearing/range gating, which encodes a real lesson about
-the MID360's 360° field of view voting a shoreline over a buoy. Its messages (`Detection`,
-`DetectionArray`) are in the same commit; re-add them to `crusader_msgs` when the node that
-fills them is landing, not before.
+before fusion is rebuilt — particularly its bearing/range gating, which encodes a real
+lesson about the MID360's 360° field of view voting a shoreline over a buoy.
 
 ## Change impact
 

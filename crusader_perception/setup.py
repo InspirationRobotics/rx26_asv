@@ -21,6 +21,7 @@ setup(
         "console_scripts": [
             "oakd_publisher = crusader_perception.oakd_publisher:main",
             "buoy_detector = crusader_perception.buoy_detector:main",
+            "lidar_cluster_node = crusader_perception.lidar_cluster_node:main",
         ],
     },
 )

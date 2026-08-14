@@ -151,6 +151,67 @@ buoy_detector:
                                            #      are never both useful at once
     stream_quality: 60                     # [RO] JPEG quality for that view
 
+# ---- lidar_cluster_node: MID360 point cloud -> 3D object clusters ----
+# Consumes the livox container's /livox/lidar; opens no device itself. Not in
+# core.launch.py — nothing here has run on the boat yet.
+#
+# THE EXTRINSIC IS BENCH-CONFIRMED, NOT ASSUMED (docs/G2_lidar_orientation.md,
+# 2026-08-14). The raw Livox frame is x forward, y STARBOARD, z down — the plain
+# 180-degree roll about the forward axis that mounting it upside down produces.
+# Resources.md first described it as "y left, z down", which is left-handed and
+# cannot describe a rigid sensor. Both signs therefore negate into REP-103, and
+# both are [RO]: a live-tunable mounting geometry silently invalidates every
+# position already on the map. Re-run G2 after any remount.
+lidar_cluster_node:
+  ros__parameters:
+    cloud_topic: "/livox/lidar"            # [RO] livox container's PointCloud2
+    clusters_topic: "crsd/lidar_clusters"  # [RO] Cluster3DArray, every window
+    frame_id: "base_link"                  # [RO] REP-103: x fwd, y left, z up
+    # -- extrinsic [RO]: sensor -> body. See docs/G2 --
+    lidar_sign_y: -1.0                     # [RO] raw +y is starboard
+    lidar_sign_z: -1.0                     # [RO] mounted upside down
+    lidar_x: 0.32                          # [RO] m forward of geometry centre
+    lidar_y: 0.05                          # [RO] m to PORT of centreline
+    lidar_z: 0.52                          # [RO] m above the hull-bottom datum
+    # -- self-return filters [DYN], applied in the SENSOR frame --
+    r_min: 0.5                             # [DYN] clear sphere around the sensor;
+                                           #       mount, cabling, deck beneath it
+    fov_deg: 180.0                         # [DYN] forward sector only — the hull
+                                           #       blocks the view aft of the beam,
+                                           #       so returns behind it are the boat
+    # -- levelled-frame gates [DYN] --
+    water_z: 0.10                          # [DYN] PLACEHOLDER. Waterline above the
+                                           #       hull datum; measure it floating
+                                           #       (G2 step 4) and update. Most of
+                                           #       this mount's FOV is water, so
+                                           #       this threshold does real work.
+    water_margin: 0.15                     # [DYN] keep points this far above water
+    z_ceiling: 4.0                         # [DYN] above this is sky/rain
+    r_max: 40.0                            # [DYN] horizontal range ceiling [m]
+    # -- voxel-grid DBSCAN [DYN] --
+    # eps stays SMALL and grows only gently with range. Opening it up for distant
+    # objects is the wrong instinct: a buoy is 0.3 m wide at every range, so its
+    # returns are always ~0.3 m apart, while the neighbourhood volume grows as
+    # eps^3 and sweeps in proportionally more scattered noise.
+    leaf_size: 0.15                        # [DYN] voxel edge [m]
+    eps_0: 0.30                            # [DYN] neighbourhood radius at eps_r_ref
+    eps_r_ref: 15.0                        # [DYN] range where eps_0 applies [m]
+    max_rings: 2                           # [DYN] cap on adaptive eps, in voxels
+    min_density_points: 6                  # [DYN] raw points in the neighbourhood
+                                           #       before a voxel may seed a cluster
+    min_points: 5                          # [DYN] points needed to emit a cluster
+    max_extent_m: 8.0                      # [DYN] bigger = shoreline, not an object
+    # -- accumulation + freshness [DYN] --
+    # A 0.3 m buoy returns ~37 points per sweep at 5 m, 9 at 10 m, 2 at 20 m.
+    # Measured against this core: 1 sweep reaches ~10 m, 5 sweeps reach ~20 m.
+    # Livox's non-repetitive pattern means each sweep adds NEW coverage rather
+    # than resampling the same lines, which is what makes stacking them work.
+    accumulate_sweeps: 5                   # [DYN] 10 Hz sweeps -> ~0.5 s window
+    attitude_timeout_s: 1.0                # [DYN] stale -> cluster unlevelled
+    pose_timeout_s: 1.0                    # [DYN] stale -> single sweep, no
+                                           #       accumulation (cannot compensate)
+    health_period_s: 5.0                   # [DYN] JSON stats publish period
+
 # ---- rc_heartbeat_watchdog: force-disarm on RC-transmitter link loss (safety) ----
 # Consumes telemetry_bridge topics (/crsd/rc_channels, /crsd/fcu_status) and routes
 # a force-disarm back through the bridge (/crsd/force_disarm) — no own MAVLink conn.

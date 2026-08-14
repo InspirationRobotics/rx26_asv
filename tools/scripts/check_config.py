@@ -35,7 +35,7 @@ PARAMS_BASELINE = REPO / "params" / "working_crusader.params"
 # still has; a node with no section fails at startup instead.
 CONFIG_DRIVEN_NODES = {"telemetry_bridge", "led_node",
                        "pixhawk_led_status_node", "rc_heartbeat_watchdog",
-                       "oakd_publisher", "buoy_detector"}
+                       "oakd_publisher", "buoy_detector", "lidar_cluster_node"}
 
 # oakd_publisher and buoy_detector each build the SAME OAK-D pipeline (only one
 # runs at a time — the camera admits one client). These params decide the image
