@@ -1,9 +1,14 @@
 """Shared frame/geodesy helpers (no ROS imports — used by nodes AND unit tests).
 
 Conventions:
-  WORLD: x = east+ [m], y = north+ [m], anchored at `origin` (lat, lon).
-  BODY:  x = starboard+ [m], y = forward+ [m].
-  heading: radians, 0 = true north, clockwise positive (compass convention).
+  WORLD: x = east+ [m], y = north+ [m], z = up+ [m], anchored at `origin`.
+  BODY:  x = starboard+ [m], y = forward+ [m]   (legacy RX24; body_to_world).
+  REP-103 BODY: x = forward+, y = left+, z = up+ (Detection3D; body_to_world_ypr).
+  heading/yaw: radians, 0 = true north, clockwise positive (compass convention).
+
+The two BODY conventions coexist because the RX24 math and ROS disagree, and
+renaming either one silently breaks whichever caller was right. Each function
+states which it takes; do not mix them.
 
 Equirectangular approximation — fine at course scale (<5 km), matches the legacy
 RX24 GIS math (111_139 m/deg).
@@ -50,8 +55,64 @@ def xy_to_latlon(x: float, y: float, origin) -> tuple:
 def body_to_world(bx: float, by: float, boat_x: float, boat_y: float,
                   heading_rad: float) -> tuple:
     """Rotate a BODY-frame offset into WORLD and translate by boat position.
-    (The diagram's 'Coordinate Transform Node (rotation matrix)'.)"""
+    (The diagram's 'Coordinate Transform Node (rotation matrix)'.)
+
+    Yaw only — assumes the boat is level. For a camera or LiDAR detection use
+    body_to_world_ypr instead: on a surface vessel in chop, roll and pitch move
+    a 20 m bearing by metres, and this function has no way to know about them.
+
+    NOTE the axis convention here is the legacy RX24 one (bx = starboard,
+    by = forward), which is NOT the REP-103 convention Detection3D uses. That
+    mismatch is the reason body_to_world_ypr takes its input in REP-103 and
+    converts internally — so a mapping node never has to remember which is
+    which.
+    """
     ch, sh = math.cos(heading_rad), math.sin(heading_rad)
     wx = bx * ch + by * sh
     wy = -bx * sh + by * ch
     return boat_x + wx, boat_y + wy
+
+
+def body_to_world_ypr(x_fwd: float, y_left: float, z_up: float,
+                      roll: float, pitch: float, yaw: float,
+                      boat_x: float = 0.0, boat_y: float = 0.0) -> tuple:
+    """Place a REP-103 body-frame detection in the WORLD frame using full YPR.
+
+    This is the transform that mission-element mapping runs on every detection:
+    a Detection3D arrives in body axes relative to a boat that is rolling and
+    pitching, and the map needs it in fixed world axes.
+
+    Args:
+      x_fwd, y_left, z_up: offset from the boat in REP-103 BODY axes [m] —
+        exactly the (x, y, z) triple carried by crusader_msgs/Detection3D.
+      roll, pitch, yaw: attitude [rad] straight off /crsd/attitude, in the
+        autopilot's NED body axes and compass yaw. Passed through unconverted
+        so a value read in Mission Planner can be typed in here unchanged.
+      boat_x, boat_y: boat position in WORLD [m] (latlon_to_xy of /crsd/pose).
+        Default 0 gives the world-frame OFFSET rather than an absolute point.
+
+    Returns:
+      (world_x, world_y, world_z) — east+ [m], north+ [m], up+ [m]. The third
+      element is returned rather than discarded because it is the cheapest
+      sanity check available: a buoy that maps to +4 m of altitude means the
+      attitude and the detection disagree, and silently dropping z hides that.
+
+    Rotation is the standard aerospace 3-2-1 (yaw, then pitch, then roll)
+    applied to the FRD form of the input, matching how ArduPilot's EKF defines
+    the angles. Composing them in any other order is wrong by degrees once the
+    boat is doing two of the three at the same time.
+    """
+    # REP-103 (x fwd, y left, z up) -> NED body / FRD (x fwd, y right, z down),
+    # which is the frame the EKF's roll/pitch/yaw are defined against.
+    xf, yr, zd = x_fwd, -y_left, -z_up
+
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+
+    north = cy * cp * xf + (cy * sp * sr - sy * cr) * yr + (cy * sp * cr + sy * sr) * zd
+    east = sy * cp * xf + (sy * sp * sr + cy * cr) * yr + (sy * sp * cr - cy * sr) * zd
+    down = -sp * xf + cp * sr * yr + cp * cr * zd
+
+    # WORLD is x = east, y = north, z = up (geo.py convention, top of file).
+    return boat_x + east, boat_y + north, -down

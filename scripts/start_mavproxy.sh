@@ -40,9 +40,26 @@ fi
 # identical invocation stays up in a terminal and dies under systemd.
 # Run it by hand (a TTY) and you get the console; drop --daemon here and the
 # service will loop forever.
+# --streamrate=-1 means "request NOTHING; leave the vehicle's own SRx_* rates
+# alone". It is not a tuning choice — without it MAVProxy sends
+# REQUEST_DATA_STREAM(MAV_DATA_STREAM_ALL, 4Hz) on every connect and after every
+# reconnect, which overwrites SR0_* in the autopilot's RAM. A rate set in
+# QGroundControl is saved to the Pixhawk's EEPROM, looks correct in QGC forever,
+# and is silently stomped back to 4 Hz the moment this service restarts. That is
+# how /crsd/attitude ends up at 4 Hz while the params say 30.
+#
+# So per-message rates are now set ONCE, in QGC, on SR0_* (USB = SERIAL0, which
+# is the port this --master opens). Raise only the stream you need: SR0_EXTRA1
+# carries ATTITUDE and is the one mission-element mapping cares about. Doing it
+# that way instead of --streamrate=30 also keeps RAW_SENS/PARAMS/etc at their
+# low rates rather than lifting every stream at once.
+#
+# If SR0_* is ever left at 0 the vehicle streams nothing and telemetry_bridge
+# sits at "still no heartbeat" — check the params before suspecting the link.
 exec mavproxy.py \
   --master="$MASTER" \
   --daemon \
+  --streamrate=-1 \
   --out=udp:127.0.0.1:14551 \
   --out=udp:127.0.0.1:14550 \
   --out=udpbcast:"${BCAST_ADDR}":14550

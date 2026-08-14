@@ -5,6 +5,7 @@ Three jobs, deliberately fused into one node:
 1. RX: consume MAVProxy's rebroadcast (pymavlink over UDP — NEVER a serial device;
    the Pixhawk has exactly one owner and it is MAVProxy) and republish as topics:
      /crsd/pose          interfaces/LatLonHead   (GLOBAL_POSITION_INT)
+     /crsd/attitude      interfaces/Attitude     (ATTITUDE, on arrival)
      /crsd/fcu_status    interfaces/FcuStatus    (HEARTBEAT)
      /crsd/rc_channels   interfaces/RcChannels   (RC_CHANNELS)
      /crsd/autonomy_drop std_msgs/Bool           (latched, TRANSIENT_LOCAL)
@@ -34,6 +35,25 @@ Three jobs, deliberately fused into one node:
 
 The hardware e-stop (SB switch) remains below and independent of all of this.
 
+Why attitude is its OWN topic and not three more fields on LatLonHead: ATTITUDE
+and GLOBAL_POSITION_INT are separate MAVLink streams (EXTRA1 and POSITION) that
+can die independently, and a consumer mapping a detection needs to know WHICH
+one went quiet. Folding them together would make one stream's staleness silently
+gate the other's — the exact frozen-value failure StreamCache exists to stop —
+and LatLonHead is also used as a bare position carrier (goals, origins) where
+attitude has no meaning. The cost is that a mapping consumer must check two
+topics; that cost is the point.
+
+And why attitude alone is published FROM THE RX THREAD rather than on the 20 Hz
+tick: it is the one stream whose value is the instantaneous number, not the
+latest known state. ATTITUDE is set to 30 Hz (SR0_EXTRA1) to match the camera,
+and resampling 30 Hz onto a 20 Hz tick drops one frame in three and time-shifts
+the rest by up to 50 ms — at a 2 rad/s roll that is ~6 degrees of attitude
+error, which is most of what roll/pitch compensation was added to remove.
+Publishing on arrival also makes the staleness rule below automatic for this
+topic: there is no cached value to replay, so silence is silence for free. The
+StreamCache is kept anyway, purely so _publish_tick still logs the stale edge.
+
 Parameters:
   mav_endpoint     (str,  default udp:127.0.0.1:14551)  MAVProxy --out for ROS
   drop_channel     (int,  default 7)     RC channel of the autonomy-drop switch
@@ -58,7 +78,7 @@ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
 
-from crusader_msgs.msg import LatLonHead, FcuStatus, RcChannels
+from crusader_msgs.msg import Attitude, LatLonHead, FcuStatus, RcChannels
 
 from crusader_common import config as crsd_config
 from crusader_common import geo
@@ -116,6 +136,7 @@ class TelemetryBridge(Node):
                                  reliability=ReliabilityPolicy.RELIABLE,
                                  durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.pose_pub = self.create_publisher(LatLonHead, "/crsd/pose", 10)
+        self.att_pub = self.create_publisher(Attitude, "/crsd/attitude", 10)
         self.status_pub = self.create_publisher(FcuStatus, "/crsd/fcu_status", 10)
         self.rc_pub = self.create_publisher(RcChannels, "/crsd/rc_channels", 10)
         self.drop_pub = self.create_publisher(Bool, "/crsd/autonomy_drop", latched_qos)
@@ -139,6 +160,7 @@ class TelemetryBridge(Node):
         self._lock = threading.Lock()
         t_out = p["stream_timeout_s"]
         self._pose = StreamCache(t_out)    # (lat, lon, heading_deg, speed_mps)
+        self._att = StreamCache(t_out)     # (r, p, y, rspd, pspd, yspd) [rad, rad/s]
         self._status = StreamCache(t_out)  # (mode_str, armed, system_status)
         self._rc = StreamCache(t_out)      # list[int] 18
 
@@ -182,6 +204,7 @@ class TelemetryBridge(Node):
             # captured at RECEIPT, not at publish, so a republished frame
             # carries the age it actually has
             stamp = self.get_clock().now().to_msg()
+            att_now = None
             with self._lock:
                 if mtype == "GLOBAL_POSITION_INT":
                     hdg = msg.hdg / 100.0 if msg.hdg != 65535 else float("nan")
@@ -191,6 +214,16 @@ class TelemetryBridge(Node):
                     self._pose.set((msg.lat / 1e7, msg.lon / 1e7, hdg,
                                     geo.ground_speed_mps(msg.vx, msg.vy)),
                                    t, stamp)
+                elif mtype == "ATTITUDE":
+                    # Republished in the autopilot's own axes/units (rad, NED
+                    # body) — see Attitude.msg. Converting here would put a
+                    # frame convention in the gateway, where nothing can check
+                    # it; crusader_common.geo owns that instead.
+                    att_now = (msg.roll, msg.pitch, msg.yaw,
+                               msg.rollspeed, msg.pitchspeed, msg.yawspeed)
+                    # cached ONLY so _publish_tick can log the stale edge; the
+                    # publish itself happens below, not on the tick
+                    self._att.set(att_now, t, stamp)
                 elif mtype == "HEARTBEAT" and msg.get_srcComponent() == 1:
                     mode = self._mavutil.mode_string_v10(msg)
                     armed = bool(msg.base_mode &
@@ -202,6 +235,14 @@ class TelemetryBridge(Node):
                     self._rc.set(rc, t, stamp)
                     if self.latch.rc_sample(rc, t):
                         self._handle_trip()
+            # Outside the lock: a publish must never be held up by, or hold up,
+            # the RC path that force-disarm depends on.
+            if att_now is not None:
+                m = Attitude()
+                m.header.stamp = stamp
+                (m.roll, m.pitch, m.yaw,
+                 m.rollspeed, m.pitchspeed, m.yawspeed) = att_now
+                self.att_pub.publish(m)
 
     # ---------- publishing ----------
 
@@ -215,6 +256,7 @@ class TelemetryBridge(Node):
             # gateway must be diagnosable from the log, and consumers that
             # judge health by arrival need the silence to be real
             stale = [name for name, c in (("pose", self._pose),
+                                          ("attitude", self._att),
                                           ("fcu_status", self._status),
                                           ("rc_channels", self._rc))
                      if c.went_stale(t)]

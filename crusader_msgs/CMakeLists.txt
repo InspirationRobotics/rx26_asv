@@ -9,6 +9,7 @@ find_package(rosidl_default_generators REQUIRED)
 # and the import fails at node start, on the boat. Add the file AND a line.
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/LatLonHead.msg"
+  "msg/Attitude.msg"
   "msg/RcChannels.msg"
   "msg/FcuStatus.msg"
   "msg/Detection3D.msg"
