@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-PARAMS_YAML = REPO / "rx26_asv" / "config" / "crusader_params.yaml"
+PARAMS_YAML = REPO / "crusader_bringup" / "config" / "crusader_params.yaml"
 PARAMS_BASELINE = REPO / "params" / "working_crusader.params"
 
 # Every node that reads crusader_params.yaml. A section for a node that no longer

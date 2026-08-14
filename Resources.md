@@ -3,6 +3,7 @@ This project is for the USV for RobotX 2026 challenge.
 RobotX website: https://robotx.org/programs/2026/
 RobotX rulebook: https://robonation.gitbook.io/robotx-2026-team-handbook 
 
+Please read through the rulebook. We are aiming for disruptive tier for all mission, add remember everything that's relevant to UUV. 
 # Hardware information
 Transmitter RadioMaster Pocket: https://radiomasterrc.com/products/pocket-radio-controller-m2
 Reserver RP3 Rx: https://radiomasterrc.com/products/rp3-expresslrs-2-4ghz-nano-receiver?variant=46486353674432

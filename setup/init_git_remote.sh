@@ -33,7 +33,7 @@ if git rev-parse HEAD >/dev/null 2>&1; then
   echo "   history exists — skipping initial commit"
 else
   git add -A
-  git commit -m "Initial commit: rx26_asv (interfaces, nodes, tools, setup, docs)"
+  git commit -m "Initial commit: crusader packages, tools, setup, docs"
 fi
 
 echo "== [3/3] remote =="

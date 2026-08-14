@@ -65,8 +65,9 @@ git clone https://github.com/InspirationRobotics/rx26_asv.git
 
 If the workspace holds package sources you are **not** building (e.g. the `robotx_2026`
 boat repo kept for reference), mark them so colcon skips them entirely — otherwise
-duplicate package names such as `interfaces` collide at build time and same-named
-executables become ambiguous at `ros2 run` time:
+duplicate package names collide at build time and same-named executables become
+ambiguous at `ros2 run` time. (Our packages are all `crusader_*` precisely to make an
+accidental collision unlikely — but `robotx_2026` also ships a `led_node` executable.)
 
 ```bash
 touch ~/robotx_ws/src/<other-repo>/COLCON_IGNORE
@@ -84,9 +85,13 @@ LED tells you state at a glance: RED e-stopped · YELLOW armed/manual · GREEN a
 
 ### B3. Inside the container (once, and after package changes)
 
+Seven packages build as one target: `crusader_bringup` depends on all of them, so
+`--packages-up-to crusader_bringup` is the whole stack and stays correct as packages are
+added. Every path that builds — `rebuild.sh`, `install_container.sh`, CI — uses that form.
+
 ```bash
 docker exec -it asv bash /root/robotx_ws/src/rx26_asv/setup/install_container.sh
-# dependency guard → colcon build (rx26_asv + interfaces) → import smoke
+# dependency guard → colcon build (all seven packages) → import smoke
 ```
 
 ### B4. Boat bring-up (bench/field — day-of runbook)
@@ -95,7 +100,7 @@ docker exec -it asv bash /root/robotx_ws/src/rx26_asv/setup/install_container.sh
    (not in the container) — **exit nonzero = do not arm**, and a SKIP is not a PASS.
 2. GPS-yaw wait: open sky, 2–3 min (no heading? suspect `GPS1_COM_PORT` first).
 3. ELRS e-stop range test (SB down = hardware kill; WiFi is never a safety tool).
-4. `ros2 launch rx26_asv core.launch.py`; flip the RC arm switch and confirm the LED and
+4. `ros2 launch crusader_bringup core.launch.py`; flip the RC arm switch and confirm the LED and
    the launch logs change together.
 
 **Standing safety constraint:** anything doing RC override is bench-only until the
@@ -131,9 +136,10 @@ flowchart LR
 |---|---|
 | Change a parameter | Edit `config/crusader_params.yaml` + restart the node. No rebuild. Every param is `[RO]`, so `ros2 param set` will be rejected — that is deliberate. |
 | Change an ArduRover param | Change it on the vehicle, verify it, then **re-export** `params/working_crusader.params` from QGC in the same commit. `param_guard.py` blocks protected params outright. |
-| Add a ROS node | Write `*_core.py` (pure logic) + `*_node.py` (wrapper via `api/common/node_main`), add a params section in the YAML and to `CONFIG_DRIVEN_NODES` in `check_config.py`. Add the `console_scripts` entry and the `core.launch.py` line **only after it has run on the boat**. |
-| Add a message | `interfaces/msg/` + `CMakeLists.txt`, rebuild both packages, update all producers/consumers in one commit. A `.msg` not listed in CMakeLists is silently not generated. |
-| Bring a mission node back | Define the topic contract with the camera container first; port the algorithm from [robotx_2026](https://github.com/InspirationRobotics/robotx_2026) (prequal-proven), not from this repo's deleted rewrite. |
+| Add a ROS node | Pick the package by domain (see the root README table). Write `*_core.py` (pure logic) + `*_node.py` (wrapper via `crusader_common.node_main`), add a params section in the YAML and to `CONFIG_DRIVEN_NODES` in `check_config.py`. Add the `console_scripts` entry and the `core.launch.py` line **only after it has run on the boat**. |
+| Add a message | `crusader_msgs/msg/` + its `CMakeLists.txt` line, then `rebuild.sh`, and update all producers/consumers in one commit. A `.msg` not listed in CMakeLists is silently not generated. |
+| Add a package | `package.xml` + `setup.py` + `setup.cfg` + `resource/<name>`, then add it to `crusader_bringup/package.xml`'s exec_depends and to CI's discovery list — or it silently stops being built by every path. |
+| Bring a mission node back | Define the topic contract with the sensor container first; port the algorithm from [robotx_2026](https://github.com/InspirationRobotics/robotx_2026) (prequal-proven), not from this repo's deleted rewrite. |
 
 ### Git / remote
 

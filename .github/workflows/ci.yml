@@ -26,44 +26,73 @@ jobs:
     container: ros:humble
     steps:
       - uses: actions/checkout@v4
-      - name: build interfaces + rx26_asv packages
+      - name: build every crusader package
         shell: bash
         run: |
           # Reproduce the Jetson's workspace SHAPE: the repo is one source dir
           # inside a colcon workspace, not the workspace root. That nesting is
-          # what the discovery guard below actually tests. The path matches the
-          # boat for readability; colcon does not care what it is called.
+          # what the discovery guard below actually tests.
           mkdir -p /root/robotx_ws/src
           cp -r . /root/robotx_ws/src/rx26_asv
           cd /root/robotx_ws
           source /opt/ros/humble/setup.bash
 
-          # Guard the failure mode this layout exists to prevent: if the repo
-          # root ever becomes a package again, colcon stops descending and
-          # `interfaces` is silently skipped. Fail loudly instead.
+          # Guard the failure this layout exists to prevent: if the repo root
+          # ever becomes a package, colcon stops descending and the packages
+          # below it are silently skipped. With seven packages that would be
+          # very easy to miss, so name every one.
           colcon list --names-only | sort > /tmp/pkgs.txt
           echo "discovered packages:"; cat /tmp/pkgs.txt
-          for p in interfaces rx26_asv; do
+          for p in crusader_msgs crusader_common crusader_fcu crusader_behavior                    crusader_perception crusader_world_model crusader_bringup; do
             grep -qx "$p" /tmp/pkgs.txt || {
               echo "ERROR: colcon did not discover package '$p'" >&2; exit 1; }
           done
 
-          colcon build --packages-select interfaces rx26_asv \
-                       --event-handlers console_cohesion+
+          # --packages-up-to bringup proves the dependency graph too: if a
+          # package is missing from bringup's exec_depends it never gets built
+          # here, and the executable check below catches it.
+          colcon build --packages-up-to crusader_bringup                        --event-handlers console_cohesion+
 
-          # Every entry point in setup.py must actually import. A console_script
-          # pointing at a module that was moved or deleted builds clean and dies
-          # at `ros2 run` — on the boat, at the worst moment.
           source install/setup.bash
-          ros2 pkg executables rx26_asv
-          for m in \
-            rx26_asv.api.navigation.telemetry_bridge \
-            rx26_asv.api.safety.rc_heartbeat_watchdog \
-            rx26_asv.api.led.led_node \
-            rx26_asv.api.pixhawk.pixhawk_led_status_node; do
-            python3 -c "import importlib, sys; importlib.import_module('$m')" \
-              || { echo "ERROR: $m does not import" >&2; exit 1; }
-          done
+
+          # Every entry point must actually import. A console_script pointing at
+          # a module that moved builds clean and dies at `ros2 run` — on the
+          # boat, at the worst moment. This is the check that the seven-package
+          # split most needs, since imports now cross package boundaries.
+          ros2 pkg executables crusader_fcu crusader_behavior
+          python3 - <<'PY'
+          import importlib, sys
+          mods = ["crusader_common.config", "crusader_common.node_main",
+                  "crusader_common.param_utils", "crusader_common.stream_cache",
+                  "crusader_common.drop_latch", "crusader_common.geo",
+                  "crusader_fcu.telemetry_bridge",
+                  "crusader_behavior.safety.rc_heartbeat_core",
+                  "crusader_behavior.safety.rc_heartbeat_watchdog",
+                  "crusader_behavior.indicator.led_node",
+                  "crusader_behavior.indicator.pixhawk_led_status_node",
+                  "crusader_perception", "crusader_world_model",
+                  "crusader_msgs.msg"]
+          bad = []
+          for m in mods:
+              try:
+                  importlib.import_module(m)
+              except Exception as e:
+                  bad.append(f"{m}: {type(e).__name__}: {e}")
+          for b in bad:
+              print("IMPORT FAIL:", b)
+          sys.exit(1 if bad else 0)
+          PY
+
+          # The params file must resolve from the INSTALL space, where lib/ and
+          # share/ are siblings in DIFFERENT packages. Path arithmetic cannot
+          # reach it; this is the check that proves ament resolution still does.
+          python3 -c "
+          from crusader_common import config
+          p = config.DEFAULT_CONFIG_PATH
+          assert p.is_file(), f'params not resolved from the install space: {p}'
+          assert 'crusader_bringup' in str(p), f'resolved to the wrong package: {p}'
+          assert config.node_params('telemetry_bridge'), 'params file loaded empty'
+          print('params resolved from install space:', p)"
 
   dockerfile:
     name: dockerfile paths

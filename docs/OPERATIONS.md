@@ -1,6 +1,6 @@
 # CRUSADER USV — OPERATIONS MANUAL (RobotX 2026)
 
-**Updated 2026-08-13 (v0.5).** Field manual for the `rx26_asv` stack.
+**Updated 2026-08-13 (v0.5).** Field manual for the Crusader stack (repo `rx26_asv`).
 
 For first-time installation on a machine, use [SETUP_GUIDE.md](SETUP_GUIDE.md).
 This document assumes the boat is already installed and you are operating it.
@@ -11,8 +11,10 @@ This document assumes the boat is already installed and you are operating it.
 > Terminal 1 / Terminal 2 commands you type.
 >
 > **v0.5 removed everything that had never run on the boat** — perception,
-> avoidance, mission planning, station keeping, gate transit. What is documented
-> here is what exists. Camera and LiDAR now belong to a separate container (§13).
+> avoidance, mission planning, station keeping, gate transit — and split what
+> remained into seven `crusader_*` packages. What is documented here is what
+> exists. The camera and LiDAR *devices* are now driven by a separate sensor
+> container; what we do with their data still happens here (§13).
 
 ---
 
@@ -22,8 +24,10 @@ This document assumes the boat is already installed and you are operating it.
 - All code lives on the Jetson at **`~/robotx_ws/src/rx26_asv`**, version-controlled with git.
   `~/robotx_ws` is a **colcon workspace**, not the repo — the repo is one source
   directory inside `src/`, alongside any others.
-- Code **runs** inside a Docker container named **`asv`** (ROS 2 Humble); code is
-  **edited** outside the container. Both see the same files via a bind mount.
+- Code **runs** inside a Docker container named **`asv`** (ROS 2 Humble + CUDA);
+  code is **edited** outside the container. Both see the same files via a bind mount.
+- A **second container drives the sensors** (OAK-D, MID360) and publishes their raw
+  frames and clouds as ROS topics. It does no detection — that runs in `asv` (§13).
 - The **Pixhawk is owned by exactly one program, MAVProxy**, which rebroadcasts
   over UDP to everything else (our nodes, Mission Planner/QGC on your laptop).
   Nothing else may open the serial device.
@@ -171,25 +175,25 @@ MAVProxy and the container are already up (§1). What you start by hand are node
 Inside the container:
 
 ```bash
-cd /root/robotx_ws && source install/setup.bash && ros2 launch rx26_asv core.launch.py
+cd /root/robotx_ws && source install/setup.bash && ros2 launch crusader_bringup core.launch.py
 ```
 
 That starts four nodes:
 
-| Node | Role |
-|---|---|
-| `telemetry_bridge` | THE single consumer of MAVProxy's rebroadcast, and THE single RC-override sender |
-| `led_node` | `/crsd/led_state` → LED serial |
-| `pixhawk_led_status_node` | Pixhawk state → LED state |
-| `rc_watchdog` | force-disarm on RC-link loss |
+| Node | Package | Role |
+|---|---|---|
+| `telemetry_bridge` | `crusader_fcu` | THE single consumer of MAVProxy's rebroadcast, and THE single MAVLink sender |
+| `pixhawk_led_status_node` | `crusader_behavior` | Pixhawk state → LED state |
+| `led_node` | `crusader_behavior` | `/crsd/led_state` → LED serial |
+| `rc_watchdog` | `crusader_behavior` | force-disarm on RC-link loss |
 
 **Verify:** flip the RC arm switch — the LED strip and the launch logs should
 change together.
 
 ### Camera
 
-The camera runs in a **separate container** that owns the OAK-D and publishes to
-ROS. To see what it sees from a laptop, from any container with ROS on the path:
+The **sensor container** owns the OAK-D and publishes its frames to ROS; detection
+and fusion run here, in `asv` (§13). To see what the camera sees from a laptop:
 
 ```bash
 python3 /root/robotx_ws/src/rx26_asv/tools/oak_view.py
@@ -197,8 +201,11 @@ python3 /root/robotx_ws/src/rx26_asv/tools/oak_view.py
 
 Then open `http://<JETSON_IP>:8080`. It subscribes to the camera topic and
 re-serves it as MJPEG — it never opens the device, so it cannot take the camera
-away from the perception container. Pass `--topic` if that container renames its
-node away from the `depthai_ros_driver` default.
+away from anything, and any number can run at once. Pass `--topic` if the sensor
+container renames its node away from the `depthai_ros_driver` default.
+
+> Perception and world-model nodes are **not** in `core.launch.py`: those packages
+> are scaffolded and empty while they are rebuilt (§13).
 
 ### Laptop side
 
@@ -225,16 +232,16 @@ independent of any node or software, at full RC range.
 
 Inside the container, after `source install/setup.bash` in `/root/robotx_ws`.
 
-Run one node instead of the launch file:
+Run one node instead of the launch file (note the package name):
 
 ```bash
-ros2 run rx26_asv led_node
+ros2 run crusader_behavior led_node
 ```
 
-List every executable the package ships (four):
+List every executable we ship:
 
 ```bash
-ros2 pkg executables rx26_asv
+ros2 pkg executables crusader_fcu crusader_behavior
 ```
 
 Set the LED colour manually (0=off 1=red 2=yellow 3=green) — works with only
@@ -290,12 +297,14 @@ That is the one blessed path: it builds both packages inside the container and
 runs an import smoke test. Equivalent by hand, inside the container:
 
 ```bash
-cd /root/robotx_ws && source /opt/ros/humble/setup.bash && colcon build --symlink-install --packages-select interfaces rx26_asv && source install/setup.bash
+cd /root/robotx_ws && source /opt/ros/humble/setup.bash && colcon build --symlink-install --packages-up-to crusader_bringup && source install/setup.bash
 ```
 
-> **`--packages-select` is deliberate.** The workspace may hold other package
-> sources (e.g. `robotx_2026`) whose build state is not ours to change and whose
-> build failure must not block ours. A bare `colcon build` drags them in.
+> **`--packages-up-to crusader_bringup` is deliberate.** The workspace holds other
+> package sources (`robotx_2026`, the sensor container's) whose build state is not
+> ours to change and whose build failure must not block ours. bringup depends on
+> every package we ship, so "up-to" is exactly our stack — and it stays correct
+> when a package is added, which a `--packages-select` list does not.
 
 **If a change "did nothing", you almost certainly skipped the rebuild.**
 
@@ -358,27 +367,27 @@ cd ~/robotx_ws/src/rx26_asv && git add -A && git commit -m "short description" &
 ```
 ~/robotx_ws/                        # colcon WORKSPACE — holds build/ install/ log/
 └── src/
-    ├── rx26_asv/                   # <- THIS REPO
-    │   ├── rx26_asv/               # the ROS 2 package (colcon package root)
-    │   │   ├── package.xml  setup.py  setup.cfg
-    │   │   ├── config/             # crusader_params.yaml
-    │   │   ├── launch/             # core.launch.py
-    │   │   ├── resource/
-    │   │   └── rx26_asv/api/       # the importable python module
-    │   │       ├── common/         # params, node lifecycle, autonomy-drop latch, geo
-    │   │       ├── navigation/     # telemetry_bridge (the only MAVLink talker)
-    │   │       ├── safety/         # rc_heartbeat_watchdog
-    │   │       ├── led/            # led_node
-    │   │       └── pixhawk/        # pixhawk_led_status_node
-    │   ├── interfaces/             # ROS 2 message package (3 msgs)
+    ├── rx26_asv/                   # <- THIS REPO (seven packages, not one)
+    │   ├── crusader_msgs/          # ament_cmake — msg definitions (3)
+    │   ├── crusader_common/        # shared lib: params, lifecycle, latch, geo
+    │   ├── crusader_fcu/           # telemetry_bridge — the only MAVLink talker
+    │   ├── crusader_perception/    # EMPTY — detection + ranging (being rebuilt)
+    │   ├── crusader_world_model/   # EMPTY — fusion + occupancy grid
+    │   ├── crusader_behavior/      # safety/ watchdog + indicator/ LED stack
+    │   ├── crusader_bringup/       # ament_cmake — launch/ + config/; build entry point
     │   ├── docs/  firmware/  params/
     │   ├── scripts/start_mavproxy.sh
     │   ├── setup/                  # install_jetson_host.sh, install_container.sh
     │   ├── tools/                  # udev, systemd, preflight, param_guard, rebuild, oak_view
     │   └── Dockerfile              # builds the `asv` image
     ├── robotx_2026/                # legacy boat repo — NOT built by us (see §19)
-    └── <camera container's sources, if any>
+    └── <sensor container sources>  # drivers for the OAK-D and MID360
 ```
+
+Build with `colcon build --packages-up-to crusader_bringup` — bringup depends on
+every package we ship, so that one target is the whole stack, and it stays correct
+when a package is added. **A new package must be listed in
+`crusader_bringup/package.xml`** or it silently stops being built.
 
 The repo root is deliberately **not** a colcon package. If it were, colcon would
 stop descending and never find `interfaces/`. Do not add a `package.xml` at the
@@ -418,26 +427,53 @@ Re-export it from QGC after any deliberate param change.
 
 ---
 
-## 13. Camera and LiDAR — a different container
+## 13. Camera and LiDAR — sensor container vs this one
 
-Neither sensor is driven by this stack any more. The OAK-D LR and the Livox
-MID360 belong to a separate container with its own image, its own dependencies
-(depthai, CUDA/TensorRT, Livox-SDK2, PCL) and its own lifecycle. The `asv` image
-deliberately has none of that: it is ROS 2 + MAVProxy, and it cannot open either
-device even by accident.
+The split is by **device ownership, not by responsibility**:
 
-What stays here:
+| | Sensor container | `asv` (this repo) |
+|---|---|---|
+| Owns | OAK-D LR, Livox MID360 | Pixhawk, LED Arduino |
+| Has | depthai, Livox SDK, the drivers | CUDA/TensorRT, cv_bridge, MAVProxy |
+| Publishes | raw `Image`, `PointCloud2` | detections, world model, boat state |
+| Does NOT | detect, fuse, or map | open a camera or a LiDAR |
 
-- `tools/oak_view.py` — subscribes to the camera topic and re-serves it as MJPEG
-  for a laptop browser (§5). A viewer, not a driver.
-- The OAK-D permission rule and the usbfs bump in `tools/udev/` — udev rules and
-  kernel parameters are **host** state, so they cannot live in the other
-  container's image. They grant access only; nothing here uses them. Move them
-  when that container grows its own host installer.
+So detection runs **here**, on this container's GPU, against the raw topics the sensor
+container publishes. That is why the `asv` image carries the CUDA/TensorRT stack and
+`cv_bridge`, and why it deliberately carries no depthai and no Livox SDK — the Dockerfile
+fails the build if depthai reappears in it.
 
-Anything that consumes detections — buoy models, fusion, avoidance — was removed
-in v0.5 and will come back only against an agreed topic contract with that
-container.
+Two packages hold that work, both currently **empty and scaffolded** while it is rebuilt:
+
+- `crusader_perception` — sensor-coupled: frames and clouds become detections with ranges.
+- `crusader_world_model` — sensor-agnostic: fusion into 3D object positions, occupancy grid.
+
+The pre-v0.5 pipeline was removed unverified (its buoy model was trained on another team's
+buoys, and none of it had run end-to-end). It is recoverable from git at `8c4ffa5` and
+worth reading before rewriting — see each package's README.
+
+**Before any of it comes back, the topic contract with the sensor container has to be
+agreed**: topic names, message types, QoS, frame ids. A QoS mismatch is silent — a
+BEST_EFFORT publisher and a RELIABLE subscriber match nothing, `ros2 topic list` looks
+perfect, and no data flows.
+
+### Watching the camera from a laptop
+
+```bash
+python3 /root/robotx_ws/src/rx26_asv/tools/oak_view.py
+```
+
+Then open `http://<JETSON_IP>:8080`. It subscribes to the camera topic and re-serves it as
+MJPEG; it never opens the device, so it cannot take the camera away from anything, and any
+number can run at once. Pass `--topic` if the sensor container renames its node away from
+the `depthai_ros_driver` default.
+
+### Host-level bits that stay with us
+
+The OAK-D permission rule and the usbfs memory bump live in `tools/udev/` even though the
+camera isn't ours: udev rules and kernel parameters are **host** state and cannot live
+inside the other container's image. They grant access only. Move them when that container
+grows its own host installer.
 
 ---
 
@@ -463,9 +499,11 @@ suspect `GPS1_COM_PORT` before anything else.
 ## 15. The container
 
 Image `asv`, built **from this repo's Dockerfile** — not a hand-made container.
-Base is `arm64v8/ros:humble-ros-base`, plus the colcon/rosidl build toolchain and
-MAVProxy/pymavlink/pyserial. No CUDA, no depthai, no PCL, no Livox: this stack
-talks to an autopilot and a serial LED strip, and nothing else.
+Base is `ultralytics/ultralytics:latest-jetson-jetpack6` (CUDA + PyTorch + TensorRT),
+plus ROS 2 Humble, `cv_bridge`/`sensor_msgs_py`, and MAVProxy/pymavlink/pyserial.
+
+**No depthai, no Livox SDK** — the sensor container owns those devices (§13). The build
+asserts depthai is absent, so perception cannot quietly drift back into the wrong place.
 
 Rebuild it on the Jetson host:
 
@@ -477,25 +515,25 @@ cd ~/robotx_ws/src/rx26_asv && docker build -t asv .
 then retag and recreate:
 
 ```bash
-docker build -t asv:next . && docker tag asv:next asv:latest && docker rm -f asv && docker create -it --name asv --network host --privileged -v /dev:/dev -v /home/crusader/robotx_ws:/root/robotx_ws asv && docker start asv
+docker build -t asv:next . && docker tag asv:next asv:latest && docker rm -f asv && docker create -it --name asv --network host --privileged --runtime nvidia -v /dev:/dev -v /home/crusader/robotx_ws:/root/robotx_ws asv && docker start asv
 ```
 
 Those create flags are not optional:
 
 | Flag | Why |
 |---|---|
-| `--network host` | MAVProxy loopback rebroadcast, DDS multicast, and cross-container topics from the camera container |
+| `--network host` | MAVProxy loopback rebroadcast, DDS multicast, and the cross-container topics from the sensor container |
 | `--privileged` + `-v /dev:/dev` | the Pixhawk and LED serial devices |
+| `--runtime nvidia` | GPU for TensorRT — detection runs in this container |
 | `-it` | keeps `CMD ["bash"]` alive so `docker start -a` works |
-
-`--runtime nvidia` is no longer needed here — nothing in this image uses the GPU.
 
 **The image is the only place runtime dependencies are installed.** Never
 `pip install` into a running container: that state is undocumented and lost on
-`docker rm`.
+`docker rm`. An unpinned install once resolved protobuf past what TensorFlow accepts and
+broke the whole ML stack; the Dockerfile pins those and asserts the stack still imports at
+build time.
 
-Jetson power mode should be `MAXN_SUPER` (`sudo nvpmodel -m 2`) — the camera
-container still wants the GPU clocks.
+Jetson power mode should be `MAXN_SUPER` (`sudo nvpmodel -m 2`) for full GPU speed.
 
 ---
 
@@ -574,7 +612,7 @@ each one before arming. Manual items it cannot check: GPS yaw resolved (open sky
 
 The legacy boat repo lives at `~/robotx_ws/src/robotx_2026`. It is **not built by
 us** — `rebuild.sh` and `install_container.sh` use
-`--packages-select interfaces rx26_asv`.
+`--packages-up-to crusader_bringup`, which reaches only our seven packages.
 
 **Never launch both stacks.** `robotx_2026` ships its own `led_node`,
 `pixhawk_led_node`, `gate_navigator` and `dp_hold`, each opening its own
