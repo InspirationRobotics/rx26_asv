@@ -38,6 +38,18 @@ check against different numbers than the node uses would be worse than no check.
 CLI flags override, and there are built-in defaults so this tool works before
 Phase 1 lands.
 
+MESSAGE TYPE. The Livox driver publishes `sensor_msgs/PointCloud2` when its
+`xfer_format` is 0 and `livox_ros_driver2/CustomMsg` when it is 1. ROS 2 matches
+NOTHING across types, so a subscriber guessing wrong sees perfect-looking output
+from `ros2 topic list`/`ros2 topic info` and receives not one message. This tool
+therefore looks up the publisher's actual type before subscribing, reads either,
+and says plainly which one it found. `ros2 topic info -v /livox/lidar` shows the
+same thing per endpoint, plus QoS.
+
+Prefer `xfer_format: 0`. PointCloud2 is the standard type, rviz and every ROS
+tool speak it, `asv` needs no livox package to deserialise it, and it decodes as
+a numpy stride view instead of a Python loop over 20k objects.
+
 REQUIREMENTS: rclpy + sensor_msgs + numpy + cv2 — i.e. the `asv` container.
 Run it there, with --network host, or DDS will not see the livox container's
 publisher.
@@ -92,6 +104,23 @@ def load_extrinsic():
     except Exception:
         pass
     return dict(FALLBACK_EXTRINSIC), "built-in fallback"
+
+
+def custommsg_to_xyz(msg) -> np.ndarray:
+    """(N,3) xyz from a livox_ros_driver2/CustomMsg.
+
+    CustomPoint carries x/y/z as plain float32 members, so this is a straight
+    read — but it is a Python loop over ~20k objects per sweep (~10-30 ms),
+    where the PointCloud2 path is a numpy stride view. Fine for a viewer at
+    10 Hz; the clustering node should be fed PointCloud2 (xfer_format: 0).
+    """
+    pts = msg.points
+    if not pts:
+        return np.empty((0, 3))
+    out = np.empty((len(pts), 3), dtype=np.float64)
+    for i, p in enumerate(pts):
+        out[i, 0], out[i, 1], out[i, 2] = p.x, p.y, p.z
+    return out[np.isfinite(out).all(axis=1)]
 
 
 def pointcloud2_to_xyz(msg: PointCloud2) -> np.ndarray:
@@ -262,29 +291,95 @@ class LidarView(Node):
         self.frames = 0
         self.sweeps = deque(maxlen=max(1, args.accumulate))
         self.last_stats = ""
+        self.sub = None
 
-        # BEST_EFFORT. A RELIABLE subscription to a BEST_EFFORT publisher matches
-        # NOTHING: `ros2 topic list` looks perfect, `ros2 topic hz` shows the
-        # publisher, and this node receives zero clouds. That mismatch is the
-        # single most likely reason for an empty page here.
-        self.create_subscription(PointCloud2, args.topic, self._on_cloud,
-                                 qos_profile_sensor_data)
-        self.get_logger().info(f"subscribed to {args.topic}  frame={args.frame}")
+        # Subscription is DEFERRED until the publisher's type is known. The
+        # Livox driver publishes livox_ros_driver2/CustomMsg when xfer_format=1
+        # and sensor_msgs/PointCloud2 when xfer_format=0, and ROS 2 matches
+        # nothing across types: `ros2 topic info` shows the publisher, `ros2
+        # topic list` looks perfect, and not one message arrives. Guessing the
+        # type and then reporting "no clouds yet" describes the symptom and
+        # hides the cause.
+        self._resolve_timer = self.create_timer(1.0, self._resolve)
         self.create_timer(5.0, self._health)
 
+    # ---------- type resolution ----------
+
+    def _resolve(self):
+        """Find the publisher, match its type, subscribe. Retries until it does."""
+        try:
+            infos = self.get_publishers_info_by_topic(self.args.topic)
+        except Exception as e:                      # topic name not yet valid
+            self.get_logger().warn(f"cannot query {self.args.topic}: {e}")
+            return
+        if not infos:
+            self.get_logger().warn(
+                f"no publisher on {self.args.topic} yet — is the livox container "
+                "up, and does this container have --network host?",
+                throttle_duration_sec=10.0)
+            return
+
+        types = {i.topic_type for i in infos}
+        for i in infos:
+            q = i.qos_profile
+            self.get_logger().info(
+                f"publisher {i.node_name}: {i.topic_type} "
+                f"reliability={q.reliability.name} durability={q.durability.name}")
+
+        if "sensor_msgs/msg/PointCloud2" in types:
+            self.sub = self.create_subscription(
+                PointCloud2, self.args.topic,
+                lambda m: self._on_points(pointcloud2_to_xyz(m)),
+                qos_profile_sensor_data)
+            self.get_logger().info("subscribed as sensor_msgs/PointCloud2")
+        elif any(t.endswith("CustomMsg") for t in types):
+            try:
+                from livox_ros_driver2.msg import CustomMsg
+            except ImportError:
+                self.get_logger().error(
+                    f"{self.args.topic} carries livox_ros_driver2/CustomMsg, but "
+                    "that message package is not on this container's ROS path, so "
+                    "it cannot be deserialised here. Two ways out, and the first "
+                    "is the right one:\n"
+                    "  1. set the driver's `xfer_format: 0` in the livox "
+                    "container so it publishes sensor_msgs/PointCloud2 — the "
+                    "standard type, which rviz and every ROS tool also speak.\n"
+                    "  2. build livox_ros_driver2's interface package into this "
+                    "workspace, then rerun.\n"
+                    "NOT a QoS problem and not a network problem — the types "
+                    "simply do not match, so ROS 2 connects nothing.")
+                return                              # keep retrying; they may fix it
+            self.sub = self.create_subscription(
+                CustomMsg, self.args.topic,
+                lambda m: self._on_points(custommsg_to_xyz(m)),
+                qos_profile_sensor_data)
+            self.get_logger().warn(
+                "subscribed as livox_ros_driver2/CustomMsg. This works for the "
+                "bench view, but prefer xfer_format: 0 (PointCloud2) — the "
+                "clustering node wants the numpy-friendly layout.")
+        else:
+            self.get_logger().error(
+                f"{self.args.topic} publishes {sorted(types)}, which this tool "
+                "cannot read. Expected sensor_msgs/PointCloud2.")
+            return
+
+        self._resolve_timer.cancel()
+        self.get_logger().info(f"frame={self.args.frame}")
+
     def _health(self):
+        if self.sub is None:
+            return                                  # _resolve is already loud
         if self.frames == 0:
             self.get_logger().warn(
-                f"no clouds yet on {self.args.topic} — is the livox container "
-                "running? check `ros2 topic list`, that this container has "
-                "--network host, and that the publisher QoS is BEST_EFFORT",
+                f"subscribed to {self.args.topic} but no messages yet — check "
+                "the publisher QoS above; a RELIABLE subscriber matches a "
+                "BEST_EFFORT publisher not at all",
                 throttle_duration_sec=10.0)
         else:
             self.get_logger().info(self.last_stats)
 
-    def _on_cloud(self, msg: PointCloud2):
+    def _on_points(self, pts):
         import cv2
-        pts = pointcloud2_to_xyz(msg)
         if self.args.frame == "body":
             pts = to_body(pts, self.ext)
         # Accumulation is NOT motion-compensated — valid only with the boat

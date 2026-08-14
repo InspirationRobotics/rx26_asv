@@ -34,9 +34,27 @@ wrong side of every gate.
 - [ ] Boat on the cart or at the dock, **stationary** (the viewer's `--accumulate` is not
       motion-compensated).
 - [ ] livox container running; `ros2 topic hz /livox/lidar` shows ~10 Hz from inside `asv`.
-      If the topic lists but never ticks, suspect QoS before anything else — a RELIABLE
-      subscriber matches a BEST_EFFORT publisher **not at all**, and the symptom is silence
-      with a perfect-looking `ros2 topic list`.
+- [ ] **Message type checked.** Run this first — it is the failure that actually happened:
+
+      ```bash
+      ros2 topic info -v /livox/lidar
+      ```
+
+      The driver publishes `sensor_msgs/PointCloud2` when `xfer_format: 0` and
+      `livox_ros_driver2/CustomMsg` when `xfer_format: 1`. **ROS 2 matches nothing across
+      types**, so a subscriber on the wrong one receives zero messages while `ros2 topic
+      list` and `ros2 topic info` both look perfectly healthy — the type list simply shows
+      two entries, one per endpoint, which is easy to read as "it supports both".
+      `lidar_view` resolves the publisher's type before subscribing and logs which it
+      found, so this should not bite twice.
+
+      `xfer_format: 0` is preferred for the stack: PointCloud2 is the standard type, `asv`
+      needs no livox package to deserialise it, rviz speaks it, and it decodes as a numpy
+      stride view rather than a Python loop over 20k objects per sweep.
+
+- [ ] QoS noted from the same command. A **RELIABLE subscriber matches a BEST_EFFORT
+      publisher not at all**; the reverse (our BEST_EFFORT subscriber, a RELIABLE
+      publisher) is compatible and fine.
 - [ ] A distinct, isolated target ~1 m tall at **5 m on the port bow** — roughly 45° off the
       bow to the **left**. A traffic cone, a buoy, or a person standing still. It must be the
       only thing at that bearing; a target in front of a wall proves nothing.
