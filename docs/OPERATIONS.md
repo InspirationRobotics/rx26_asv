@@ -1,15 +1,18 @@
 # CRUSADER USV — OPERATIONS MANUAL (RobotX 2026)
 
-**Updated 2026-07-28.** Field manual for the `rx26_asv` stack.
+**Updated 2026-08-13 (v0.5).** Field manual for the `rx26_asv` stack.
 
 For first-time installation on a machine, use [SETUP_GUIDE.md](SETUP_GUIDE.md).
-For "if I change X, what do I re-run?", use [CHANGE_IMPACT_MAP.md](CHANGE_IMPACT_MAP.md).
 This document assumes the boat is already installed and you are operating it.
 
 > **This supersedes the `robotx_2026` documentation.** Package, container, repo
 > and startup procedure all changed. The single biggest difference: **MAVProxy
 > and the container start automatically via systemd** — they are no longer
 > Terminal 1 / Terminal 2 commands you type.
+>
+> **v0.5 removed everything that had never run on the boat** — perception,
+> avoidance, mission planning, station keeping, gate transit. What is documented
+> here is what exists. Camera and LiDAR now belong to a separate container (§13).
 
 ---
 
@@ -101,25 +104,30 @@ Jetson. This is not persistent across reboot.
 
 ---
 
-## 3. Find your laptop's IP (for telemetry)
+## 3. Telemetry to your laptop
 
-MAVProxy forwards telemetry to your laptop. On Windows:
+MAVProxy **broadcasts** telemetry to the whole field subnet, so nothing has to be
+typed in per-laptop or per-day: Mission Planner and QGroundControl both listen on
+14550 for traffic from any sender.
 
-```
-ipconfig
-```
-
-Use the `Wireless LAN adapter Wi-Fi` → `IPv4 Address`. That's `<LAPTOP_IP>` below.
-It changes per laptop and often per day.
-
-Set it once so the service picks it up on every start, instead of editing the unit:
+You only need to touch this if the field network hands out a different subnet than
+`192.168.100.0/24`. Set the subnet's BROADCAST address (host bits all 1 — `.255`
+for a /24), not a laptop's own address:
 
 ```bash
-echo 'LAPTOP_IP=<LAPTOP_IP>' | sudo tee /etc/default/crusader && sudo systemctl restart crsd-mavproxy
+echo 'CRSD_BCAST_ADDR=192.168.100.255' | sudo tee /etc/default/crusader && sudo systemctl restart crsd-mavproxy
 ```
 
 The unit reads that file via `EnvironmentFile=-/etc/default/crusader`. If it's
 absent, `start_mavproxy.sh` falls back to its built-in default.
+
+> This variable used to be called `LAPTOP_IP`, from when the `--out` was unicast.
+> Putting one laptop's address in it now sends "broadcast" traffic to that single
+> host, and everyone else on the field network sees nothing.
+>
+> Broadcast is subnet-scoped, not laptop-scoped: if two teams share a field
+> network, every laptop sees every broadcasting boat. Pick the right vehicle in
+> the GCS connection list.
 
 ---
 
@@ -178,25 +186,19 @@ That starts four nodes:
 **Verify:** flip the RC arm switch — the LED strip and the launch logs should
 change together.
 
-### Perception (camera)
+### Camera
+
+The camera runs in a **separate container** that owns the OAK-D and publishes to
+ROS. To see what it sees from a laptop, from any container with ROS on the path:
 
 ```bash
-ros2 launch rx26_asv camera.launch.py
+python3 /root/robotx_ws/src/rx26_asv/tools/oak_view.py
 ```
 
-### LiDAR and fusion
-
-```bash
-ros2 launch rx26_asv lidar.launch.py
-```
-
-```bash
-ros2 launch rx26_asv lidar_fusion.launch.py
-```
-
-`lidar_fusion.launch.py` runs the driver **and** the fusion node together.
-See §14 for prerequisites — these will not produce useful ranges until the
-MID360 is on its own NIC and the extrinsic is calibrated.
+Then open `http://<JETSON_IP>:8080`. It subscribes to the camera topic and
+re-serves it as MJPEG — it never opens the device, so it cannot take the camera
+away from the perception container. Pass `--topic` if that container renames its
+node away from the `depthai_ros_driver` default.
 
 ### Laptop side
 
@@ -212,7 +214,7 @@ QGroundControl connects by itself.
 | **SA** | 5 | pressed in = Pixhawk control, released = Teensy control. **Keep pressed in** — the Teensy is not in use. |
 | **SB** | 7 | down = **e-stop** (RED, ~994) · middle = released (~1498) · up = **arm** (YELLOW + arming tune, ~1995). `RCx_OPTION=165`. |
 | **SC** | 8 | down = Manual · middle = Hold (boat actively stops) · up = **Guided** (GREEN — needs a mission loaded and GPS lock, else the mode change is rejected). |
-| **SE** | 9 | **PROPOSED, NOT BUILT** — autonomy-drop for RC-override nodes. See §18. |
+| **SE** | 9 | **PROPOSED, NOT BUILT** — autonomy-drop for RC-override nodes. See §17. |
 
 **SB down is the real e-stop.** It kills motors instantly in any mode,
 independent of any node or software, at full RC range.
@@ -229,7 +231,7 @@ Run one node instead of the launch file:
 ros2 run rx26_asv led_node
 ```
 
-List every executable the package ships (16 of them):
+List every executable the package ships (four):
 
 ```bash
 ros2 pkg executables rx26_asv
@@ -248,15 +250,16 @@ See what's publishing:
 ros2 topic list
 ```
 
-Camera check without ROS — then open `http://<JETSON_IP>:8080`, Ctrl+C to stop:
+Watch the camera from a laptop browser — then open `http://<JETSON_IP>:8080`,
+Ctrl+C to stop:
 
 ```bash
 python3 /root/robotx_ws/src/rx26_asv/tools/oak_view.py
 ```
 
-> One camera user at a time. Stop `perception_node` before running `oak_view.py`.
-> Unlike the old `oak_buoy_view.py`, detections now come from the ROS pipeline
-> (`perception_node` → `/crsd/detections_body`), not from this tool.
+> This subscribes to the camera container's topic and re-serves it; it never
+> opens the device, so it cannot take the camera away from anything. Run as many
+> as you like. `--topic` overrides the `depthai_ros_driver` default name.
 
 Confirm MAVLink actually reaches container-side code — this is the single best
 end-to-end health check:
@@ -354,32 +357,27 @@ cd ~/robotx_ws/src/rx26_asv && git add -A && git commit -m "short description" &
 
 ```
 ~/robotx_ws/                        # colcon WORKSPACE — holds build/ install/ log/
-├── models/                         # per-Jetson TensorRT engines (gitignored, copied in)
 └── src/
     ├── rx26_asv/                   # <- THIS REPO
     │   ├── rx26_asv/               # the ROS 2 package (colcon package root)
     │   │   ├── package.xml  setup.py  setup.cfg
-    │   │   ├── config/             # crusader_params.yaml, devices, MID360_config.json
-    │   │   ├── launch/             # core, camera, lidar, lidar_fusion
+    │   │   ├── config/             # crusader_params.yaml
+    │   │   ├── launch/             # core.launch.py
     │   │   ├── resource/
     │   │   └── rx26_asv/api/       # the importable python module
-    │   │       ├── common/         # params, node lifecycle, autonomy-drop latch
-    │   │       ├── navigation/     # telemetry_bridge, frame_transform, occupancy,
-    │   │       │                   #   APF advisory, progress monitor, fence writer,
-    │   │       │                   #   gate_navigator, dp_hold
-    │   │       ├── perception/     # OAK-D -> TensorRT -> depth assoc; LiDAR fusion
-    │   │       ├── mission/        # task-stack mission planner + RoboCommand comms
+    │   │       ├── common/         # params, node lifecycle, autonomy-drop latch, geo
+    │   │       ├── navigation/     # telemetry_bridge (the only MAVLink talker)
     │   │       ├── safety/         # rc_heartbeat_watchdog
-    │   │       ├── actuators/      # Mission-3 effectors
-    │   │       ├── ivc/            # inter-vehicle comms
-    │   │       └── testing/        # bench-only nodes
-    │   ├── interfaces/             # ROS 2 message package
-    │   ├── docs/  proto/  firmware/  tests/
+    │   │       ├── led/            # led_node
+    │   │       └── pixhawk/        # pixhawk_led_status_node
+    │   ├── interfaces/             # ROS 2 message package (3 msgs)
+    │   ├── docs/  firmware/  params/
     │   ├── scripts/start_mavproxy.sh
     │   ├── setup/                  # install_jetson_host.sh, install_container.sh
-    │   ├── tools/                  # udev, systemd, preflight, rebuild, oak_view, training
+    │   ├── tools/                  # udev, systemd, preflight, param_guard, rebuild, oak_view
     │   └── Dockerfile              # builds the `asv` image
-    └── robotx_2026/                # legacy boat repo — NOT built by us (see §19)
+    ├── robotx_2026/                # legacy boat repo — NOT built by us (see §19)
+    └── <camera container's sources, if any>
 ```
 
 The repo root is deliberately **not** a colcon package. If it were, colcon would
@@ -410,87 +408,40 @@ Current correct config — do not change without reading the above:
   our autonomous steering assumes it doesn't. Value 3 ("unchanged when backing up")
   stops the boat spinning out during autonomous reverse.
 
-Known-good params: `working_crusader_params.params` in the drive.
+Known-good params: **`params/working_crusader.params`**, committed in this repo
+and diffed against the live vehicle by `preflight.py` before every arm (§18).
+Re-export it from QGC after any deliberate param change.
+
+> **Unresolved:** that baseline currently has `PILOT_STEER_TYPE=0`, not the `3`
+> this section calls for. See §20 — do not assume either value is live without
+> checking the board.
 
 ---
 
-## 13. Camera + buoy detection
+## 13. Camera and LiDAR — a different container
 
-The model runs **on the Jetson GPU via TensorRT**, not on the camera. The OAK-D LR
-streams RGB + stereo depth; the Jetson infers and samples depth per detection —
-~30 fps, versus ~5 fps on-camera.
+Neither sensor is driven by this stack any more. The OAK-D LR and the Livox
+MID360 belong to a separate container with its own image, its own dependencies
+(depthai, CUDA/TensorRT, Livox-SDK2, PCL) and its own lifecycle. The `asv` image
+deliberately has none of that: it is ROS 2 + MAVProxy, and it cannot open either
+device even by accident.
 
-`perception_node` runs the whole pipeline in one process (capture → detect →
-depth-associate) and publishes only the small `DetectionArray` on
-`/crsd/detections_body` (BODY frame: x = starboard+, y = forward+). Shipping
-1080p frames over DDS would blow the latency budget.
+What stays here:
 
-Model files live at the **workspace** level, `~/robotx_ws/models/` — gitignored
-and copied in out-of-band:
+- `tools/oak_view.py` — subscribes to the camera topic and re-serves it as MJPEG
+  for a laptop browser (§5). A viewer, not a driver.
+- The OAK-D permission rule and the usbfs bump in `tools/udev/` — udev rules and
+  kernel parameters are **host** state, so they cannot live in the other
+  container's image. They grant access only; nothing here uses them. Move them
+  when that container grows its own host installer.
 
-| File | What |
-|---|---|
-| `buoy_v16.pt` | source weights (MHSeals V16, YOLOv11, 13 classes) |
-| `buoy_v16.engine` | TensorRT engine, **compiled for this Jetson** |
-
-Regenerate the engine if the Jetson or JetPack changes:
-
-```bash
-yolo export model=buoy_v16.pt format=engine half=True imgsz=352,640 device=0
-```
-
-**Camera must be USB 3.** `oakd_guard` asserts this at startup and refuses to run
-on USB 2. Check manually:
-
-```bash
-python3 -c "import depthai as dai; print(dai.Device().getUsbSpeed())"
-```
-
-Must print `SUPER`. `HIGH` = USB 2 = wrong cable or port.
-
-> **Detection quality on our buoys is UNVERIFIED.** The model was trained on
-> another team's buoys. Retraining on our own footage is a prerequisite for
-> trusting any collision-avoidance metric — see [G2_bench_procedure.md](G2_bench_procedure.md).
-> Use `tools/scripts/collect_footage.py` to capture training data on water days.
+Anything that consumes detections — buoy models, fusion, avoidance — was removed
+in v0.5 and will come back only against an agreed topic contract with that
+container.
 
 ---
 
-## 14. LiDAR (Livox MID360)
-
-The MID360 fills the LiDAR slot for camera–LiDAR fusion. `livox_ros_driver2` is
-**baked into the `asv` image** in its own workspace (`/opt/livox_ws`) and owns the
-device the way MAVProxy owns the Pixhawk — no other node opens it.
-
-`lidar_fusion_node` subscribes to `/livox/lidar` **and** `/crsd/detections_body`,
-and refines each detection's **range** from LiDAR returns in its bearing sector:
-the camera keeps the reliable bearing, the LiDAR supplies the accurate range.
-Output on `/crsd/detections_fused`.
-
-**Safety invariant:** a detection with no LiDAR support is **passed through with
-its camera range, never dropped**. Losing an obstacle is worse than carrying a
-coarse range. A stale or absent cloud degrades to camera-only plus a logged WARN.
-
-Verify the driver is present in the container:
-
-```bash
-docker exec asv bash -lc 'source /opt/ros/humble/setup.bash && source /opt/livox_ws/install/setup.bash && ros2 pkg list | grep livox'
-```
-
-Should print `livox_ros_driver2`. If it prints nothing, the image was built
-without PCL — rebuild it; the Dockerfile now fails the build in that case.
-
-**Two prerequisites before fused ranges are trustworthy:**
-
-1. **Extrinsic calibration.** The `lidar_*` params in `crusader_params.yaml` and
-   `extrinsic_parameter` in `MID360_config.json` are placeholder zeros. Keep the
-   *driver* extrinsic at identity and treat `crusader_params.yaml` as the single
-   source of truth, so points are not transformed twice.
-2. **Its own NIC/subnet.** The MID360 is an Ethernet/UDP device and must not share
-   the RoboCommand RJ-45 link.
-
----
-
-## 15. GPS heading (dual-antenna, no compass)
+## 14. GPS heading (dual-antenna, no compass)
 
 Heading comes from **two GPS antennas (moving-baseline yaw)**, not the compass.
 The compass is **disabled** (`COMPASS_USE=0`) — intentional, and it permanently
@@ -509,12 +460,12 @@ suspect `GPS1_COM_PORT` before anything else.
 
 ---
 
-## 16. The container
+## 15. The container
 
 Image `asv`, built **from this repo's Dockerfile** — not a hand-made container.
-Base is `ultralytics/ultralytics:latest-jetson-jetpack6` (CUDA + PyTorch +
-TensorRT), plus ROS 2 Humble, MAVProxy, depthai, and Livox-SDK2 +
-`livox_ros_driver2`.
+Base is `arm64v8/ros:humble-ros-base`, plus the colcon/rosidl build toolchain and
+MAVProxy/pymavlink/pyserial. No CUDA, no depthai, no PCL, no Livox: this stack
+talks to an autopilot and a serial LED strip, and nothing else.
 
 Rebuild it on the Jetson host:
 
@@ -526,46 +477,49 @@ cd ~/robotx_ws/src/rx26_asv && docker build -t asv .
 then retag and recreate:
 
 ```bash
-docker build -t asv:next . && docker tag asv:next asv:latest && docker rm -f asv && docker create -it --name asv --network host --privileged --runtime nvidia -v /dev:/dev -v /home/crusader/robotx_ws:/root/robotx_ws asv && docker start asv
+docker build -t asv:next . && docker tag asv:next asv:latest && docker rm -f asv && docker create -it --name asv --network host --privileged -v /dev:/dev -v /home/crusader/robotx_ws:/root/robotx_ws asv && docker start asv
 ```
 
 Those create flags are not optional:
 
 | Flag | Why |
 |---|---|
-| `--network host` | MID360 UDP, RoboCommand RJ-45, MAVProxy loopback rebroadcast, DDS multicast |
-| `--privileged` + `-v /dev:/dev` | OAK-D USB and serial devices |
-| `--runtime nvidia` | GPU for TensorRT |
+| `--network host` | MAVProxy loopback rebroadcast, DDS multicast, and cross-container topics from the camera container |
+| `--privileged` + `-v /dev:/dev` | the Pixhawk and LED serial devices |
 | `-it` | keeps `CMD ["bash"]` alive so `docker start -a` works |
+
+`--runtime nvidia` is no longer needed here — nothing in this image uses the GPU.
 
 **The image is the only place runtime dependencies are installed.** Never
 `pip install` into a running container: that state is undocumented and lost on
-`docker rm`. An unpinned `pip install protobuf grpcio-tools` once resolved
-protobuf to 7.x and broke TensorFlow — and with it the whole perception stack.
-The Dockerfile pins those and asserts the ML stack still imports at build time.
+`docker rm`.
 
-Jetson power mode should be `MAXN_SUPER` (`sudo nvpmodel -m 2`) for full GPU speed.
-
----
-
-## 17. Position + yaw hold (`dp_hold`) — docking, Mission 3
-
-`dp_hold` locks onto a visual target (buoy/dock) and holds a set yaw and
-distance/side offset using **RC override in MANUAL mode**. Strafe, throttle and
-rotate are all driven by the node. LED stays GREEN.
-
-**Why MANUAL and not GUIDED:** ArduRover's GUIDED cannot strafe on this frame —
-it turns instead of translating laterally. RC override in MANUAL is currently the
-only way to get true lateral hold on this omni boat.
-
-Status: working, gains being tuned. `MOT_THST_ASYM ≈ 1.5`, `MOT_THST_EXPO ≈ 0.65`
-in progress. Reverse-spin was fixed by `PILOT_STEER_TYPE=3` (§12).
-
-**Do not run beyond WiFi range.** See §18.
+Jetson power mode should be `MAXN_SUPER` (`sudo nvpmodel -m 2`) — the camera
+container still wants the GPU clocks.
 
 ---
 
-## 18. Safety and manual takeover
+## 16. Station keeping and gate transit — removed in v0.5
+
+`dp_hold` (RC-override lateral hold for docking) and `gate_navigator` (GUIDED
+buoy-gate transit) are **no longer in this repo**. This repo's versions were
+decoupled rewrites that had never run; `dp_hold` was also blocked from field work
+by the missing autonomy-drop switch (§17), and `gate_navigator` was untested on
+water.
+
+The field-proven versions — the ones that completed prequal — live in
+[robotx_2026](https://github.com/InspirationRobotics/robotx_2026). That is what
+to port from when mission work restarts, against an agreed detections topic from
+the camera container.
+
+The ArduRover-side lesson from `dp_hold` is worth keeping regardless: **GUIDED
+cannot strafe on this frame** — it turns instead of translating laterally. RC
+override in MANUAL is the only way to get true lateral hold on this omni boat,
+which is exactly why the autonomy-drop switch gates that whole class of work.
+
+---
+
+## 17. Safety and manual takeover
 
 Two radio links, very different range:
 
@@ -597,72 +551,64 @@ needs to read — confirm what option 165 maps to in Rover 4.6.3 before building
 
 ---
 
-## 19. `gate_navigator` — Mission 1 transit
+## 18. Preflight
 
-GUIDED-mode gate navigation: drives QGC-uploaded waypoints and corrects toward
-buoy-gate midpoints. **Status: UNTESTED on water.**
+Run it on the Jetson **host**, not in the container:
 
-Order of operations:
+```bash
+python3 ~/robotx_ws/src/rx26_asv/tools/scripts/preflight.py
+```
 
-1. Boot chain up (§1) — MAVProxy and container are automatic.
-2. Upload initial waypoints from QGC / Mission Planner.
-3. Core stack: `ros2 launch rx26_asv core.launch.py`
-4. Perception: `ros2 launch rx26_asv camera.launch.py`
-5. Confirm detections before anything moves.
-6. `ros2 run rx26_asv gate_navigator`
+**Exit nonzero = do not arm.** It checks the udev symlinks, disk space, that
+MAVProxy is alive, that the `asv` container is up, that `core.launch.py`'s topics
+are actually publishing, and diffs the live ArduRover params against the
+committed baseline (`params/working_crusader.params`).
 
-The entry/exit circling maneuvers are a real local-minima risk given GUIDED's
-turn-instead-of-strafe behaviour on this frame.
+**A SKIP is not a PASS.** The script says how many checks skipped and why; decide
+each one before arming. Manual items it cannot check: GPS yaw resolved (open sky,
+2–3 min)? ELRS e-stop range-tested today? LED showing the state you expect?
 
 ---
 
-## 20. Sharing the workspace with `robotx_2026`
+## 19. Sharing the workspace with `robotx_2026`
 
 The legacy boat repo lives at `~/robotx_ws/src/robotx_2026`. It is **not built by
 us** — `rebuild.sh` and `install_container.sh` use
 `--packages-select interfaces rx26_asv`.
 
-**Never launch both stacks.** `robotx_2026` ships its own `gate_navigator`,
-`dp_hold`, `led_node` and `rc_watchdog`, each opening its own
-`udpin:127.0.0.1:14551`, and its watchdog sends `MAV_CMD_COMPONENT_ARM_DISARM`.
-Running both gives you two processes competing for MAVProxy's rebroadcast port
-and two independent disarm authorities. Package names don't collide, so builds
-are fine — the hazard is entirely at runtime.
+**Never launch both stacks.** `robotx_2026` ships its own `led_node`,
+`pixhawk_led_node`, `gate_navigator` and `dp_hold`, each opening its own
+`udpin:127.0.0.1:1455x` connection to MAVProxy's rebroadcast. Running both gives
+you two processes competing for the same rebroadcast ports and two independent
+authorities driving the boat. Package names don't collide, so builds are fine —
+the hazard is entirely at runtime.
+
+It is kept on the boat on purpose: it holds the prequal-proven `gate_navigator`
+and `dp_hold`, which is what mission work will be ported from (§16).
 
 ---
 
-## 21. Preflight
+## 20. Known gaps
 
-```bash
-docker exec -it asv python3 /root/robotx_ws/src/rx26_asv/tools/scripts/preflight.py
-```
+Honest list — these are known-wrong or known-missing, not merely untested:
 
-**Exit nonzero = do not arm.** Manual items it can't check: GPS yaw resolved
-(open sky, 2–3 min)? ELRS e-stop range-tested today? Autonomy-drop verified if
-any RC-override task is planned?
-
-> **Known bug:** run inside the container, the `asv container` check fails with
-> `No such file or directory: 'docker'`, and the ROS-topics and TensorRT-engine
-> checks then SKIP behind it. Those two SKIPs are noise, not information. Fix
-> pending; until then verify ROS topics and the engine file by hand.
-
----
-
-## 22. Known gaps and stale artifacts
-
-Honest list — these are known-wrong, not merely untested:
-
-- **`preflight.py` host/container detection** (§21). The arm gate can't currently
-  check ROS topics or the TensorRT engine the way the docs say to run it.
-- **`crusader_devices.json`** still describes a ball launcher, a Teensy and a
-  Jetson-side GPS that are **not aboard**, with port chains that point at the
-  Pixhawk. Documentation-only — no node loads it — but wrong.
-- **GPS serial placeholders** in `99-crusader.rules` (`TODO_GPS1_SERIAL`) refer to
-  u-blox units that aren't attached. The installer warns about them on every run.
-- **Buoy model not retrained** on our buoys (§13). This bottlenecks every
-  collision-avoidance number.
-- **MID360 not yet on its own NIC**, extrinsic not calibrated (§14).
-- **Autonomy-drop switch not built** (§18) — blocks `dp_hold` field testing.
+- **Autonomy-drop switch not built** (§17). It blocks every RC-override
+  mechanism, which includes any future station-keeping work. The enforcement
+  point exists in `telemetry_bridge`; the bench harness that drove it was removed
+  with the rest of the untested code, so [G1](G1_bench_procedure.md) needs a
+  replacement publisher written first.
+- **`PILOT_STEER_TYPE` disagrees between the docs and the boat.** §12 records
+  `PILOT_STEER_TYPE=3` as the fix for autonomous reverse-spin (found 2026-07-16),
+  but the committed baseline `params/working_crusader.params` has it at **0**.
+  One of the two is wrong: either the value was never saved to the board, or it
+  was later reverted and §12 is stale. Resolve this before the next autonomous
+  run — it is on `param_guard`'s PROTECTED list precisely because it is not a
+  preference.
+- **`MOT_THST_ASYM` / `MOT_THST_EXPO` were mid-tuning** when §16's work stopped
+  (≈1.5 and ≈0.65 in progress); the baseline has 1.0 and 0.0. Tunable, not
+  protected — but know which one you are running.
+- **No topic contract with the camera container** yet. Until there is one,
+  nothing that consumes detections can come back (§13).
 
 ### Confirmed hardware (2026-07-28)
 
@@ -670,7 +616,7 @@ Honest list — these are known-wrong, not merely untested:
 |---|---|---|
 | Pixhawk | ArduPilot Pixhawk1, `1209:5741` | `/dev/crsd-pixhawk` |
 | LED Arduino | CH340 `1a86:7523`, **no serial number** | `/dev/crsd-led` |
-| OAK-D LR | MX ID `194430101110C82F00` | (not a tty) |
+| OAK-D LR | MX ID `194430101110C82F00` | (not a tty; camera container's device) |
 
 A Teensy (`16c0:0483`) and a Prolific PL2303 (`067b:23a3`) also enumerate but are
 **not on the official hardware list** — treat as unused until someone traces the

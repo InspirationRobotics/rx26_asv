@@ -1,40 +1,46 @@
-# `config/` — single source of truth for runtime configuration
+# `config/` — the ROS parameter source of truth
 
-| File | Role |
+| File | What it is |
 |---|---|
-| `crusader_params.yaml` | **THE source of truth for all ROS-side parameters** (Phase 3.5). Standard ROS 2 params-file format. YAML anchors tie values that must stay equal across nodes (e.g. `occupied_threshold` grid↔APF; progress-monitor thresholds node↔evaluator). Its sha256 is recorded as `ros_config_hash` in every episode metrics JSON. |
-| `crusader_devices.json` | Per-boat device topology with stable `/dev/crsd-*` symlinks (generated alongside the udev rules by `tools/udev/gen_udev_rules.py`). Consumers open the symlink directly. |
+| `crusader_params.yaml` | Every ROS-side parameter for every node, in standard ROS 2 params format. Node code reads it for declaration defaults, so a code default cannot drift from the file the launch system loads. |
 
-ArduRover-side parameters live in `working_crusader_params.params` on the boat/drive (the
-known-good file) — **not** in this directory. `tools/scripts/param_guard.py` diffs live
-params against it and hard-fails on the protected set.
+The ArduRover side of the boat's configuration is **not** here — it lives on the Pixhawk,
+with the known-good baseline committed at `params/working_crusader.params` and enforced by
+`tools/scripts/param_guard.py`.
 
-## Parameter posture (enforced in code, `api/common/param_utils.py`)
+## Parameter posture
 
-- **`[RO]` read_only** — safety/structural (telemetry_bridge + rc_heartbeat_watchdog safety
-  params, grid geometry, engine path, monitor thresholds). `ros2 param set` is rejected loudly.
-  Change = edit YAML + restart node (no rebuild; params load at start).
-- **`[DYN]` dynamic** — range-validated and actually applied at runtime (APF gains,
-  conf_threshold, decay_tau, health budgets). This is the knob path for test-day tuning and
-  the Level-1 loop.
+Every parameter is declared with a `ParameterDescriptor` that marks it:
 
-There is deliberately no third posture: "declared-but-ignored" no longer exists anywhere.
+- **`[RO]` read_only** — safety or structural. `ros2 param set` is REJECTED. The change
+  path is: edit this file, restart the node. No rebuild needed; params load at start.
+- **`[DYN]` dynamic** — accepted at runtime, range-validated on set.
 
-## How a param change propagates
+Everything in the file is currently `[RO]`. That is not an oversight: the whole stack is
+safety plumbing, and none of it has a test-day tuning knob.
 
-```mermaid
-flowchart LR
-    Y[crusader_params.yaml] -->|declaration defaults| N[nodes via api/common/config.py]
-    Y -->|objective-2 thresholds| E[orchestrator evaluator]
-    Y -->|sha256 = ros_config_hash| M[episode metrics JSON]
-    G[tests/test_config_shared.py] -.->|fails build on drift| Y
-```
+## Two hard format rules
 
-## Change-impact map
+`rcl_yaml_param_parser` is stricter than PyYAML and it fails CLOSED — an illegal file kills
+every node in the launch at `rclpy.init()`, before any node code runs. This grounded the
+whole stack (LEDs included) on 2026-07-29.
 
-| If you edit… | Then |
+1. **No YAML anchors/aliases** (`&name` / `*name`). rcl is a token-level parser, not a
+   document loader, and rejects them outright. Values that must stay equal across sections
+   are written out literally and pinned by `tools/scripts/check_config.py`.
+2. **Every top-level key must be a node name whose only child is `ros__parameters:`.**
+   A bare scalar at top level produces "Cannot have a value before ros__parameters". This
+   is why the `shared` block — documentation, not a real node — still carries a
+   `ros__parameters:` level.
+
+`tools/scripts/check_config.py` enforces both in CI, plus the reverse guard: a section for a
+node that no longer exists fails the build, because a stale parameter set reads as a
+capability the boat still has.
+
+## Change impact
+
+| You changed | Re-run |
 |---|---|
-| a `[DYN]` value | restart node (or `ros2 param set` live); episode metrics hash changes — results before/after are not comparable rows |
-| a `[RO]` value | restart node; if it's a safety param, needs review vs CLAUDE.md standing constraints |
-| a **YAML anchor** value | you changed BOTH the node and the evaluator — run `tests/test_config_shared.py` and the G3/G4 gates |
-| `crusader_devices.json` | regenerate udev rules (`tools/udev/gen_udev_rules.py`), reinstall, replug |
+| any node's params | restart that node (no rebuild); `python3 tools/scripts/check_config.py` |
+| `shared.pose_timeout_s` | update every literal copy the test names, or the test fails |
+| added/removed a node section | update `CONFIG_DRIVEN_NODES` in `tools/scripts/check_config.py` |

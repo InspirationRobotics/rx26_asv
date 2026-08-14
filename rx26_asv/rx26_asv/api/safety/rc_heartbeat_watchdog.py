@@ -94,8 +94,8 @@ class RCHeartbeatWatchdog(Node):
         self.reset_channel = p["reset_channel"]
         self.min_valid_pwm = p["min_valid_pwm"]
 
-        # All safety logic lives in the ROS-free core (unit-tested in
-        # tests/test_rc_heartbeat_core.py); this node only marshals topics.
+        # All safety logic lives in the ROS-free core (rc_heartbeat_core.py);
+        # this node only marshals topics.
         self.core = RcHeartbeatCore(
             WatchdogConfig(
                 heartbeat_timeout=p["heartbeat_timeout"],

@@ -1,6 +1,6 @@
 """telemetry_bridge — the single ROS-side gateway to MAVProxy's rebroadcast.
 
-Plan §3.1/§3.2. Two jobs, deliberately fused into one node:
+Three jobs, deliberately fused into one node:
 
 1. RX: consume MAVProxy's rebroadcast (pymavlink over UDP — NEVER a serial device;
    the Pixhawk has exactly one owner and it is MAVProxy) and republish as topics:
@@ -12,20 +12,25 @@ Plan §3.1/§3.2. Two jobs, deliberately fused into one node:
    connection — this node existing is what keeps the "no second consumer racing
    the ROS graph" rule enforceable.
 
-2. TX: the ONLY sanctioned path for RC overrides. Nodes publish
+2. TX (safety): the ONLY sanctioned force-disarm path. rc_heartbeat_watchdog
+   publishes std_msgs/Bool on /crsd/force_disarm on RC-transmitter link loss;
+   this node forwards it as MAV_CMD_COMPONENT_ARM_DISARM (force magic). It is
+   NOT gated by the autonomy-drop latch — a force-disarm must fire even
+   (especially) when the latch has already tripped.
+
+3. TX (autonomy): the ONLY sanctioned path for RC overrides. Nodes publish
    interfaces/RcChannels on /crsd/rc_override; this node forwards them to the
    autopilot — UNLESS the autonomy-drop latch (api.common.drop_latch) has
    tripped, in which case it sends release frames (all-zero override) and drops
    every subsequent override until the operator resets via the
    /crsd/autonomy_drop_reset service (std_srvs/Trigger). Because misbehaving
    nodes have no MAVLink connection of their own, a tripped latch cannot be
-   bypassed from the ROS graph. (G1 gate: this is the mechanism under test.)
+   bypassed from the ROS graph.
 
-3. TX (safety): the ONLY sanctioned force-disarm path. rc_heartbeat_watchdog
-   publishes std_msgs/Bool on /crsd/force_disarm on RC-transmitter link loss;
-   this node forwards it as MAV_CMD_COMPONENT_ARM_DISARM (force magic). Unlike
-   the RC-override/GUIDED paths it is NOT gated by the autonomy-drop latch — a
-   force-disarm must fire even when the latch has already tripped.
+   NOTE: this repo currently ships NO publisher on /crsd/rc_override — the
+   override path and its latch are the Gate G1 mechanism, kept here so the
+   enforcement point exists, but nothing exercises them yet. G1 sign-off needs a
+   bench node that drives this topic (docs/G1_bench_procedure.md).
 
 The hardware e-stop (SB switch) remains below and independent of all of this.
 
@@ -42,22 +47,18 @@ Staleness rule (safety-relevant): each RX stream is republished ONLY while it
 is fresh, and its header carries the stamp captured at RECEIPT. Rebroadcasting
 the last cached frame with a fresh stamp — as this node originally did —
 makes a dead MAVProxy indistinguishable from a healthy one, which silently
-disables rc_heartbeat_watchdog (both its RC-loss and its gateway-down paths)
-and feeds the avoidance stack a frozen pose. Silence must stay silent.
+disables rc_heartbeat_watchdog (both its RC-loss and its gateway-down paths).
+Silence must stay silent.
 """
-import json
-import queue
 import threading
 import time
 
-import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
 
-from interfaces.msg import (LatLonHead, FcuStatus, RcChannels, DetectionArray,
-                            GuidedSetpoint)
+from interfaces.msg import LatLonHead, FcuStatus, RcChannels
 
 from rx26_asv.api.common import config as crsd_config
 from rx26_asv.api.common import geo
@@ -65,8 +66,6 @@ from rx26_asv.api.common.drop_latch import DropLatch
 from rx26_asv.api.common.node_main import run_node
 from rx26_asv.api.common.param_utils import declare_from_config
 from rx26_asv.api.common.stream_cache import StreamCache
-from rx26_asv.api.navigation.fence_core import (FenceError, FenceProtocol, MavFenceTransport,
-                         items_from_keepouts)
 
 # All bridge params are SAFETY CONFIG -> read_only: `ros2 param set` is
 # rejected; the change path is config/crusader_params.yaml + node restart.
@@ -85,21 +84,12 @@ PARAM_SPEC = {
                                          "that stream stops being republished"),
 }
 
-MISSION_MSG_TYPES = ("MISSION_REQUEST", "MISSION_REQUEST_INT", "MISSION_ACK",
-                     "MISSION_COUNT", "MISSION_ITEM", "MISSION_ITEM_INT")
-
 RELEASE_FRAMES = 5          # all-zero override frames sent on trip
 PUB_RATE_HZ = 20.0
 
 # Magic value ArduPilot requires in param2 of MAV_CMD_COMPONENT_ARM_DISARM to
 # force-disarm even while the vehicle is moving.
 FORCE_DISARM_MAGIC = 21196
-
-# ArduPilot's documented position-only SET_POSITION_TARGET_GLOBAL_INT mask —
-# the EXACT value the pre-integration gate_navigator used and field-exercised.
-# yaw on GuidedSetpoint is accepted but not commanded yet (left to ArduRover);
-# adding yaw control means clearing the yaw-ignore bit and is a separate change.
-POSITION_ONLY_TYPE_MASK = 0b110111111100  # 3580
 
 
 class TelemetryBridge(Node):
@@ -132,11 +122,6 @@ class TelemetryBridge(Node):
 
         self.create_subscription(RcChannels, "/crsd/rc_override",
                                  self._override_cb, 10)
-        # Sanctioned GUIDED setpoint TX — task nodes (gate_navigator) publish here
-        # instead of opening their own MAVLink connection. Gated by the same latch
-        # as RC overrides, so an autonomy drop stops GUIDED motion too.
-        self.create_subscription(GuidedSetpoint, "/crsd/guided_setpoint",
-                                 self._guided_cb, 10)
         # Sanctioned force-disarm TX — rc_heartbeat_watchdog publishes here on RC
         # link loss instead of opening its own MAVLink connection. Deliberately
         # NOT gated by the autonomy-drop latch: a force-disarm must fire even
@@ -146,28 +131,11 @@ class TelemetryBridge(Node):
                                  self._force_disarm_cb, 10)
         self.create_service(Trigger, "/crsd/autonomy_drop_reset", self._reset_cb)
 
-        # --- keep-out -> exclusion-fence path (plan §3.2: AVOID_* is the hard
-        # backstop; a fence the autopilot doesn't echo back does not exist) ---
-        # /crsd/keepouts semantics: DetectionArray frame="world"; each Detection
-        # is a circular zone, label = zone_id; radius <= 0 = All Clear for that
-        # zone. Publisher is the Phase-4 RoboCommand comms node (mock until then).
-        self.fence_pub = self.create_publisher(String, "/crsd/fence_state", latched_qos)
-        self.create_subscription(DetectionArray, "/crsd/keepouts",
-                                 self._keepouts_cb, 10)
-        self.create_subscription(LatLonHead, "/crsd/world_origin",
-                                 self._origin_cb, latched_qos)
-        self._origin = None
-        self._zones = {}                     # zone_id -> (x, y, radius) world m
-        self._zones_lock = threading.Lock()
-        self._mission_q = queue.Queue()
-        self._fence_dirty = threading.Event()
-        self._fence_thread = threading.Thread(target=self._fence_worker, daemon=True)
-
         # Each stream is republished ONLY while it is fresh. Rebroadcasting the
         # last cached frame with a fresh stamp after MAVProxy dies makes a dead
         # gateway indistinguishable from a healthy one — it defeats
-        # rc_heartbeat_watchdog's RC-loss AND gateway-down detection, and feeds
-        # the avoidance stack a frozen pose. See stream_cache.py.
+        # rc_heartbeat_watchdog's RC-loss AND gateway-down detection. See
+        # stream_cache.py.
         self._lock = threading.Lock()
         t_out = p["stream_timeout_s"]
         self._pose = StreamCache(t_out)    # (lat, lon, heading_deg, speed_mps)
@@ -182,7 +150,6 @@ class TelemetryBridge(Node):
         self._stop = threading.Event()          # deterministic teardown
         self._rx_thread = threading.Thread(target=self._rx_loop, daemon=True)
         self._rx_thread.start()
-        self._fence_thread.start()
 
         self.create_timer(1.0 / PUB_RATE_HZ, self._publish_tick)
         self._publish_drop_state()               # initial latched state (STARTUP=blocked)
@@ -212,9 +179,6 @@ class TelemetryBridge(Node):
                 continue
             t = time.monotonic()
             mtype = msg.get_type()
-            if mtype in MISSION_MSG_TYPES:
-                self._mission_q.put(msg)     # fence dialog msgs -> uploader
-                continue
             # captured at RECEIPT, not at publish, so a republished frame
             # carries the age it actually has
             stamp = self.get_clock().now().to_msg()
@@ -223,8 +187,7 @@ class TelemetryBridge(Node):
                     hdg = msg.hdg / 100.0 if msg.hdg != 65535 else float("nan")
                     # vx/vy (cm/s NED) are already in this message — republish
                     # them as ground speed so consumers do not have to
-                    # finite-difference position (roa_apf_node's objective-2
-                    # monitor needs a real speed, not a placeholder).
+                    # finite-difference position.
                     self._pose.set((msg.lat / 1e7, msg.lon / 1e7, hdg,
                                     geo.ground_speed_mps(msg.vx, msg.vy)),
                                    t, stamp)
@@ -291,20 +254,6 @@ class TelemetryBridge(Node):
         self.conn.mav.rc_channels_override_send(
             self.conn.target_system, self.conn.target_component, *ch8)
 
-    # ---------- GUIDED setpoint TX (sanctioned, latch-gated) ----------
-
-    def _guided_cb(self, msg: GuidedSetpoint):
-        if not self.latch.allowed:
-            return                   # dropped/startup: setpoints die here too
-        time_boot_ms = int(time.monotonic() * 1000.0) & 0xFFFFFFFF
-        self.conn.mav.set_position_target_global_int_send(
-            time_boot_ms,
-            self.conn.target_system, self.conn.target_component,
-            self._mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
-            POSITION_ONLY_TYPE_MASK,
-            int(msg.latitude * 1e7), int(msg.longitude * 1e7),
-            0, 0, 0, 0, 0, 0, 0, 0, 0)
-
     # ---------- force-disarm TX (safety watchdog, latch-INDEPENDENT) ----------
 
     def _force_disarm_cb(self, msg: Bool):
@@ -328,59 +277,6 @@ class TelemetryBridge(Node):
             self._send_override([0] * 8)
         self._publish_drop_state()
 
-    # ---------- keep-out fence path ----------
-
-    def _origin_cb(self, msg: LatLonHead):
-        self._origin = (msg.latitude, msg.longitude)
-
-    def _keepouts_cb(self, msg: DetectionArray):
-        if msg.frame != "world":
-            self.get_logger().warn(f"keepouts ignored: frame={msg.frame!r}")
-            return
-        with self._zones_lock:
-            for d in msg.detections:
-                if d.radius <= 0:
-                    if self._zones.pop(d.label, None) is not None:
-                        self.get_logger().info(f"All Clear: zone {d.label}")
-                else:
-                    self._zones[d.label] = (float(d.x), float(d.y), float(d.radius))
-        self._fence_dirty.set()
-
-    def _fence_worker(self):
-        """Single-flight uploader: coalesces bursts, always uploads the latest
-        zone set, verifies by readback, publishes /crsd/fence_state."""
-        while not self._stop.is_set():
-            if not self._fence_dirty.wait(timeout=0.5):
-                continue
-            self._fence_dirty.clear()
-            if self._origin is None:
-                self.get_logger().error(
-                    "keep-outs received but no world origin yet — fence NOT "
-                    "uploaded (will retry)")
-                self._fence_dirty.set()
-                time.sleep(1.0)
-                continue
-            with self._zones_lock:
-                zones = [(zid, x, y, r) for zid, (x, y, r) in self._zones.items()]
-            items = items_from_keepouts(zones, self._origin)
-            state = {"zones": sorted(z[0] for z in zones),
-                     "verified": False, "error": None, "t": time.time()}
-            try:
-                while not self._mission_q.empty():   # drain stale dialog msgs
-                    self._mission_q.get_nowait()
-                transport = MavFenceTransport(self.conn, self._mission_q,
-                                              self._mavutil.mavlink)
-                FenceProtocol(transport).upload_and_verify(items)
-                state["verified"] = True
-                self.get_logger().info(f"fence verified: {state['zones']}")
-            except FenceError as e:
-                state["error"] = str(e)
-                self.get_logger().error(f"FENCE UPLOAD FAILED: {e} — ArduRover "
-                                        "is NOT enforcing the keep-out set")
-                self._fence_dirty.set()              # retry
-                time.sleep(2.0)
-            self.fence_pub.publish(String(data=json.dumps(state)))
-
     # ---------- reset service ----------
 
     def _reset_cb(self, request, response):
@@ -397,7 +293,6 @@ class TelemetryBridge(Node):
     def destroy_node(self):
         self._stop.set()
         self._rx_thread.join(timeout=2.0)
-        self._fence_thread.join(timeout=2.0)
         try:
             self.conn.close()
         except Exception:

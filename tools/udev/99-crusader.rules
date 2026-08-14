@@ -1,38 +1,44 @@
 # Crusader (RX26) udev rules — stable device names + permissions.
-# Install with install_udev.sh, which also helps you fill in the serial numbers below.
+# Install with install_udev.sh.
+#
+# Only the devices ACTUALLY ABOARD get a rule. A symlink for hardware that is not
+# on the boat is worse than no symlink: it makes a config file look satisfied
+# while pointing at whatever else happened to enumerate. Confirmed aboard
+# 2026-07-28 (docs/OPERATIONS.md); a Teensy (16c0:0483) and a Prolific PL2303
+# (067b:23a3) also enumerate and deliberately get NO rule until someone traces
+# the cable.
 #
 # Discover attrs for a plugged-in device:
 #   udevadm info -a -n /dev/ttyACM0 | grep -E 'idVendor|idProduct|serial' | head
-#
-# NOTE: fill in ATTRS{serial} per-boat where marked TODO — two devices sharing a
-# VID/PID (e.g. two u-blox GPS units) are only distinguishable by serial.
 
 # --- Pixhawk (autopilot). Owned exclusively by MAVProxy; everything else uses the
-#     rebroadcast. The symlink exists so mavproxy.service never chases ttyACM numbering.
-#     Common VID/PIDs: 3DR 26ac:*, Holybro/ArduPilot 1209:5740/5741, CubePilot 2dae:*
+#     rebroadcast. The symlink exists so crsd-mavproxy.service never chases ttyACM
+#     numbering.
 #     5741 is what Crusader's board actually enumerates as (confirmed on the
-#     Jetson: usb-ArduPilot_Pixhawk1_3A001F00...). 5740 stays for other boards.
-SUBSYSTEM=="tty", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="5740", SYMLINK+="crsd-pixhawk", MODE="0660", GROUP="dialout"
+#     Jetson: usb-ArduPilot_Pixhawk1_3A001F00...). The other IDs cover the boards
+#     we might swap in: 5740 other ArduPilot/Holybro, 26ac 3DR, 2dae CubePilot.
 SUBSYSTEM=="tty", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="5741", SYMLINK+="crsd-pixhawk", MODE="0660", GROUP="dialout"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="5740", SYMLINK+="crsd-pixhawk", MODE="0660", GROUP="dialout"
 SUBSYSTEM=="tty", ATTRS{idVendor}=="26ac", SYMLINK+="crsd-pixhawk", MODE="0660", GROUP="dialout"
 SUBSYSTEM=="tty", ATTRS{idVendor}=="2dae", SYMLINK+="crsd-pixhawk", MODE="0660", GROUP="dialout"
 
-# --- LED Arduino (led_node serial target; auto-reconnect logic expects a stable path)
-#     Arduino VIDs: 2341 (genuine), 1a86 (CH340 clones), 0403 (FTDI)
-#     TODO: add ATTRS{serial}=="XXXX" if any other CH340/FTDI device is ever aboard.
-SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", SYMLINK+="crsd-led", MODE="0660", GROUP="dialout"
+# --- LED Arduino (led_node's serial target; its auto-reconnect expects a stable
+#     path). Crusader's board is a CH340 clone with NO SERIAL NUMBER, which is
+#     why a second CH340 must never go aboard: the two would be indistinguishable
+#     and the symlink would land on whichever enumerated first.
+#     2341 = genuine Arduino, kept for a board swap.
 SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="crsd-led", MODE="0660", GROUP="dialout"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", SYMLINK+="crsd-led", MODE="0660", GROUP="dialout"
 
-# --- RTK GPS units (u-blox 1546:01a9). Dual-antenna moving-baseline pair -> the two
-#     units MUST be told apart by serial or physical port; fill in per-boat.
-# TODO: ATTRS{serial}=="TODO_BASE_SERIAL"
-SUBSYSTEM=="tty", ATTRS{idVendor}=="1546", ATTRS{idProduct}=="01a9", ATTRS{serial}=="TODO_GPS1_SERIAL", SYMLINK+="crsd-gps1", MODE="0660", GROUP="dialout"
-SUBSYSTEM=="tty", ATTRS{idVendor}=="1546", ATTRS{idProduct}=="01a9", ATTRS{serial}=="TODO_GPS2_SERIAL", SYMLINK+="crsd-gps2", MODE="0660", GROUP="dialout"
-
-# --- OAK-D LR (Luxonis / Intel Movidius). Not a tty; needs plugdev access and, in
-#     bootloader/runtime, shows as 03e7:2485 (unbooted) then 03e7:f63b (booted).
-SUBSYSTEM=="usb", ATTRS{idVendor}=="03e7", MODE="0666", GROUP="plugdev"
-
-# --- 915MHz telemetry radio (SiK, usually FTDI 0403:6001 or Silabs 10c4:ea60)
-#     TODO: confirm VID/PID and add serial if it collides with anything else.
+# --- 915MHz telemetry radio (SiK, Silabs CP210x). Optional: the boat flies
+#     without it (the 5.8GHz link carries telemetry), so install_udev.sh does not
+#     warn when it is absent.
 SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="crsd-telem", MODE="0660", GROUP="dialout"
+
+# --- OAK-D LR (Luxonis / Intel Movidius). NOT this stack's device — the camera
+#     runs in its own container — but udev rules are a property of the HOST, and
+#     this one only grants access permissions (no symlink, nothing here opens it).
+#     It stays so that removing it from this repo does not silently break the
+#     camera container on a shared Jetson. Move it to that container's own
+#     installer when it grows one, and delete these three lines.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="03e7", MODE="0666", GROUP="plugdev"

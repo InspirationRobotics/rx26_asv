@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """param_guard — protect Crusader's hard-won ArduRover config.
 
-Two uses:
-  1. CLI: diff a candidate param file (or the live vehicle via MAVProxy's
-     rebroadcast) against the known-good file. Nonzero exit if any PROTECTED
-     param differs. Used by preflight and by CI on any PR touching params.
-  2. Library: the Level-1 autoresearch evaluator imports is_tunable() to reject
-     any proposed change that touches a protected param.
+Diff a candidate param file (or the live vehicle via MAVProxy's rebroadcast)
+against the known-good baseline. Nonzero exit if any PROTECTED param differs.
+Used by preflight before every arm.
 
-PROTECTED params encode the "critical engineering lessons" in CLAUDE.md —
-steering inversion lives in SERVOx_*, compass stays off, arming checks stay on.
-Autoresearch may only ever touch TUNABLE params.
+PROTECTED params encode the field lessons in docs/OPERATIONS.md — steering
+inversion lives in SERVOx_*, compass stays off, arming checks stay on. Anything
+outside the PROTECTED list is reported as a warning, not a failure.
+
+The baseline lives at params/working_crusader.params (QGroundControl dump).
+Re-export it after any deliberate, verified param change on the boat — a stale
+baseline turns this into noise, and noise is how a real drift gets waved through.
 
 Usage:
-    param_guard.py known_good.params candidate.params
-    param_guard.py known_good.params --live udp:127.0.0.1:14550
+    param_guard.py params/working_crusader.params candidate.params
+    param_guard.py params/working_crusader.params --live udp:127.0.0.1:14550
 """
 import fnmatch
+import re
 import sys
 
 PROTECTED = [
@@ -43,21 +45,37 @@ def _match(name, patterns):
 def is_protected(name): return _match(name, PROTECTED)
 def is_tunable(name):   return _match(name, TUNABLE) and not is_protected(name)
 
+PARAM_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
 def load_param_file(path):
+    """Parse an ArduPilot parameter dump into {NAME: float}.
+
+    Handles the three formats the team actually produces, which differ in WHERE
+    the name sits, not just in the separator:
+
+        Mission Planner   NAME,VALUE
+        plain / .parm     NAME VALUE
+        QGroundControl    <vehicle-id> <component-id> NAME VALUE <type>   (tabs)
+
+    Finding the name by position is what broke: taking token[0] on a QGC dump
+    reads every line as a param called "1" with value 1, so a diff against it
+    compares nothing and reports a clean PASS. Locate the first token that looks
+    like a parameter name instead, and take the token after it as the value.
+    """
     params = {}
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
+            line = line.split("#", 1)[0].strip()
+            if not line:
                 continue
-            # Mission Planner format: NAME,VALUE  — QGC format: NAME\tVALUE (+extra cols)
-            for sep in (",", "\t", " "):
-                if sep in line:
-                    parts = [p for p in line.split(sep) if p]
+            tokens = [t for t in re.split(r"[,\t ]+", line) if t]
+            for i, tok in enumerate(tokens[:-1]):
+                if PARAM_NAME_RE.match(tok):
                     try:
-                        params[parts[0]] = float(parts[1])
-                    except (IndexError, ValueError):
-                        pass
+                        params[tok] = float(tokens[i + 1])
+                    except ValueError:
+                        pass          # name-like token, non-numeric next: not a row
                     break
     return params
 

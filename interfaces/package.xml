@@ -3,7 +3,10 @@
 <package format="3">
   <name>interfaces</name>
   <version>0.1.0</version>
-  <description>RX26 message definitions (ported from RX24 shapes)</description>
+  <description>
+    RX26 message definitions: the typed contracts telemetry_bridge republishes
+    from MAVProxy's rebroadcast (pose, FCU status, RC channels).
+  </description>
   <maintainer email="brandont3927@gmail.com">Team Inspiration</maintainer>
   <license>MIT</license>
   <url type="repository">https://github.com/InspirationRobotics/rx26_asv</url>

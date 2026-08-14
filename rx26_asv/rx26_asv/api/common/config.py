@@ -1,15 +1,9 @@
 """Shared config loader — config/crusader_params.yaml is the single source of
-truth for ROS-side parameters (Phase 3.5).
+truth for ROS-side parameters.
 
-Consumed by:
-  * node code, for declaration defaults (so code defaults can't drift from the
-    file the launch system loads);
-  * the episode evaluator, for objective-2 thresholds (so scoring uses the same
-    numbers as the onboard at-risk detector);
-  * metrics.assemble, which records the file's sha256 as ros_config_hash.
-
-Nodes still receive their live values through normal ROS parameter machinery —
-this loader only supplies defaults and non-ROS consumers.
+Consumed by node code for declaration defaults, so a code default can't drift
+from the file the launch system loads. Nodes still receive their live values
+through normal ROS parameter machinery — this loader only supplies defaults.
 """
 import hashlib
 from pathlib import Path
@@ -46,7 +40,7 @@ def _resolve_config_path(get_share_dir=None) -> Path:
             return _SOURCE_CONFIG_PATH        # no ROS here: source tree it is
     try:
         # PackageNotFoundError when the workspace is not sourced; fall through
-        # rather than fail, so `python -m pytest` in a container still works.
+        # rather than fail, so off-boat tooling still works.
         p = Path(get_share_dir("rx26_asv")) / "config" / "crusader_params.yaml"
     except Exception:
         return _SOURCE_CONFIG_PATH
@@ -66,7 +60,7 @@ def load(path=None) -> dict:
     if key not in _cache:
         import yaml
         try:
-            with open(p) as f:
+            with open(p, encoding="utf-8") as f:
                 _cache[key] = yaml.safe_load(f)
         except FileNotFoundError as e:
             # The bare errno message names one path and gives no hint which
@@ -96,7 +90,7 @@ def shared_params(path=None) -> dict:
 
     Not a real node — rcl forbids YAML aliases in a params file, so values that
     must stay equal are written out literally per-node and pinned to this
-    section by tests/test_config_shared.py. The section carries a
+    section by tools/scripts/check_config.py. The section carries a
     `ros__parameters` level only because rcl rejects a top-level scalar; no node
     is named `shared`, so nothing ever loads it.
     """
@@ -110,21 +104,3 @@ def node_params(node_name: str, path=None) -> dict:
         return dict(cfg[node_name]["ros__parameters"])
     except KeyError:
         raise KeyError(f"node {node_name!r} missing from {path or DEFAULT_CONFIG_PATH}")
-
-
-def monitor_kwargs(path=None) -> dict:
-    """ProgressMonitor constructor kwargs — the shared objective-2 thresholds."""
-    p = node_params("roa_apf_node", path)
-    return {
-        "window_s": p["monitor_window_s"],
-        "speed_floor": p["monitor_speed_floor"],
-        "progress_floor": p["monitor_progress_floor"],
-        "heading_osc_floor": p["monitor_heading_osc_floor"],
-        "stall_after_s": p["monitor_stall_after_s"],
-    }
-
-
-def apf_kwargs(path=None) -> dict:
-    """ApfParams constructor kwargs from the roa_apf_node section."""
-    p = node_params("roa_apf_node", path)
-    return {k[len("apf_"):]: v for k, v in p.items() if k.startswith("apf_")}

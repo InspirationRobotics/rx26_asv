@@ -1,48 +1,36 @@
-# `tools/` — host tooling, bench utilities, training, device config
+# `tools/` — one blessed path per operation
 
-Everything here runs *outside* the ROS graph: host-side plumbing (udev/systemd), operator
-tools (preflight, param_guard, rebuild), the mock RoboCommand server, and the model-training
-pipeline. Plan §9–10.
+Everything here exists so that "how a person does X" has exactly one answer. A second
+way to do the same operation is how two machines end up configured differently.
 
-## Module map
-
-| Dir | Contents | Design intent |
+| Dir | Contents | Design choice |
 |---|---|---|
-| `udev/` | `99-crusader.rules` (VID-based fallback/perms), `gen_udev_rules.py` + generated `99-crusader-devpath.rules` (port-chain matched `/dev/crsd-*` symlinks), `install_udev.sh` | Stable device names resolved by the kernel at plug time; immune to JetPack controller-prefix renames. **Each device must stay on its labeled hub port.** Regenerate after any cabling change. |
-| `systemd/` | `crsd-mavproxy.service`, `crsd-container.service` | Boot chain encodes the single-Pixhawk-owner rule: MAVProxy starts first and is the only serial owner; the container starts after. |
-| `scripts/` | `preflight.py` (do-not-arm gate: symlinks, USB SUPER, param diff, engine load, topic liveness), `param_guard.py` (PROTECTED vs TUNABLE param diff — used by preflight AND the Level-1 evaluator), `rebuild.sh` (the one blessed rebuild), `extract_sitl_params.py`, `collect_footage.py` (G2 retrain capture) | One true path for each operation, shared by humans and autoresearch identically — no drift between "how a person rebuilds" and "how Level 2 rebuilds". |
-| `sim/` | `mock_robocommand.py` — scripted/interactive event injector (assistance request, keep-out, moving object, All Clear) over TCP with competition framing | Byte-identical to the real link so comms code is exercised fully before the venue. |
-| `training/` | `prep_dataset.py` (session-level splits — leakage guard), `train_buoy.py` (fine-tune + per-Jetson engine export), `eval_regression.py` (per-class P/R gate, exits nonzero on fail) | Objective-1 metrics are untrusted until the model is retrained on Crusader's own buoys (G2). |
-| `bench/` | `g2_error_logger.py` — position-error vs RTK truth | The G2 sign-off instrument. |
+| `udev/` | `99-crusader.rules` (VID/PID → stable `/dev/crsd-*` symlinks + permissions), `install_udev.sh` | Device identity resolved by the kernel at plug time, so nothing chases `ttyACM` numbering. Matching is by VID/PID, not USB port chain: it survives recabling, and the two devices aboard are distinguishable. **Only hardware actually on the boat gets a rule** — a symlink for absent hardware makes a config look satisfied while pointing at whatever else enumerated. |
+| `systemd/` | `crsd-mavproxy.service`, `crsd-container.service` (templates; `__PLACEHOLDERS__` expanded by `setup/install_jetson_host.sh`) | The boot chain is ordered so MAVProxy owns the Pixhawk before any node starts. A power cycle brings the boat up with no typed commands. |
+| `scripts/` | `check_config.py` (static config guards), `param_guard.py` (PROTECTED vs TUNABLE param diff), `preflight.py` (do-not-arm gate), `rebuild.sh` (the one blessed rebuild) | Fail loudly and early: a check that cannot fail is worse than no check. |
+| `oak_view.py` | Subscribes to the camera container's ROS topic and re-serves it as MJPEG to a laptop browser | A viewer, not a driver. It never opens the OAK-D, so it cannot take the camera away from perception, and any number can run at once. Runs anywhere with ROS on the path, `asv` included. |
 
-## Sequence: operator day-of boot (plan §7)
+## The param baseline
 
-```mermaid
-sequenceDiagram
-    participant OP as Operator
-    participant SYS as systemd (host)
-    participant MAV as MAVProxy
-    participant CT as asv container
-    participant PF as preflight.py
+`params/working_crusader.params` is the known-good ArduRover config, exported from
+QGroundControl. `param_guard.py` diffs the live vehicle against it and hard-fails on any
+PROTECTED parameter that differs; `preflight.py` runs that diff before every arm.
 
-    OP->>SYS: power on
-    SYS->>MAV: crsd-mavproxy.service (sole Pixhawk owner)
-    SYS->>CT: crsd-container.service (After=mavproxy)
-    OP->>PF: docker exec … preflight.py
-    PF->>PF: /dev/crsd-* symlinks · OAK-D USB=SUPER · disk · container · MAVProxy alive
-    PF->>PF: live-param diff vs known-good (param_guard) · topics · TensorRT engine loads
-    PF-->>OP: exit 0 = may arm · nonzero = DO NOT ARM
-    OP->>OP: GPS-yaw wait (open sky 2–3 min) → ELRS e-stop range test → arm
-```
+**Re-export it after any deliberate, verified param change on the boat.** A stale baseline
+turns the gate into noise, and noise is how a real drift gets waved through.
 
-## Change-impact map
+Parameter dumps come in three shapes and they disagree about where the name sits —
+Mission Planner writes `NAME,VALUE`, QGroundControl writes
+`<vehicle-id>⇥<component-id>⇥NAME⇥VALUE⇥<type>`. `load_param_file` finds the name rather
+than assuming a column, and `check_config.py` asserts the committed baseline still parses
+into real parameter names.
 
-| If you edit… | Re-run / re-do | Affects |
-|---|---|---|
-| `udev/gen_udev_rules.py` or device JSON | regenerate rules, `sudo bash tools/udev/install_udev.sh`, replug, `tests/test_gen_udev.py` | every device open on the boat; preflight symlink checks |
-| `systemd/*.service` | `sudo setup/install_jetson_host.sh` (reinstalls + daemon-reload) | boot ordering — MAVProxy-first is safety-relevant |
-| `scripts/param_guard.py` PROTECTED list | `pytest tests/` + review vs CLAUDE.md safety params | what autoresearch is ALLOWED to touch — changes need safety review |
-| `scripts/preflight.py` | run it on bench | the do-not-arm gate; add new topics when nodes join `core.launch.py` |
-| `scripts/rebuild.sh` | run on Jetson once | humans AND Level-2 validate use it — keep them identical |
-| `sim/mock_robocommand.py` framing | `tests/test_robocomms_integration.py` (byte-identical loopback) | Mission-4 comms compliance testing fidelity |
-| `training/*` | `eval_regression.py` on held-out sessions | objective-1 trustworthiness (G2) |
+## Change impact
+
+| You changed | Re-run |
+|---|---|
+| `udev/99-crusader.rules` | `sudo bash tools/udev/install_udev.sh`, replug, check `ls -l /dev/crsd-*`; affects every device open on the boat |
+| `systemd/*.service` | `sudo bash setup/install_jetson_host.sh`, then `systemctl daemon-reload` + reboot to prove the boot chain |
+| `scripts/param_guard.py` PROTECTED list | `python3 tools/scripts/check_config.py`; a change here needs safety review — it is the list of things nobody may quietly retune |
+| `params/working_crusader.params` | `python3 tools/scripts/check_config.py`, then a preflight run against the live boat |
+| `scripts/preflight.py` | run it on the Jetson host and confirm no check silently SKIPs |

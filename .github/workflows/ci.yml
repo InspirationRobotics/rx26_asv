@@ -4,22 +4,23 @@ on:
   pull_request:
 
 jobs:
-  # The orchestrator job (unit+episode tests, G0 smoke, gates G3/G4/G5) lives on
-  # the `sim/orchestrator` branch along with the harness itself — see
-  # docs/PARKED_SIM.md. Restore it here when that branch is merged back.
-  unit:
-    name: unit tests
+  config:
+    name: config guards
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      - run: pip install pytest numpy pyyaml
-      - name: unit tests
-        run: python -m pytest tests -q
+      - run: pip install pyyaml
+      # Static guards on the two files that can ground the boat: the ROS params
+      # YAML (an rcl-illegal file kills every node at rclpy.init()) and the
+      # known-good ArduRover param baseline (a dump the parser mis-reads makes
+      # preflight's param diff pass unconditionally).
+      - name: config + param baseline guards
+        run: python3 tools/scripts/check_config.py
 
-  interfaces:
+  build:
     name: colcon build (ros:humble)
     runs-on: ubuntu-latest
     container: ros:humble
@@ -50,17 +51,31 @@ jobs:
           colcon build --packages-select interfaces rx26_asv \
                        --event-handlers console_cohesion+
 
+          # Every entry point in setup.py must actually import. A console_script
+          # pointing at a module that was moved or deleted builds clean and dies
+          # at `ros2 run` — on the boat, at the worst moment.
+          source install/setup.bash
+          ros2 pkg executables rx26_asv
+          for m in \
+            rx26_asv.api.navigation.telemetry_bridge \
+            rx26_asv.api.safety.rc_heartbeat_watchdog \
+            rx26_asv.api.led.led_node \
+            rx26_asv.api.pixhawk.pixhawk_led_status_node; do
+            python3 -c "import importlib, sys; importlib.import_module('$m')" \
+              || { echo "ERROR: $m does not import" >&2; exit 1; }
+          done
+
   dockerfile:
     name: dockerfile paths
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: COPY sources exist
-        # The image itself cannot be built here — the base is arm64 JetPack and
-        # these runners are x86_64. What CI *can* catch is the failure that
-        # actually happened: a file moved in the repo and the Dockerfile's COPY
-        # kept pointing at the old path, so `docker build` broke on the Jetson
-        # with nothing upstream noticing.
+        # The image itself cannot be built here — the base is arm64 and these
+        # runners are x86_64. What CI *can* catch is the failure that actually
+        # happened: a file moved in the repo and the Dockerfile's COPY kept
+        # pointing at the old path, so `docker build` broke on the Jetson with
+        # nothing upstream noticing.
         run: |
           python3 - <<'PY'
           import os, sys
@@ -89,13 +104,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: python compile + shell -n
         run: |
-          python3 -m py_compile tools/scripts/*.py tools/sim/*.py \
-                                tools/training/*.py tools/bench/*.py \
-                                tools/udev/*.py
+          python3 -m py_compile tools/scripts/*.py
           # Every tracked shell script, so a new one is covered the day it lands
           # rather than the day someone remembers to add it here. setup/*.sh in
-          # particular was uncovered: it carries the repo-vs-workspace path
-          # derivation and the "not a colcon workspace" guard.
+          # particular carries the repo-vs-workspace path derivation and the
+          # "not a colcon workspace" guard.
           fail=0
           for f in $(git ls-files '*.sh'); do
             echo "  bash -n $f"

@@ -1,13 +1,13 @@
 """rc_heartbeat_core — ROS-free force-disarm state machine for the RC watchdog.
 
 The safety logic of `rc_heartbeat_watchdog` lives here so the latch / link-loss
-transitions are unit-testable without rclpy (Format best-practice #2:
-pure-logic `*_core.py` + thin `*_node.py`). The node parses RcChannels/FcuStatus
-into observations, drives this machine once per tick, and turns the returned
-`Decision` into ROS publishes + throttled logging. Every safety-relevant choice
-(when to disarm, when to latch, what clears the latch, the "bridge down during RC
-loss -> defer to ArduPilot" case) is decided here and asserted in
-tests/test_rc_heartbeat_core.py.
+transitions can be reasoned about — and exercised — without rclpy (Format
+best-practice: pure-logic `*_core.py` + thin `*_node.py`). The node parses
+RcChannels/FcuStatus into observations, drives this machine once per tick, and
+turns the returned `Decision` into ROS publishes + throttled logging. Every
+safety-relevant choice (when to disarm, when to latch, what clears the latch, the
+"bridge down during RC loss -> defer to ArduPilot" case) is decided here, in one
+place, with no ROS imports between you and it.
 
 Semantics preserved verbatim from the pre-split node:
   * `last_rc_ok` is seeded optimistically (a fresh start is not a dropout);

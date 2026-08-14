@@ -2,12 +2,12 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>rx26_asv</name>
-  <version>0.4.0</version>
+  <version>0.5.0</version>
   <description>
-    Crusader USV ROS 2 nodes for RobotX 2026 (Team Inspiration): telemetry bridge,
-    perception, occupancy grid, APF advisory, mission planner. The autoresearch
-    harness under orchestrator/ is intentionally NOT part of this package
-    (orchestrator-vs-target boundary, see CLAUDE.md).
+    Crusader USV ROS 2 nodes for RobotX 2026 (Team Inspiration): the telemetry
+    bridge to MAVProxy, the RC-loss force-disarm watchdog, and the LED status
+    stack. Camera and LiDAR are handled by a separate container and are not part
+    of this package.
   </description>
   <maintainer email="brandont3927@gmail.com">Team Inspiration</maintainer>
   <license>MIT</license>
@@ -15,16 +15,13 @@
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
-  <depend>sensor_msgs</depend>
+  <depend>std_srvs</depend>
   <depend>interfaces</depend>
 
-  <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
-  <!-- depthai, pymavlink, ultralytics have no reliable rosdep keys on the
-       Jetson image; they are provided by the asv container base image
-       and pinned in setup/install_container.sh -->
-
-  <test_depend>python3-pytest</test_depend>
+  <exec_depend>python3-serial</exec_depend>
+  <!-- pymavlink has no reliable rosdep key on the Jetson image; it is provided
+       by the asv container base image and pinned in the Dockerfile -->
 
   <export>
     <build_type>ament_python</build_type>

@@ -1,7 +1,7 @@
 # ============================================================
 # rx26_asv .gitignore
 # Rule of thumb: source and configs are tracked; anything a
-# machine can regenerate (builds, caches, logs, engines) is not.
+# machine can regenerate (builds, caches, logs) is not.
 # ============================================================
 
 # --- Python ---
@@ -26,41 +26,15 @@ build/
 install/
 log/
 
-# --- ROS bags & MAVLink telemetry logs (archive out-of-repo per plan §7) ---
+# --- ROS bags & MAVLink telemetry logs (archive out-of-repo) ---
+# NOT *.param/*.params: the known-good ArduRover baseline in params/ is
+# tracked on purpose — param_guard diffs against it before every arm.
 *.bag
 *.db3
 *.mcap
 *.tlog
 *.tlog.raw
 *.BIN
-
-# --- Per-Jetson TensorRT engines & model weights (regenerated per device,
-#     see tools/training/train_buoy.py; the dataset lives outside the repo) ---
-*.engine
-*.onnx
-*.pt
-tools/training/runs/
-tools/training/datasets/
-
-# --- Generated protobuf classes (compiled from proto/ at build time) ---
-*_pb2.py
-*_pb2.pyi
-
-# --- Episode / autoresearch run outputs (metrics JSON archived elsewhere) ---
-# The orchestrator's own ignore rules live with it on `sim/orchestrator`.
-*.episode.json
-
-# --- Sim / orchestrator artifacts: never on main ---
-# Nothing here generates these — they live on `sim/orchestrator`. But they are
-# untracked build output, and untracked files survive a branch switch, so work
-# done on that branch reappears here and `git add -A` would commit it. This
-# guard is the reason that cannot happen. See docs/PARKED_SIM.md.
-#
-# Only untracked files are affected: if the branch is merged back, its tracked
-# files land normally and these lines should be deleted.
-tools/sim/worlds/
-orchestrator/
-docker/
 
 # --- Editors / OS ---
 .vscode/

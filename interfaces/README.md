@@ -1,47 +1,40 @@
-# `interfaces/` — ROS 2 message definitions (ament_cmake / rosidl)
+# `interfaces` — ROS 2 message package
 
-Typed contracts between nodes. Message *shapes* are ported from the proven RX24 stack 
-so legacy-tested semantics carry over; the package builds with
-`ament_cmake` + `rosidl` (messages can't be ament_python).
-
-**Design choice:** intra-boat comms are ROS 2 topics, not the legacy `comms_core` sockets
- — typed messages caught interface drift at `colcon build` in CI instead of on the
-water. The RoboCommand link is the one exception: protobuf at the edge (`../proto/`),
-converted to these types at the boundary by `robocomms.py`.
+The typed contracts between nodes. Three messages, all produced by `telemetry_bridge`
+from MAVProxy's rebroadcast and consumed by everything else.
 
 ## Messages
 
-| Message | Producer → Consumer | Notes |
+| Message | Producer → consumer | Notes |
 |---|---|---|
-| `Occupancy`, `Grid`, `Cell` | `occupancy_grid_node` → `roa_apf_node` | RX24 shape retained: origin, position+heading, cell_size, ranges, sparse `cells[]` |
-| `LatLonHead` | `telemetry_bridge` → everyone | fused ArduRover pose (EK3, GPS moving-baseline yaw) |
-| `FcuStatus` | `telemetry_bridge` → planner, LED | mode/armed/health |
-| `RcChannels` | `telemetry_bridge` → `drop_latch` consumers | autonomy-drop switch channel lives here |
-| `Detection`, `DetectionArray` | `perception_node` → `frame_transform` → grid | BODY frame at source; WORLD after transform |
-| `ApfAdvisory` | `roa_apf_node` → active task | corrected goal + speed scale — advisory only, never a motor command |
+| `LatLonHead` | `telemetry_bridge` → any consumer | lat/lon/heading + `ground_speed`, taken from `GLOBAL_POSITION_INT`'s own vx/vy so nobody has to finite-difference position. `heading` is NaN when GPS yaw is unresolved — that is a value to check, not to smooth over |
+| `FcuStatus` | `telemetry_bridge` → LED status, watchdog | mode string, armed flag, system status, from `HEARTBEAT` |
+| `RcChannels` | `telemetry_bridge` → LED status, watchdog; and any override publisher → `telemetry_bridge` | 18 raw PWM values. Also the TX direction: an override publisher fills channels 1–8 |
 
-## Message flow
+Every message carries a `std_msgs/Header`. **The stamp is the time the MAVLink frame was
+RECEIVED**, not the time it was republished — a consumer judging freshness needs the age
+the data actually has.
 
-```mermaid
-flowchart LR
-    TB[telemetry_bridge] -- LatLonHead / FcuStatus / RcChannels --> ALL[all consumers]
-    PN[perception_node] -- DetectionArray (BODY) --> FT[frame_transform]
-    FT -- DetectionArray (WORLD) --> OG[occupancy_grid_node]
-    OG -- Occupancy/Grid/Cell --> APF[roa_apf_node]
-    APF -- ApfAdvisory --> MP[mission planner / active task]
-```
+## Design choice
 
-## Change-impact map
+Typed ROS messages, drift caught at build time, rather than the legacy socket-and-dict
+approach. The cost is that a producer/consumer pair must be rebuilt together; `colcon
+build --packages-select interfaces rx26_asv` does both, which is why the blessed rebuild
+path names them together.
 
-Editing a `.msg` file is the **highest-blast-radius change in the repo**: every
-producer/consumer pair must be rebuilt together, and the orchestrator's evaluator may read
-the same fields from bags.
+## Adding a message
 
-| If you edit… | Then |
+Add the `.msg` file **and** the entry in `CMakeLists.txt` — a file that is not listed is
+silently not generated, and the import failure shows up at node start on the boat rather
+than at build time.
+
+Messages for capabilities this repo does not have are not kept "for later": the v0.5 strip
+removed seven of them (detections, occupancy grid, APF advisory, guided setpoint) along
+with the nodes that used them. Re-add one when the node that fills it is landing.
+
+## Change impact
+
+| You changed | Re-run |
 |---|---|
-| any `.msg` | rebuild BOTH packages in-container (`tools/scripts/rebuild.sh`), fix all producers/consumers in the same commit, re-run full pytest + G3/G4 |
-| add a `.msg` | add to `CMakeLists.txt` `rosidl_generate_interfaces`, then as above |
-| `package.xml` / `CMakeLists.txt` | CI `interfaces` job is the canary (`colcon build` on ros:humble) |
-
-Never rename/renumber fields casually — recorded bags from earlier episodes become
-unreadable, which breaks the Level-2 Explore round's trace reading.
+| any `.msg` field | full `colcon build` of both packages (`tools/scripts/rebuild.sh`), then restart every node — a mismatched message is a silent deserialization failure |
+| `LatLonHead.ground_speed` | `telemetry_bridge` is its only producer — check it still populates the field |
