@@ -514,7 +514,7 @@ this needs a unit edit:
 | `CRSD_LIVOX_CONTAINER` | `crusader_legacy` | The **name**, never the 12-hex ID — an ID changes every time the container is recreated |
 | `CRSD_LIVOX_LAUNCH` | `ros2 launch livox_ros_driver2 rviz_MID360_launch.py` | See the rviz trap below |
 | `CRSD_LIVOX_HOST_IP` | `192.168.1.5` | The address the driver binds, from `MID360_config.json` |
-| `CRSD_LIVOX_SETUP` | `/opt/ros/humble/setup.bash /opt/livox_ws/install/setup.bash …` | ROS setup files to source **inside** the container, base distro first. Missing entries are skipped |
+| `CRSD_LIVOX_SETUP` | `/opt/ros/humble/setup.bash /root/livox_ws/install/setup.bash …` | ROS setup files to source **inside** the container, base distro first. Missing entries are skipped, and the wrapper autodiscovers if none of them resolve `livox_ros_driver2` |
 
 > **`ros2: command not found` — the first thing that goes wrong.** `docker exec
 > bash -lc` is not enough. A login shell reads `/etc/profile` and

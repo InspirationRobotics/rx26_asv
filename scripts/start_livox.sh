@@ -35,7 +35,12 @@ LAUNCH="${CRSD_LIVOX_LAUNCH:-ros2 launch livox_ros_driver2 rviz_MID360_launch.py
 # `docker exec -it ... bash` then `ros2` works perfectly by hand.
 # Space-separated; missing entries are skipped, so one list covers several
 # layouts. Overlays must come AFTER the base distro.
-SETUPS="${CRSD_LIVOX_SETUP:-/opt/ros/humble/setup.bash /opt/livox_ws/install/setup.bash /root/ws_livox/install/setup.bash /root/robotx_ws/install/setup.bash}"
+#
+# /root/livox_ws is THIS boat's (confirmed 2026-08-14). ws_livox is Livox's own
+# convention and the two are easy to transpose — which is exactly the guess that
+# cost a round trip, so both are listed and the autodiscovery below is the real
+# safety net.
+SETUPS="${CRSD_LIVOX_SETUP:-/opt/ros/humble/setup.bash /root/livox_ws/install/setup.bash /root/ws_livox/install/setup.bash /root/robotx_ws/install/setup.bash}"
 # The MID360 is an ETHERNET device: the driver binds the host address in
 # MID360_config.json (192.168.1.5) and talks to the sensor at 192.168.1.166.
 HOST_IP="${CRSD_LIVOX_HOST_IP:-192.168.1.5}"
