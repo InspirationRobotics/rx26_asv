@@ -87,25 +87,52 @@ echo "starting MID360 driver in '$CONTAINER': $LAUNCH"
 # container where it plainly works by hand is confusing enough to be worth a
 # real diagnostic rather than one line from bash.
 read -r -d '' INNER <<INNER_EOF || true
-for f in ${SETUPS}; do [ -f "\$f" ] && . "\$f"; done
+ROOTS="/opt /root /home /ws_livox /workspace"
+have_pkg() { ros2 pkg prefix livox_ros_driver2 >/dev/null 2>&1; }
+
+# 1. whatever CRSD_LIVOX_SETUP names, if it exists
+for f in ${SETUPS}; do [ -f "\$f" ] && . "\$f" 2>/dev/null; done
+
+# 2. any ROS distro under /opt/ros, if that did not produce a ros2
 if ! command -v ros2 >/dev/null 2>&1; then
-  echo "ERROR: ros2 not on PATH inside this container after sourcing:" >&2
+  for d in /opt/ros/*/setup.bash; do
+    [ -f "\$d" ] && . "\$d" 2>/dev/null && break
+  done
+fi
+
+# 3. overlays, until one actually provides livox_ros_driver2. Guessing a
+#    workspace path is what cost a round trip here: the layout differs per
+#    container and the only reliable test is asking ros2 whether the package
+#    resolves.
+if command -v ros2 >/dev/null 2>&1 && ! have_pkg; then
+  for s in \$(find \$ROOTS -maxdepth 5 -name setup.bash -path "*install*" 2>/dev/null); do
+    . "\$s" 2>/dev/null || true
+    have_pkg && { echo "livox overlay: \$s"; break; }
+  done
+fi
+
+if ! command -v ros2 >/dev/null 2>&1; then
+  echo "ERROR: ros2 is not on PATH in this container, even after autodiscovery." >&2
+  echo "Tried CRSD_LIVOX_SETUP:" >&2
   for f in ${SETUPS}; do
     [ -f "\$f" ] && echo "  [found]   \$f" >&2 || echo "  [missing] \$f" >&2
   done
   echo "ROS installs present:" >&2
   ls -d /opt/ros/*/ 2>/dev/null >&2 || echo "  (none under /opt/ros)" >&2
-  echo "Overlay setup.bash candidates:" >&2
-  # Bounded to the roots workspaces actually live under. \`find /\` here would
-  # walk every bind mount the container happens to have, turning a one-line
-  # diagnostic into a minute of silence before the error appears.
-  find /opt /root /home /ws_livox /workspace -maxdepth 4 -name setup.bash \\
-       -path "*install*" 2>/dev/null | head >&2
-  echo "Set CRSD_LIVOX_SETUP in /etc/default/crusader to the right ones," >&2
-  echo "base distro first, e.g.:" >&2
-  echo '  CRSD_LIVOX_SETUP="/opt/ros/humble/setup.bash /opt/livox_ws/install/setup.bash"' >&2
+  echo "What the interactive shell sources (this is what works by hand):" >&2
+  grep -nE "^\\s*(source|\\.)\\s" /root/.bashrc "\$HOME/.bashrc" 2>/dev/null \\
+    | grep setup >&2 || echo "  (nothing in .bashrc)" >&2
   exit 127
 fi
+if ! have_pkg; then
+  echo "ERROR: ros2 works, but package 'livox_ros_driver2' does not resolve." >&2
+  echo "Overlay setup.bash files searched under: \$ROOTS" >&2
+  find \$ROOTS -maxdepth 5 -name setup.bash -path "*install*" 2>/dev/null | head >&2
+  echo "Is the driver actually built in THIS container? Check by hand:" >&2
+  echo "  docker exec -it ${CONTAINER} bash -lc 'ros2 pkg prefix livox_ros_driver2'" >&2
+  exit 127
+fi
+echo "livox_ros_driver2 at: \$(ros2 pkg prefix livox_ros_driver2)"
 exec ${LAUNCH}
 INNER_EOF
 
