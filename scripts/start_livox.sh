@@ -28,6 +28,14 @@ set -euo pipefail
 
 CONTAINER="${CRSD_LIVOX_CONTAINER:-crusader_legacy}"
 LAUNCH="${CRSD_LIVOX_LAUNCH:-ros2 launch livox_ros_driver2 rviz_MID360_launch.py}"
+# ROS environment INSIDE the container, sourced explicitly. `docker exec bash -lc`
+# is not enough: a login shell reads /etc/profile and ~/.bash_profile, while ROS
+# setup conventionally lands in ~/.bashrc, which a NON-INTERACTIVE login shell
+# never reads. The symptom is `ros2: command not found` from a container where
+# `docker exec -it ... bash` then `ros2` works perfectly by hand.
+# Space-separated; missing entries are skipped, so one list covers several
+# layouts. Overlays must come AFTER the base distro.
+SETUPS="${CRSD_LIVOX_SETUP:-/opt/ros/humble/setup.bash /opt/livox_ws/install/setup.bash /root/ws_livox/install/setup.bash /root/robotx_ws/install/setup.bash}"
 # The MID360 is an ETHERNET device: the driver binds the host address in
 # MID360_config.json (192.168.1.5) and talks to the sensor at 192.168.1.166.
 HOST_IP="${CRSD_LIVOX_HOST_IP:-192.168.1.5}"
@@ -65,19 +73,44 @@ docker start "$CONTAINER" >/dev/null
 
 case "$LAUNCH" in
   *rviz*)
-    echo "WARN: launching '$LAUNCH', which starts rviz2." >&2
-    echo "      Headless (at boot) rviz2 exits immediately, and the stock livox" >&2
-    echo "      launch shuts the whole launch down with it -> restart loop." >&2
-    echo "      Make a headless copy INSIDE the container, once:" >&2
-    echo "        cd \$(ros2 pkg prefix livox_ros_driver2)/share/livox_ros_driver2/launch_ROS2" >&2
-    echo "        cp rviz_MID360_launch.py MID360_headless_launch.py" >&2
-    echo "        # delete the rviz2 Node and the OnProcessExit/Shutdown handler" >&2
-    echo "      then set in /etc/default/crusader:" >&2
-    echo "        CRSD_LIVOX_LAUNCH=\"ros2 launch livox_ros_driver2 MID360_headless_launch.py\"" >&2
+    # ADVISORY, not an error — it prints on every start. If the service is
+    # failing, read the LAST line of the journal, not this.
+    echo "NOTE: '$LAUNCH' starts rviz2, which cannot run headless. If the stock" >&2
+    echo "      launch registers OnProcessExit->Shutdown, rviz dying takes the" >&2
+    echo "      driver with it. See docs/OPERATIONS.md §13 for the headless copy." >&2
     ;;
 esac
 
 echo "starting MID360 driver in '$CONTAINER': $LAUNCH"
+
+# Source explicitly, then check. `ros2: command not found` from inside a
+# container where it plainly works by hand is confusing enough to be worth a
+# real diagnostic rather than one line from bash.
+read -r -d '' INNER <<INNER_EOF || true
+for f in ${SETUPS}; do [ -f "\$f" ] && . "\$f"; done
+if ! command -v ros2 >/dev/null 2>&1; then
+  echo "ERROR: ros2 not on PATH inside this container after sourcing:" >&2
+  for f in ${SETUPS}; do
+    [ -f "\$f" ] && echo "  [found]   \$f" >&2 || echo "  [missing] \$f" >&2
+  done
+  echo "ROS installs present:" >&2
+  ls -d /opt/ros/*/ 2>/dev/null >&2 || echo "  (none under /opt/ros)" >&2
+  echo "Overlay setup.bash candidates:" >&2
+  # Bounded to the roots workspaces actually live under. \`find /\` here would
+  # walk every bind mount the container happens to have, turning a one-line
+  # diagnostic into a minute of silence before the error appears.
+  find /opt /root /home /ws_livox /workspace -maxdepth 4 -name setup.bash \\
+       -path "*install*" 2>/dev/null | head >&2
+  echo "Set CRSD_LIVOX_SETUP in /etc/default/crusader to the right ones," >&2
+  echo "base distro first, e.g.:" >&2
+  echo '  CRSD_LIVOX_SETUP="/opt/ros/humble/setup.bash /opt/livox_ws/install/setup.bash"' >&2
+  exit 127
+fi
+exec ${LAUNCH}
+INNER_EOF
+
 # -i (not -it): no TTY under systemd, but keep stdin so SIGTERM propagates to
 # the launch instead of orphaning it inside the container on `systemctl stop`.
-exec docker exec -i "$CONTAINER" bash -lc "$LAUNCH"
+# Plain `bash -c`, not `-lc`: the environment is built above, explicitly, rather
+# than depending on whatever this container's profile happens to do.
+exec docker exec -i "$CONTAINER" bash -c "$INNER"

@@ -514,6 +514,22 @@ this needs a unit edit:
 | `CRSD_LIVOX_CONTAINER` | `crusader_legacy` | The **name**, never the 12-hex ID — an ID changes every time the container is recreated |
 | `CRSD_LIVOX_LAUNCH` | `ros2 launch livox_ros_driver2 rviz_MID360_launch.py` | See the rviz trap below |
 | `CRSD_LIVOX_HOST_IP` | `192.168.1.5` | The address the driver binds, from `MID360_config.json` |
+| `CRSD_LIVOX_SETUP` | `/opt/ros/humble/setup.bash /opt/livox_ws/install/setup.bash …` | ROS setup files to source **inside** the container, base distro first. Missing entries are skipped |
+
+> **`ros2: command not found` — the first thing that goes wrong.** `docker exec
+> bash -lc` is not enough. A login shell reads `/etc/profile` and
+> `~/.bash_profile`; ROS setup conventionally lands in `~/.bashrc`, which a
+> *non-interactive* login shell never reads. So `ros2` works perfectly when you
+> `docker exec -it … bash` by hand and is missing under systemd.
+>
+> `start_livox.sh` sources `CRSD_LIVOX_SETUP` explicitly and, if `ros2` is still
+> absent, prints which paths were found or missing, what is under `/opt/ros`, and
+> any overlay `setup.bash` it can find. Point `CRSD_LIVOX_SETUP` at the right
+> ones. To see the container's actual layout:
+>
+> ```bash
+> docker exec crusader_legacy bash -c 'ls -d /opt/ros/*/; find /opt /root -maxdepth 4 -name setup.bash -path "*install*"'
+> ```
 
 > **The rviz trap — this is what breaks the boot service.** `rviz_MID360_launch.py`
 > starts rviz2 alongside the driver, and the stock launch registers an

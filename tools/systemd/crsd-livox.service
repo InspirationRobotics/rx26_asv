@@ -18,10 +18,11 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=__CRSD_USER__
-# CRSD_LIVOX_CONTAINER / CRSD_LIVOX_LAUNCH / CRSD_LIVOX_HOST_IP live in
-# /etc/default/crusader alongside CRSD_BCAST_ADDR and GCS_IPS, so changing the
-# container name or moving to a headless launch needs no unit edit. Unset is
-# fine — start_livox.sh carries defaults.
+# CRSD_LIVOX_CONTAINER / CRSD_LIVOX_LAUNCH / CRSD_LIVOX_HOST_IP /
+# CRSD_LIVOX_SETUP live in /etc/default/crusader alongside CRSD_BCAST_ADDR and
+# GCS_IPS, so changing the container name, the ROS overlay paths, or moving to a
+# headless launch needs no unit edit. Unset is fine — start_livox.sh carries
+# defaults and prints a real diagnostic when the ROS environment is wrong.
 EnvironmentFile=-/etc/default/crusader
 ExecStart=__CRSD_REPO__/scripts/start_livox.sh
 # Kill only OUR process, not the container: `crusader_legacy` may hold other
