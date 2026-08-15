@@ -38,16 +38,21 @@ CRSD_REPO="$(pwd)"
 # Container name is a deployment choice, not a constant — override to stage a
 # replacement image (e.g. CRSD_CONTAINER=asv-next) without editing units.
 CRSD_CONTAINER="${CRSD_CONTAINER:-asv}"
+# The MID360's container is NOT ours — it is the second container on the Jetson
+# (docs/OPERATIONS.md §13) and its name is a deployment fact, not a constant.
+CRSD_LIVOX_CONTAINER="${CRSD_LIVOX_CONTAINER:-crusader_legacy}"
 id -u "$CRSD_USER" >/dev/null 2>&1 || {
   echo "ERROR: user '$CRSD_USER' does not exist — cannot install units." >&2
   echo "       Run with sudo from that user's session, or set SUDO_USER." >&2
   exit 1; }
-echo "   service user: $CRSD_USER"
-echo "   repo path:    $CRSD_REPO"
-echo "   container:    $CRSD_CONTAINER"
-for unit in crsd-mavproxy crsd-container; do
+echo "   service user:    $CRSD_USER"
+echo "   repo path:       $CRSD_REPO"
+echo "   container:       $CRSD_CONTAINER"
+echo "   livox container: $CRSD_LIVOX_CONTAINER"
+for unit in crsd-mavproxy crsd-container crsd-livox; do
   sed -e "s|__CRSD_USER__|$CRSD_USER|g" -e "s|__CRSD_REPO__|$CRSD_REPO|g" \
       -e "s|__CRSD_CONTAINER__|$CRSD_CONTAINER|g" \
+      -e "s|__CRSD_LIVOX_CONTAINER__|$CRSD_LIVOX_CONTAINER|g" \
       "tools/systemd/$unit.service" > "/etc/systemd/system/$unit.service"
   chmod 644 "/etc/systemd/system/$unit.service"
   # Fail loudly rather than enabling a unit that still carries a placeholder.
@@ -56,13 +61,16 @@ for unit in crsd-mavproxy crsd-container; do
   fi
 done
 systemctl daemon-reload
-systemctl enable crsd-mavproxy.service crsd-container.service
-echo "   enabled; start now with: systemctl start crsd-mavproxy crsd-container"
+systemctl enable crsd-mavproxy.service crsd-container.service crsd-livox.service
+echo "   enabled; start now with:"
+echo "     systemctl start crsd-mavproxy crsd-container crsd-livox"
 
 echo "== [3/4] host sanity checks =="
 command -v docker >/dev/null || { echo "ERROR: docker not installed" >&2; exit 1; }
 docker image inspect "$CRSD_CONTAINER" >/dev/null 2>&1 \
   || echo "WARN: no '$CRSD_CONTAINER' image found — build it (docker build -t $CRSD_CONTAINER .) before boot."
+docker inspect "$CRSD_LIVOX_CONTAINER" >/dev/null 2>&1 \
+  || echo "WARN: no container named '$CRSD_LIVOX_CONTAINER' — crsd-livox.service will fail. Set CRSD_LIVOX_CONTAINER and re-run."
 command -v mavproxy.py >/dev/null \
   || echo "WARN: mavproxy.py not on PATH — crsd-mavproxy.service will fail."
 

@@ -39,18 +39,24 @@ This document assumes the boat is already installed and you are operating it.
 
 ```
 power on
-  └─ crsd-mavproxy.service   (host) ── takes /dev/crsd-pixhawk, rebroadcasts UDP
-       └─ crsd-container.service (host) ── docker start -a asv
+  ├─ crsd-mavproxy.service   (host) ── takes /dev/crsd-pixhawk, rebroadcasts UDP
+  │    └─ crsd-container.service (host) ── docker start -a asv
+  └─ crsd-livox.service      (host) ── MID360 driver in the livox container
 ```
 
-Both are `systemctl enable`d, so a power cycle brings them up in order. The
-container unit is ordered `After=crsd-mavproxy.service` so no node ever races
-MAVProxy for the serial device.
+All three are `systemctl enable`d, so a power cycle brings them up. The `asv`
+container is ordered `After=crsd-mavproxy.service` so no node ever races MAVProxy
+for the serial device.
+
+**The LiDAR branch is deliberately independent.** It shares no device with the
+Pixhawk, so ordering it behind MAVProxy would only make a LiDAR problem look like
+an autopilot problem. `lidar_cluster_node` retries until the topic appears, so
+nothing downstream needs to win a start-order race.
 
 Check the chain:
 
 ```bash
-systemctl status crsd-mavproxy crsd-container --no-pager
+systemctl status crsd-mavproxy crsd-container crsd-livox --no-pager
 ```
 
 Healthy looks like `active (running)` on both, and `NRestarts=0`:
@@ -491,10 +497,59 @@ the guard came out. The package formerly called `crusader_sensors` is now
 The pre-v0.5 LiDAR fusion was removed unverified. It is recoverable from git at `8c4ffa5`
 and worth reading before rewriting — see each package's README.
 
-**Before the LiDAR half comes back, the topic contract with the livox container has to be
-agreed**: topic name, message type, QoS, frame id. A QoS mismatch is silent — a
-BEST_EFFORT publisher and a RELIABLE subscriber match nothing, `ros2 topic list` looks
-perfect, and no data flows.
+### Starting the MID360
+
+`crsd-livox.service` runs it at boot via
+[`scripts/start_livox.sh`](../scripts/start_livox.sh). By hand:
+
+```bash
+sudo systemctl restart crsd-livox && journalctl -u crsd-livox -f
+```
+
+Settings live in `/etc/default/crusader` beside `CRSD_BCAST_ADDR`, so none of
+this needs a unit edit:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `CRSD_LIVOX_CONTAINER` | `crusader_legacy` | The **name**, never the 12-hex ID — an ID changes every time the container is recreated |
+| `CRSD_LIVOX_LAUNCH` | `ros2 launch livox_ros_driver2 rviz_MID360_launch.py` | See the rviz trap below |
+| `CRSD_LIVOX_HOST_IP` | `192.168.1.5` | The address the driver binds, from `MID360_config.json` |
+
+> **The rviz trap — this is what breaks the boot service.** `rviz_MID360_launch.py`
+> starts rviz2 alongside the driver, and the stock launch registers an
+> `OnProcessExit` handler that **shuts down the whole launch when rviz exits**. At
+> boot there is no display, so rviz2 dies instantly and takes the driver with it.
+> systemd restarts, it dies again, and the journal reads like an orderly shutdown
+> rather than an error — the LiDAR is simply never there.
+>
+> It is still the default because it is the launch that publishes **PointCloud2**
+> (`xfer_format: 0`); `msg_MID360_launch.py` publishes `CustomMsg`, which ROS 2
+> will not connect to a PointCloud2 subscriber at all. Fix it once, inside the
+> livox container:
+>
+> ```bash
+> cd $(ros2 pkg prefix livox_ros_driver2)/share/livox_ros_driver2/launch_ROS2
+> cp rviz_MID360_launch.py MID360_headless_launch.py
+> # then delete the rviz2 Node and the OnProcessExit/Shutdown handler
+> ```
+>
+> and point `CRSD_LIVOX_LAUNCH` at it. `start_livox.sh` prints this whenever the
+> configured launch name contains "rviz".
+
+The wrapper also **waits (bounded) for `CRSD_LIVOX_HOST_IP` to appear** before
+starting the driver. `network-online.target` does not mean "this interface has
+this address": at boot the wired link often comes up seconds late, and the driver
+then fails to bind with an error that reads like a LiDAR fault rather than a
+timing one.
+
+`ExecStop` kills only the driver process, not the container — `crusader_legacy`
+may hold other things, and stopping the LiDAR must not take them down.
+
+**The topic contract with the livox container**, now settled: `/livox/lidar`,
+`sensor_msgs/PointCloud2`, `BEST_EFFORT`. A QoS mismatch is silent — a
+BEST_EFFORT publisher and a RELIABLE subscriber match nothing, `ros2 topic list`
+looks perfect, and no data flows. A **type** mismatch is equally silent and
+easier to hit: see §13's `xfer_format` note and `tools/lidar_view.py`.
 
 ### Watching the camera from a laptop
 

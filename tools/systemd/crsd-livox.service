@@ -1,0 +1,39 @@
+# /etc/systemd/system/crsd-livox.service  (Jetson host)
+#
+# TEMPLATE: __CRSD_USER__ / __CRSD_REPO__ are substituted by
+# setup/install_jetson_host.sh at install time. Do NOT `install` this file
+# verbatim — the placeholders must be expanded.
+#
+# Starts the MID360 driver in the livox container. Independent of the Pixhawk
+# chain: the LiDAR shares no device with MAVProxy, so it is ordered only after
+# docker and the network, not after crsd-mavproxy. crusader_perception's
+# lidar_cluster_node retries until the topic appears, so nothing downstream
+# needs this to win a start-order race.
+[Unit]
+Description=Crusader MID360 LiDAR driver (livox container)
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__CRSD_USER__
+# CRSD_LIVOX_CONTAINER / CRSD_LIVOX_LAUNCH / CRSD_LIVOX_HOST_IP live in
+# /etc/default/crusader alongside CRSD_BCAST_ADDR and GCS_IPS, so changing the
+# container name or moving to a headless launch needs no unit edit. Unset is
+# fine — start_livox.sh carries defaults.
+EnvironmentFile=-/etc/default/crusader
+ExecStart=__CRSD_REPO__/scripts/start_livox.sh
+# Kill only OUR process, not the container: `crusader_legacy` may hold other
+# things, and stopping the LiDAR driver must not take them down. Change to
+# `docker stop` only if that container is the driver and nothing else.
+ExecStop=-/usr/bin/docker exec __CRSD_LIVOX_CONTAINER__ pkill -f livox_ros_driver2
+# The driver waits (bounded) for its host IP, so an early boot is a slow start
+# rather than a failure. RestartSec is longer than the mavproxy unit's for the
+# same reason: retrying a link that is still coming up just burns restarts.
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
