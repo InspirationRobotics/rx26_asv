@@ -41,7 +41,7 @@
 # Usage: ./start_mavproxy.sh [BCAST_ADDR]        (env: GCS_IPS, CRSD_PIXHAWK_DEV)
 set -euo pipefail
 
-BCAST_ADDR="${1:-192.168.100.255}"         # override if the field subnet changes
+BCAST_ADDR="${1:-192.168.8.255}"         # override if the field subnet changes
 MASTER="${CRSD_PIXHAWK_DEV:-/dev/crsd-pixhawk}"
 
 if [ ! -e "$MASTER" ]; then
