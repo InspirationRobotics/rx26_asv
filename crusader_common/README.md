@@ -10,7 +10,7 @@ change here would only make sense on Crusader, it belongs in a domain package in
 | `node_main.py` | `run_node` — the lifecycle wrapper, with deterministic teardown. |
 | `stream_cache.py` | Freshness-gated value cache. The thing that makes silence stay silent. |
 | `drop_latch.py` | The autonomy-drop latch state machine (Gate G1). |
-| `geo.py` | lat/lon ↔ local XY, body↔world rotation (yaw-only *and* full roll/pitch/yaw), ground speed from NED cm/s. Holds **two** body-axis conventions — read its header before using either. |
+| `geo.py` | lat/lon ↔ local XY, body↔world rotation (yaw-only, full roll/pitch/yaw, and its exact inverse `world_to_body_ypr`), ground speed from NED cm/s. Holds **two** body-axis conventions — read its header before using either. |
 
 ## Dependency direction
 
@@ -39,4 +39,4 @@ CI asserts the file still resolves from a real install space, not just from the 
 | `config.py` path resolution | `python3 tools/scripts/check_config.py`, then a full `rebuild.sh` and confirm nodes start — this is the highest-blast-radius file in the repo |
 | `stream_cache.py` | every consumer's staleness behaviour; re-check the watchdog's gateway-down path |
 | `drop_latch.py` | the Gate G1 procedure (`docs/G1_bench_procedure.md`) |
-| `geo.py` | anything doing position math — `telemetry_bridge`'s ground speed, and `body_to_world_ypr`, which every mapped detection will pass through |
+| `geo.py` | anything doing position math — `telemetry_bridge`'s ground speed, and `body_to_world_ypr`, which every mapped detection passes through. `world_to_body_ypr` is its **transpose**, read off it rather than re-derived, so the two cannot disagree; round-tripping proves they are consistent, never that the convention is right |

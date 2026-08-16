@@ -16,6 +16,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Detection3DArray.msg"
   "msg/Cluster3D.msg"
   "msg/Cluster3DArray.msg"
+  "msg/TrackedTarget.msg"
+  "msg/TrackedTargetArray.msg"
   DEPENDENCIES std_msgs
 )
 

@@ -7,10 +7,12 @@ container.
 
 **What runs today:** the status, telemetry and safety layer — four nodes that have all
 been on the water — plus `crusader_perception`, which owns the OAK-D and publishes
-detections rather than frames. **What is scaffolded and empty:** the world model (fusion,
-occupancy grid), being rebuilt after v0.5 removed the unverified version. **What is
-elsewhere:** the MID360 only. A second container drives that LiDAR and publishes its point
-cloud; consuming it is the unwritten half of perception.
+detections rather than frames. **What is written but unproven:** the world model's fusion
+and target tracking, and the map display that renders them to a laptop — bench-driven from
+invented detections, never on the water, and deliberately out of `core.launch.py`. The
+occupancy grid is still unwritten. **What is elsewhere:** the MID360 only. A second
+container drives that LiDAR and publishes its point cloud; consuming it is the unwritten
+half of perception.
 
 Before developing ANY code, read [Format](#format) and the standing
 [safety constraints](#safety-constraints-non-negotiable). Before your **first day**, follow
@@ -28,7 +30,7 @@ and run in the `asv` container (`--packages-up-to crusader_bringup`).
 | [`crusader_common`](crusader_common/README.md) | Shared plumbing: params loader, node lifecycle, stream cache, drop latch, geodesy. No nodes | library |
 | [`crusader_fcu`](crusader_fcu/README.md) | `telemetry_bridge` — the only thing that speaks MAVLink. Localization source *and* Movement actuator | **field** |
 | [`crusader_perception`](crusader_perception/README.md) | Owns the OAK-D and detects in it: `oakd_publisher` → raw frames; `buoy_detector` → `oak/detections` in `camera_link`. Not launched — the two contend for the camera | 2 nodes |
-| [`crusader_world_model`](crusader_world_model/README.md) | Fusion → 3D object positions; occupancy grid. Sensor-agnostic, verifiable without a camera | **empty** |
+| [`crusader_world_model`](crusader_world_model/README.md) | `target_tracker` → camera+LiDAR fusion and earth-anchored target tracks; `map_server` → those tracks and the vessel state in a laptop browser (`:8082`). Sensor-agnostic, driven off-boat by `tools/bench/bench_world_model.py`. Occupancy grid still unwritten | 2 nodes |
 | [`crusader_behavior`](crusader_behavior/README.md) | `safety/` RC-loss force-disarm watchdog; `indicator/` LED status stack | **field** |
 | [`crusader_bringup`](crusader_bringup/README.md) | Launch files + the params YAML. Ships no code; build entry point | — |
 
@@ -80,6 +82,17 @@ ros2 launch crusader_bringup core.launch.py
 
 MAVProxy owns the Pixhawk serial link and is started by systemd outside ROS — nothing
 else may open `/dev/crsd-pixhawk`.
+
+Everything else is started **by hand**, for two different reasons. The OAK-D pair contend
+for one camera, so which of them runs is an operator choice. The rest have simply never run
+on the boat, and `core.launch.py` is for what has.
+
+| Started by hand | Package | Why not launched |
+|---|---|---|
+| `oakd_publisher` *or* `buoy_detector` | `crusader_perception` | one camera, one client — an operator choice per session |
+| `lidar_cluster_node` | `crusader_perception` | unproven on the boat |
+| `target_tracker` | `crusader_world_model` | unproven on the boat |
+| `map_server` | `crusader_world_model` | unproven; also a display, so it is started when a human wants to watch |
 
 ## Usage
 
@@ -201,10 +214,19 @@ prequal — that is the version to port from when mission work restarts.
 
 - **Topic contract with the livox container** — name, type, QoS, frame id for the MID360
   cloud. Blocks the LiDAR half of `crusader_perception`.
-- **Mission-element mapping** — `/crsd/pose` + `/crsd/attitude` + `oak/detections` through
-  `geo.body_to_world_ypr` into a world-frame object list. The inputs all exist now.
+- **A G2-style bench check for the CAMERA's orientation.** Its mounting *translation* is in
+  `Resources.md` and now in `target_tracker`'s `cam_x/y/z`, on the same hull-bottom datum as
+  the LiDAR. Its *orientation* is recorded as "not yet bench-confirmed", which is the same
+  state the LiDAR was in when `Resources.md` described it with a left-handed frame that
+  could not exist. Until the camera gets its own G2, `cam_yaw_deg`/`cam_pitch_deg` are an
+  assumption and `fuse_bearing_deg` has to stay wide to cover it.
+- **A water test of `target_tracker` + `map_server`**, against buoys at known lat/lon. The
+  off-boat bench proves the plumbing and the algorithms; it cannot prove the frame
+  convention, and nothing here has earned a place in `core.launch.py` yet.
 - **Gate G1**: build + sign off the RC autonomy-drop switch. The enforcement point exists;
   the bench harness needs rewriting ([docs/G1_bench_procedure.md](docs/G1_bench_procedure.md)).
-- Rebuild fusion and the occupancy grid in `crusader_world_model`, verified off-boat before
-  they ever see a camera.
+- Rebuild the occupancy grid in `crusader_world_model` on top of the tracks, verified
+  off-boat before it ever sees a camera.
+- **A consumer for `crsd/world_targets`.** Nothing reads it yet — the tracker publishes a
+  picture and nothing acts on it, which is deliberate for now.
 - Decide the shape of Cognition, then give it a package.

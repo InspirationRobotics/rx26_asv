@@ -212,6 +212,129 @@ lidar_cluster_node:
                                            #       accumulation (cannot compensate)
     health_period_s: 5.0                   # [DYN] JSON stats publish period
 
+# ---- World model: target_tracker — detections + pose -> earth-anchored targets ----
+# Consumes oak/detections (camera_link), crsd/lidar_clusters (base_link),
+# /crsd/pose and /crsd/attitude; publishes crsd/world_targets. Opens no device
+# and commands nothing. Not in core.launch.py — nothing here has run on the boat.
+#
+# THE CAMERA EXTRINSIC BELOW IS MEASURED, THE ORIENTATION IS NOT BENCH-CONFIRMED.
+# Both come from Resources.md's mounting section. The TRANSLATION (37 cm forward,
+# on the centreline, 65 cm up) is measured against the same hull-bottom datum as
+# the LiDAR's lidar_x/y/z, which is what lets a camera z and a LiDAR z of the
+# same buoy agree. The ORIENTATION is Resources.md's "already REP-103; NOT yet
+# bench-confirmed the way the LiDAR was" — so the two mount ANGLES are zero
+# because the camera is believed to point dead ahead and dead level, not because
+# anyone has proved it. That belief is exactly what got the LiDAR's y-sign wrong
+# for a season until docs/G2 settled it on the bench; run the same check here and
+# the angles stop being an assumption. It is [RO] for the LiDAR's reason —
+# retuning the mounting geometry live silently invalidates every target already
+# on the map.
+target_tracker:
+  ros__parameters:
+    detections_topic: "oak/detections"     # [RO] = buoy_detector.detections_topic
+    clusters_topic: "crsd/lidar_clusters"  # [RO] = lidar_cluster_node.clusters_topic
+    targets_topic: "crsd/world_targets"    # [RO] TrackedTargetArray, every tick
+    health_topic: "crsd/world_model_health"  # [RO] std_msgs/String (JSON)
+    update_rate_hz: 10.0                   # [RO] fuse/track cycle. Slower than
+                                           #      the camera ON PURPOSE: one
+                                           #      message counts once, and three
+                                           #      frames 33 ms apart are the same
+                                           #      vantage point.
+    # -- freshness budgets [RO] --
+    pose_timeout_s: 1.0                    # [RO] = shared.pose_timeout_s; stale
+                                           #      -> NO observations ingested
+    attitude_timeout_s: 1.0                # [RO] stale -> no observations; a
+                                           #      detection cannot be placed
+                                           #      without roll/pitch/yaw
+    detection_timeout_s: 1.0               # [RO] stale -> LiDAR-only cycles
+    cluster_timeout_s: 2.0                 # [RO] stale -> camera-only cycles.
+                                           #      Longer than the others: the
+                                           #      LiDAR window is ~0.5 s, so a
+                                           #      1 s budget would flap.
+    # -- camera extrinsic [RO]: camera_link -> base_link. Resources.md, see above --
+    cam_x: 0.37                            # [RO] m forward of the body origin
+                                           #      (LiDAR is at 0.32 — 5 cm aft)
+    cam_y: 0.0                             # [RO] m to PORT; camera is on the
+                                           #      centreline, LiDAR is 5 cm port
+    cam_z: 0.65                            # [RO] m above the hull-bottom datum,
+                                           #      the SAME datum as lidar_z=0.52
+    cam_yaw_deg: 0.0                       # [RO] mount yaw, + = aimed to PORT.
+                                           #      ASSUMED, not bench-confirmed.
+    cam_pitch_deg: 0.0                     # [RO] mount tilt, + = aimed DOWN.
+                                           #      ASSUMED, not bench-confirmed.
+    # -- fusion gates [DYN] --
+    fuse_bearing_deg: 6.0                  # [DYN] camera/LiDAR bearing agreement.
+                                           #       Stays wide for the mount
+                                           #       ANGLES, which are assumed, not
+                                           #       measured. The translations no
+                                           #       longer justify it: the two
+                                           #       sensors are 5 cm apart in x and
+                                           #       y, which is 0.3 deg of parallax
+                                           #       at 10 m. Tighten toward 2-3 deg
+                                           #       once a G2-style bench check
+                                           #       confirms the camera points
+                                           #       where this file says it does.
+    fuse_range_m: 4.0                      # [DYN] absolute range-agreement floor
+    fuse_range_frac: 0.25                  # [DYN] ... or this fraction of the
+                                           #       camera range, whichever is
+                                           #       larger — stereo error grows
+                                           #       with range, so the gate must
+    min_confidence: 0.50                   # [DYN] above buoy_detector's 0.40:
+                                           #       the detector publishes what it
+                                           #       saw, the map commits to it
+    track_unlabeled: true                  # [RO] keep LiDAR-only clusters. An
+                                           #      unnamed obstacle is still an
+                                           #      obstacle (package README).
+    # -- tracking gates [DYN] --
+    assoc_radius_m: 3.0                    # [DYN] world-frame association radius.
+                                           #       The single most consequential
+                                           #       number here: too wide merges a
+                                           #       red/green gate pair into one
+                                           #       object at the midpoint, too
+                                           #       narrow splits one buoy into a
+                                           #       new track every few seconds.
+                                           #       Watch position_stddev.
+    pos_alpha: 0.30                        # [DYN] floor on the position EMA gain
+    vel_alpha: 0.20                        # [DYN] velocity EMA gain
+    confirm_hits: 3                        # [DYN] sightings before CONFIRMED
+    tentative_timeout_s: 3.0               # [DYN] unconfirmed tracks expire fast
+                                           #       — one frame of detector noise
+                                           #       must not sit on the map
+    track_timeout_s: 30.0                  # [DYN] confirmed tracks are held long
+                                           #       past leaving the camera's FOV;
+                                           #       persisting is the whole point
+    max_tracks: 64                         # [DYN] runaway guard, not a normal
+                                           #       path (a shoreline clustering
+                                           #       into hundreds of objects)
+    health_period_s: 5.0                   # [DYN] JSON stats publish period
+
+# ---- World model: map_server — the boat and its targets in a laptop browser ----
+# Read-only display: four subscriptions, no publishers, no services. Safe to
+# start and kill mid-session. http://<JETSON_IP>:8082
+map_server:
+  ros__parameters:
+    port: 8082                             # [RO] 8080 = buoy_detector/oak_view,
+                                           #      8081 = lidar_view. Three
+                                           #      servers, three ports; all three
+                                           #      are useful at once.
+    bind_host: "0.0.0.0"                   # [RO] must NOT be 127.0.0.1 or the
+                                           #      laptop cannot reach it
+    targets_topic: "crsd/world_targets"    # [RO] = target_tracker.targets_topic
+    pose_timeout_s: 1.0                    # [RO] = shared.pose_timeout_s
+    attitude_timeout_s: 1.0                # [RO] stale -> attitude readout greys
+    targets_timeout_s: 3.0                 # [RO] stale -> "world model silent".
+                                           #      Well over target_tracker's
+                                           #      10 Hz tick, so a scheduling
+                                           #      hiccup is not an alarm.
+    status_timeout_s: 1.0                  # [RO] mode/armed readout
+    poll_period_s: 0.2                     # [RO] how often the browser asks for
+                                           #      /state. 5 Hz is smooth for a
+                                           #      boat and ~1 KB per poll.
+    trail_length: 600                      # [DYN] wake points kept
+    trail_min_move_m: 0.5                  # [DYN] distance-gated, not time-gated:
+                                           #       station-keeping must not spend
+                                           #       the whole buffer on one spot
+
 # ---- rc_heartbeat_watchdog: force-disarm on RC-transmitter link loss (safety) ----
 # Consumes telemetry_bridge topics (/crsd/rc_channels, /crsd/fcu_status) and routes
 # a force-disarm back through the bridge (/crsd/force_disarm) — no own MAVLink conn.

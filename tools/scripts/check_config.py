@@ -35,7 +35,21 @@ PARAMS_BASELINE = REPO / "params" / "working_crusader.params"
 # still has; a node with no section fails at startup instead.
 CONFIG_DRIVEN_NODES = {"telemetry_bridge", "led_node",
                        "pixhawk_led_status_node", "rc_heartbeat_watchdog",
-                       "oakd_publisher", "buoy_detector", "lidar_cluster_node"}
+                       "oakd_publisher", "buoy_detector", "lidar_cluster_node",
+                       "target_tracker", "map_server"}
+
+# Topic names that two sections must agree on, as (producer, param) ->
+# (consumer, param). A producer and a consumer that disagree about a topic name
+# do not fail: both start, both look healthy, `ros2 topic list` shows two
+# plausible names, and the consumer simply never receives anything. That is the
+# most expensive kind of green.
+TOPIC_PAIRS = (
+    (("buoy_detector", "detections_topic"),
+     ("target_tracker", "detections_topic")),
+    (("lidar_cluster_node", "clusters_topic"),
+     ("target_tracker", "clusters_topic")),
+    (("target_tracker", "targets_topic"), ("map_server", "targets_topic")),
+)
 
 # oakd_publisher and buoy_detector each build the SAME OAK-D pipeline (only one
 # runs at a time — the camera admits one client). These params decide the image
@@ -104,18 +118,45 @@ def check_params_yaml():
 
     # Shared values that must stay equal across sections (rcl forbids anchors,
     # so they are written out literally and pinned here instead).
+    #
+    # Checked in BOTH directions: the bridge's own republish budget, and every
+    # consumer that decides when to stop acting on the last pose it saw. The
+    # YAML says "any future consumer must use the same number" — a comment
+    # cannot enforce that, and a consumer trusting a pose for longer than the
+    # bridge vouches for it is the frozen-pose failure the value exists to
+    # prevent. This finds the drift while it is still a diff.
     try:
         want = cfg["shared"]["ros__parameters"]["pose_timeout_s"]
-        got = cfg["telemetry_bridge"]["ros__parameters"]["stream_timeout_s"]
-        if want != got:
+        pinned = [("telemetry_bridge", "stream_timeout_s")]
+        pinned += [(name, "pose_timeout_s") for name in sorted(cfg)
+                   if name != "shared"
+                   and "pose_timeout_s" in cfg[name]["ros__parameters"]]
+        differing = {f"{n}.{k}": cfg[n]["ros__parameters"][k]
+                     for n, k in pinned if cfg[n]["ros__parameters"][k] != want}
+        if differing:
             fail("shared pose_timeout_s",
-                 f"shared={want} but telemetry_bridge.stream_timeout_s={got}; a "
-                 "consumer trusting a pose longer than the bridge vouches for it "
-                 "is the frozen-pose failure this value exists to prevent")
+                 f"shared={want} but {differing}; a consumer trusting a pose "
+                 "longer than the bridge vouches for it is the frozen-pose "
+                 "failure this value exists to prevent")
         else:
-            ok("shared pose_timeout_s consistent")
+            ok("shared pose_timeout_s consistent",
+               f"{len(pinned)} section(s) pinned at {want}")
     except KeyError as e:
         fail("shared pose_timeout_s", f"missing key {e}")
+
+    # Producer/consumer topic names (see TOPIC_PAIRS).
+    for (pn, pk), (cn, ck) in TOPIC_PAIRS:
+        try:
+            a, b = cfg[pn]["ros__parameters"][pk], cfg[cn]["ros__parameters"][ck]
+        except KeyError as e:
+            fail(f"topic {pn}.{pk} -> {cn}.{ck}", f"missing key {e}")
+            continue
+        if a != b:
+            fail(f"topic {pn}.{pk} -> {cn}.{ck}",
+                 f"{a!r} != {b!r} — both nodes start, neither complains, and "
+                 "the consumer receives nothing")
+        else:
+            ok(f"topic {pn}.{pk} -> {cn}.{ck}", a)
 
     # The two OAK-D nodes must describe the same camera (see CAMERA_PARAMS).
     try:

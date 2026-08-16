@@ -1,4 +1,43 @@
-# `tools/bench/` — where do the frames go?
+# `tools/bench/` — bench harnesses
+
+Two unrelated jobs live here. The four `bench_*_{no,}ros.py` scripts measure **where the
+frames go**; `bench_world_model.py` **invents** frames so the world model can be driven
+with no hardware at all.
+
+## `bench_world_model.py` — a boat and a buoy field, invented
+
+```bash
+python3 tools/bench/bench_world_model.py
+```
+
+Publishes `/crsd/pose`, `/crsd/attitude`, `/crsd/fcu_status`, `oak/detections` and
+`crsd/lidar_clusters` for a simulated boat circling an invented buoy field, at roughly the
+real rates and in the real frames. Run `target_tracker` and `map_server` alongside it and
+open `http://localhost:8082`.
+
+**It prints the ground truth at startup**, which is what makes it a check rather than a
+demo: the tracker's output is a number you can compare against a number you chose. A track
+that settles within a metre of its truth row, keeps its id, and does not split in two when
+the boat circles it, is a tracker that works.
+
+The circle is not decoration. A straight run past a buoy never tests the two things most
+likely to be wrong — whether a track survives leaving the field of view, and whether it is
+still *one* track when it comes back into view from a different bearing.
+
+| Flag | Reproduces |
+|---|---|
+| `--no-camera` | LiDAR only — every track goes anonymous (empty label) |
+| `--no-lidar` | camera only — ranges carry the stereo bias, targets sit beyond truth and wander. Nothing is dropped; that is the package invariant |
+| `--drop-pose-after N` | a dead bridge. The tracker must stop ingesting, the map must go red and grey the boat out, and existing tracks must expire on schedule |
+| `--chop` | roll and pitch. With compensation working the targets hold still; without it they breathe in and out by a metre or two at 20 m |
+
+**What it cannot prove:** it builds detections with `geo.world_to_body_ypr`, the exact
+transpose of the transform the tracker runs, so a sign error shared by both cancels and the
+map looks perfect anyway. It proves plumbing, association, decay, fusion arbitration and the
+display — never the frame convention. That is bench work against real hardware, the way
+[docs/G2](../../docs/G2_lidar_orientation.md) did it for the LiDAR.
+
+## The four throughput benches — where do the frames go?
 
 Four scripts, one variable at a time, to answer a question the running node cannot:
 **is the camera slow, is ROS slow, or is the transport slow?** Written to settle whether

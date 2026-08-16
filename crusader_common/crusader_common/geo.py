@@ -116,3 +116,55 @@ def body_to_world_ypr(x_fwd: float, y_left: float, z_up: float,
 
     # WORLD is x = east, y = north, z = up (geo.py convention, top of file).
     return boat_x + east, boat_y + north, -down
+
+
+def world_to_body_ypr(world_x: float, world_y: float, world_z: float,
+                      roll: float, pitch: float, yaw: float,
+                      boat_x: float = 0.0, boat_y: float = 0.0) -> tuple:
+    """The exact inverse of body_to_world_ypr — world point to REP-103 BODY.
+
+    Answers "where is that, from here": a known world position (a waypoint, a
+    stored target, a simulated buoy) expressed as the offset a sensor bolted to
+    this boat would report for it.
+
+    Args:
+      world_x, world_y, world_z: the point in WORLD axes — east+ [m], north+
+        [m], up+ [m], against the same origin latlon_to_xy uses.
+      roll, pitch, yaw: attitude [rad], autopilot NED body axes and compass
+        yaw, exactly as body_to_world_ypr takes them.
+      boat_x, boat_y: boat position in WORLD [m]. Default 0 treats the inputs
+        as an offset from the boat rather than an absolute point.
+
+    Returns:
+      (x_fwd, y_left, z_up) [m] — REP-103 body axes, the same triple
+      Detection3D and Cluster3D carry.
+
+    Implemented as the TRANSPOSE of the forward rotation, which is what the
+    inverse of an orthonormal rotation is. Re-deriving it by negating the three
+    angles and reversing the order gives the same matrix and one more place to
+    get a sign wrong; the transpose cannot disagree with the forward transform
+    because it is read off it.
+
+    NOTE this is the same rotation the forward function uses. Round-tripping a
+    point through both proves the pair is CONSISTENT, not that the convention
+    is right — a shared sign error cancels perfectly. Proving the convention is
+    a bench exercise against a real sensor, the way docs/G2 did it for the
+    LiDAR.
+    """
+    # WORLD (east, north, up) -> NED (north, east, down), relative to the boat.
+    north = world_y - boat_y
+    east = world_x - boat_x
+    down = -world_z
+
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+
+    xf = cy * cp * north + sy * cp * east - sp * down
+    yr = ((cy * sp * sr - sy * cr) * north + (sy * sp * sr + cy * cr) * east
+          + cp * sr * down)
+    zd = ((cy * sp * cr + sy * sr) * north + (sy * sp * cr - cy * sr) * east
+          + cp * cr * down)
+
+    # FRD (x fwd, y right, z down) -> REP-103 (x fwd, y LEFT, z UP).
+    return xf, -yr, -zd

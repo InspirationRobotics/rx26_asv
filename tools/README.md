@@ -17,6 +17,17 @@ else — no ROS on Windows, no rviz2, no X forwarding. They use **different defa
 purpose**: `buoy_detector`'s built-in view already claims 8080, and two servers cannot bind
 one port.
 
+`crusader_world_model`'s `map_server` is the fourth thing on that list and takes **8082**.
+It is a node rather than a tool here because it is an operational display, not a bench
+check — and it sends JSON rather than JPEG, because unlike a camera frame a map is small
+enough to be data. Same rule at the laptop end: a browser and nothing else.
+
+| Port | Served by | Shows |
+|---|---|---|
+| 8080 | `buoy_detector` (`stream_enable`) *or* `tools/oak_view.py` | annotated camera frames — one at a time; they cannot both bind it |
+| 8081 | `tools/lidar_view.py` | MID360 cloud, plan / elevation |
+| 8082 | `crusader_world_model`'s `map_server` | vessel state + tracked targets on a plan map |
+
 ## The param baseline
 
 `params/working_crusader.params` is the known-good ArduRover config, exported from

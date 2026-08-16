@@ -1,8 +1,8 @@
 # `crusader_msgs` — ROS 2 message package
 
 The typed contracts between nodes. Four telemetry messages produced by
-`telemetry_bridge` from MAVProxy's rebroadcast, plus the perception pair that
-`crusader_perception/buoy_detector` fills.
+`telemetry_bridge` from MAVProxy's rebroadcast, the two perception pairs that
+`crusader_perception` fills, and the world-model pair that comes out the other side.
 
 ## Messages
 
@@ -16,6 +16,8 @@ The typed contracts between nodes. Four telemetry messages produced by
 | `Detection3DArray` | `buoy_detector` → fusion, world model | everything one camera frame saw. **Published every frame, empty or not**: empty means "alive, saw nothing", silence means the producer died |
 | `Cluster3D` | inside `Cluster3DArray` | one LiDAR object: centroid, AABB extent, point count, range. **No label and no confidence** — a cluster is a thing that is *there*, which is all the LiDAR can say; naming it is the camera's job |
 | `Cluster3DArray` | `lidar_cluster_node` → fusion, world model | one accumulated window, **nearest first** so a consumer that truncates keeps the near ones. Same every-window-empty-or-not contract as `Detection3DArray` |
+| `TrackedTarget` | inside `TrackedTargetArray` | one object anchored to the **earth**, not to the boat: lat/lon, world x/y/z, majority-vote label, which sensors have contributed, and how much to believe it. `id` is never reused, so a stored reference cannot be silently re-pointed at a different buoy |
+| `TrackedTargetArray` | `target_tracker` → `map_server`, cognition | the world model's current picture, nearest first, carrying the world-frame origin its metres are relative to. Same every-update-empty-or-not contract. Boat state is deliberately **not** in it — subscribe to `/crsd/pose` and `/crsd/attitude`, so one stream's staleness cannot hide behind another's freshness |
 
 Every message carries a `std_msgs/Header`. **The stamp is the time the MAVLink frame was
 RECEIVED**, not the time it was republished — a consumer judging freshness needs the age
@@ -50,4 +52,5 @@ that staying cheap costs nothing.
 |---|---|
 | any `.msg` field | full `colcon build` of both packages (`tools/scripts/rebuild.sh`), then restart every node — a mismatched message is a silent deserialization failure |
 | `LatLonHead.ground_speed` | `telemetry_bridge` is its only producer — check it still populates the field |
-| `Attitude` axes or units | `crusader_common/geo.py:body_to_world_ypr` is the only thing that interprets them; re-check its FRD conversion, then anything mapping detections |
+| `Attitude` axes or units | `crusader_common/geo.py:body_to_world_ypr` **and its transpose `world_to_body_ypr`** are the only things that interpret them; re-check the FRD conversion, then anything mapping detections |
+| `TrackedTarget`/`TrackedTargetArray` | `target_tracker` fills them and `map_server` draws them — rebuild both, and re-run `tools/bench/bench_world_model.py`, which needs no hardware |
