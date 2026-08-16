@@ -40,8 +40,47 @@ def declare(node, name, default, *, read_only=False, lo=None, hi=None,
         elif isinstance(default, int) and not isinstance(default, bool):
             d.integer_range = [IntegerRange(
                 from_value=int(lo), to_value=int(hi), step=0)]
-    node.declare_parameter(name, default, d)
+    try:
+        node.declare_parameter(name, default, d)
+    except Exception as e:
+        # rcl reports "out of range Min: 1.0, Max: 3600.0, value: 0.0" and
+        # stops there. That is true and nearly useless: the VALUE came from the
+        # YAML and the RANGE came from this node's code, so the two disagreeing
+        # is not a bad parameter, it is two halves of the build that are not
+        # the same age. Same treatment config.py gives a missing params file.
+        raise ValueError(range_conflict_message(name, default, lo, hi, e)) from e
     return node.get_parameter(name).value
+
+
+def range_conflict_message(name, value, lo, hi, error) -> str:
+    """Explain a declaration failure in terms of what a person can act on.
+
+    Pure and importable without ROS so the wording can be checked off-boat —
+    the whole point is that this text is read exactly once, on a boat, by
+    someone who wants to know what to type next.
+    """
+    lines = [f"could not declare parameter {name!r} = {value!r}", f"  {error}"]
+    if lo is not None and hi is not None and check_range(name, value,
+                                                         {name: (lo, hi)}):
+        lines += [
+            f"  This node's code declares {name} valid over [{lo}, {hi}], and "
+            f"the params file supplied {value!r}. Those come from two "
+            "different files:",
+            "    value:  crusader_bringup/config/crusader_params.yaml",
+            "    range:  this node's PARAM_SPEC",
+            "  They can only disagree if one is newer than the other — almost "
+            "always a STALE INSTALL SPACE, where the YAML was picked up and "
+            "the node code was not (or the reverse).",
+            "  Fix: tools/scripts/rebuild.sh, then run the node again.",
+            "  If a rebuild does not clear it, the YAML value really is out of "
+            "range: change the value, or widen the range in PARAM_SPEC.",
+        ]
+        try:
+            from crusader_common import config as _config
+            lines.append(f"  params file in use: {_config.DEFAULT_CONFIG_PATH}")
+        except Exception:
+            pass
+    return "\n".join(lines)
 
 
 def declare_from_config(node, defaults, spec):
