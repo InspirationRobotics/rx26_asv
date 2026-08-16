@@ -148,6 +148,35 @@ Windows, no rviz2, no X forwarding.
 8081 is `tools/lidar_view.py`. All three are useful at once — they are three different
 questions about one moment.
 
+### What it costs on the radio link
+
+Measured on the real `/state` path, at the 5 Hz default poll, **per connected browser**:
+
+| Scenario | `/state` | Per client |
+|---|---|---|
+| Idle at the dock | 0.3 KiB | 0.02 Mbps |
+| Typical run, 6 targets, trail saturated | 12.2 KiB | 0.51 Mbps |
+| Busy course, 20 targets | 15.5 KiB | 0.64 Mbps |
+| Worst case, `max_tracks: 64` | 25.5 KiB | 1.05 Mbps |
+
+Plus 13 KiB once, when the page loads. Against a 150 Mbps link that is 0.34% typical and
+0.7% worst case — but the number worth remembering is the **0.5 Mbps**, not the percentage,
+because a WiFi link's rated speed is a close-range PHY rate and what matters is what is
+left at the far end of a course.
+
+**The trail is 86% of every poll** — 600 points of unchanged history, resent five times a
+second. `trail_length` is `[DYN]`, so it is the one knob that moves this number without a
+restart: halving it roughly halves the bandwidth. Sending only new points would be the real
+fix and has not been done, because 0.5 Mbps has not yet been worth the protocol.
+
+The page holds **one poll in flight at a time**. `setInterval` fires on a wall clock and
+does not care whether the last request returned, so on a link that has gone slow the
+requests pile up faster than they drain, hit the browser's per-host connection cap, and
+freeze the map on stale data while the banner that should be warning about it waits behind
+the queue. Skipping a tick instead costs one frame of a 5 Hz display and keeps the request
+rate matched to what the link can carry — measured at 4 requests rather than 20 across four
+seconds of a two-second-latency link.
+
 **It has no publishers, no services and no timers that touch anything but its own trail
 buffer**, so it can be started and killed at any point in a session, including under way.
 A display that can affect the vehicle is a display nobody dares restart when it misbehaves.

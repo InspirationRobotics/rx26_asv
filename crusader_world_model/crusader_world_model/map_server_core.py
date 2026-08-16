@@ -342,10 +342,23 @@ function render(){
   el.textContent = msg; el.style.display = msg ? 'block' : 'none';
 }
 
+/* One poll in flight at a time. setInterval fires on a wall clock and does not
+   care whether the last request came back, so on a link that has gone slow --
+   the boat at the far end of the course, which is exactly when someone is
+   staring at this page -- requests pile up faster than they drain, hit the
+   browser's per-host connection cap, and the map freezes on stale data while
+   the banner that should be warning about it waits its turn behind the queue.
+   Skipping a tick instead costs one frame of a 5 Hz display and keeps the
+   request rate matched to what the link can actually carry. */
+var inflight = false;
 function poll(){
+  if(inflight) return;
+  inflight = true;
   fetch('/state').then(function(r){ return r.json(); }).then(function(j){
+    inflight = false;
     S = j; render(); draw();
   }).catch(function(){
+    inflight = false;
     /* The server going away must not look like a healthy boat sitting still. */
     var el = document.getElementById('banner');
     el.textContent = 'NO CONNECTION TO THE BOAT';
