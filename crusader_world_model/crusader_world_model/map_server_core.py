@@ -87,7 +87,7 @@ _PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
   <div class="row"><span>targets</span><span id="s_tgt">—</span></div>
   <h2>Targets (<span id="n">0</span>)</h2>
   <table><thead><tr><th>id</th><th>label</th><th>rng</th><th>brg</th>
-    <th>hits</th></tr></thead><tbody id="tbody"></tbody></table>
+    <th>hits</th><th>seen</th></tr></thead><tbody id="tbody"></tbody></table>
  </div>
  <div id="map">
   <canvas id="c"></canvas>
@@ -124,6 +124,13 @@ function colorOf(label){
   return '#9a9a9a';
 }
 function fmt(v, n){ return (v===null||v===undefined) ? '—' : v.toFixed(n); }
+/* Compact elapsed time. A track remembered across a whole run reaches minutes,
+   and "247.0" is harder to read at a glance than "4m". */
+function ago(s){
+  if(s < 60) return s.toFixed(0)+'s';
+  if(s < 3600) return Math.floor(s/60)+'m';
+  return Math.floor(s/3600)+'h';
+}
 
 /* ---- geometry: world metres (x east, y north) -> canvas pixels, north up ----
    All drawing works in CSS pixels (W, H). The backing store is scaled by the
@@ -214,10 +221,17 @@ function drawTargets(b){
   var items = S.targets.items || [];
   for(var i=0;i<items.length;i++){
     var t = items[i], X = sx(t.x), Y = sy(t.y);
-    /* Fading with time_since_seen makes staleness a property you can see at a
-       glance instead of a column to read. A track the boat has turned away
-       from stays on the map — it is still there — but stops looking current. */
-    var fade = Math.max(0.25, 1 - t.unseen/8);
+    /* A track the boat has turned away from is REMEMBERED, not stale, and the
+       map has to say which. Fading alone could not: the old curve hit its floor
+       after six seconds, so a perfectly good remembered buoy looked like it had
+       nearly gone, and "it disappears when the camera looks away" was the
+       natural reading.
+       So the fade is now gentle and stops well short of invisible, and anything
+       out of sight for more than a moment gets an explicit dashed halo and its
+       age in seconds. Remembered objects stay legible; you can still tell at a
+       glance which ones the boat is looking at right now. */
+    var remembered = t.unseen > 2.0;
+    var fade = Math.max(0.55, 1 - t.unseen/60);
     cx.globalAlpha = fade;
     cx.fillStyle = colorOf(t.label);
     cx.strokeStyle = t.confirmed ? '#fff' : '#666';
@@ -232,9 +246,21 @@ function drawTargets(b){
       cx.beginPath(); cx.arc(X, Y, t.stddev*scale, 0, 6.2832); cx.stroke();
       cx.globalAlpha = fade;
     }
+    /* Dashed halo = "held from memory, not in view". Drawn outside the marker
+       so it never obscures the position itself. */
+    if(remembered){
+      cx.strokeStyle = colorOf(t.label); cx.lineWidth = 1;
+      cx.setLineDash([3,3]); cx.globalAlpha = fade*0.7;
+      cx.beginPath(); cx.arc(X, Y, 11, 0, 6.2832); cx.stroke();
+      cx.setLineDash([]); cx.globalAlpha = fade;
+    }
     cx.fillStyle = '#ddd'; cx.font = '11px ui-monospace,monospace';
-    cx.fillText('#'+t.id+' '+(t.label||'unknown'), X+10, Y-4);
-    if(b.ok) cx.fillText(fmt(t.range,1)+' m', X+10, Y+8);
+    cx.fillText('#'+t.id+' '+(t.label||'unknown'), X+14, Y-4);
+    if(b.ok) cx.fillText(fmt(t.range,1)+' m', X+14, Y+8);
+    if(remembered){
+      cx.fillStyle = '#8a8a8a';
+      cx.fillText('seen '+ago(t.unseen)+' ago', X+14, Y+20);
+    }
     cx.globalAlpha = 1;
   }
 }
@@ -296,14 +322,17 @@ function render(){
 
   var rows = '';
   (t.items||[]).forEach(function(x){
+    /* "seen" is blank while the boat is actually looking at it, so the column
+       reads as a list of what is currently OUT of view rather than a wall of
+       near-zero numbers. */
     rows += '<tr class="'+(x.confirmed?'':'tent')+'">'
       + '<td><span class="dot" style="background:'+colorOf(x.label)+'"></span>'
       + x.id + '</td><td>' + (x.label||'unknown') + '</td><td>'
       + fmt(x.range,1) + '</td><td>' + fmt(x.bearing,0) + '°</td><td>'
-      + x.hits + '</td></tr>';
+      + x.hits + '</td><td>' + (x.unseen > 2 ? ago(x.unseen) : '') + '</td></tr>';
   });
   document.getElementById('tbody').innerHTML = rows
-    || '<tr><td colspan="5" style="color:#666">nothing tracked</td></tr>';
+    || '<tr><td colspan="6" style="color:#666">nothing tracked</td></tr>';
 
   var msg = '';
   if(!b.ok) msg = 'POSE STALE — vessel position is NOT current';

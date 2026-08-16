@@ -48,6 +48,24 @@ target 1.7 m, which is most of a buoy gate.
 `1/hits`, and two decay timeouts. This is what turns a stream of sightings into an object
 that persists while the boat looks away — the thing a mission actually needs.
 
+### Remembering the course
+
+`track_timeout_s: 0` (the default) means a **confirmed track never expires**: the boat
+remembers the whole field for the run, and a buoy re-entering the camera's FOV updates the
+*original* track instead of spawning a second one beside it. Set a positive number of
+seconds to go back to forgetting.
+
+Tentative tracks still expire on `tentative_timeout_s`, always — that guard cannot be
+switched off, because without it one wave crest that clears `confirm_hits` would sit on the
+map permanently. **With immortal tracks, `confirm_hits` is the only thing between a
+reflection and a permanent phantom.** Raise it if phantoms accumulate.
+
+The knob that decides whether a re-sighting *lands* on the remembered track is
+`assoc_radius_m`: the new observation must fall within it of the stored position. At the
+3.0 m default a re-sighting up to 2.9 m off re-associates and 3.5 m splits into a second
+track. If returning to a buoy reliably produces a duplicate a few metres from the original,
+that is this gate, not the memory.
+
 ### Why not a Kalman filter
 
 The targets are mostly **static** objects seen from a moving platform whose own position is

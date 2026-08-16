@@ -102,8 +102,8 @@ class TrackerParams:
     pos_alpha: float = 0.30          # floor on the position EMA gain
     vel_alpha: float = 0.20          # velocity EMA gain
     confirm_hits: int = 3            # sightings before a track is CONFIRMED
-    tentative_timeout_s: float = 3.0  # unconfirmed tracks expire fast
-    track_timeout_s: float = 30.0    # confirmed tracks are held much longer
+    tentative_timeout_s: float = 3.0  # unconfirmed tracks expire fast; ALWAYS
+    track_timeout_s: float = 0.0     # confirmed: 0 = never expire. See _prune
     max_tracks: int = 64             # hard cap; see _prune
 
 
@@ -617,18 +617,37 @@ class TargetTracker:
         from — dropping it because it left the camera's 80 degree field is how
         the boat forgets the buoy it just rounded.
 
+        track_timeout_s <= 0 means a CONFIRMED track NEVER expires — the boat
+        remembers the whole course for the life of the run. That is the right
+        posture for a buoy field, which does not move and which the boat will
+        leave and return to many times, and it is what makes a re-sighting
+        update the ORIGINAL track instead of creating a second one beside it.
+
+        Note what it does NOT do: tentative tracks still expire on
+        tentative_timeout_s, always. That guard cannot be switched off, because
+        with it gone a single wave crest that clears confirm_hits would sit on
+        the map permanently. With immortal tracks, confirm_hits is the only
+        thing standing between a reflection and a phantom obstacle that never
+        goes away — raise it if phantoms start accumulating.
+
         The cap is a last-resort guard against a runaway (a shoreline
         clustering into hundreds of anonymous objects), not a normal path: the
         tracks kept are the confirmed ones, then the most recently seen. It is
         logged by the caller through the health topic because silently
         forgetting an obstacle is exactly the failure this package's README
-        forbids.
+        forbids. It applies to immortal tracks too — "never expires" is not a
+        promise this can keep against an unbounded number of them.
         """
         before = len(self.tracks)
         keep = []
         for t in self.tracks:
-            timeout = (self.p.track_timeout_s if t.confirmed(self.p)
-                       else self.p.tentative_timeout_s)
+            if t.confirmed(self.p):
+                if self.p.track_timeout_s <= 0:
+                    keep.append(t)                # remembered for the whole run
+                    continue
+                timeout = self.p.track_timeout_s
+            else:
+                timeout = self.p.tentative_timeout_s
             if now - t.last_seen <= timeout:
                 keep.append(t)
         self.tracks = keep

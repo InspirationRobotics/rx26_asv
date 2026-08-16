@@ -119,8 +119,10 @@ PARAM_SPEC = {
                          description="sightings before CONFIRMED"),
     "tentative_timeout_s": dict(read_only=False, lo=0.5, hi=60.0,
                                 description="unconfirmed tracks expire fast"),
-    "track_timeout_s": dict(read_only=False, lo=1.0, hi=3600.0,
-                            description="confirmed tracks are held this long"),
+    "track_timeout_s": dict(read_only=False, lo=0.0, hi=3600.0,
+                            description="confirmed tracks are held this long; "
+                                        "0 = never expire (remember the whole "
+                                        "course for the run)"),
     "max_tracks": dict(read_only=False, lo=1, hi=1000,
                        description="hard cap; runaway guard, not a normal path"),
     "health_period_s": dict(read_only=False, lo=1.0, hi=60.0,

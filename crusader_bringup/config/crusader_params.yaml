@@ -300,9 +300,20 @@ target_tracker:
     tentative_timeout_s: 3.0               # [DYN] unconfirmed tracks expire fast
                                            #       — one frame of detector noise
                                            #       must not sit on the map
-    track_timeout_s: 30.0                  # [DYN] confirmed tracks are held long
-                                           #       past leaving the camera's FOV;
-                                           #       persisting is the whole point
+    track_timeout_s: 0.0                   # [DYN] 0 = a CONFIRMED track NEVER
+                                           #       expires: the boat remembers
+                                           #       the whole course for the run,
+                                           #       so a buoy re-entering the FOV
+                                           #       updates the ORIGINAL track
+                                           #       rather than spawning a second
+                                           #       one beside it. Set a positive
+                                           #       number of seconds to go back
+                                           #       to forgetting.
+                                           #       WITH THIS AT 0, confirm_hits
+                                           #       is the ONLY thing between a
+                                           #       wave crest and a permanent
+                                           #       phantom — raise it if
+                                           #       phantoms accumulate.
     max_tracks: 64                         # [DYN] runaway guard, not a normal
                                            #       path (a shoreline clustering
                                            #       into hundreds of objects)
