@@ -33,6 +33,9 @@ docker exec "$CONTAINER" bash -lc \
 import crusader_common, crusader_fcu, crusader_behavior
 import crusader_perception, crusader_world_model
 from crusader_msgs.msg import Attitude, FcuStatus, LatLonHead, RcChannels
+from crusader_msgs.msg import Detection3D, Detection3DArray
+from crusader_msgs.msg import Cluster3D, Cluster3DArray
+from crusader_msgs.msg import TrackedTarget, TrackedTargetArray
 print(\"import ok\")'"
 
 echo "== done. Restart affected nodes/launch for changes to take effect. =="
