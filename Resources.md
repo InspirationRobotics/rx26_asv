@@ -31,7 +31,7 @@ There's a relay that controls the power to ESCs and it requires the magnetic coi
 Either will cut the power to ESCs
 
 # Device information
-Jetson WIFI IP: 192.168.100.109
+Jetson WIFI IP: 192.168.8.109
 Jetson ETH IP: 192.168.1.5
 LiDar IP: 192.168.1.166
 

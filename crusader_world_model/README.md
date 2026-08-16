@@ -144,18 +144,24 @@ from the lat/lon they carry. The two nodes start at different moments, so their 
 differ; lat/lon is the frame they genuinely share, and metres are always relative to
 somebody's choice.
 
-## Verifying it without a boat
+## Verifying it before the sensors are trustworthy
 
 ```bash
 python3 tools/bench/bench_world_model.py
 ```
 
-A simulated boat circling an invented buoy field, publishing all five real topics at
-roughly the real rates in the real frames. **It prints the ground truth at startup** — that
-is what makes it a check rather than a demo. A track that settles within a metre of its
-truth row, keeps its id, and does not split in two when the boat circles it, is a tracker
-that works. `--no-camera`, `--no-lidar`, `--drop-pose-after` and `--chop` reproduce the four
-degraded modes on purpose.
+An invented buoy field around the **real** boat: it subscribes to `/crsd/pose` and
+`/crsd/attitude` and publishes only `oak/detections` and `crsd/lidar_clusters`, computing
+what the two sensors would have reported. Real RTK noise, real moving-baseline yaw with its
+real latency, real hull motion — a simulated boat moves perfectly, which is the one kind
+this tracker will never see. It does not contend with `telemetry_bridge` for `/crsd/pose`.
+
+The field is anchored at the first fix and rotated to the heading at that instant, so the
+buoys land **ahead of the bow** wherever the boat is. **It prints the ground truth when it
+anchors** — that is what makes it a check rather than a demo.
+
+`--sim-pose` invents the vessel too, for a desk run with no boat; `--no-camera` and
+`--no-lidar` force the single-sensor paths.
 
 **What it cannot prove:** the bench builds detections with `geo.world_to_body_ypr`, the exact
 transpose of the transform the tracker runs, so a sign error shared by both cancels and the

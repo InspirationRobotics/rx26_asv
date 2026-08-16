@@ -4,32 +4,50 @@ Two unrelated jobs live here. The four `bench_*_{no,}ros.py` scripts measure **w
 frames go**; `bench_world_model.py` **invents** frames so the world model can be driven
 with no hardware at all.
 
-## `bench_world_model.py` — a boat and a buoy field, invented
+## `bench_world_model.py` — an invented buoy field around the REAL boat
 
 ```bash
 python3 tools/bench/bench_world_model.py
 ```
 
-Publishes `/crsd/pose`, `/crsd/attitude`, `/crsd/fcu_status`, `oak/detections` and
-`crsd/lidar_clusters` for a simulated boat circling an invented buoy field, at roughly the
-real rates and in the real frames. Run `target_tracker` and `map_server` alongside it and
-open `http://localhost:8082`.
+**It uses the real vessel.** It subscribes to `/crsd/pose` and `/crsd/attitude` and
+publishes only the two sensor topics — `oak/detections` and `crsd/lidar_clusters` —
+computing what the camera and LiDAR *would* have reported for a field of buoys that isn't
+there. Run `core.launch.py` as normal, then `target_tracker`, `map_server` and this.
 
-**It prints the ground truth at startup**, which is what makes it a check rather than a
-demo: the tracker's output is a number you can compare against a number you chose. A track
-that settles within a metre of its truth row, keeps its id, and does not split in two when
-the boat circles it, is a tracker that works.
+That is a far better test than a simulated boat: the pose carries real RTK noise, the yaw
+is the real moving-baseline solution with its real latency, and the roll and pitch are the
+real hull in the real water. A synthetic boat moves perfectly, which is the one kind of
+boat the tracker will never see. It also means the bench does not contend with
+`telemetry_bridge` for `/crsd/pose` — two publishers on that topic make the boat teleport.
 
-The circle is not decoration. A straight run past a buoy never tests the two things most
-likely to be wrong — whether a track survives leaving the field of view, and whether it is
-still *one* track when it comes back into view from a different bearing.
+**The field is anchored at the first fix and rotated to the heading at that instant**, so
+the buoys are laid out ahead of the bow wherever the boat happens to be — pointing the boat
+anywhere and starting the bench puts targets in front of it. `FIELD` is written as
+`(right, ahead)` in metres so the layout reads the way you would describe it from the helm.
+Anchoring to fixed lat/lon would put the field in Florida while the boat sits in a car park.
+
+**It prints the ground truth when it anchors**, which is what makes it a check rather than
+a demo: the tracker's output is a number you can compare against a number you chose. A
+track that settles within a metre of its truth row, keeps its id, and does not split in two
+as the boat swings past it, is a tracker that works.
 
 | Flag | Reproduces |
 |---|---|
 | `--no-camera` | LiDAR only — every track goes anonymous (empty label) |
 | `--no-lidar` | camera only — ranges carry the stereo bias, targets sit beyond truth and wander. Nothing is dropped; that is the package invariant |
-| `--drop-pose-after N` | a dead bridge. The tracker must stop ingesting, the map must go red and grey the boat out, and existing tracks must expire on schedule |
-| `--chop` | roll and pitch. With compensation working the targets hold still; without it they breathe in and out by a metre or two at 20 m |
+| `--sim-pose` | invent the **vessel** too: a boat circling the field, publishing `/crsd/pose` itself. Desk mode, for a laptop with no boat. **Do not use it while the core stack is up** |
+
+`--chop` and `--drop-pose-after` apply only under `--sim-pose` and the script **errors**
+rather than ignoring them — a `--chop` run that quietly did nothing because the real
+attitude was in use would read as "roll compensation works", which is the opposite of what
+it proved. On the real boat, rock the hull for chop and stop `telemetry_bridge` for a
+dropout.
+
+Under `--sim-pose` the boat circles rather than running straight, because a straight run
+past a buoy never tests the two things most likely to be wrong — whether a track survives
+leaving the field of view, and whether it is still *one* track when it comes back into view
+from a different bearing. On the real boat you get that by driving a loop.
 
 **What it cannot prove:** it builds detections with `geo.world_to_body_ypr`, the exact
 transpose of the transform the tracker runs, so a sign error shared by both cancels and the
