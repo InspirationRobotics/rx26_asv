@@ -6,7 +6,7 @@ change here would only make sense on Crusader, it belongs in a domain package in
 | Module | What it is |
 |---|---|
 | `config.py` | Loads `crusader_params.yaml` so node code declares defaults *from* the file the launch system loads. Read its header before touching path resolution. |
-| `param_utils.py` | `declare_from_config` + range validation. Rejects a YAML key with no declared posture at node start. |
+| `param_utils.py` | `declare_from_config` + range validation. Rejects a YAML key with no declared posture at node start. When a YAML value falls outside the range its node's code declares, it says so as a **version skew** and names `rebuild.sh` — the value and the range live in different files and can only disagree if one is staler than the other. |
 | `node_main.py` | `run_node` — the lifecycle wrapper, with deterministic teardown. |
 | `stream_cache.py` | Freshness-gated value cache. The thing that makes silence stay silent. |
 | `drop_latch.py` | The autonomy-drop latch state machine (Gate G1). |

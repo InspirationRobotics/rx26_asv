@@ -60,8 +60,13 @@ def range_conflict_message(name, value, lo, hi, error) -> str:
     someone who wants to know what to type next.
     """
     lines = [f"could not declare parameter {name!r} = {value!r}", f"  {error}"]
-    if lo is not None and hi is not None and check_range(name, value,
-                                                         {name: (lo, hi)}):
+    # Only a NUMERIC value that is genuinely outside the declared range points
+    # at a version skew. check_range also rejects wrong types, and a string
+    # where a float was expected is a different mistake that a rebuild will
+    # not fix — telling someone to rebuild for it wastes the trip.
+    numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
+    if (lo is not None and hi is not None and numeric
+            and check_range(name, value, {name: (lo, hi)})):
         lines += [
             f"  This node's code declares {name} valid over [{lo}, {hi}], and "
             f"the params file supplied {value!r}. Those come from two "
