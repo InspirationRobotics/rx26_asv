@@ -58,6 +58,13 @@ class NodeSpec:
     protected: bool = False        # startable here, never stoppable here
     exclusive: str = ""            # tag; two nodes sharing one cannot co-run
     port: int = 0                  # serves a browser view on this port, if any
+    # Path of the raw MJPEG stream on that port, for the RECORDER only. The
+    # page embeds `/` and never needs this, but a recorder pulling frames has
+    # to name the stream itself — and the two servers disagree. buoy_detector
+    # streams from ANY non-root path; mjpeg_server routes /stream/<view> and
+    # 404s on a name it does not have. lidar_view's views are plan/elev/both,
+    # so the obvious guess of /stream/view records nothing from it, silently.
+    stream_path: str = ""
     note: str = ""
 
 
@@ -77,6 +84,7 @@ REGISTRY = (
     # ---- perception ----
     NodeSpec("buoy_detector", "buoy_detector", "crusader_perception",
              "buoy_detector", "perception", exclusive="oakd", port=8080,
+             stream_path="/stream",
              note="detections + annotated view; owns the OAK-D"),
     NodeSpec("oakd_publisher", "oakd_publisher", "crusader_perception",
              "oakd_publisher", "perception", exclusive="oakd",
@@ -93,9 +101,11 @@ REGISTRY = (
     # ---- viewers: tools/ scripts, not ROS entry points ----
     NodeSpec("oak_view", "oak_view", "tools", "oak_view.py", "viewers",
              kind="script", exclusive="port8080", port=8080,
+             stream_path="/stream/view",      # bare FrameBuffer -> named "view"
              note="re-serves a camera topic; does NOT open the device"),
     NodeSpec("lidar_view", "lidar_view", "tools", "lidar_view.py", "viewers",
              kind="script", port=8081,
+             stream_path="/stream/plan",      # views: plan / elev / both
              note="MID360 cloud, plan and elevation"),
 )
 

@@ -261,15 +261,28 @@ function renderTel(){
 /* ---------------- tabs 3 and 4: the viewers ---------------- */
 function renderViewer(pane, cfg, tabName){
   var e = el(pane);
-  if(tab !== tabName){ e.innerHTML = ''; return; }   /* drop the connection */
-  if(cfg && cfg.source){
-    var url = location.protocol+'//'+location.hostname+':'+cfg.port+'/';
-    if(e.dataset.src === url) return;                /* don't restart a stream */
-    e.dataset.src = url;
+  if(tab !== tabName){
+    /* Tear the iframe down so the MJPEG connection actually closes — a hidden
+       one keeps streaming and the Jetson keeps encoding for nobody.
+       dataset.src MUST be cleared with it. Leaving it set made the guard below
+       match on the way back in, so the pane was never rebuilt: the tab was
+       blank from the SECOND visit onwards while the viewer's own URL worked
+       perfectly, which points the finger at the viewer instead of at this. */
+    if(e.dataset.src !== ''){ e.innerHTML = ''; e.dataset.src = ''; }
+    return;
+  }
+  var url = (cfg && cfg.source)
+    ? location.protocol+'//'+location.hostname+':'+cfg.port+'/' : '';
+  if(e.dataset.src === url) return;                  /* unchanged: leave it */
+  e.dataset.src = url;
+  if(url){
+    /* An iframe of the viewer's OWN page, not a bare <img> of its stream: the
+       two servers publish different stream paths (buoy_detector streams from
+       any non-root path, mjpeg_server routes /stream/<view>), and lidar_view's
+       page carries its own plan/elevation tabs worth keeping. */
     e.innerHTML = '<div class="viewer"><iframe src="'+url+'" style="width:100%;'
       + 'height:100%;border:0;background:#111"></iframe></div>';
   } else {
-    e.dataset.src = '';
     var btns = (cfg && cfg.candidates || []).map(function(c){
       return '<button class="go" onclick="startNode(\''+c.name+'\')">Start '
            + esc(c.label)+'</button>'; }).join(' ');

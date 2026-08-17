@@ -291,8 +291,10 @@ class GroundStation(Node):
                            ("lidar", reg.LIDAR_TAB_SOURCES)):
             src = reg.tab_source(names, running)
             if src:
-                port = reg.BY_NAME[src].port
-                sources[key] = f"http://127.0.0.1:{port}/stream/view"
+                spec = reg.BY_NAME[src]
+                if spec.port and spec.stream_path:
+                    sources[key] = (f"http://127.0.0.1:{spec.port}"
+                                    f"{spec.stream_path}")
         return sources
 
     # ---------- the snapshot ----------
