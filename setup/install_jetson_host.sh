@@ -84,11 +84,20 @@ if docker inspect "$CRSD_CONTAINER" >/dev/null 2>&1; then
   case "$MOUNT_LIST" in *"$POWER_SOCK"*) ;; *) MISSING="$MISSING power-socket" ;; esac
   if [[ -n "$MISSING" ]]; then
     echo "WARN: container '$CRSD_CONTAINER' is MISSING mounts:$MISSING"
-    echo "      Consequences:"
-    echo "        workspace     -> ground station recordings live only inside the"
-    echo "                         container and are DESTROYED by 'docker rm'."
-    echo "        power-socket  -> the System tab cannot shut the Jetson down;"
-    echo "                         it will show 'power helper unreachable'."
+    echo "      Consequences of what is ACTUALLY missing:"
+    # Only the missing ones. Listing both consequences whatever is absent reads
+    # as "recordings will be destroyed" to someone whose workspace mount is
+    # fine, which is the opposite of reassuring and sends them recreating a
+    # container they did not need to touch.
+    case "$MISSING" in *workspace*)
+      echo "        workspace     -> ground station recordings live only inside the"
+      echo "                         container and are DESTROYED by 'docker rm'." ;;
+    esac
+    case "$MISSING" in *power-socket*)
+      echo "        power-socket  -> the System tab cannot shut the Jetson down;"
+      echo "                         it will show 'power helper unreachable'."
+      echo "                         Everything else on the page works." ;;
+    esac
     echo "      To fix, recreate the container with BOTH mounts (adjust the rest"
     echo "      of the flags to match how yours was built):"
     echo
