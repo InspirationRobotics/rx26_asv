@@ -8,9 +8,9 @@ container.
 **What runs today:** the status, telemetry and safety layer — four nodes that have all
 been on the water — plus `crusader_perception`, which owns the OAK-D and publishes
 detections rather than frames. **What is written but unproven:** the world model's fusion
-and target tracking, and the map display that renders them to a laptop — bench-driven from
-invented detections, never on the water, and deliberately out of `core.launch.py`. The
-occupancy grid is still unwritten. **What is elsewhere:** the MID360 only. A second
+and target tracking, and the ground station that renders the whole boat to a laptop —
+bench-driven from invented detections, never on the water, and deliberately out of
+`core.launch.py`. The occupancy grid is still unwritten. **What is elsewhere:** the MID360 only. A second
 container drives that LiDAR and publishes its point cloud; consuming it is the unwritten
 half of perception.
 
@@ -20,18 +20,20 @@ Before developing ANY code, read [Format](#format) and the standing
 
 ## Packages
 
-Seven packages, laid out along the architecture: perception → world model → cognition →
-behavior, with a shared library underneath and a bringup package on top. All seven build
+Eight packages, laid out along the architecture: perception → world model → cognition →
+behavior, with a shared library underneath, a ground station beside it and a bringup
+package on top. All eight build
 and run in the `asv` container (`--packages-up-to crusader_bringup`).
 
 | Package | Contains | State |
 |---|---|---|
-| [`crusader_msgs`](crusader_msgs/README.md) | Message definitions. Depends on nothing but `std_msgs`, so any image can build it cheaply | 6 msgs |
+| [`crusader_msgs`](crusader_msgs/README.md) | Message definitions. Depends on nothing but `std_msgs`, so any image can build it cheaply | 10 msgs |
 | [`crusader_common`](crusader_common/README.md) | Shared plumbing: params loader, node lifecycle, stream cache, drop latch, geodesy. No nodes | library |
 | [`crusader_fcu`](crusader_fcu/README.md) | `telemetry_bridge` — the only thing that speaks MAVLink. Localization source *and* Movement actuator | **field** |
 | [`crusader_perception`](crusader_perception/README.md) | Owns the OAK-D and detects in it: `oakd_publisher` → raw frames; `buoy_detector` → `oak/detections` in `camera_link`. Not launched — the two contend for the camera | 2 nodes |
-| [`crusader_world_model`](crusader_world_model/README.md) | `target_tracker` → camera+LiDAR fusion and earth-anchored target tracks; `map_server` → those tracks and the vessel state in a laptop browser (`:8082`). Sensor-agnostic, driven off-boat by `tools/bench/bench_world_model.py`. Occupancy grid still unwritten | 2 nodes |
+| [`crusader_world_model`](crusader_world_model/README.md) | `target_tracker` → camera+LiDAR fusion and earth-anchored target tracks on `crsd/world_targets`. Sensor-agnostic, driven off-boat by `tools/bench/bench_world_model.py`. Occupancy grid still unwritten | 1 node |
 | [`crusader_behavior`](crusader_behavior/README.md) | `safety/` RC-loss force-disarm watchdog; `indicator/` LED status stack | **field** |
+| [`crusader_groundstation`](crusader_groundstation/README.md) | `ground_station` — one web page on `:8090`: node control, telemetry, the camera and LiDAR viewers, the map, and host power. The one package allowed to *know about* every other while importing none | 1 node |
 | [`crusader_bringup`](crusader_bringup/README.md) | Launch files + the params YAML. Ships no code; build entry point | — |
 
 Cognition (missions, mission planner, RoboCommand interface) has no package yet — its
@@ -44,7 +46,7 @@ Every package has its own README with its design rationale and a change-impact t
 This repo is **a set of source dirs inside a colcon workspace**, not the workspace itself.
 On the Jetson it lives at `~/robotx_ws/src/rx26_asv`, alongside any other package sources.
 The repo root is deliberately **not** a colcon package — that is what lets `colcon build`
-discover all seven packages instead of stopping at the first one it finds.
+discover all eight packages instead of stopping at the first one it finds.
 
 ```
 ~/robotx_ws/                    # colcon WORKSPACE (not this repo; holds build/ install/ log/)
@@ -54,7 +56,8 @@ discover all seven packages instead of stopping at the first one it finds.
      |    |-- crusader_common/      # ament_python: the shared library
      |    |-- crusader_fcu/         # ament_python: telemetry_bridge
      |    |-- crusader_perception/  # ament_python: OAK-D driver + buoy detection
-     |    |-- crusader_world_model/ # ament_python: EMPTY, scaffolded
+     |    |-- crusader_world_model/ # ament_python: fusion + target tracking
+     |    |-- crusader_groundstation/# ament_python: the operator's web page
      |    |-- crusader_behavior/    # ament_python: safety/ + indicator/
      |    |-- crusader_bringup/     # ament_cmake: launch/ + config/
      |    |-- docs/                 # setup guide, operations manual, G1 bench procedure
@@ -92,7 +95,7 @@ on the boat, and `core.launch.py` is for what has.
 | `oakd_publisher` *or* `buoy_detector` | `crusader_perception` | one camera, one client — an operator choice per session |
 | `lidar_cluster_node` | `crusader_perception` | unproven on the boat |
 | `target_tracker` | `crusader_world_model` | unproven on the boat |
-| `map_server` | `crusader_world_model` | unproven; also a display, so it is started when a human wants to watch |
+| `ground_station` | `crusader_groundstation` | unproven; also a display, so it is started when a human wants to watch |
 
 ## Usage
 

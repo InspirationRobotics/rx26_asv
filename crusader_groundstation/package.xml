@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>crusader_groundstation</name>
+  <version>0.5.0</version>
+  <description>
+    The operator's window onto the boat: one web page, served from the Jetson,
+    that shows what is running, what the sensors say, where the boat and its
+    targets are, and how to power the machine down. The laptop needs a browser
+    and nothing else.
+
+    The one package allowed to KNOW ABOUT every other package - it names their
+    nodes in order to launch them - while IMPORTING none of them. That is what
+    keeps it off the dependency graph of the code it starts.
+  </description>
+  <maintainer email="brandont3927@gmail.com">Team Inspiration</maintainer>
+  <license>MIT</license>
+  <url type="repository">https://github.com/InspirationRobotics/rx26_asv</url>
+
+  <depend>rclpy</depend>
+  <!-- /rosout carries rcl_interfaces/msg/Log; the Logs tab reads it
+       instead of journalctl, which a container cannot reach. -->
+  <depend>rcl_interfaces</depend>
+  <depend>crusader_msgs</depend>
+  <depend>crusader_common</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

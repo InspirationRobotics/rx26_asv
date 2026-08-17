@@ -1,0 +1,41 @@
+# /etc/systemd/system/crsd-power.service  (Jetson host)
+#
+# TEMPLATE: __CRSD_REPO__ is substituted by setup/install_jetson_host.sh at
+# install time. Do NOT `install` this file verbatim — the placeholder must be
+# expanded.
+#
+# The one privileged piece behind the ground station's shutdown and reboot
+# buttons. Runs as root on the HOST, outside every container, and offers a Unix
+# socket with exactly two verbs. See tools/scripts/crsd_power_helper.py for why
+# this exists rather than running `asv` --privileged: the alternative buys one
+# button by handing every process in that container root on the Jetson.
+#
+# Ordered after nothing in the boat chain on purpose. It shares no device with
+# MAVProxy or the LiDAR, and coupling it to them would mean a fault in either
+# takes away the ability to shut the machine down cleanly — which is exactly
+# when you want it most.
+[Unit]
+Description=Crusader power helper (shutdown/reboot socket for the ground station)
+After=local-fs.target
+
+[Service]
+Type=simple
+# root, deliberately and minimally: systemctl poweroff needs it, and this
+# program exists so that NOTHING ELSE does. It never interpolates client input
+# into a command — read the module docstring before editing.
+User=root
+# CRSD_POWER_SOCKET / CRSD_POWER_GROUP live in /etc/default/crusader alongside
+# the other CRSD_* settings, so moving the socket needs no unit edit.
+EnvironmentFile=-/etc/default/crusader
+ExecStart=/usr/bin/python3 __CRSD_REPO__/tools/scripts/crsd_power_helper.py
+# RuntimeDirectory gives us /run/crsd owned by root and cleaned up on stop;
+# the default socket path sits in /run directly, which systemd also manages.
+Restart=on-failure
+RestartSec=5
+# A helper that dies while the boat is running should come back, but a helper
+# crash-looping is a bug, not a condition to paper over.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

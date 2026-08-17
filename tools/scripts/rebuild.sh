@@ -31,7 +31,7 @@ echo "== import smoke test =="
 docker exec "$CONTAINER" bash -lc \
   "cd $WS && source install/setup.bash && python3 -c '
 import crusader_common, crusader_fcu, crusader_behavior
-import crusader_perception, crusader_world_model
+import crusader_perception, crusader_world_model, crusader_groundstation
 from crusader_msgs.msg import Attitude, FcuStatus, LatLonHead, RcChannels
 from crusader_msgs.msg import Detection3D, Detection3DArray
 from crusader_msgs.msg import Cluster3D, Cluster3DArray

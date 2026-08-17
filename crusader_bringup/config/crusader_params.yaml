@@ -319,32 +319,76 @@ target_tracker:
                                            #       into hundreds of objects)
     health_period_s: 5.0                   # [DYN] JSON stats publish period
 
-# ---- World model: map_server — the boat and its targets in a laptop browser ----
-# Read-only display: four subscriptions, no publishers, no services. Safe to
-# start and kill mid-session. http://<JETSON_IP>:8082
-map_server:
+# ---- Ground station: the operator's window onto the whole boat ----
+# Read-only over ROS: four subscriptions, no publishers. Its only outward
+# effects are the node processes it spawns and the two power verbs it can hand
+# to the HOST helper (tools/scripts/crsd_power_helper.py). Both are gated in
+# the page AND re-checked server-side, because a rule enforced only in
+# JavaScript is decoration.
+#
+# Replaces crusader_world_model's map_server, which is now this node's map tab.
+ground_station:
   ros__parameters:
-    port: 8082                             # [RO] 8080 = buoy_detector/oak_view,
-                                           #      8081 = lidar_view. Three
-                                           #      servers, three ports; all three
-                                           #      are useful at once.
+    port: 8090                             # [RO] clear of the viewers it embeds:
+                                           #      8080 = buoy_detector/oak_view,
+                                           #      8081 = lidar_view
     bind_host: "0.0.0.0"                   # [RO] must NOT be 127.0.0.1 or the
                                            #      laptop cannot reach it
     targets_topic: "crsd/world_targets"    # [RO] = target_tracker.targets_topic
+    tools_dir: "/root/robotx_ws/src/rx26_asv/tools"   # [RO] where the viewer
+                                           #      scripts live INSIDE the asv
+                                           #      container. Wrong path = the
+                                           #      viewer tabs fail to start with
+                                           #      a file-not-found, nothing else.
+    power_socket: "/run/crsd-power.sock"   # [RO] host helper socket, bind-mounted
+                                           #      into this container. A container
+                                           #      CANNOT power off the Jetson on
+                                           #      its own; see crsd_power_helper.
+    allow_power: true                      # [RO] master switch for the power tab.
+                                           #      Set false on any machine where
+                                           #      a browser must never be able to
+                                           #      halt the host.
+    disk_path: "/"                         # [RO] filesystem reported as free.
+                                           #      Inside a container this is the
+                                           #      CONTAINER's view, so the tab
+                                           #      prints the path it measured.
     pose_timeout_s: 1.0                    # [RO] = shared.pose_timeout_s
     attitude_timeout_s: 1.0                # [RO] stale -> attitude readout greys
-    targets_timeout_s: 3.0                 # [RO] stale -> "world model silent".
-                                           #      Well over target_tracker's
-                                           #      10 Hz tick, so a scheduling
-                                           #      hiccup is not an alarm.
-    status_timeout_s: 1.0                  # [RO] mode/armed readout
-    poll_period_s: 0.2                     # [RO] how often the browser asks for
-                                           #      /state. 5 Hz is smooth for a
-                                           #      boat and ~1 KB per poll.
+    status_timeout_s: 1.0                  # [RO] mode/armed readout. ALSO the
+                                           #      power interlock: unknown armed
+                                           #      state locks power, because a
+                                           #      missing FcuStatus usually means
+                                           #      the bridge is down, which is not
+                                           #      evidence the boat is safe.
+    targets_timeout_s: 3.0                 # [RO] stale -> map says so
+    poll_period_s: 0.2                     # [RO] browser -> /state. 5 Hz is
+                                           #      ~0.5 Mbps with a full trail
+    graph_period_s: 1.0                    # [DYN] how often the ROS node graph is
+                                           #       scanned. Once per browser poll
+                                           #       per client would put discovery
+                                           #       traffic on the wire in
+                                           #       proportion to viewers.
     trail_length: 600                      # [DYN] wake points kept
-    trail_min_move_m: 0.5                  # [DYN] distance-gated, not time-gated:
-                                           #       station-keeping must not spend
-                                           #       the whole buffer on one spot
+    trail_min_move_m: 0.5                  # [DYN] distance-gated, not time-gated
+    log_capacity: 1500                     # [RO] /rosout lines kept in the ring.
+                                           #      Bounded because a node in a
+                                           #      failure loop emits thousands a
+                                           #      minute, and running the Jetson
+                                           #      out of memory during exactly
+                                           #      that failure helps nobody.
+    record_dir: "/root/robotx_ws/logs/sessions"   # [RO] session root. Put it on
+                                           #      a BIND MOUNT if you want the
+                                           #      recordings to survive the
+                                           #      container being recreated.
+    record_telemetry_hz: 2.0               # [DYN] telemetry.jsonl sample rate
+    record_frame_hz: 1.0                   # [DYN] frames saved per second PER
+                                           #       viewer, pulled from the MJPEG
+                                           #       servers rather than re-encoded
+    record_min_free_gb: 2.0                # [DYN] refuse to start, and stop
+                                           #       mid-run, below this. A full
+                                           #       root filesystem takes down the
+                                           #       whole stack, not just the
+                                           #       recording.
 
 # ---- rc_heartbeat_watchdog: force-disarm on RC-transmitter link loss (safety) ----
 # Consumes telemetry_bridge topics (/crsd/rc_channels, /crsd/fcu_status) and routes

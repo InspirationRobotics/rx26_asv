@@ -23,6 +23,7 @@
        boat instead of at build time. -->
   <exec_depend>crusader_perception</exec_depend>
   <exec_depend>crusader_world_model</exec_depend>
+  <exec_depend>crusader_groundstation</exec_depend>
   <exec_depend>ros2launch</exec_depend>
 
   <export>

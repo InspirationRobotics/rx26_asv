@@ -36,7 +36,7 @@ PARAMS_BASELINE = REPO / "params" / "working_crusader.params"
 CONFIG_DRIVEN_NODES = {"telemetry_bridge", "led_node",
                        "pixhawk_led_status_node", "rc_heartbeat_watchdog",
                        "oakd_publisher", "buoy_detector", "lidar_cluster_node",
-                       "target_tracker", "map_server"}
+                       "target_tracker", "ground_station"}
 
 # Topic names that two sections must agree on, as (producer, param) ->
 # (consumer, param). A producer and a consumer that disagree about a topic name
@@ -48,8 +48,14 @@ TOPIC_PAIRS = (
      ("target_tracker", "detections_topic")),
     (("lidar_cluster_node", "clusters_topic"),
      ("target_tracker", "clusters_topic")),
-    (("target_tracker", "targets_topic"), ("map_server", "targets_topic")),
+    (("target_tracker", "targets_topic"), ("ground_station", "targets_topic")),
 )
+
+# Ports that must stay distinct: two servers cannot bind one socket, and the
+# loser fails at startup with an address-in-use that reads like a crash. The
+# ground station EMBEDS the viewers rather than proxying them, so it has to
+# avoid their ports rather than share them.
+PORT_OWNERS = (("buoy_detector", "stream_port"), ("ground_station", "port"))
 
 # oakd_publisher and buoy_detector each build the SAME OAK-D pipeline (only one
 # runs at a time — the camera admits one client). These params decide the image
@@ -157,6 +163,26 @@ def check_params_yaml():
                  "the consumer receives nothing")
         else:
             ok(f"topic {pn}.{pk} -> {cn}.{ck}", a)
+
+    # Distinct HTTP ports (see PORT_OWNERS).
+    seen = {}
+    clash = False
+    for node, key in PORT_OWNERS:
+        try:
+            port = cfg[node]["ros__parameters"][key]
+        except KeyError as e:
+            fail("http ports distinct", f"missing key {e}")
+            clash = True
+            continue
+        if port in seen:
+            fail("http ports distinct",
+                 f"{node}.{key} and {seen[port]} both bind {port} — the second "
+                 "to start dies with address-in-use, which reads like a crash")
+            clash = True
+        seen[port] = f"{node}.{key}"
+    if not clash:
+        ok("http ports distinct", ", ".join(f"{p}={n}" for p, n in
+                                            sorted(seen.items())))
 
     # The two OAK-D nodes must describe the same camera (see CAMERA_PARAMS).
     try:
