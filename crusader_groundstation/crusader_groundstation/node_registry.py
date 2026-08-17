@@ -165,13 +165,32 @@ def may_stop(name: str) -> tuple:
     return True, ""
 
 
-def tab_source(sources, running):
-    """Which of several candidate nodes is currently filling a viewer tab.
+def tab_source(sources, running, serving=None):
+    """Which candidate is filling a viewer tab: (source, starting).
 
-    Returns the running one, or None. The camera tab has two possible feeds and
-    the page should show whichever is actually up rather than assuming.
+    `running` is the set of node names that exist as processes. `serving` is
+    the subset whose HTTP port is actually accepting connections — pass None to
+    skip that distinction.
+
+    THE DISTINCTION IS THE WHOLE POINT. buoy_detector appears in the process
+    table within a second of being started and then spends ten to thirty more
+    loading a TensorRT engine and opening the OAK-D before its stream server
+    binds. A tab that trusted "running" alone pointed an iframe at a port
+    nothing was listening on yet, got connection-refused, and — because the
+    page will not reload a stream it thinks is already correct — stayed on that
+    error page permanently, while opening the same URL by hand worked fine
+    because that load happened after the port came up.
+
+    Returns:
+      (name, False)  a viewer is up and serving; show it.
+      (name, True)   the process exists but its port is not open YET; say
+                     "starting" and check again.
+      (None, False)  nothing is running; offer to start it.
     """
     for name in sources:
-        if name in running:
-            return name
-    return None
+        if name not in running:
+            continue
+        if serving is None or name in serving:
+            return name, False
+        return name, True
+    return None, False

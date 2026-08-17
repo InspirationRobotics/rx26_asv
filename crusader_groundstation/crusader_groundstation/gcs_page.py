@@ -273,8 +273,15 @@ function renderViewer(pane, cfg, tabName){
   }
   var url = (cfg && cfg.source)
     ? location.protocol+'//'+location.hostname+':'+cfg.port+'/' : '';
-  if(e.dataset.src === url) return;                  /* unchanged: leave it */
-  e.dataset.src = url;
+  /* The guard keys on the whole rendered STATE, not just the url. There are
+     three states and two of them have no url — keying on the url alone left
+     the tab showing "not running" with Start buttons after the node had
+     started, because both states compared equal and the early return skipped
+     the rebuild. */
+  var key = url || (cfg && cfg.starting ? 'starting:' + cfg.starting_name
+                                        : 'idle');
+  if(e.dataset.src === key) return;                  /* unchanged: leave it */
+  e.dataset.src = key;
   if(url){
     /* An iframe of the viewer's OWN page, not a bare <img> of its stream: the
        two servers publish different stream paths (buoy_detector streams from
@@ -282,6 +289,18 @@ function renderViewer(pane, cfg, tabName){
        page carries its own plan/elevation tabs worth keeping. */
     e.innerHTML = '<div class="viewer"><iframe src="'+url+'" style="width:100%;'
       + 'height:100%;border:0;background:#111"></iframe></div>';
+  } else if(cfg && cfg.starting){
+    /* Running, but its port is not answering yet. buoy_detector spends ten to
+       thirty seconds loading a TensorRT engine and opening the OAK-D before it
+       binds; the server withholds `source` until a connect succeeds, so the
+       iframe is created once and works, rather than being created early,
+       refused, and then never reloaded. */
+    e.innerHTML = '<div class="viewer"><div class="empty">'
+      + '<div style="font-size:15px;color:#bbb;margin-bottom:6px">'
+      + esc(cfg.starting_name) + ' is starting…</div>'
+      + '<div>Its process is up; the stream server has not bound port '
+      + cfg.port + ' yet. The camera and the model take a while to load — '
+      + 'this will switch to the live view on its own.</div></div></div>';
   } else {
     var btns = (cfg && cfg.candidates || []).map(function(c){
       return '<button class="go" onclick="startNode(\''+c.name+'\')">Start '

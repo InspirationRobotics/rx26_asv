@@ -141,6 +141,7 @@ class GroundStation(Node):
         # One /proc pass per graph tick, alongside the graph scan. The two see
         # different worlds and we need both — see proc_scan's header.
         self._proc = {}
+        self._serving = set()
 
         # The ROS graph is scanned on a timer rather than per request:
         # get_node_names() is a discovery call, and running it once per browser
@@ -232,6 +233,11 @@ class GroundStation(Node):
         # graph cannot: the tools/ viewer scripts, which are not ROS nodes, and
         # anything started from a terminal. See proc_scan.
         self._proc = proc_scan.scan([s.executable for s in reg.REGISTRY])
+        # Which viewer ports are actually ACCEPTING connections. A process in
+        # the table is not a server that has bound its socket yet, and telling
+        # the page otherwise is what left an iframe stuck on connection-refused.
+        self._serving = {s.name for s in reg.REGISTRY
+                         if s.port and _port_open(s.port)}
 
     def _on_rosout(self, msg: Log):
         """Every node's logger output, from anywhere in the DDS domain.
@@ -289,8 +295,8 @@ class GroundStation(Node):
         sources = {}
         for key, names in (("camera", reg.CAMERA_TAB_SOURCES),
                            ("lidar", reg.LIDAR_TAB_SOURCES)):
-            src = reg.tab_source(names, running)
-            if src:
+            src, starting = reg.tab_source(names, running, self._serving)
+            if src and not starting:
                 spec = reg.BY_NAME[src]
                 if spec.port and spec.stream_path:
                     sources[key] = (f"http://127.0.0.1:{spec.port}"
@@ -348,9 +354,13 @@ class GroundStation(Node):
         registry and asks the process table about every entry, and calling it
         once per tab meant doing that three times for one browser poll.
         """
-        src = reg.tab_source(sources, running)
+        src, starting = reg.tab_source(sources, running, self._serving)
         return {
-            "source": src,
+            # `source` is only set once the port answers, so the page never
+            # points an iframe at a socket that is not listening yet.
+            "source": None if starting else src,
+            "starting": starting,
+            "starting_name": src if starting else None,
             "port": reg.BY_NAME[src].port if src else 0,
             "title": title, "hint": hint,
             "candidates": [{"name": n, "label": reg.BY_NAME[n].label}
@@ -623,6 +633,22 @@ class GroundStation(Node):
         if self.recorder.session and self.recorder.session.stopped is None:
             self.recorder.stop()
         super().destroy_node()
+
+
+def _port_open(port, host="127.0.0.1", timeout=0.25):
+    """Is something listening there right now?
+
+    A plain TCP connect to loopback, which on the same host is sub-millisecond
+    when it succeeds and immediate (RST) when nothing is bound. Run once per
+    graph tick rather than per browser poll, so the cost does not scale with
+    how many people have the page open.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            return s.connect_ex((host, port)) == 0
+    except OSError:
+        return False
 
 
 def _round(v, n=2):

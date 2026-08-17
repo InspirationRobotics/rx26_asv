@@ -111,6 +111,31 @@ of letting the operator discover the conflict from a traceback. **Profiles never
 conflict on their own**: silently stopping the camera node someone deliberately chose is the
 kind of helpfulness that loses a run.
 
+## A viewer tab waits for the PORT, not the process
+
+`buoy_detector` appears in the process table within a second of being started, then spends
+another ten to thirty loading a TensorRT engine and opening the OAK-D before its stream
+server binds. Three states, not two:
+
+| Server says | Tab shows |
+|---|---|
+| not running | "Camera viewer not running" + Start buttons |
+| running, port closed | "buoy_detector is starting…" |
+| running, port open | the live view |
+
+The middle one exists because without it the page pointed an iframe at a socket nothing was
+listening on yet, got connection-refused, and — since it will not reload a stream it thinks
+is already correct — **stayed on that error page permanently**, while opening the same URL
+by hand worked fine because that load happened after the port came up.
+
+So the server withholds `source` until a TCP connect to the port actually succeeds, probed
+once per graph tick rather than per browser poll. The recorder uses the same signal: it will
+not try to pull frames from a viewer that is not serving yet.
+
+The rebuild guard keys on the whole rendered **state**, not just the URL. Two of the three
+states have no URL, so keying on the URL alone left the tab showing Start buttons after the
+node had already started.
+
 ## Discovery: the graph *and* `/proc`
 
 Borrowed from the team's UUV ground station (`robotx_graey_2026`), which scans `/proc` for
