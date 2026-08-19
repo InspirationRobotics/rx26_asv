@@ -1,0 +1,32 @@
+# /etc/systemd/system/crsd-core.service  (Jetson host)
+#
+# TEMPLATE: __CRSD_USER__ / __CRSD_CONTAINER__ substituted by
+# setup/install_jetson_host.sh, same convention as the other units here.
+[Unit]
+Description=Crusader core ROS 2 stack (telemetry, watchdog, LEDs)
+After=crsd-container.service
+Requires=crsd-container.service
+
+[Service]
+Type=simple
+User=__CRSD_USER__
+# `docker start -a` returns before ROS is usable inside, so exec'ing immediately
+# fails with "container not running". Wait for it rather than relying on Restart=
+# to paper over a race on every boot.
+ExecStartPre=/bin/bash -c 'until /usr/bin/docker inspect -f "{{.State.Running}}" __CRSD_CONTAINER__ 2>/dev/null | grep -q true; do sleep 2; done'
+# ROS sourced EXPLICITLY: a non-interactive shell never reads ~/.bashrc, which
+# is where the container's ROS setup lives. Same trap tools/scripts/rebuild.sh
+# documents at length.
+ExecStart=/usr/bin/docker exec __CRSD_CONTAINER__ bash -c \
+  "source /opt/ros/humble/setup.bash && \
+   source /root/robotx_ws/install/setup.bash && \
+   ros2 launch crusader_bringup core.launch.py"
+# SIGTERM, never SIGKILL: every node routes SIGTERM through
+# crusader_common.node_main into a clean destroy_node(). Killing outright leaves
+# telemetry_bridge's RC overrides latched in the autopilot.
+ExecStop=-/usr/bin/docker exec __CRSD_CONTAINER__ pkill -TERM -f "crusader_bringup"
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
