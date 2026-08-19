@@ -407,3 +407,102 @@ rc_heartbeat_watchdog:
     reset_channel: 7                       # [RO] channel whose low->high toggle clears the latch
     reset_low_pwm: 1300                    # [RO] us; reset switch "low" below this
     reset_high_pwm: 1700                   # [RO] us; reset switch "high" above this
+
+
+# ---- oak_detector: two-stage shape + LED-colour pipeline ----
+# THIRD client for the one OAK-D, alongside oakd_publisher and buoy_detector.
+# Only one of the three may run; which one is an operator choice per session,
+# which is why none of them is in core.launch.py.
+#
+# It publishes to the SAME topic as buoy_detector (oak/detections) on purpose:
+# the two answer the same question about different mission elements, they can
+# never run together, and target_tracker should work behind whichever is up
+# without a remap. check_config.py pins all three names together.
+#
+# It also shares buoy_detector's stream_port 8080 on purpose — same reason, plus
+# the ground station's camera tab then finds whichever is running.
+#
+# THE FOUR CROP PARAMS ARE A CONTRACT WITH THE TRAINING EXPORTER, not tuning
+# knobs. cls_imgsz / crop_pad / crop_top_frac decide the picture the classifier
+# sees, and the exporter that built its training set cuts crops the same way. A
+# few percent of disagreement does not fail — the engine just classifies worse,
+# everywhere, and nothing reports why. Change them in both places or not at all.
+oak_detector:
+  ros__parameters:
+    # -- stage 1: shape detector --
+    det_engine: "/root/robotx_ws/models/detector.engine"   # [RO] TensorRT
+    det_labels:                            # [RO] IN ENGINE ORDER — check the
+                                           #      dataset.yaml the engine was
+                                           #      trained from, not this comment
+      - "circle"
+      - "diamond"
+    det_conf_min: 0.60                     # [RO] minimum detector confidence
+    det_imgsz_height: 640                  # [RO] detector engine input height
+    det_imgsz_width: 640                   # [RO] detector engine input width
+    # -- stage 2: LED colour classifier --
+    cls_engine: "/root/robotx_ws/models/classifier.engine"  # [RO] TensorRT
+    cls_labels:                            # [RO] IN ENGINE ORDER. For an
+                                           #      ultralytics classifier that is
+                                           #      the training FOLDER order,
+                                           #      i.e. alphabetical — not the
+                                           #      order you find most natural
+      - "blue"
+      - "green"
+      - "off"
+      - "red"
+    cls_imgsz: 96                          # [RO] = exporter --crop-size
+    crop_pad: 0.10                         # [RO] box padding per side, fraction
+                                           #      of box size = exporter's 1.2x
+    crop_top_frac: 0.40                    # [RO] = exporter --crop-frac; the
+                                           #      share of the padded crop taken
+                                           #      as the LED band
+    min_crop_px: 10                        # [RO] padded-crop height below which
+                                           #      the band is a couple of rows
+                                           #      and its colour is whatever the
+                                           #      resize invented
+    # -- stage 3: track + vote --
+    iou_match: 0.25                        # [RO] IoU above which a box
+                                           #      continues an existing track
+    max_missed: 10                         # [RO] frames a track survives unseen
+    vote_decay: 0.85                       # [RO] per-frame forgetting factor
+    vote_min: 0.55                         # [RO] accumulated share a colour
+                                           #      needs before it is published;
+                                           #      below it the label carries the
+                                           #      shape alone
+    # -- ranging (same numbers and reasoning as buoy_detector) --
+    range_min_m: 0.30                      # [RO] depth below this is invalid
+    range_max_m: 25.0                      # [RO] depth above this is invalid
+    min_depth_samples: 5                   # [RO] valid pixels needed to range
+                                           #      a box; fewer = not published
+    # -- output --
+    frame_id: "camera_link"                # [RO] REP-103: x fwd, y left, z up
+    detections_topic: "oak/detections"     # [RO] = buoy_detector.detections_topic
+    # -- camera: MUST equal oakd_publisher and buoy_detector. Depth is aligned
+    #    to the RGB camera at exactly this geometry, so the RGB intrinsics are
+    #    only valid on the depth image while all three agree. check_config.py
+    #    pins them; let them drift and nothing fails, ranges just quietly stop
+    #    meaning the same thing under each node.
+    fps: 30.0                              # [RO] = oakd_publisher.fps
+    isp_denominator: 3                     # [RO] = oakd_publisher.isp_denominator
+                                           #      3 -> 640x400. Raise the
+                                           #      resolution (2 -> 960x600) if
+                                           #      no_crop is high — but it moves
+                                           #      all three nodes together.
+    sync_threshold_ms: 50                  # [RO] = oakd_publisher.sync_threshold_ms
+    subpixel: true                         # [RO] = oakd_publisher.subpixel
+    lr_check: true                         # [RO] = oakd_publisher.lr_check
+    poll_period_s: 0.01                    # [RO] output-queue poll period [s]
+    queue_size: 4                          # [RO] device output queue depth
+    health_period_s: 5.0                   # [RO] rate/health log period [s]
+    # -- annotated view --
+    stream_enable: true                    # [RO] MJPEG over HTTP; frames are
+                                           #      only drawn while a browser is
+                                           #      actually connected
+    stream_port: 8080                      # [RO] SHARED with buoy_detector and
+                                           #      tools/oak_view.py — all three
+                                           #      contend for the one camera, so
+                                           #      they can never contend for the
+                                           #      socket
+    stream_quality: 60                     # [RO] JPEG quality for that view
+
+    
