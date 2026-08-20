@@ -77,7 +77,7 @@ echo "== import smoke test =="
 # safety issue on this boat, not a nuisance. Every package with code is named
 # here: a build that succeeds while an import fails is the exact gap this closes.
 docker exec "$CONTAINER" bash -c \
-  "$SOURCE_CMD cd $WS && . install/setup.bash && python3 -c '
+  "$SOURCE_CMD cd $WS && { set +u; . install/setup.bash; set -u; } && python3 -c '
 import crusader_common, crusader_fcu, crusader_behavior
 import crusader_perception, crusader_world_model, crusader_groundstation
 from crusader_msgs.msg import Attitude, FcuStatus, LatLonHead, RcChannels

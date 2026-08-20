@@ -35,8 +35,8 @@ PARAMS_BASELINE = REPO / "params" / "working_crusader.params"
 # still has; a node with no section fails at startup instead.
 CONFIG_DRIVEN_NODES = {"telemetry_bridge", "led_node",
                        "pixhawk_led_status_node", "rc_heartbeat_watchdog",
-                       "oakd_publisher", "buoy_detector", "lidar_cluster_node",
-                       "target_tracker", "ground_station"}
+                       "oakd_publisher", "buoy_detector", "oak_detector", 
+                       "lidar_cluster_node", "target_tracker", "ground_station"}
 
 # Topic names that two sections must agree on, as (producer, param) ->
 # (consumer, param). A producer and a consumer that disagree about a topic name
@@ -45,6 +45,8 @@ CONFIG_DRIVEN_NODES = {"telemetry_bridge", "led_node",
 # most expensive kind of green.
 TOPIC_PAIRS = (
     (("buoy_detector", "detections_topic"),
+     ("target_tracker", "detections_topic")),
+    (("oak_detector", "detections_topic"),
      ("target_tracker", "detections_topic")),
     (("lidar_cluster_node", "clusters_topic"),
      ("target_tracker", "clusters_topic")),
