@@ -52,4 +52,6 @@ def generate_launch_description():
              output="screen", parameters=[params]),
         Node(package="crusader_behavior", executable="rc_watchdog",
              output="screen", parameters=[params]),
+        Node(package="crusader_groundstation", executable="ground_station",
+             output="screen", parameters=[params]),
     ])

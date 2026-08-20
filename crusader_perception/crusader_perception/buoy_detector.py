@@ -441,12 +441,17 @@ class BuoyDetector(Node):
                 return self._stream()
 
             def _page(self):
-                body = ("<html><head><title>buoy_detector</title></head>"
-                        "<body style='margin:0;background:#111'>"
-                        "<img src='/stream' style='width:100%'>"
+                body = ("<html><head><title>buoy_detector</title>"
+                        "<meta name='viewport' content='width=device-width,"
+                        "initial-scale=1'></head>"
+                        "<body style='margin:0;height:100vh;overflow:hidden;"
+                        "background:#111'>"
+                        "<img src='/stream' style='width:100%;height:100%;"
+                        "object-fit:contain;display:block'>"
                         "</body></html>").encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
+                self.send_header("Cache-Control", "no-store")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)

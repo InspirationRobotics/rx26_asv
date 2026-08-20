@@ -430,7 +430,7 @@ rc_heartbeat_watchdog:
 oak_detector:
   ros__parameters:
     # -- stage 1: shape detector --
-    det_engine: "/root/robotx_ws/models/detector.engine"   # [RO] TensorRT
+    det_engine: "/root/robotx_ws/models/buoy_detector.engine"   # [RO] TensorRT
     det_labels:                            # [RO] IN ENGINE ORDER — check the
                                            #      dataset.yaml the engine was
                                            #      trained from, not this comment
@@ -440,7 +440,7 @@ oak_detector:
     det_imgsz_height: 640                  # [RO] detector engine input height
     det_imgsz_width: 640                   # [RO] detector engine input width
     # -- stage 2: LED colour classifier --
-    cls_engine: "/root/robotx_ws/models/classifier.engine"  # [RO] TensorRT
+    cls_engine: "/root/robotx_ws/models/led_classifier.engine"  # [RO] TensorRT
     cls_labels:                            # [RO] IN ENGINE ORDER. For an
                                            #      ultralytics classifier that is
                                            #      the training FOLDER order,

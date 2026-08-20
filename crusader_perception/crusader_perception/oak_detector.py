@@ -572,9 +572,18 @@ class OakDetector(Node):
                 return self._stream()
 
             def _page(self):
-                body = ("<html><head><title>oak_detector</title></head>"
-                        "<body style='margin:0;background:#111'>"
-                        "<img src='/stream' style='width:100%'>"
+                # max-height, not width:100%. Embedded in the ground station's
+                # camera tab the pane is far wider than 640x400, and a
+                # width-only rule scales the height past the pane and makes the
+                # iframe scroll. Contain-to-fit matches what the GCS already
+                # does for a bare <img> in .viewer.
+                body = ("<html><head><title>oak_detector</title>"
+                        "<meta name='viewport' content='width=device-width,"
+                        "initial-scale=1'></head>"
+                        "<body style='margin:0;height:100vh;background:#111;"
+                        "display:flex;align-items:center;justify-content:center'>"
+                        "<img src='/stream' style='max-width:100%;"
+                        "max-height:100vh;object-fit:contain;display:block'>"
                         "</body></html>").encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")

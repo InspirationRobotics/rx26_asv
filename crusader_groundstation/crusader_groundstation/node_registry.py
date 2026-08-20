@@ -17,12 +17,12 @@ exactly the friction that should exist. Note the asymmetry is deliberate:
 starting a safety node can only ever move the boat toward safe, so it needs no
 such guard.
 
-THE EXCLUSION RULE. The OAK-D admits exactly one client, so oakd_publisher and
-buoy_detector cannot both run — the second to start fails on a device already
-open, which surfaces as an obscure depthai error rather than "the camera is
-busy". Nodes that contend for one device share an `exclusive` tag, and the
-page offers to stop the incumbent instead of letting the operator discover the
-conflict from a traceback.
+THE EXCLUSION RULE. The OAK-D admits exactly one client, so oakd_publisher,
+buoy_detector and oak_detector cannot co-run — the second to start fails on a
+device already open, which surfaces as an obscure depthai error rather than
+"the camera is busy". Nodes that contend for one device share an `exclusive`
+tag, and the page offers to stop the incumbent instead of letting the operator
+discover the conflict from a traceback.
 """
 from dataclasses import dataclass, field
 
@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 # want running first.
 GROUPS = (
     ("core", "Core", "Safety and telemetry. Protected: startable here, not stoppable."),
-    ("perception", "Perception", "Sensors. The two OAK-D nodes contend for one camera."),
+    ("perception", "Perception", "Sensors. The three OAK-D nodes contend for one camera."),
     ("world", "World model", "Fusion and tracking. Needs perception and pose."),
     ("viewers", "Viewers", "Bench views served on their own ports."),
 )
@@ -86,6 +86,10 @@ REGISTRY = (
              "buoy_detector", "perception", exclusive="oakd", port=8080,
              stream_path="/stream",
              note="detections + annotated view; owns the OAK-D"),
+    NodeSpec("oak_detector", "oak_detector", "crusader_perception",
+             "oak_detector", "perception", exclusive="oakd", port=8080,
+             stream_path="/stream",
+             note="shape + LED colour, two engines; owns the OAK-D"),
     NodeSpec("oakd_publisher", "oakd_publisher", "crusader_perception",
              "oakd_publisher", "perception", exclusive="oakd",
              note="raw frames; owns the OAK-D. 38 MB/s on the wire"),
@@ -122,10 +126,13 @@ PROFILES = {
               ("telemetry_bridge", "lidar_cluster_node", "target_tracker")),
 }
 
-# buoy_detector serves its annotated view on the same port oak_view binds. Both
-# are legitimate ways to fill the camera tab, and neither can start while the
-# other holds the socket.
-CAMERA_TAB_SOURCES = ("buoy_detector", "oak_view")
+# All three serve the camera tab on ONE port (8080). buoy_detector and
+# oak_detector are alternative detectors that each own the device; oak_view
+# re-serves a topic without touching it. Any of them can fill the tab, and none
+# can start while another holds the socket — which is fine, because the two
+# detectors already cannot co-run for the device itself. Order matters: the
+# first one found running wins the tab.
+CAMERA_TAB_SOURCES = ("buoy_detector", "oak_detector", "oak_view")
 LIDAR_TAB_SOURCES = ("lidar_view",)
 
 

@@ -59,8 +59,21 @@ jobs:
           # a module that moved builds clean and dies at `ros2 run` — on the
           # boat, at the worst moment. This is the check that the seven-package
           # split most needs, since imports now cross package boundaries.
-          ros2 pkg executables crusader_fcu crusader_behavior crusader_perception
-          python3 - <<'PY'
+          ros2 pkg executables > /tmp/execs.txt
+          cat /tmp/execs.txt
+          for e in "crusader_fcu telemetry_bridge" \
+                   "crusader_behavior rc_watchdog" \
+                   "crusader_behavior led_node" \
+                   "crusader_behavior pixhawk_led_status_node" \
+                   "crusader_perception oakd_publisher" \
+                   "crusader_perception buoy_detector" \
+                   "crusader_perception lidar_cluster_node" \
+                   "crusader_perception oak_detector" \
+                   "crusader_world_model target_tracker" \
+                   "crusader_groundstation ground_station"; do
+            grep -qx "$e" /tmp/execs.txt || {
+              echo "MISSING executable: $e" >&2; exit 1; }
+          done          python3 - <<'PY'
           import importlib, sys
           mods = ["crusader_common.config", "crusader_common.node_main",
                   "crusader_common.param_utils", "crusader_common.stream_cache",
