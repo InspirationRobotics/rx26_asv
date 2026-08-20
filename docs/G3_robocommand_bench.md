@@ -20,6 +20,29 @@ subscribe -> retained RxCourse -> RunDeclaration -> heartbeats -> RunStart(decla
 Heartbeats begin **after** the declaration and **before** `RunStart`. Read past that and
 you sit silent through the window RoboCommand is watching to confirm the team is alive.
 
+## Which machine runs what
+
+Every script has exactly one home. Only two of your three machines are involved
+until `robocommand_reporter` exists.
+
+| Script | Runs on | Stands in for |
+|---|---|---|
+| `rx_bridge` | **host computer**, always, never anywhere else | this *is* the OCS |
+| `bench_stage1.py` | host computer | everything at once, for Part A |
+| `fake_vehicle.py` | host computer, for now | the Jetson |
+| `fake_course.py` | host computer | RoboCommand, when the stub sends no course |
+| `docker compose` (RoboNation stub) | sim box — or the host, in Part A | RoboCommand |
+| `mosquitto` (team broker) | host computer | the team radio network |
+
+| Stage | Jetson | Host computer | RoboNation server |
+|---|---|---|---|
+| **A** | *off* | broker, `rx_bridge`, fake USV | *off* |
+| **B** | *off* (used only for the B4 ping test) | mosquitto, `rx_bridge`, fake USV | docker stub + DHCP |
+| **C** | `robocommand_reporter` | mosquitto, `rx_bridge` | docker stub + DHCP |
+
+`rx_bridge` never moves. It is the only process permitted to talk to RoboNation.
+Everything else is a stand-in that gets deleted later, or a broker.
+
 ## Prerequisites
 
 - [ ] `ocs/.venv` built: `python -m venv .venv && .venv/Scripts/python -m pip install -r requirements.txt`
@@ -34,6 +57,23 @@ you sit silent through the window RoboCommand is watching to confirm the team is
 ---
 
 ## Part A — one laptop, no network (start here)
+
+### A0 — the whole matrix in one command
+
+```bash
+cd ocs && .venv/Scripts/python bench_stage1.py
+```
+
+Runs an MQTT broker in-process, plays both RoboCommand and the USV, and checks
+every criterion below. No docker, no mosquitto, no network. Expect **15/15**.
+
+Do this first. It cannot tell you whether we agree with *RoboNation* about the
+bytes — only their stub can — but it tells you in thirty seconds whether the
+bridge's own logic is sound, and it is the thing to re-run after every change.
+
+The manual walkthrough below is still worth doing once, because at a competition
+you will be driving the bridge by hand and it should not be the first time.
+
 
 Everything on loopback against one broker. Two topic namespaces, two MQTT clients,
 zero networking questions. If Part A does not pass, no amount of cabling will help.
@@ -80,12 +120,17 @@ cd ocs && .venv/Scripts/python fake_vehicle.py --host 127.0.0.1
 | A9 | UNKNOWN is caught | Restart with `--unknown` | `DROP ... current_task: UNKNOWN (TASK_UNKNOWN...)` |
 | A10 | Run start | Send `RunStart` from `test_client.py` with the matching `declaration_seq` | `RUN START: run N started`; state `RUNNING` |
 | A11 | Wrong seq refused | Send `RunStart` with a different `declaration_seq` | `RUN START REFUSED: ... does not match ours`; state stays put |
-| A12 | Seq survives a restart | Note `seq`, Ctrl-C the bridge, restart, `declare` is **not** needed — check `status` | Reconnects into `DECLARED`/`RUNNING`; report seq resumes, never restarts at 1 |
+| A12 | Run survives a restart | Note `seq` and the state, Ctrl-C the bridge, restart it, `status` | Resumes `DECLARED`/`RUNNING` on connect; report seq continues, never restarts at 1; `declare` is **not** needed and is refused |
 | A13 | Wire log | `tail` the file named in `status` | One JSON object per frame, `b64` payloads present |
 
-> **A12 note.** The bridge does not re-declare on reconnect by design — `RunStart` carries
-> the `declaration_seq` it answers, so re-declaring orphans it. To start a genuinely new
+> **A12 note.** `run/seq.json` holds the run itself — state, `declaration_seq`, `run_id` —
+> not only the counters. Durable counters alone are worthless: a bridge that came back
+> with correct sequence numbers and no memory of having declared would sit in `COURSE_RX`
+> unable to publish, and the only way out would be to declare again, which mints a new
+> `RxRequest.seq` and orphans the `RunStart` it is waiting for. To start a genuinely new
 > run, delete `ocs/run/seq.json` and declare again.
+>
+> This was found by `bench_stage1.py` check A12b, which failed the first time it ran.
 
 ---
 

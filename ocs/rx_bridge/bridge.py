@@ -58,6 +58,19 @@ class Bridge:
         self.counters = Counters()
         self.wire = WireLog(cfg.wire_log, run_tag=cfg.team_id)
 
+        # Pick the run back up if we are a restart rather than a cold start.
+        # Durable counters without a durable run leave us with correct sequence
+        # numbers and no right to publish anything.
+        saved = self.seqs.run
+        if saved.get("state"):
+            v = self.machine.restore(
+                str(saved["state"]),
+                saved.get("declaration_seq"),  # type: ignore[arg-type]
+                saved.get("run_id"),           # type: ignore[arg-type]
+            )
+            self.log("run store: " + v.reason)
+            self.wire.event("restore", v.reason)
+
         # Per vehicle, because the 5/s cap is metered per vehicle. See
         # governor.py for the ambiguity in the handbook, and what to change if
         # RoboNation answers that it is per-team.
@@ -170,6 +183,10 @@ class Bridge:
                 v = self.machine.on_run_start(
                     cmd.run_start.declaration_seq, cmd.run_start.run_id
                 )
+                if v.ok:
+                    self.seqs.save_run(self.machine.state.name,
+                                       self.machine.declaration_seq,
+                                       self.machine.run_id)
             # A refusal here is the loudest thing this process can say: it means
             # RoboCommand answered a declaration that is not the one we hold.
             self.log(("RUN START: " if v.ok else "RUN START REFUSED: ") + v.reason)
@@ -287,6 +304,8 @@ class Bridge:
             payload = req.SerializeToString()
             seq = req.seq
             v = self.machine.on_declared(seq)
+            self.seqs.save_run(self.machine.state.name,
+                               self.machine.declaration_seq, self.machine.run_id)
 
         self.rc.publish(self.cfg.rc_request_topic(), payload, qos=1)
         self.wire.frame(
@@ -297,7 +316,11 @@ class Bridge:
 
     def end(self) -> str:
         with self._lock:
-            return self.machine.on_end().reason
+            v = self.machine.on_end()
+            if v.ok:
+                self.seqs.save_run(self.machine.state.name,
+                                   self.machine.declaration_seq, self.machine.run_id)
+            return v.reason
 
     def status(self) -> str:
         with self._lock:

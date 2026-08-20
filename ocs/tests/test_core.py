@@ -98,6 +98,77 @@ class TestRunMachine(unittest.TestCase):
         self.assertEqual(m.state, RunState.DECLARED)
 
 
+class TestRestoreAfterProcessRestart(unittest.TestCase):
+    """A dropped socket and a killed process are different failures.
+
+    on_disconnect/on_connect covers the first; only restore() covers the second.
+    Found by bench_stage1.py check A12b, which is why it is a test now.
+    """
+
+    def test_restore_resumes_a_declared_run_on_the_next_connect(self):
+        m = RunMachine()
+        v = m.restore("DECLARED", 7, None)
+        self.assertTrue(v.ok, v.reason)
+        self.assertEqual(m.state, RunState.DISCONNECTED,
+                         "must not claim a connection it does not have")
+        self.assertEqual(m.declaration_seq, 7)
+
+        m.on_connect()
+        self.assertEqual(m.state, RunState.DECLARED)
+        self.assertTrue(m.may_report())
+        self.assertFalse(m.may_declare(), "restoring must not invite a re-declare")
+        self.assertTrue(m.on_run_start(7, 42).ok, "the original RunStart still matches")
+
+    def test_restore_resumes_a_running_run(self):
+        m = RunMachine()
+        m.restore("RUNNING", 3, 42)
+        m.on_connect()
+        self.assertEqual(m.state, RunState.RUNNING)
+        self.assertEqual(m.run_id, 42)
+        self.assertTrue(m.may_report())
+
+    def test_a_state_that_is_not_resumable_starts_clean(self):
+        m = RunMachine()
+        v = m.restore("COURSE_RX", None, None)
+        self.assertFalse(v.ok)
+        m.on_connect()
+        self.assertEqual(m.state, RunState.CONNECTED)
+
+    def test_a_corrupt_state_name_does_not_raise(self):
+        m = RunMachine()
+        v = m.restore("BANANA", 1, 1)
+        self.assertFalse(v.ok)
+        self.assertIn("BANANA", v.reason)
+        m.on_connect()
+        self.assertEqual(m.state, RunState.CONNECTED)
+
+    def test_the_store_carries_the_run_across_a_restart(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "seq.json"
+            s = SeqStore(path)
+            s.new_epoch("run-1")
+            s.next_report("USV1")
+            s.save_run("RUNNING", 1, 42)
+
+            reborn = SeqStore(path)
+            self.assertEqual(reborn.run,
+                             {"state": "RUNNING", "declaration_seq": 1, "run_id": 42})
+
+            m = RunMachine()
+            m.restore(str(reborn.run["state"]),
+                      reborn.run["declaration_seq"], reborn.run["run_id"])
+            m.on_connect()
+            self.assertEqual(m.state, RunState.RUNNING)
+
+    def test_a_new_epoch_forgets_the_previous_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = SeqStore(Path(d) / "seq.json")
+            s.new_epoch("run-1")
+            s.save_run("RUNNING", 1, 42)
+            s.new_epoch("run-2")
+            self.assertEqual(s.run, {})
+
+
 class TestGovernor(unittest.TestCase):
     def test_heartbeats_survive_a_flood_of_reports(self):
         """The property the whole class exists for."""

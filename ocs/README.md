@@ -7,9 +7,9 @@ bash make_protos.sh                      # generates rx_bridge/gen/ from a pinne
 .venv/Scripts/python -m rx_bridge --config bridge.toml
 ```
 
-**State: USV only, and not yet run against a real broker.** The rules, the wire
-format and the validator are tested (35 tests). The MQTT plumbing has never held
-a live connection to anything — see [What is actually proven](#what-is-actually-proven).
+**State: USV only.** 41 tests, plus `bench_stage1.py` which runs the whole
+start-of-run sequence against an in-process broker — 15/15 checks. Not yet run
+against RoboNation's own stub; see [What is actually proven](#what-is-actually-proven).
 
 This is **not** a ROS package and does not live on the boat. It is a plain Python
 program for the laptop on shore, and that separation is the point: the handbook
@@ -209,16 +209,17 @@ So `make_protos.sh` prefers the `protoc` inside `.venv` over any system one.
 
 | | |
 |---|---|
-| `runstate` `seqstore` `governor` `config` | **tested**, 24 cases, no dependencies |
+| `runstate` `seqstore` `governor` `config` | **tested**, 30 cases, no dependencies |
 | `validate`, wire format, RunDeclaration, RunStart | **tested**, 11 cases against generated protobuf |
 | codegen from a pinned SHA | **run**, `f6457fa` |
-| `bridge.py` MQTT plumbing | **imports only.** Never held a live connection |
-| `fake_vehicle.py` | **imports only.** Never published to a broker |
+| `bridge.py` MQTT plumbing | **exercised end to end** by `bench_stage1.py`: 15/15 checks |
+| `fake_vehicle.py` | **imports only.** `bench_stage1.py` uses its own publisher |
+| against RoboNation's own stub | **not yet.** Ours agrees with itself; theirs is the authority |
 | the network topology above | **not built** |
 
-The next thing to do is step 2 of the bench sequence: bring up the RoboNation
-stub and run all three processes together. Everything above it is untested
-plumbing until that happens.
+Run `bench_stage1.py` first -- it proves the bridge's own logic without a
+network. Then run the same sequence against RoboNation's docker stub, which
+is the only thing that can tell you we agree with *them* about the bytes.
 
 ## Layout
 
@@ -228,6 +229,7 @@ ocs/
   make_protos.sh       codegen from a pinned robocommand SHA
   fake_vehicle.py      a 2 Hz USV that does not exist, plus its two fault modes
   fake_course.py       a retained RxCourse, for when the stub does not send one
+  bench_stage1.py      G3 Part A end to end, broker included.  no docker
   rx_bridge/
     runstate.py        the run's state machine.  no I/O
     seqstore.py        durable per-vehicle sequence counters

@@ -71,6 +71,33 @@ class RunMachine:
 
     _prior: RunState = field(default=RunState.DISCONNECTED, repr=False)
 
+    # ---- reload after a process restart -----------------------------------
+
+    def restore(self, state_name: str, declaration_seq: int | None,
+                run_id: int | None) -> Verdict:
+        """Reload a run from disk. Sets where we RETURN to, not where we are.
+
+        The socket does not exist yet at construction time, so restoring
+        straight into DECLARED would claim a connection we do not have. Instead
+        this primes the same `_prior` that a dropped TCP connection sets, and
+        the next on_connect() lands us back in DECLARED or RUNNING through
+        exactly one code path rather than two.
+        """
+        try:
+            prior = RunState[state_name]
+        except KeyError:
+            return Verdict(False, "unknown persisted state %r; starting clean"
+                                  % state_name)
+        if prior not in _STICKY:
+            return Verdict(False, "persisted state %s is not resumable; starting clean"
+                                  % prior.name)
+        self._prior = prior
+        self.declaration_seq = declaration_seq
+        self.run_id = run_id
+        self.state = RunState.DISCONNECTED
+        return Verdict(True, "restored %s (declaration_seq=%s) -- will resume on connect"
+                             % (prior.name, declaration_seq))
+
     # ---- connection edges -------------------------------------------------
 
     def on_connect(self) -> Verdict:

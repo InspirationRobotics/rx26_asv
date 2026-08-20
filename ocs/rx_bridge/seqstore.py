@@ -35,6 +35,7 @@ class SeqStore:
         self._epoch: str = ""
         self._request: int = 0
         self._reports: dict[str, int] = {}
+        self._run: dict[str, object] = {}
         self._load()
 
     # ---- persistence ------------------------------------------------------
@@ -47,6 +48,7 @@ class SeqStore:
         self._epoch = raw.get("epoch", "")
         self._request = int(raw.get("request", 0))
         self._reports = {str(k): int(v) for k, v in raw.get("reports", {}).items()}
+        self._run = raw.get("run", {})
 
     def _flush(self) -> None:
         """Atomic replace + fsync. Both halves matter.
@@ -56,7 +58,8 @@ class SeqStore:
         the OLD counters, which is the bug this file exists to prevent.
         """
         payload = json.dumps(
-            {"epoch": self._epoch, "request": self._request, "reports": self._reports},
+            {"epoch": self._epoch, "request": self._request,
+             "reports": self._reports, "run": self._run},
             indent=2,
         )
         fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), suffix=".tmp")
@@ -81,6 +84,7 @@ class SeqStore:
         self._epoch = epoch
         self._request = 0
         self._reports = {}
+        self._run = {}
         self._flush()
 
     def next_request(self) -> int:
@@ -96,10 +100,30 @@ class SeqStore:
         self._flush()
         return nxt
 
+    def save_run(self, state: str, declaration_seq: int | None,
+                 run_id: int | None) -> None:
+        """Persist the run itself, not just its counters.
+
+        Durable sequence numbers are worthless on their own. A bridge that
+        crashes mid-run and comes back with correct counters but no memory of
+        having declared cannot legally publish a single report -- it is in
+        COURSE_RX, and the only way out is to declare again, which mints a new
+        RxRequest.seq and orphans the RunStart it is waiting for. So the run's
+        identity is written the same way and at the same time.
+        """
+        self._run = {"state": state, "declaration_seq": declaration_seq,
+                     "run_id": run_id}
+        self._flush()
+
+    @property
+    def run(self) -> dict[str, object]:
+        return dict(self._run)
+
     def snapshot(self) -> dict[str, object]:
         """For the status line. Never mutates."""
         return {
             "epoch": self._epoch,
             "request": self._request,
             "reports": dict(self._reports),
+            "run": dict(self._run),
         }
