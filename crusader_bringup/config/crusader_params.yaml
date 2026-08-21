@@ -432,62 +432,90 @@ oak_detector:
     # -- stage 1: shape detector --
     det_engine: "/root/robotx_ws/models/buoy_detector.engine"   # [RO] TensorRT
     det_labels:                            # [RO] IN ENGINE ORDER — check the
-                                           #      dataset.yaml the engine was
-                                           #      trained from, not this comment
-      - "circle"
-      - "diamond"
+      - "circle"                           #      dataset.yaml the engine was
+      - "diamond"                          #      trained from, not this comment
     det_conf_min: 0.60                     # [RO] minimum detector confidence
     det_imgsz_height: 640                  # [RO] detector engine input height
     det_imgsz_width: 640                   # [RO] detector engine input width
     # -- stage 2: LED colour classifier --
     cls_engine: "/root/robotx_ws/models/led_classifier.engine"  # [RO] TensorRT
     cls_labels:                            # [RO] IN ENGINE ORDER. For an
-                                           #      ultralytics classifier that is
-                                           #      the training FOLDER order,
-                                           #      i.e. alphabetical — not the
-                                           #      order you find most natural
-      - "blue"
-      - "green"
-      - "off"
-      - "red"
+      - "blue"                             #      ultralytics classifier that is
+      - "green"                            #      the training FOLDER order,
+      - "off"                              #      i.e. alphabetical — not the
+      - "red"                              #      order you find natural
+    off_class: "off"                       # [RO] MUST be one of cls_labels. Its
+                                           #      probability is the flash
+                                           #      tracker's whole input; a name
+                                           #      that is not in the list turns
+                                           #      flash detection OFF and says so
     cls_imgsz: 96                          # [RO] = exporter --crop-size
-    crop_pad: 0.10                         # [RO] box padding per side, fraction
-                                           #      of box size = exporter's 1.2x
-    crop_top_frac: 0.40                    # [RO] = exporter --crop-frac; the
-                                           #      share of the padded crop taken
-                                           #      as the LED band
+    crop_pad: 0.10                         # [RO] = exporter's 1.2x box padding
+    crop_top_frac: 0.40                    # [RO] = exporter --crop-frac
     min_crop_px: 10                        # [RO] padded-crop height below which
                                            #      the band is a couple of rows
-                                           #      and its colour is whatever the
-                                           #      resize invented
-    # -- stage 3: track + vote --
-    iou_match: 0.25                        # [RO] IoU above which a box
-                                           #      continues an existing track
-    max_missed: 10                         # [RO] frames a track survives unseen
+    # -- stage 3: association --
+    iou_match: 0.25                        # [RO] IoU to continue a track
+    max_missed: 10                         # [RO] frames a track survives unseen.
+                                           #      Losing a track resets its flash
+                                           #      window, so this is now worth
+                                           #      more than it looks
+    # -- stage 3: colour vote. BYPASSED while flash_enable is true --
+    # Set flash_enable false with vote_decay 0.0 and vote_min 0.0 to see the RAW
+    # per-frame classification, unsmoothed — the view you want when judging the
+    # model itself rather than the tracker.
     vote_decay: 0.85                       # [RO] per-frame forgetting factor
-    vote_min: 0.55                         # [RO] accumulated share a colour
-                                           #      needs before it is published;
-                                           #      below it the label carries the
-                                           #      shape alone
-    # -- ranging (same numbers and reasoning as buoy_detector) --
+    vote_min: 0.55                         # [RO] share needed to publish
+    # -- stage 3: flash detection --
+    # RobotX 2026 Task 1: ten buoys, five light states (OFF, flashing RED /
+    # GREEN / BLUE, solid BLUE), flashing at 1 s ON / 1 s OFF. Task 2 adds SOLID
+    # red and green survey indicators. Flashing blue is the ENTRY buoy and solid
+    # blue the EXIT, so flashing-vs-solid is a course-direction decision, not a
+    # cosmetic label.
+    #
+    # THE GAPS BETWEEN THESE FOUR NUMBERS ARE DELIBERATE. Between off_max and
+    # flash_lo, and between flash_hi and solid_min, the answer is `unknown` and
+    # the label degrades to the bare colour. Reading a solid-blue EXIT as a
+    # flashing-blue ENTRY sends the boat to the wrong end of the course, so
+    # refusing to answer is much cheaper than answering wrongly.
+    #
+    # The values come from tools/bench/bench_flash.py, not from taste. A
+    # confident classifier reports ~0.9 for a lit frame rather than 1.0, so a
+    # SOLID light measures ~0.90 duty before any noise; solid_min at 0.85 would
+    # make a solid buoy unclassifiable the moment the model is wrong one frame
+    # in ten. These survive 10% frame error and abstain at 25%.
+    flash_enable: true                     # [RO] false -> colour only, via voter
+    flash_window_s: 6.0                    # [RO] duty window; 3 full periods
+    flash_min_span_s: 4.0                  # [RO] observed time before a verdict
+    flash_min_samples: 8                   # [RO] frames before a verdict
+    flash_lo: 0.38                         # [RO] flashing band, low edge
+    flash_hi: 0.62                         # [RO] flashing band, high edge
+    solid_min: 0.70                        # [RO] at/above this = solid
+    off_max: 0.30                          # [RO] at/below this = off
+    colour_min_share: 0.6                  # [RO] share of LIT frames one colour
+                                           #      needs before it is named
+    flash_debug_path: ""                   # [RO] jsonl of every observation, for
+                                           #      replaying real footage through
+                                           #      the tracker off-boat. Empty =
+                                           #      off; it writes one line per
+                                           #      detection per frame
+    # -- ranging --
     range_min_m: 0.30                      # [RO] depth below this is invalid
     range_max_m: 25.0                      # [RO] depth above this is invalid
     min_depth_samples: 5                   # [RO] valid pixels needed to range
-                                           #      a box; fewer = not published
     # -- output --
     frame_id: "camera_link"                # [RO] REP-103: x fwd, y left, z up
     detections_topic: "oak/detections"     # [RO] = buoy_detector.detections_topic
-    # -- camera: MUST equal oakd_publisher and buoy_detector. Depth is aligned
-    #    to the RGB camera at exactly this geometry, so the RGB intrinsics are
-    #    only valid on the depth image while all three agree. check_config.py
-    #    pins them; let them drift and nothing fails, ranges just quietly stop
-    #    meaning the same thing under each node.
+    health_topic: "crsd/oak_detector_health"   # [RO] std_msgs/String JSON;
+                                           #      per-track light state, and the
+                                           #      rate the flash tracker depends
+                                           #      on. Same shape as
+                                           #      crsd/lidar_cluster_health
+    # -- camera: MUST equal oakd_publisher and buoy_detector (check_config.py) --
     fps: 30.0                              # [RO] = oakd_publisher.fps
-    isp_denominator: 3                     # [RO] = oakd_publisher.isp_denominator
-                                           #      3 -> 640x400. Raise the
-                                           #      resolution (2 -> 960x600) if
-                                           #      no_crop is high — but it moves
-                                           #      all three nodes together.
+    isp_denominator: 3                     # [RO] 3 -> 640x400. Raise resolution
+                                           #      (2 -> 960x600) if no_crop is
+                                           #      high — moves all three nodes
     sync_threshold_ms: 50                  # [RO] = oakd_publisher.sync_threshold_ms
     subpixel: true                         # [RO] = oakd_publisher.subpixel
     lr_check: true                         # [RO] = oakd_publisher.lr_check
@@ -495,14 +523,11 @@ oak_detector:
     queue_size: 4                          # [RO] device output queue depth
     health_period_s: 5.0                   # [RO] rate/health log period [s]
     # -- annotated view --
-    stream_enable: true                    # [RO] MJPEG over HTTP; frames are
-                                           #      only drawn while a browser is
-                                           #      actually connected
+    stream_enable: true                    # [RO] MJPEG over HTTP; frames drawn
+                                           #      only while a browser is open
     stream_port: 8080                      # [RO] SHARED with buoy_detector and
                                            #      tools/oak_view.py — all three
                                            #      contend for the one camera, so
-                                           #      they can never contend for the
-                                           #      socket
+                                           #      never for the socket
     stream_quality: 60                     # [RO] JPEG quality for that view
 
-    

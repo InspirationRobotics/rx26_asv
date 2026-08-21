@@ -1,4 +1,4 @@
-"""oak_detector — two-stage buoy detection. Frames in, labelled detections out.
+"""oak_detector — two-stage buoy detection with light-state tracking.
 
 NOTE: unverified on the boat. Bench-run only, and deliberately NOT in
 core.launch.py.
@@ -6,53 +6,70 @@ core.launch.py.
 Owns the OAK-D, runs two TensorRT engines on each colour frame, ranges every box
 against the aligned depth image, and publishes positions in `camera_link`:
 
-  * `oak/detections`  crusader_msgs/Detection3DArray  — EVERY frame, empty or not
+  * `oak/detections`           crusader_msgs/Detection3DArray — EVERY frame
+  * `crsd/oak_detector_health` std_msgs/String (JSON)         — per-track detail
 
-  stage 1  det_engine  ->  where the buoys are, and what SHAPE each one is
-  stage 2  cls_engine  ->  what COLOUR each one's LED is, from a crop of its top
-  stage 3  track+vote  ->  one stable answer per buoy, not a per-frame flicker
+  stage 1  det_engine   ->  where the buoys are, and what SHAPE each one is
+  stage 2  cls_engine   ->  what COLOUR each LED is, from a crop of the box top
+  stage 3  track + time ->  one stable answer per buoy, and whether it FLASHES
 
-The published label is `"{colour}_{shape}"` once the colour vote has converged
-and bare `"{shape}"` until it has. An unresolved colour is reported as
-unresolved rather than guessed: a gate is defined by which colour is on which
-side, so a confident wrong colour is worse than an honest "shape only".
+THE LABEL IS THE CONTRACT
+-------------------------
+`{state}_{colour}_{shape}`, e.g. `flash_red_diamond`, `solid_blue_circle`, or
+`off_diamond`. Those are RobotX 2026's five Task 1 light states plus Task 2's
+solid red/green survey indicators — the words mission logic branches on.
+
+A state the tracker cannot yet call degrades to the bare colour, and an unknown
+colour to the bare shape. It never guesses: calling a solid-blue EXIT buoy a
+flashing-blue ENTRY buoy sends the boat to the wrong end of the course, and
+`unknown` is far cheaper than wrong. `tools/bench/bench_flash.py` measures how
+often each happens at a given classifier error rate.
+
+WHY FLASHING IS NOT A CLASSIFIER CLASS
+--------------------------------------
+The off-phase of a flashing buoy is pixel-identical to an unlit one, so no
+single frame distinguishes them and no per-frame model can learn to. It is a
+property of a track over time. `FlashTracker` measures the duty cycle of
+`1 - P(off)` over a window; 1 s ON / 1 s OFF puts a flashing light near 50%, a
+solid one near 100% and an unlit one near 0%, whatever the phase.
+
+It is fed the classifier's SOFT score, not its argmax. When the classifier
+hedges at ~0.5, argmax turns a shrug into a full vote; the bench shows soft
+input holding ~100% correct where hard labels start producing wrong verdicts.
+
+THE VOTER AND THE FLASH TRACKER ARE ALTERNATIVES
+------------------------------------------------
+`LabelVoter` stabilises a colour by decaying old observations into new ones —
+which is exactly what destroys a flash signal. With `flash_enable` true the
+tracker owns the temporal answer and the voter is bypassed. With it false you
+get the voted colour, and `vote_decay: 0.0` + `vote_min: 0.0` gives the raw
+per-frame classification with no smoothing at all, for looking at what the model
+actually says frame by frame.
 
 WHY THIS NODE PUBLISHES NO FRAMES
 ---------------------------------
-Same trade `buoy_detector` makes, and it is the whole reason detection runs
-beside the device: 1.28 MB of raw RGB+depth per frame is ~38 MB/s at 30fps, to
-produce a few hundred bytes of Detection3DArray. Nothing large leaves this
-process. Unlike `buoy_detector` there is no `publish_frames` escape hatch here —
-if you want pixels, run `oakd_publisher`, which exists for exactly that.
-
-The annotated MJPEG view is the way to watch this work (`stream_port`, default
-8080). It costs nothing while no browser is attached.
+1.28 MB of raw RGB+depth per frame is ~38 MB/s at 30fps, to produce a few
+hundred bytes of Detection3DArray. Nothing large leaves this process. Unlike
+`buoy_detector` there is no `publish_frames` escape hatch — if you want pixels,
+run `oakd_publisher`, which exists for exactly that.
 
 IT CONTENDS FOR THE ONE OAK-D
 ------------------------------
 Third client for a device that admits exactly one. `oakd_publisher`,
 `buoy_detector` and this node are ALTERNATIVES: whichever starts first gets the
-camera and the others fail to open it. Which one runs is an operator choice per
-session, which is why none of them is in a launch file.
-
-It shares `stream_port` 8080 with `buoy_detector` ON PURPOSE. They can never run
-at the same time, so they can never contend for the socket — and the ground
-station's camera tab then shows whichever one is running with no extra wiring.
+camera and the others fail to open it. It shares `stream_port` 8080 with
+`buoy_detector` on purpose — they can never run together, so they can never
+contend for the socket, and the ground station's camera tab finds whichever is
+up with no extra wiring.
 
 DETECTION RUNS ON THE ISP FRAME, NOT AN NN PREVIEW
 ---------------------------------------------------
-The pipeline comes from `oak_pipeline.build_rgbd`, unchanged, so this node sees
-exactly the frame `buoy_detector` sees: ISP-scaled colour with depth aligned to
-it and paired on-device. Boxes, LED crops and depth lookups are therefore all in
-ONE pixel coordinate system.
-
-That is not a simplification for its own sake. Running the detector on a
-`setPreviewSize` stream means the preview is a centre-CROP of the ISP at a
-different scale, so every box has to be mapped back into ISP pixels before a
-depth lookup or a crop, and getting that mapping wrong produces a plausible
-range rather than an error. Using one frame for all three deletes the mapping
-and the class of bug that comes with it. The engine's own letterboxing handles
-the aspect difference, exactly as it already does for `buoy_detector`.
+The pipeline comes from `oak_pipeline.build_rgbd`, unchanged, so boxes, LED
+crops and depth lookups are all in ONE pixel coordinate system. Running the
+detector on a `setPreviewSize` stream means the preview is a centre-crop of the
+ISP at a different scale, and every box has to be mapped back before a depth
+lookup or a crop — a mapping that produces a plausible range rather than an
+error when it is wrong. Using one frame for all three deletes that class of bug.
 
 FRAME CONVENTION
 ----------------
@@ -62,10 +79,11 @@ no consumer ever holds an optical convention.
 
 WHERE IT RUNS
 -------------
-`asv`, the only image with both depthai (the camera) and ultralytics/TensorRT
-(the engines). Both imports are function-local, so `colcon build` and CI's
-import check still pass on a machine with no SDK and no camera.
+`asv`, the only image with both depthai and ultralytics/TensorRT. Both imports
+are function-local, so `colcon build` and CI's import check still pass on a
+machine with no SDK and no camera.
 """
+import json
 import threading
 import time
 
@@ -73,13 +91,15 @@ import numpy as np
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from std_msgs.msg import String
 
 from crusader_common import config as crsd_config
 from crusader_common.node_main import run_node
 from crusader_common.param_utils import declare_from_config
 from crusader_msgs.msg import Detection3D, Detection3DArray
 from crusader_perception import oak_pipeline
-from crusader_perception.shape_led_core import LabelVoter, TrackTable, led_patch
+from crusader_perception.oak_detector_core import (FlashTracker, LabelVoter,
+                                                   TrackTable, led_patch)
 
 MAX_GROUPS_PER_TICK = 2
 
@@ -111,6 +131,11 @@ PARAM_SPEC = {
                        description="colour class names IN ENGINE ORDER — for an "
                                    "ultralytics classifier that is the training "
                                    "folder order, i.e. alphabetical"),
+    "off_class": dict(read_only=True,
+                      description="which cls_labels entry means 'unlit'. Its "
+                                  "probability is what the flash tracker reads; "
+                                  "a name that is not in cls_labels disables "
+                                  "flash detection rather than guessing"),
     "cls_imgsz": dict(read_only=True, lo=32, hi=640,
                       description="classifier input size; MUST equal the crop "
                                   "size the training exporter wrote"),
@@ -123,16 +148,46 @@ PARAM_SPEC = {
     "min_crop_px": dict(read_only=True, lo=4, hi=200,
                         description="padded-crop height below which the LED band "
                                     "is too small to classify"),
-    # -- stage 3: track + vote --
+    # -- stage 3: association --
     "iou_match": dict(read_only=True, lo=0.05, hi=0.9,
                       description="IoU above which a box continues a track"),
     "max_missed": dict(read_only=True, lo=1, hi=120,
                        description="frames a track survives without a match"),
+    # -- stage 3: colour vote (bypassed when flash_enable) --
     "vote_decay": dict(read_only=True, lo=0.0, hi=0.999,
-                       description="per-frame forgetting factor for colour votes"),
+                       description="per-frame forgetting factor. 0.0 with "
+                                   "vote_min 0.0 gives the RAW per-frame call"),
     "vote_min": dict(read_only=True, lo=0.0, hi=1.0,
-                     description="accumulated share a colour needs before it is "
-                                 "published at all"),
+                     description="accumulated share a colour needs to publish"),
+    # -- stage 3: flash detection --
+    "flash_enable": dict(read_only=True,
+                         description="report flashing/solid/off from the duty "
+                                     "cycle. False falls back to the voter"),
+    "flash_window_s": dict(read_only=True, lo=2.0, hi=30.0,
+                           description="duty-cycle window [s]. Must span whole "
+                                       "1 s ON / 1 s OFF periods"),
+    "flash_min_span_s": dict(read_only=True, lo=1.0, hi=30.0,
+                             description="observed time before any verdict [s]"),
+    "flash_min_samples": dict(read_only=True, lo=2, hi=500,
+                              description="frames in the window before any "
+                                          "verdict; a 0.5 Hz square wave needs "
+                                          ">1 Hz sampling"),
+    "flash_lo": dict(read_only=True, lo=0.0, hi=1.0,
+                     description="duty at or above this may be 'flashing'"),
+    "flash_hi": dict(read_only=True, lo=0.0, hi=1.0,
+                     description="duty at or below this may be 'flashing'"),
+    "solid_min": dict(read_only=True, lo=0.0, hi=1.0,
+                      description="duty at or above this is 'solid'"),
+    "off_max": dict(read_only=True, lo=0.0, hi=1.0,
+                    description="duty at or below this is 'off'. The gaps "
+                                "between these four are DELIBERATE dead bands"),
+    "colour_min_share": dict(read_only=True, lo=0.0, hi=1.0,
+                             description="share of lit frames one colour needs "
+                                         "before it is named"),
+    "flash_debug_path": dict(read_only=True,
+                             description="jsonl of every per-frame observation, "
+                                         "for replaying real footage through the "
+                                         "tracker off-boat. Empty = off"),
     # -- ranging --
     "range_min_m": dict(read_only=True, lo=0.05, hi=5.0,
                         description="depth below this is discarded as invalid"),
@@ -147,6 +202,9 @@ PARAM_SPEC = {
                                  "body axes: x forward, y left, z up)"),
     "detections_topic": dict(read_only=True,
                              description="Detection3DArray topic (relative name)"),
+    "health_topic": dict(read_only=True,
+                         description="std_msgs/String JSON; per-track light "
+                                     "state and where the frames went"),
     # -- camera; MUST match the other OAK-D nodes, see check_config.py --
     "fps": dict(read_only=True, lo=1.0, hi=60.0, description="camera frame rate [Hz]"),
     "isp_denominator": dict(read_only=True, lo=1, hi=8,
@@ -170,9 +228,10 @@ PARAM_SPEC = {
                            description="JPEG quality for the MJPEG view"),
 }
 
-# Box colour by LED colour. Getting red and green the right way round matters
-# more than it looks: a gate is defined by which side each colour is on, so a
-# viewer that draws them wrong has you "confirming" a correct detection as broken.
+# Box colour by LED colour, in OpenCV's BGR order. Drawing only — nothing here
+# classifies. Getting red and green the right way round matters more than it
+# looks: a gate is defined by which side each colour is on, so a viewer that
+# draws them wrong has you "confirming" a correct detection as broken.
 LED_COLORS = {"red": (0, 0, 255), "green": (0, 255, 0), "blue": (255, 128, 0),
               "yellow": (0, 255, 255), "white": (255, 255, 255),
               "off": (160, 160, 160)}
@@ -223,13 +282,47 @@ class OakDetector(Node):
         self.det_imgsz = (int(p["det_imgsz_height"]), int(p["det_imgsz_width"]))
         self.cls_imgsz = int(p["cls_imgsz"])
 
+        # Which class means "unlit". The flash tracker reads 1 - P(off), so a
+        # missing or misspelled name would silently make every light look solid.
+        # Refuse instead: no off class, no flash detection, said out loud once.
+        self.off_class = p["off_class"]
+        self.off_index = (self.colours.index(self.off_class)
+                          if self.off_class in self.colours else None)
+        self.flash_enable = bool(p["flash_enable"]) and self.off_index is not None
+        if bool(p["flash_enable"]) and self.off_index is None:
+            self.get_logger().error(
+                f"off_class {self.off_class!r} is not in cls_labels "
+                f"({', '.join(self.colours)}) — FLASH DETECTION IS OFF. Every "
+                "light will be reported by colour alone, with no flashing/solid "
+                "distinction, which is the ENTRY vs EXIT call in Task 1.")
+
         self.pub_detections = self.create_publisher(
             Detection3DArray, p["detections_topic"], qos_profile_sensor_data)
+        self.pub_health = self.create_publisher(String, p["health_topic"], 10)
 
         self.tracks = TrackTable(iou_match=p["iou_match"],
                                  max_missed=int(p["max_missed"]))
         self.voter = LabelVoter(self.colours, decay=p["vote_decay"],
                                 min_vote=p["vote_min"])
+        self.flash = FlashTracker(
+            window_s=p["flash_window_s"], min_span_s=p["flash_min_span_s"],
+            min_samples=int(p["flash_min_samples"]),
+            flash_lo=p["flash_lo"], flash_hi=p["flash_hi"],
+            solid_min=p["solid_min"], off_max=p["off_max"],
+            colour_min_share=p["colour_min_share"])
+
+        # Per-frame observation log, for replaying REAL classifier noise through
+        # the tracker on a laptop. The bench proves the duty-cycle logic against
+        # synthetic error; only real footage proves the error rate itself.
+        self._debug = None
+        if p["flash_debug_path"]:
+            try:
+                self._debug = open(p["flash_debug_path"], "a", buffering=1)
+                self.get_logger().warn(
+                    f"flash debug log ON -> {p['flash_debug_path']} "
+                    "(one line per detection per frame; turn it off for a run)")
+            except OSError as e:
+                self.get_logger().warn(f"flash debug log disabled: {e}")
 
         self.device = None
         self.server = None
@@ -243,6 +336,7 @@ class OakDetector(Node):
         self.no_depth = 0
         self.no_crop = 0
         self.unresolved = 0
+        self.states = {}             # track id -> latest FlashState
         self.last_health_frames = 0
         self.last_health_time = time.monotonic()
 
@@ -267,10 +361,20 @@ class OakDetector(Node):
         self.classifier = YOLO(self.p["cls_engine"], task="classify")
         self.get_logger().info(
             f"engines ready — shapes: {', '.join(self.shapes)} | "
-            f"colours: {', '.join(self.colours)}")
+            f"colours: {', '.join(self.colours)} | "
+            f"flash detection {'ON' if self.flash_enable else 'OFF'}")
 
     def _open_device(self):
         import depthai as dai                   # sensor SDK, function-local
+
+        # depthai v3 removed XLinkOut in favour of output queues. Naming the
+        # version here turns "AttributeError deep in a builder" into a sentence
+        # about a dependency that moved — see the Dockerfile's pin.
+        if not hasattr(dai.node, "XLinkOut"):
+            raise RuntimeError(
+                f"depthai {dai.__version__} is the v3 API (no XLinkOut); "
+                "oak_pipeline targets v2. Pin depthai==2.x in the Dockerfile "
+                "and rebuild the image.")
 
         pipeline, self.width, self.height = oak_pipeline.build_rgbd(
             isp_denominator=self.p["isp_denominator"], fps=self.p["fps"],
@@ -327,7 +431,9 @@ class OakDetector(Node):
             self.frames += 1
 
     def _run_pipeline(self, rgb_frame, depth_frame, stamp):
-        start = time.monotonic()
+        now = time.monotonic()
+
+        start = now
         result = self.detector.predict(rgb_frame, verbose=False,
                                        imgsz=self.det_imgsz,
                                        conf=self.p["det_conf_min"])[0]
@@ -349,13 +455,18 @@ class OakDetector(Node):
             shapes.append(self.shapes[index])
             confidences.append(float(box.conf[0]))
 
-        # -------- stage 3a: association, before classification --------
-        # Association first so a crop that fails to cut still keeps its track
-        # alive and its accumulated votes intact. Classifying first and
-        # associating only what classified would drop the track of any buoy that
-        # briefly got too small to crop, and it would come back as a new one.
+        # -------- stage 3a: association, BEFORE classification --------
+        # A crop that fails to cut still keeps its track alive and its history
+        # intact. Classifying first and associating only what classified would
+        # drop the track of any buoy that briefly got too small to crop, and it
+        # would come back as a new one with an empty flash window — which for a
+        # 6 s window means six seconds of `unknown` for a light we had already
+        # called.
         track_ids = self.tracks.update(boxes)
-        self.voter.prune(self.tracks.live_ids)
+        live = self.tracks.live_ids
+        self.voter.prune(live)
+        self.flash.prune(live)
+        self.states = {k: v for k, v in self.states.items() if k in live}
 
         # -------- stage 2: crop the LED band and classify --------
         crops, cropped_index = [], []
@@ -375,28 +486,63 @@ class OakDetector(Node):
         self.cls_ms = (time.monotonic() - start) * 1000.0
         by_index = dict(zip(cropped_index, probabilities))
 
-        # -------- stage 3b: vote, range, publish --------
+        # -------- stage 3b: light state, range, publish --------
         array = Detection3DArray()
         array.header.stamp = stamp
         array.header.frame_id = self.frame_id
         drawn = []
 
         for i, box in enumerate(boxes):
-            colour, colour_conf = (None, 0.0)
-            if i in by_index:
-                colour, colour_conf = self.voter.update(track_ids[i], by_index[i])
+            track_id = track_ids[i]
+            probs = by_index.get(i)
+            state = None
+            colour = None
+            colour_conf = 0.0
+
+            if probs is not None:
+                # The per-frame argmax, which is what the flash tracker needs —
+                # NOT the voted colour. The voter's whole job is to smooth
+                # across frames, and that is precisely what erases a flash.
+                frame_index = int(np.argmax(probs))
+                frame_colour = self.colours[frame_index]
+                if frame_colour == self.off_class:
+                    frame_colour = None
+
+                if self.flash_enable:
+                    lit_score = 1.0 - float(probs[self.off_index])
+                    state = self.flash.update(track_id, now, lit_score,
+                                              frame_colour)
+                    self.states[track_id] = state
+                    colour, colour_conf = state.colour, state.confidence
+                    if self._debug is not None:
+                        self._debug.write(json.dumps({
+                            "t": round(now, 4), "id": int(track_id),
+                            "lit": round(lit_score, 4),
+                            "colour": frame_colour, "shape": shapes[i],
+                            "state": state.state,
+                            "duty": None if state.duty is None
+                                    else round(state.duty, 4),
+                        }) + "\n")
+                else:
+                    colour, colour_conf = self.voter.update(track_id, probs)
+
+            if self.flash_enable and state is not None:
+                label = state.label(shapes[i])
+            elif colour:
+                label = f"{colour}_{shapes[i]}"
+            else:
+                label = shapes[i]
             if colour is None:
                 self.unresolved += 1
 
-            label = f"{colour}_{shapes[i]}" if colour else shapes[i]
             position, sample = self._position(box, depth_frame)
 
             # Recorded whether or not it ranged: a box the viewer shows with no
             # range is the single most useful thing on the stream when tuning.
-            drawn.append({"box": box, "label": label, "id": track_ids[i],
+            drawn.append({"box": box, "label": label, "id": track_id,
                           "conf": confidences[i], "colour": colour,
-                          "colour_conf": colour_conf, "pos": position,
-                          "sample": sample})
+                          "colour_conf": colour_conf, "state": state,
+                          "pos": position, "sample": sample})
 
             if position is None:
                 # No usable depth: sky behind the box, featureless water, or
@@ -407,9 +553,10 @@ class OakDetector(Node):
 
             detection = Detection3D()
             detection.label = label
-            # The DETECTOR's confidence — "is this a buoy". The colour's own
-            # confidence has nowhere to live in Detection3D, so the label itself
-            # carries that gate: a colour only appears once it cleared vote_min.
+            # The DETECTOR's confidence — "is this a buoy". The light state has
+            # its own confidence and nowhere in Detection3D to live, so the
+            # LABEL carries that gate (an uncertain state degrades the label)
+            # and the number goes on the health topic for anyone who needs it.
             detection.confidence = confidences[i]
             detection.x, detection.y, detection.z = position
             x1, y1, x2, y2 = box
@@ -497,8 +644,12 @@ class OakDetector(Node):
 
         Both regions are drawn because they answer different questions. The LED
         band at the top is what the classifier read — if it is sitting on sky or
-        on the hull, the colour is noise no matter what the vote says. The depth
-        patch lower down is what stereo ranged.
+        on the hull, the colour is noise no matter what the duty cycle says. The
+        depth patch lower down is what stereo ranged.
+
+        The duty cycle is drawn as a number, not a word, because the words are
+        thresholds over it: seeing 0.34 next to `unknown` tells you the dead band
+        is doing its job, where the word alone reads as a failure.
         """
         cv2 = self.cv2
         image = rgb_frame.copy()
@@ -517,9 +668,13 @@ class OakDetector(Node):
             band_x1 = int(round(band_x0 + (x2 - x1) * (1.0 + 2 * pad)))
             cv2.rectangle(image, (band_x0, band_y0), (band_x1, band_y1), color, 1)
 
-            vote = f"{item['colour_conf'] * 100:.0f}%" if item["colour"] else "??"
-            text = (f"#{item['id']} {item['label']} "
-                    f"d{item['conf'] * 100:.0f}% c{vote}")
+            text = f"#{item['id']} {item['label']} d{item['conf'] * 100:.0f}%"
+            state = item["state"]
+            if state is not None:
+                duty = "--" if state.duty is None else f"{state.duty:.2f}"
+                text += f" duty={duty} c{state.confidence * 100:.0f}% n{state.samples}"
+            elif item["colour"]:
+                text += f" c{item['colour_conf'] * 100:.0f}%"
             if item["pos"] is None:
                 text += " NO DEPTH"
             else:
@@ -544,6 +699,7 @@ class OakDetector(Node):
         status = (f"{self.fps:.0f}fps  det {self.det_ms:.0f}ms  "
                   f"cls {self.cls_ms:.0f}ms  {ranged}/{len(drawn)} ranged  "
                   f"no_depth={self.no_depth} no_crop={self.no_crop}  "
+                  f"flash={'on' if self.flash_enable else 'OFF'}  "
                   f"{self.width}x{self.height}  frame={self.frame_id}")
         cv2.putText(image, status, (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                     (255, 255, 255), 1)
@@ -572,21 +728,24 @@ class OakDetector(Node):
                 return self._stream()
 
             def _page(self):
-                # max-height, not width:100%. Embedded in the ground station's
-                # camera tab the pane is far wider than 640x400, and a
-                # width-only rule scales the height past the pane and makes the
-                # iframe scroll. Contain-to-fit matches what the GCS already
-                # does for a bare <img> in .viewer.
+                # object-fit:contain, NOT width:100%. The ground station embeds
+                # this page in an iframe far wider than the frame, and a
+                # width-only rule scales the height past the pane so the iframe
+                # scrolls. `contain` fills whichever axis binds and letterboxes
+                # the other, at any window size.
+                # no-store because this markup changes and a cached copy of the
+                # old page is indistinguishable from a fix that did not work.
                 body = ("<html><head><title>oak_detector</title>"
                         "<meta name='viewport' content='width=device-width,"
                         "initial-scale=1'></head>"
-                        "<body style='margin:0;height:100vh;background:#111;"
-                        "display:flex;align-items:center;justify-content:center'>"
-                        "<img src='/stream' style='max-width:100%;"
-                        "max-height:100vh;object-fit:contain;display:block'>"
+                        "<body style='margin:0;height:100vh;overflow:hidden;"
+                        "background:#111'>"
+                        "<img src='/stream' style='width:100%;height:100%;"
+                        "object-fit:contain;display:block'>"
                         "</body></html>").encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
+                self.send_header("Cache-Control", "no-store")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -654,28 +813,59 @@ class OakDetector(Node):
         elapsed = max(now - self.last_health_time, 1e-6)
         self.last_health_frames = self.frames
         self.last_health_time = now
+        self.fps = delivered / elapsed if delivered else 0.0
+
+        # JSON first, so the topic keeps publishing even on a stalled camera —
+        # a consumer judging health by arrival needs the silence to be real, and
+        # "fps 0" is information where no message at all is ambiguous.
+        tracks = [{"id": int(k), "state": s.state, "colour": s.colour,
+                   "duty": None if s.duty is None else round(s.duty, 3),
+                   "conf": round(s.confidence, 3), "n": s.samples,
+                   "span_s": round(s.span_s, 2)}
+                  for k, s in sorted(self.states.items())]
+        self.pub_health.publish(String(data=json.dumps({
+            "fps": round(self.fps, 2), "det_ms": round(self.det_ms, 1),
+            "cls_ms": round(self.cls_ms, 1), "batched": self.batched,
+            "frames": self.frames, "detections": self.detections,
+            "no_depth": self.no_depth, "no_crop": self.no_crop,
+            "unresolved": self.unresolved, "viewers": self.buffer.viewers,
+            "flash_enable": self.flash_enable, "tracks": tracks,
+        })))
 
         if delivered == 0:
-            self.fps = 0.0
             self.get_logger().warn(
                 f"no frames since last check (total={self.frames}) — camera "
                 "stalled, unplugged, or inference wedged")
             return
 
-        self.fps = delivered / elapsed
-        # The three counters worth watching, and they fail differently:
-        #   no_depth  detector sees buoys, stereo cannot range them -> empty
-        #             arrays, which looks downstream exactly like seeing nothing
-        #   no_crop   boxes too small for an LED band -> shape published without
-        #             a colour, which reads as a classifier problem and is not
-        #   unresolved votes not converging -> the classifier is being fed
-        #             something it cannot call; check the band on the viewer
+        # THE FRAME RATE IS A CORRECTNESS NUMBER HERE, not just performance. A
+        # 0.5 Hz square wave needs more than 1 Hz of sampling; measured against
+        # FlashTracker, 2 fps is the floor and 3+ is comfortable. Below that the
+        # tracker reports `unknown` rather than guessing, but you want to know.
+        if self.flash_enable and 0.0 < self.fps < 3.0:
+            self.get_logger().warn(
+                f"{self.fps:.1f} fps is below the 3 fps the flash tracker wants "
+                "— light states will mostly read `unknown`. See "
+                "tools/bench/bench_flash.py", throttle_duration_sec=30.0)
+
+        # The counters worth watching, and they fail differently:
+        #   no_depth    detector sees buoys, stereo cannot range them -> empty
+        #               arrays, which downstream looks exactly like seeing nothing
+        #   no_crop     boxes too small for an LED band -> shape published with
+        #               no colour, which reads as a classifier problem and is not
+        #   unresolved  no colour called; with flash on, usually a window that
+        #               has not filled yet rather than a bad classifier
+        states = {}
+        for s in self.states.values():
+            states[s.state] = states.get(s.state, 0) + 1
+        summary = " ".join(f"{k}={v}" for k, v in sorted(states.items())) or "none"
         self.get_logger().info(
             f"{self.fps:.1f} fps  det={self.det_ms:.0f}ms cls={self.cls_ms:.0f}ms"
             f"{' (unbatched)' if not self.batched else ''}  "
             f"detections={self.detections}  no_depth={self.no_depth}  "
             f"no_crop={self.no_crop}  unresolved={self.unresolved}  "
-            f"tracks={len(self.tracks.tracks)}  viewers={self.buffer.viewers}")
+            f"tracks={len(self.tracks.tracks)} [{summary}]  "
+            f"viewers={self.buffer.viewers}")
 
     def destroy_node(self):
         if self.server is not None:
@@ -688,6 +878,12 @@ class OakDetector(Node):
             except Exception as e:
                 self.get_logger().warn(f"stream shutdown failed: {e}")
             self.server = None
+        if self._debug is not None:
+            try:
+                self._debug.close()
+            except OSError:
+                pass
+            self._debug = None
         if self.device is not None:
             try:
                 self.device.close()      # one client only: a leaked handle
