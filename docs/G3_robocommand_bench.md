@@ -48,7 +48,7 @@ Everything else is a stand-in that gets deleted later, or a broker.
 - [ ] `ocs/.venv` built: `python -m venv .venv && .venv/Scripts/python -m pip install -r requirements.txt`
       (Linux/macOS: `.venv/bin/python`)
 - [ ] `bash ocs/make_protos.sh` run; `ocs/rx_bridge/gen/` populated
-- [ ] `.venv/Scripts/python -m unittest discover -s tests -t .` → **35 tests OK**
+- [ ] `.venv/Scripts/python -m unittest discover -s tests -t .` → **41 tests OK**
 - [ ] Docker available for RoboNation's stub
 - [ ] `mosquitto-clients` installed (`mosquitto_sub`) — the single most useful
       diagnostic in this document
@@ -105,6 +105,13 @@ cd ocs && .venv/Scripts/python -m rx_bridge --config bridge.toml
 cd ocs && .venv/Scripts/python fake_vehicle.py --host 127.0.0.1
 ```
 
+> **Their stub is more active than a log sink.** `test_server.py` publishes the retained
+> `RxCourse` on startup and then *auto-issues `RunStart`* the moment every vehicle in your
+> `RunDeclaration` reports `STATE_AUTO`. You do not send `RunStart` by hand. This is a
+> gift: it means the bench also proves your heartbeat carries the right `state` and the
+> right `vehicle_id`, because a mismatch in either silently prevents the run from starting.
+> `test_client.py` is still there for injecting Task 4 traffic and malformed frames.
+
 ### Test matrix A (all must pass; record pass/fail + timestamp)
 
 | # | Test | Procedure | Pass criterion |
@@ -118,7 +125,7 @@ cd ocs && .venv/Scripts/python fake_vehicle.py --host 127.0.0.1
 | A7 | Rate is right | `status` twice, 30 s apart | `forwarded` delta ≈ 60 (±3). Not 30, not 120 |
 | A8 | NaN is caught | Restart the fake with `--nan` | `DROP ... heading_deg: NaN`; `dropped ... invalid` climbing; **`forwarded` stops** |
 | A9 | UNKNOWN is caught | Restart with `--unknown` | `DROP ... current_task: UNKNOWN (TASK_UNKNOWN...)` |
-| A10 | Run start | Send `RunStart` from `test_client.py` with the matching `declaration_seq` | `RUN START: run N started`; state `RUNNING` |
+| A10 | Run start | **Nothing — it is automatic.** Their `test_server.py` publishes `RunStart` as soon as every vehicle named in your `RunDeclaration` is reporting `STATE_AUTO` | `RUN START: run N started`; state `RUNNING`. If it never fires, your heartbeat's `state` is not `STATE_AUTO`, or a `vehicle_id` disagrees with the declaration |
 | A11 | Wrong seq refused | Send `RunStart` with a different `declaration_seq` | `RUN START REFUSED: ... does not match ours`; state stays put |
 | A12 | Run survives a restart | Note `seq` and the state, Ctrl-C the bridge, restart it, `status` | Resumes `DECLARED`/`RUNNING` on connect; report seq continues, never restarts at 1; `declare` is **not** needed and is refused |
 | A13 | Wire log | `tail` the file named in `status` | One JSON object per frame, `b64` payloads present |
@@ -201,7 +208,7 @@ is swapping `fake_vehicle.py` for the Jetson; every criterion above still applie
 
 | # | Symptom | Cause and fix |
 |---|---------|---------------|
-| T6 | Stuck in `CONNECTED`, never `COURSE_RX` | No retained `RxCourse`. **The most confusing failure in this setup.** Check with `mosquitto_sub -h HOST -t 'robocommand/robotx/course' -v` — if a fresh subscriber gets nothing, there is no retained message. Fix: `python fake_course.py --host HOST`. A course published *without* the retain flag reaches only clients already subscribed, so the bridge looks healthy and simply never proceeds |
+| T6 | Stuck in `CONNECTED`, never `COURSE_RX` | No retained `RxCourse`. Their `test_server.py` *does* publish one on startup, so suspect the `rc-test` container rather than the protocol: `docker compose logs rc-test` should show `Published RxCourse (retained)`. Confirm with `mosquitto_sub -h HOST -t 'robocommand/robotx/course' -v` — a fresh subscriber getting nothing means no retained message exists. If you are running without their stub at all, `python fake_course.py --host HOST` supplies one |
 | T7 | Stuck in `DISCONNECTED` | Broker unreachable. `docker compose ps` — is it up and is 1883 published to the host? Try `mosquitto_sub -h HOST -p 1883 -t '#'`. A broker bound to `127.0.0.1` inside the container is invisible from another machine |
 | T8 | `cannot declare in CONNECTED` | You have no course yet. See T6 |
 | T9 | `cannot declare in DECLARED` | Already declared. To start a new run, delete `ocs/run/seq.json` and restart the bridge |
