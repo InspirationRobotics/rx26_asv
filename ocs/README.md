@@ -106,6 +106,16 @@ Then at the `rx>` prompt: `declare`, watch `test_client.py`'s log fill with
 heartbeats, send a `RunStart` from the stub, and `status` to see the state
 machine advance.
 
+The full procedure -- pass/fail matrix, the two-machine network build, and a
+troubleshooting table -- is [docs/G3_robocommand_bench.md](../docs/G3_robocommand_bench.md).
+
+**If the bridge sits in `CONNECTED` and never advances**, the stub is not
+publishing a retained `RxCourse`, and nothing else can proceed until it does:
+
+```bash
+.venv/Scripts/python fake_course.py --host 127.0.0.1
+```
+
 We did **not** write our own RoboCommand stub. RoboNation ships one, along with
 `test_client.py`, which is a reference OCS — the thing to diff our wire output
 against when a report is rejected.
@@ -217,6 +227,7 @@ ocs/
   bridge.toml          configuration; bare keys MUST precede every [section]
   make_protos.sh       codegen from a pinned robocommand SHA
   fake_vehicle.py      a 2 Hz USV that does not exist, plus its two fault modes
+  fake_course.py       a retained RxCourse, for when the stub does not send one
   rx_bridge/
     runstate.py        the run's state machine.  no I/O
     seqstore.py        durable per-vehicle sequence counters
