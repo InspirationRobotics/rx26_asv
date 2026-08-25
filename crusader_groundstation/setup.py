@@ -23,6 +23,10 @@ setup(
             # core.launch.py. It is an entry point because a ground station
             # that cannot be started is not a ground station.
             "ground_station = crusader_groundstation.gcs_node:main",
+            # Same posture as ground_station above: NOT PROVEN ON THE
+            # BOAT, carries a NOTE header, and is deliberately absent
+            # from core.launch.py until it has carried a real run.
+            "ocs_client = crusader_groundstation.ocs_client_node:main",
         ],
     },
 )

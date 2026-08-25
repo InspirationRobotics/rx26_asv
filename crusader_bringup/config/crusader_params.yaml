@@ -408,6 +408,50 @@ rc_heartbeat_watchdog:
     reset_low_pwm: 1300                    # [RO] us; reset switch "low" below this
     reset_high_pwm: 1700                   # [RO] us; reset switch "high" above this
 
+# ---- ocs_client: the heartbeat to the Operator Control Station ----
+# NOT PROVEN ON THE BOAT — started by hand, absent from core.launch.py, same
+# posture as ground_station. Sends an RxReport heartbeat as length-prefixed JSON
+# over one TCP connection that also carries OCS commands back down. Commands are
+# republished to /crsd/ocs_command and NEVER acted on here: the RC e-stop remains
+# the only safety path.
+# All [RO]: none of this is a test-day tuning knob, and ocs_host in particular
+# must not be changeable from a laptop mid-run.
+ocs_client:
+  ros__parameters:
+    ocs_host: "192.168.8.107"               # [RO] the OCS on the TEAM subnet.
+                                           #      There is NO discovery: give the
+                                           #      OCS a static address on its team
+                                           #      NIC or a DHCP reservation, and
+                                           #      set this to match.
+                                           #      NOT 127.0.0.1 — that is this
+                                           #      Jetson, and the connect fails.
+    ocs_port: 37564                        # [RO] = [tcp] port in the OCS
+                                           #      bridge.toml. Clear of 8090
+                                           #      (ground_station) and 8080/8081
+                                           #      (the viewers it embeds).
+    vehicle_id: "USV1"                     # [RO] MUST match a [[vehicle]] id in
+                                           #      the OCS bridge.toml, or the OCS
+                                           #      drops every frame with
+                                           #      "not a configured vehicle"
+    team_id: "ASTA"                        # [RO] = bridge.toml team_id
+    rate_hz: 2.0                           # [RO] the handbook mandates 2 Hz per
+                                           #      active vehicle; the OCS rate
+                                           #      governor reserves budget for it
+    fake_telemetry: false                  # [RO] true = invent a circle instead
+                                           #      of subscribing, for bench work
+                                           #      with no Pixhawk. Logs a warning
+                                           #      the whole time it is on. NEVER
+                                           #      leave true for a scored run.
+    pose_timeout_s: 1.0                    # [RO] = shared.pose_timeout_s; stale
+                                           #      -> no heartbeat at all, rather
+                                           #      than a fabricated position
+    attitude_timeout_s: 1.0                # [RO] stale -> roll/pitch omitted, the
+                                           #      rest of the heartbeat still goes
+    status_timeout_s: 1.0                  # [RO] stale -> no heartbeat: without
+                                           #      armed/mode the vehicle state is
+                                           #      unknowable, and STATE_UNKNOWN is
+                                           #      refused by the OCS validator
+
 
 # ---- oak_detector: two-stage shape + LED-colour pipeline ----
 # THIRD client for the one OAK-D, alongside oakd_publisher and buoy_detector.
