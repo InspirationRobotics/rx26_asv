@@ -447,34 +447,7 @@ ocs_client:
                                            #      than a fabricated position
     attitude_timeout_s: 1.0                # [RO] stale -> roll/pitch omitted, the
                                            #      rest of the heartbeat still goes
-    mission_timeout_s: 1.0                 # [RO] stale /crsd/mission_state ->
-                                           #      no heartbeat at all. The
-                                           #      planner owns state and task;
-                                           #      without it we have nothing
-                                           #      truthful to report
+    status_timeout_s: 1.0                  # [RO] stale -> no heartbeat: without
                                            #      armed/mode the vehicle state is
                                            #      unknowable, and STATE_UNKNOWN is
                                            #      refused by the OCS validator
-
-# ---- mission_planner: the one node that decides state and task ----
-# NOT PROVEN ON THE BOAT. Owns STATE_AUTO/MANUAL/KILLED and the current task,
-# and is the only node allowed to decide them — ocs_client transmits its answer
-# rather than forming its own. Publishes /crsd/mission_state.
-# It NEVER changes flight mode: an OCS standby-auto directive is logged and
-# ignored, and a human puts the boat into GUIDED. All [RO].
-mission_planner:
-  ros__parameters:
-    rate_hz: 4.0                           # [RO] must be >= the OCS heartbeat
-                                           #      rate (2 Hz) or ocs_client sees
-                                           #      mission_state as stale and
-                                           #      correctly stops reporting
-    status_timeout_s: 1.0                  # [RO] = shared.pose_timeout_s; stale
-                                           #      fcu_status -> publish nothing
-                                           #      rather than guess a state
-    bench_auto: false                      # [RO] true = report STATE_AUTO with
-                                           #      no autopilot, to produce
-                                           #      rc-test logs off the water.
-                                           #      Logs a warning while on, and
-                                           #      still cannot override an RC
-                                           #      kill. NEVER true for a scored
-                                           #      run.

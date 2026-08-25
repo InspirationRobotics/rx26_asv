@@ -41,10 +41,7 @@ PARAM_SPEC = {
 }
 
 RED, YELLOW, GREEN = 1, 2, 3
-
-#: One definition, in the pure core, so the status light and the state we
-#: report to RoboCommand can never disagree about what autonomy means.
-from crusader_behavior.mission.mission_core import AUTO_MODES  # noqa: E402
+AUTO_MODES = ("AUTO", "GUIDED")
 
 
 class PixhawkLEDStatusNode(Node):
