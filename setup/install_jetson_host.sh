@@ -53,7 +53,8 @@ echo "   livox container: $CRSD_LIVOX_CONTAINER"
 # crsd-power is the ground station's shutdown/reboot path: a container has no
 # init of its own to ask, so this root helper on the HOST is what actually
 # powers the machine off. See tools/scripts/crsd_power_helper.py.
-for unit in crsd-mavproxy crsd-container crsd-livox crsd-power; do
+for unit in crsd-mavproxy crsd-container crsd-livox crsd-power \
+            crsd-mission-planner crsd-ocs-client crsd-groundstation; do
   sed -e "s|__CRSD_USER__|$CRSD_USER|g" -e "s|__CRSD_REPO__|$CRSD_REPO|g" \
       -e "s|__CRSD_CONTAINER__|$CRSD_CONTAINER|g" \
       -e "s|__CRSD_LIVOX_CONTAINER__|$CRSD_LIVOX_CONTAINER|g" \
@@ -65,7 +66,19 @@ for unit in crsd-mavproxy crsd-container crsd-livox crsd-power; do
   fi
 done
 systemctl daemon-reload
-systemctl enable crsd-mavproxy.service crsd-container.service crsd-livox.service crsd-power.service
+systemctl enable crsd-mavproxy.service crsd-container.service \
+                 crsd-livox.service crsd-power.service
+# The ROS nodes that must survive a reboot with nobody on the dock. Enabled
+# separately so `systemctl disable crsd-groundstation` is an obvious way back
+# without touching the always-on telemetry stack.
+#
+# ORDER MATTERS ONLY IN ONE PLACE: ocs_client sends nothing until
+# mission_planner is publishing /crsd/mission_state. Both are Restart=on-failure
+# and ocs_client simply stays quiet until the planner is up, so no After= is
+# needed -- but if the boat connects to the OCS and reports nothing, check that
+# crsd-mission-planner is running before suspecting the link.
+systemctl enable crsd-mission-planner.service crsd-ocs-client.service \
+                 crsd-groundstation.service
 echo "   enabled; start now with:"
 echo "     systemctl start crsd-mavproxy crsd-container crsd-livox crsd-power"
 

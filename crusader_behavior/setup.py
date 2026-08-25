@@ -20,6 +20,9 @@ setup(
     entry_points={
         "console_scripts": [
             "rc_watchdog = crusader_behavior.safety.rc_heartbeat_watchdog:main",
+            # NOT PROVEN ON THE BOAT, and not in core.launch.py. It is an
+            # entry point because the state nobody can start is no state.
+            "mission_planner = crusader_behavior.mission.mission_planner:main",
             "led_node = crusader_behavior.indicator.led_node:main",
             "pixhawk_led_status_node = crusader_behavior.indicator.pixhawk_led_status_node:main",
         ],

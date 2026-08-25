@@ -12,6 +12,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Attitude.msg"
   "msg/RcChannels.msg"
   "msg/FcuStatus.msg"
+  "msg/MissionState.msg"
   "msg/Detection3D.msg"
   "msg/Detection3DArray.msg"
   "msg/Cluster3D.msg"

@@ -15,13 +15,18 @@ WHAT THIS NODE MUST NEVER DO IS ACT. Inbound commands are republished to
 this node has no opinion. The standing rule holds unchanged: the RC e-stop is the
 only safety path, and WiFi is never a safety mechanism.
 
-TELEMETRY IT WILL NOT INVENT. If /crsd/pose or /crsd/fcu_status has gone stale,
-no heartbeat is sent at all. A fabricated position is worse than a gap: the gap is
+TELEMETRY IT WILL NOT INVENT. If /crsd/pose or /crsd/mission_state has gone
+stale, no heartbeat is sent at all. A fabricated position is worse than a gap: the gap is
 visible on the OCS as rising silence, while a made-up fix is indistinguishable
 from a real one and scores as though the boat were somewhere it is not. The same
 reasoning bans STATE_UNKNOWN -- it is the proto zero value, the OCS validator
 refuses it outright, and "the reporter forgot" and "the boat does not know" are
 not the same claim.
+
+IT DOES NOT DECIDE THE STATE. mission_planner owns STATE_AUTO/MANUAL/KILLED
+and the current task; this node carries its answer. Deriving state here as
+well is how the status light the safety officer reads and the state
+RoboNation scores end up disagreeing.
 """
 import json
 import math
@@ -32,7 +37,7 @@ from crusader_common import config as crsd_config
 from crusader_common.node_main import run_node
 from crusader_common.param_utils import declare_from_config
 from crusader_common.stream_cache import StreamCache
-from crusader_msgs.msg import Attitude, FcuStatus, LatLonHead
+from crusader_msgs.msg import Attitude, LatLonHead, MissionState
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
 
@@ -61,9 +66,10 @@ PARAM_SPEC = {
                            description="= shared.pose_timeout_s"),
     "attitude_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
                                description="stale -> roll/pitch omitted"),
-    "status_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
-                             description="stale -> no heartbeat at all, since "
-                                         "state cannot be known"),
+    "mission_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
+                              description="stale mission_state -> no "
+                                          "heartbeat; the planner owns "
+                                          "state and task"),
 }
 
 
@@ -76,8 +82,9 @@ class OcsClient(Node):
 
         self._pose = StreamCache(p["pose_timeout_s"])
         self._att = StreamCache(p["attitude_timeout_s"])
-        self._status = StreamCache(p["status_timeout_s"])
-        self._autonomy = False
+        # state and task come from mission_planner, not from here. This
+        # node transmits; it does not decide.
+        self._mission = StreamCache(p["mission_timeout_s"])
         self._kill = False
         self._t0 = time.time()
         self._skipped = 0
@@ -88,6 +95,10 @@ class OcsClient(Node):
         # is better than growing without limit.
         self._inbox = deque(maxlen=32)
         self._cmd_pub = self.create_publisher(String, "/crsd/ocs_command", 10)
+        # Directives are OURS, not RoboNation's: a separate topic so the
+        # mission planner can subscribe to advice from the OCS without
+        # also receiving every RxCommand relayed from the course.
+        self._dir_pub = self.create_publisher(String, "/crsd/ocs_directive", 10)
 
         if p["fake_telemetry"]:
             self.get_logger().warning(
@@ -96,11 +107,9 @@ class OcsClient(Node):
         else:
             self.create_subscription(LatLonHead, "/crsd/pose", self._on_pose, 10)
             self.create_subscription(Attitude, "/crsd/attitude", self._on_att, 10)
-            self.create_subscription(FcuStatus, "/crsd/fcu_status",
-                                     self._on_status, 10)
-            self.create_subscription(Bool, "/crsd/autonomy_active",
-                                     self._on_autonomy, 10)
             self.create_subscription(Bool, "/crsd/kill_active", self._on_kill, 10)
+            self.create_subscription(MissionState, "/crsd/mission_state",
+                                     self._on_mission, 10)
 
         self.link = OcsLink(p["ocs_host"], int(p["ocs_port"]),
                             on_command=self._inbox.append,
@@ -124,14 +133,11 @@ class OcsClient(Node):
     def _on_att(self, msg):
         self._att.set(msg, time.monotonic())
 
-    def _on_status(self, msg):
-        self._status.set(msg, time.monotonic())
-
-    def _on_autonomy(self, msg):
-        self._autonomy = bool(msg.data)
-
     def _on_kill(self, msg):
         self._kill = bool(msg.data)
+
+    def _on_mission(self, msg):
+        self._mission.set(msg, time.monotonic())
 
     # ---- the heartbeat ---------------------------------------------------
 
@@ -145,8 +151,23 @@ class OcsClient(Node):
         self.link.publish(report)
 
     def _republish(self, cmd):
-        """Hand an OCS command to whoever wants it. This node does not act."""
-        self._cmd_pub.publish(String(data=json.dumps(cmd)))
+        """Hand an OCS message to whoever wants it. This node does not act.
+
+        Two shapes arrive on the link: RxCommand relayed from RoboCommand,
+        and our own ocs_directive. They go to different topics because they
+        have different authority — one is the course talking to the fleet,
+        the other is our operator asking. Neither actuates anything here.
+        """
+        blob = String(data=json.dumps(cmd))
+        if "ocs_directive" in cmd:
+            self._dir_pub.publish(blob)
+            d = cmd.get("ocs_directive") or {}
+            self.get_logger().info(
+                "OCS directive %r (declaration_seq=%s) -> "
+                "/crsd/ocs_directive" % (d.get("action"),
+                                         d.get("declaration_seq")))
+            return
+        self._cmd_pub.publish(blob)
         self.get_logger().info("OCS command -> /crsd/ocs_command: %s"
                                % sorted(cmd))
 
@@ -156,22 +177,20 @@ class OcsClient(Node):
             return fake_report(p["vehicle_id"], p["team_id"], self._t0)
 
         pose = self._pose.get(now)
-        status = self._status.get(now)
-        if pose is None or status is None:
+        mission = self._mission.get(now)
+        if pose is None or mission is None:
             # Say so once per transition, not twice a second.
-            if self._pose.went_stale(now) or self._status.went_stale(now):
+            if self._pose.went_stale(now) or self._mission.went_stale(now):
                 self.get_logger().warning(
-                    "no heartbeat: pose or fcu_status is stale -- the OCS will "
-                    "show rising silence, which is the truth")
+                    "no heartbeat: pose or mission_state is stale -- the OCS "
+                    "will show rising silence, which is the truth. Is "
+                    "mission_planner running?")
             self._skipped += 1
             return None
 
-        if self._kill:
-            state = "STATE_KILLED"
-        elif self._autonomy and status.armed:
-            state = "STATE_AUTO"
-        else:
-            state = "STATE_MANUAL"
+        # The planner decided these; we only carry them. Deciding here too
+        # is how the status light and the scored state drift apart.
+        state = mission.state
 
         hb = {
             "state": state,
@@ -182,10 +201,7 @@ class OcsClient(Node):
             # exactly that -- scrubbing it here would hide a real fault.
             "heading_deg": pose.heading,
             "vehicle_type": "TYPE_USV",
-            # No task-state source exists on the boat yet. TASK_NONE is the
-            # honest value and TASK_UNKNOWN is refused by the OCS, so this is
-            # not a placeholder that can silently rot.
-            "current_task": "TASK_NONE",
+            "current_task": mission.task,
         }
 
         att = self._att.get(now)
