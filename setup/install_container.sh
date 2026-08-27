@@ -3,14 +3,14 @@
 # setup/install_container.sh — CONTAINER-SIDE setup (inside `asv`)
 #
 # Run once after the repo lands in the container mount, and re-run whenever
-# proto/ or package files change. Order matters:
-#   dep guard -> protobuf compile -> colcon build -> import smoke.
+# package files change. Order matters:
+#   dep guard -> colcon build -> import smoke.
 #
 # This script installs NOTHING. Runtime dependencies live in the image
 # (see Dockerfile) so they are versioned, pinned, and survive `docker rm`.
-# An unpinned `pip install` from here once resolved protobuf out from under
-# TensorFlow on the real Jetson and broke the perception stack — hence the
-# guard below instead of an install step.
+# An unpinned `pip install` from here once resolved a dependency out from under
+# the rest of the stack on the real Jetson — hence the guard below instead of an
+# install step.
 #
 # Usage (from the Jetson host):
 #     docker exec -it asv bash /root/robotx_ws/src/rx26_asv/setup/install_container.sh
@@ -34,9 +34,9 @@ fi
 echo "   repo:      $REPO"
 echo "   workspace: $WS"
 
-echo "== [1/4] Dependency guard (the image supplies these — we never install) =="
+echo "== [1/3] Dependency guard (the image supplies these — we never install) =="
 missing=0
-for mod in yaml google.protobuf pymavlink; do
+for mod in yaml serial pymavlink cv_bridge torch; do
   python3 -c "import $mod" 2>/dev/null || { echo "   MISSING: $mod" >&2; missing=1; }
 done
 if [[ "$missing" -ne 0 ]]; then
@@ -45,39 +45,32 @@ if [[ "$missing" -ne 0 ]]; then
   echo "       pip-installing here — see the Dockerfile comment on pinning." >&2
   exit 1
 fi
-python3 - <<'PY'
-import google.protobuf as p
-v = p.__version__
-assert v.startswith("5.29"), (
-    "protobuf is %s; the ultralytics base needs 5.29.x for TensorFlow "
-    "(<6.0.0dev). Something moved it — rebuild the image." % v)
-print("   protobuf", v, "ok")
-PY
 
-echo "== [2/4] Compile RoboCommand protobuf (proto/ -> rx26_asv/api/mission/) =="
-# Switches robocomms.py from its JSON fallback framing to real protobuf.
-# Generated *_pb2.py files are .gitignored — always regenerated here.
-# Paths are repo-relative: <repo>/rx26_asv is the package, and the python
-# module dir is nested one deeper.
-cd "$REPO"
-python3 -m grpc_tools.protoc -I proto \
-    --python_out=rx26_asv/rx26_asv/api/mission proto/robocommand.proto \
-  || protoc -I proto --python_out=rx26_asv/rx26_asv/api/mission proto/robocommand.proto
-
-echo "== [3/4] colcon build (this repo's packages only) =="
-# --packages-select, not a bare build: the workspace may hold other package
-# sources (e.g. the robotx_2026 boat repo) whose build state is not ours to
-# change, and whose build failure must not block ours. colcon errors if a
-# selected package is missing, so a discovery regression still fails loudly.
+echo "== [2/3] colcon build (this repo's packages only) =="
+# --packages-up-to crusader_bringup, not a bare build: the workspace may hold
+# other package sources (the robotx_2026 boat repo, the livox container's
+# sources) whose build state is not ours to change and whose build failure must
+# not block ours. crusader_bringup exec_depends on every package we ship, so
+# "up-to" is the whole stack — and it stays correct when a package is added,
+# which an explicit --packages-select list does not.
 cd "$WS"
 source /opt/ros/humble/setup.bash
-colcon build --symlink-install --packages-select interfaces rx26_asv
+colcon build --symlink-install --packages-up-to crusader_bringup
 source install/setup.bash
 
-echo "== [4/4] Import smoke (fail loudly — see tools/scripts/rebuild.sh) =="
-python3 -c "import rx26_asv; print('rx26_asv import ok')"
-python3 -c "from interfaces.msg import Occupancy; print('interfaces msgs ok')"
-ros2 pkg executables rx26_asv || true
+echo "== [3/3] Import smoke (fail loudly — see tools/scripts/rebuild.sh) =="
+python3 -c "import crusader_common, crusader_fcu, crusader_behavior; print('code packages ok')"
+python3 -c "import crusader_perception, crusader_world_model; print('domain packages ok')"
+# The camera SDK, which crusader_perception's nodes need at RUN time. Their
+# `import depthai` is function-local, so a missing SDK would not surface until
+# the node opened the device — on the boat. Check it here instead.
+python3 -c "import depthai; print('depthai ok:', depthai.__version__)" \
+  || echo "WARNING: no depthai — oakd_publisher/buoy_detector will fail at device open. Rebuild the asv image."
+python3 -c "from crusader_msgs.msg import FcuStatus; print('crusader_msgs ok')"
+# The params file must be reachable from the INSTALL space, not just the source
+# tree — resolving it is the failure that grounded the stack on 2026-07-29.
+python3 -c "from crusader_common import config; print('params resolved:', config.DEFAULT_CONFIG_PATH)"
+ros2 pkg executables crusader_fcu crusader_behavior || true
 
 echo
 echo "Done. For day-to-day edits use tools/scripts/rebuild.sh (host side),"

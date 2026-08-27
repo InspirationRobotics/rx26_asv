@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>crusader_bringup</name>
+  <version>0.5.0</version>
+  <description>
+    How the boat is started: launch files and the single-source-of-truth
+    parameter file. Ships no code. Depends on every package it launches, so
+    `colcon build --packages-up-to crusader_bringup` builds the whole stack.
+  </description>
+  <maintainer email="brandont3927@gmail.com">Team Inspiration</maintainer>
+  <license>MIT</license>
+  <url type="repository">https://github.com/InspirationRobotics/rx26_asv</url>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>crusader_fcu</exec_depend>
+  <exec_depend>crusader_behavior</exec_depend>
+  <!-- Not launched by core.launch.py (its two nodes contend for the one OAK-D,
+       so which one runs is an operator choice) but exec_depended on anyway: a
+       "packages-up-to crusader_bringup" build must cover every package we ship,
+       or one silently stops being built and its compile errors surface on the
+       boat instead of at build time. -->
+  <exec_depend>crusader_perception</exec_depend>
+  <exec_depend>crusader_world_model</exec_depend>
+  <exec_depend>crusader_groundstation</exec_depend>
+  <exec_depend>ros2launch</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>crusader_common</name>
+  <version>0.5.0</version>
+  <description>
+    Shared plumbing for every Crusader node: the parameter-file loader, the
+    node lifecycle wrapper, parameter declaration and validation helpers, the
+    freshness-gated stream cache, the autonomy-drop latch state machine, and
+    geodesy. Contains NO nodes and no vehicle-specific policy.
+  </description>
+  <maintainer email="brandont3927@gmail.com">Team Inspiration</maintainer>
+  <license>MIT</license>
+  <url type="repository">https://github.com/InspirationRobotics/rx26_asv</url>
+
+  <depend>rclpy</depend>
+  <exec_depend>python3-yaml</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

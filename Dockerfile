@@ -2,16 +2,27 @@
 # Crusader container image (Jetson Orin Nano, JetPack 6 / arm64).
 #
 # Builds the `asv` image the rest of the repo assumes:
+#   * CUDA / PyTorch / TensorRT   -> from the ultralytics base (detection runs HERE)
 #   * ROS 2 Humble + build toolchain (colcon, rosdep, rosidl generators)
-#   * CUDA / PyTorch / TensorRT           -> from the ultralytics base
-#   * depthai (OAK-D LR) + MAVProxy        -> installed here
-#   * Livox-SDK2 + livox_ros_driver2 (MID360 LiDAR, camera-LiDAR fusion)
+#   * depthai                     -> crusader_perception OWNS the OAK-D, in here
+#   * cv_bridge + sensor_msgs_py  -> Image/PointCloud2 <-> numpy
+#   * MAVProxy + pymavlink + pyserial -> the autopilot and LED serial links
 #
-# The rx26_asv package itself is NOT copied/built here — it is bind-mounted
-# at /root/robotx_ws and built at runtime by tools/scripts/rebuild.sh /
+# There are exactly TWO containers on this Jetson:
+#   `asv`  (this one) — everything in this repo, INCLUDING the OAK-D nodes.
+#   livox             — the MID360 driver and nothing else; publishes PointCloud2.
+#
+# So depthai belongs here and the Livox SDK does not. That is the reverse of the
+# original plan, in which a single sensor container owned both devices and this
+# image was forbidden depthai: `buoy_detector` needs the camera AND TensorRT in
+# one process, because shipping 1.28 MB frames across a container boundary to
+# produce a few hundred bytes of detection is the wrong trade. The absence guard
+# below now protects the boundary that is actually real.
+#
+# The rx26_asv packages are NOT copied/built here — they are bind-mounted at
+# /root/robotx_ws and built at runtime by tools/scripts/rebuild.sh /
 # setup/install_container.sh (the container copies files at build time, so a
-# mounted+runtime build is the blessed path). Only third-party code (the Livox
-# driver) is baked into the image, in its own workspace.
+# mounted+runtime build is the blessed path).
 #
 # Build (on the Jetson host):
 #     docker build -t asv .
@@ -23,14 +34,6 @@ FROM ultralytics/ultralytics:latest-jetson-jetpack6
 # prompting. Build-time only is what we actually want.
 ARG DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash", "-c"]
-
-# Pin the third-party Livox sources so the image is reproducible (CLAUDE.md
-# guards against "unconstrained external dependencies"). Defaults track upstream
-# master; once a commit is field-tested, set these to that tag/SHA — either via
-# --build-arg or by editing the defaults — so a later upstream change can't
-# silently alter the image. Accepts a branch, tag, or full commit SHA.
-ARG LIVOX_SDK2_REF=master
-ARG LIVOX_DRIVER_REF=master
 
 # ----------------------------------------------------------------------------
 # ROS 2 Humble apt source (the ultralytics base ships no ROS repo/key)
@@ -45,22 +48,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # ----------------------------------------------------------------------------
 # ROS 2 Humble + full build toolchain.
-#   ros-base alone can't build the `interfaces` ament_cmake/rosidl package;
-#   ros-dev-tools brings colcon, rosdep, and the rosidl generators. cmake +
-#   build-essential are also needed for Livox-SDK2. libusb for depthai/OAK-D.
+#   ros-base alone can't build the `crusader_msgs` ament_cmake/rosidl package;
+#   ros-dev-tools brings colcon, rosdep, and the rosidl generators.
+#   cv_bridge + sensor_msgs_py: Image -> numpy for the detector's bring-up
+#   frames, PointCloud2 -> numpy for the MID360 cloud the livox container
+#   publishes. Without them this image builds the packages but cannot consume a
+#   single frame or point.
 # ----------------------------------------------------------------------------
-#   libpcl-dev + pcl_conversions are REQUIRED by livox_ros_driver2:
-#   its CMakeLists does find_package(PCL REQUIRED), and without it the driver
-#   build fails at configure time. It is a heavy dependency (pulls VTK/Boost/
-#   FLANN) but there is no building the MID360 driver without it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-humble-ros-base \
         ros-dev-tools \
         python3-colcon-common-extensions \
+        ros-humble-cv-bridge \
+        ros-humble-sensor-msgs-py \
+        ros-humble-std-srvs \
         build-essential cmake git \
-        libusb-1.0-0-dev \
-        libpcl-dev \
-        ros-humble-pcl-conversions \
     && rm -rf /var/lib/apt/lists/*
 
 # ----------------------------------------------------------------------------
@@ -68,81 +70,55 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # pip-installs into a running container (that state is undocumented and lost on
 # `docker rm`).
 #
-# Everything that can move protobuf is PINNED, and for a specific reason: the
-# ultralytics base ships protobuf 5.29.6, which TensorFlow 2.19 requires
-# (<6.0.0dev). An unpinned `grpcio-tools` resolves to a 7.x-era protobuf and
-# breaks the ML stack this boat's perception runs on. That happened on the real
-# Jetson. Do not unpin these without re-running the guard below.
-#   depthai<3 -> v2 API used by perception (USB3 SUPER-speed check in CLAUDE.md)
+# pymavlink is PINNED: it is the wire library for the only process that talks to
+# the autopilot, and an upgrade that changes message parsing is not something to
+# discover on the water.
+#
+# Nothing here may move protobuf. The ultralytics base ships protobuf 5.29.x,
+# which its TensorFlow requires (<6.0.0dev); an unpinned package that drags in a
+# newer protobuf breaks the ML stack the detector runs on. That happened on the
+# real Jetson, via grpcio-tools. The guard below is what catches a recurrence —
+# and depthai is exactly the kind of package that could do it again, which is
+# why it goes in HERE, above the guard, rather than being pip-installed into a
+# running container where nothing would check.
 # ----------------------------------------------------------------------------
 RUN uv pip install --system \
-        "depthai<3" \
+        depthai \
         "pymavlink==2.4.49" \
         MAVProxy \
         pyserial \
         future \
-        "pyyaml==6.0.3" \
-        "protobuf==5.29.6" \
-        "grpcio==1.82.1" \
-        "grpcio-tools==1.71.0" \
-        pytest
+        "pyyaml==6.0.3"
 
-# Fail the BUILD, not the boat, if a dependency resolution moved protobuf out
-# from under TensorFlow/ultralytics. This import is slow (~1 min on TF) and
-# worth every second of it.
+# Fail the BUILD, not the boat, if the ML stack, the MAVLink stack or the camera
+# SDK is broken. The TensorFlow import is slow (~1 min) and worth every second.
 RUN python3 -c "\
-import google.protobuf, tensorflow, ultralytics; \
+import google.protobuf, tensorflow, ultralytics, pymavlink, serial, yaml, depthai; \
+from pymavlink import mavutil; \
 v = google.protobuf.__version__; \
 assert v.startswith('5.29'), 'protobuf moved to %s — TF requires <6.0.0dev' % v; \
 print('dep guard ok: protobuf', v, '| tensorflow', tensorflow.__version__, \
-      '| ultralytics', ultralytics.__version__)"
+      '| ultralytics', ultralytics.__version__, '| pymavlink', pymavlink.__version__, \
+      '| depthai', depthai.__version__)"
+
+# The depthai absence guard that used to live here is GONE: this image owns the
+# OAK-D now, so asserting depthai is absent would fail the build it exists to
+# protect. It is replaced by the positive import check above.
+#
+# The equivalent boundary that IS still real is the MID360 — the livox container
+# owns it, and two processes opening one LiDAR is the same failure the old guard
+# was about. No check is written for it yet ON PURPOSE: the marker would be a
+# guess at the Livox SDK's installed name, and a guard that never fires because
+# the name is wrong is worse than no guard (same reasoning as check_config.py's
+# param-baseline parse check). Add it here once someone confirms, in the livox
+# container, what the SDK actually installs — a `ros2 pkg prefix
+# livox_ros_driver2` or the SDK's real library path.
 
 # ----------------------------------------------------------------------------
-# Livox-SDK2 — native SDK for the MID360 (Ethernet/UDP device)
-# ----------------------------------------------------------------------------
-RUN mkdir -p /opt/livox && cd /opt/livox \
-    && git clone https://github.com/Livox-SDK/Livox-SDK2.git \
-    && cd Livox-SDK2 && git checkout "$LIVOX_SDK2_REF" \
-    && mkdir build && cd build \
-    && cmake .. && make -j"$(nproc)" && make install \
-    && ldconfig
-
-# ----------------------------------------------------------------------------
-# livox_ros_driver2 (ROS 2 Humble) — third-party, baked into its own workspace
-# so it is NOT rebuilt on every rx26_asv edit. Publishes /livox/lidar
-# (PointCloud2 / CustomMsg) + /livox/imu for the fusion node to consume.
-# MID360_config.json carries the host/LiDAR IPs — TUNE for Crusader's network
-# (see config/MID360_config.json header notes; the LiDAR needs its own NIC,
-# not the RoboCommand RJ-45 link).
-# ----------------------------------------------------------------------------
-ENV LIVOX_WS=/opt/livox_ws
-RUN mkdir -p $LIVOX_WS/src && cd $LIVOX_WS/src \
-    && git clone https://github.com/Livox-SDK/livox_ros_driver2.git \
-    && cd livox_ros_driver2 && git checkout "$LIVOX_DRIVER_REF"
-COPY rx26_asv/config/MID360_config.json $LIVOX_WS/src/livox_ros_driver2/config/MID360_config.json
-# build.sh EXITS 0 EVEN WHEN COLCON FAILS. A missing PCL made the configure step
-# error out, colcon returned rc=1, build.sh swallowed it, and the image shipped
-# with an empty install space — `ls /opt/livox_ws/install` looked fine while
-# `ros2 pkg list` had no livox at all. Never trust build.sh's exit code; assert
-# the package is actually discoverable, and dump the log if it is not.
-RUN source /opt/ros/humble/setup.bash \
-    && cd $LIVOX_WS/src/livox_ros_driver2 \
-    && ./build.sh humble; \
-    source $LIVOX_WS/install/setup.bash 2>/dev/null || true; \
-    if ! ros2 pkg list 2>/dev/null | grep -qx livox_ros_driver2; then \
-        echo "ERROR: livox_ros_driver2 is not on the ROS path after build.sh." >&2; \
-        echo "       (build.sh exits 0 even when colcon fails — log tail below)" >&2; \
-        tail -60 "$LIVOX_WS"/log/latest_build/events.log >&2 2>/dev/null || true; \
-        exit 1; \
-    fi; \
-    echo "livox guard ok: livox_ros_driver2 built and discoverable"
-
-# ----------------------------------------------------------------------------
-# Environment sourcing: ROS, the baked Livox ws, then the mounted rx26_asv
-# workspace (guarded — it only exists once the mount is built).
+# Environment sourcing: ROS, then the mounted workspace (guarded — it only
+# exists once the mount is built).
 # ----------------------------------------------------------------------------
 RUN echo "source /opt/ros/humble/setup.bash" >> /root/.bashrc \
-    && echo "[ -f /opt/livox_ws/install/setup.bash ] && source /opt/livox_ws/install/setup.bash" >> /root/.bashrc \
     && echo "[ -f /root/robotx_ws/install/setup.bash ] && source /root/robotx_ws/install/setup.bash" >> /root/.bashrc
 
 WORKDIR /root/robotx_ws

@@ -4,8 +4,8 @@
 # setup/install_jetson_host.sh at install time (invoking user + repo path).
 # Do NOT `install` this file verbatim — the placeholders must be expanded.
 # MAVProxy is the SOLE owner of the Pixhawk serial link. Everything else —
-# ROS nodes, Mission Planner/QGC on the laptop, preflight, autoresearch —
-# consumes its rebroadcast. Nothing may open /dev/crsd-pixhawk directly.
+# ROS nodes, Mission Planner/QGC on the laptop, preflight — consumes its
+# rebroadcast. Nothing may open /dev/crsd-pixhawk directly.
 [Unit]
 Description=Crusader MAVProxy (sole Pixhawk owner)
 After=dev-crsd\x2dpixhawk.device network-online.target
@@ -20,10 +20,23 @@ User=__CRSD_USER__
 # there (they are .gitignored and were never meant to sit in the repo).
 StateDirectory=crsd-mavproxy
 WorkingDirectory=/var/lib/crsd-mavproxy
-# LAPTOP_IP set in /etc/default/crusader (EnvironmentFile) so field IP changes
-# don't require a unit edit.
+# CRSD_BCAST_ADDR set in /etc/default/crusader (EnvironmentFile) so a change of
+# field subnet doesn't require a unit edit. It is the SUBNET BROADCAST ADDRESS
+# (e.g. 192.168.100.255), NOT a laptop IP — start_mavproxy.sh broadcasts, so
+# every GCS on the field network sees the boat without anything being typed in.
+# The variable used to be LAPTOP_IP, from when this was a unicast --out; putting
+# a laptop's own address here now sends "broadcast" traffic to that one host.
+# Unset is fine — the script falls back to its built-in default.
+#
+# GCS_IPS goes in the SAME file and needs no ExecStart argument: the script reads
+# it from the environment, which EnvironmentFile already populates. It is the
+# escape hatch for laptops broadcast does not reach (client isolation, the other
+# side of the Bullet bridge, the wired 192.168.1.0/24) — space-separated and
+# QUOTED, since systemd takes the rest of the line as one value:
+#     GCS_IPS="192.168.100.50 192.168.1.20"
+# Additive: broadcast stays on regardless.
 EnvironmentFile=-/etc/default/crusader
-ExecStart=__CRSD_REPO__/scripts/start_mavproxy.sh ${LAPTOP_IP}
+ExecStart=__CRSD_REPO__/scripts/start_mavproxy.sh ${CRSD_BCAST_ADDR}
 Restart=on-failure
 RestartSec=3
 

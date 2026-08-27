@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>crusader_world_model</name>
+  <version>0.5.0</version>
+  <description>
+    Sensor-agnostic world state: fusion of per-sensor detections into 3D
+    object positions, and the occupancy grid built from them. Pure geometry
+    and time decay, verifiable without a camera. EMPTY - being rebuilt.
+  </description>
+  <maintainer email="brandont3927@gmail.com">Team Inspiration</maintainer>
+  <license>MIT</license>
+  <url type="repository">https://github.com/InspirationRobotics/rx26_asv</url>
+
+  <depend>rclpy</depend>
+  <depend>crusader_msgs</depend>
+  <depend>crusader_common</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
