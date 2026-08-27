@@ -12,8 +12,8 @@
 #   [RO] read_only — safety/structural; `ros2 param set` is REJECTED; change
 #        here + restart the node (rebuild NOT required, params load at start).
 #   [DYN] dynamic — accepted at runtime via `ros2 param set`, range-validated.
-#        Every parameter in this file is currently [RO]: the whole stack is
-#        safety plumbing, and nothing here is a test-day tuning knob.
+#        Everything here is [RO]: the stack is safety plumbing, and nothing in
+#        it is a test-day tuning knob.
 #
 # ---------------------------------------------------------------------------
 # TWO HARD FORMAT RULES — rcl's parser is stricter than PyYAML. Break either and
@@ -91,9 +91,6 @@ oakd_publisher:
     frame_id: "oak_rgb_camera_optical_frame"  # [RO] shared by both images (depth is aligned)
     fps: 30.0                              # [RO] camera frame rate [Hz]
     isp_denominator: 3                     # [RO] 1/N of 1920x1200; 3 -> 640x400 (stereo-native)
-    sync_threshold_ms: 50                  # [RO] max RGB/depth gap the device Sync will pair
-    subpixel: true                         # [RO] finer far-range depth
-    lr_check: true                         # [RO] left/right check; rejects occlusions
     poll_period_s: 0.01                    # [RO] output-queue poll; keep well under 1/fps
     queue_size: 4                          # [RO] device output queue depth (non-blocking)
     health_period_s: 5.0                   # [RO] warn if no frames arrived since last check
@@ -131,15 +128,12 @@ buoy_detector:
     range_max_m: 25.0                      # [RO] depth above this is invalid
     min_depth_samples: 5                   # [RO] valid pixels needed to range a box
     frame_id: "camera_link"                # [RO] REP-103 body axes: x fwd, y left, z up
-    detections_topic: "oak/detections"     # [RO] Detection3DArray, every frame
+    detections_topic: "crsd/oak/detections"     # [RO] Detection3DArray, every frame
     publish_frames: false                  # [RO] BRING-UP ONLY: +38 MB/s at 30fps
     rgb_topic: "oak/rgb"                   # [RO] only used if publish_frames
     depth_topic: "oak/depth"               # [RO] only used if publish_frames
     fps: 30.0                              # [RO] = oakd_publisher.fps
     isp_denominator: 3                     # [RO] = oakd_publisher.isp_denominator
-    sync_threshold_ms: 50                  # [RO] = oakd_publisher.sync_threshold_ms
-    subpixel: true                         # [RO] = oakd_publisher.subpixel
-    lr_check: true                         # [RO] = oakd_publisher.lr_check
     poll_period_s: 0.01                    # [RO] output-queue poll period [s]
     queue_size: 4                          # [RO] device output queue depth
     health_period_s: 5.0                   # [RO] rate/health log period [s]
@@ -231,7 +225,7 @@ lidar_cluster_node:
 # on the map.
 target_tracker:
   ros__parameters:
-    detections_topic: "oak/detections"     # [RO] = buoy_detector.detections_topic
+    detections_topic: "crsd/oak/detections"     # [RO] = buoy_detector.detections_topic
     clusters_topic: "crsd/lidar_clusters"  # [RO] = lidar_cluster_node.clusters_topic
     targets_topic: "crsd/world_targets"    # [RO] TrackedTargetArray, every tick
     health_topic: "crsd/world_model_health"  # [RO] std_msgs/String (JSON)
@@ -466,51 +460,90 @@ ocs_client:
 # It also shares buoy_detector's stream_port 8080 on purpose — same reason, plus
 # the ground station's camera tab then finds whichever is running.
 #
-# THE FOUR CROP PARAMS ARE A CONTRACT WITH THE TRAINING EXPORTER, not tuning
-# knobs. cls_imgsz / crop_pad / crop_top_frac decide the picture the classifier
-# sees, and the exporter that built its training set cuts crops the same way. A
-# few percent of disagreement does not fail — the engine just classifies worse,
+# THE CROP PARAMS ARE A CONTRACT WITH THE TRAINING EXPORTER, not tuning knobs.
+# cls_imgsz / crop_pad / crop_top_frac decide the picture the classifier sees,
+# and the exporter that built its training set cuts crops the same way. A few
+# percent of disagreement does not fail — the engine just classifies worse,
 # everywhere, and nothing reports why. Change them in both places or not at all.
+#
+# That contract has now broken twice, both times silently:
+#   * a val folder holding crops from two exporter versions graded 0.97 in
+#     training and 0.55 against freshly cut crops — the gap was entirely
+#     geometry, not the model.
+#   * led_patch cut a full-width top band while the exporter cut buoylib's
+#     led_box (27% buoy vs 69% buoy), so a classifier at 98.6% on held-out crops
+#     underperformed on the water.
+# ae_compensation belongs to the same contract for the same reason: it decides
+# what colour the LED records as.
 oak_detector:
   ros__parameters:
-    # -- stage 1: shape detector --
+    # -- stage 1: buoy detector --
     det_engine: "/root/robotx_ws/models/buoy_detector.engine"   # [RO] TensorRT
+    # -- stage 1b: shape, measured rather than predicted --
+    # 'geometry' measures the marking's OUTLINE on the full-resolution crop
+    # (shape_core.marking_shape: 4th harmonic of r(theta) after whitening, plus
+    # the bounding-box fill ratio; the two must agree or it abstains). CPU, no
+    # model, no training set.
+    #
+    # This is what lets det_engine be a SINGLE-CLASS "buoy" detector. At 15 m a
+    # marking is a couple of feature-map cells across and the detector head is
+    # guessing; the ISP crop of that same buoy is 60-200 px and the outline is
+    # right there. Measured on synthetic buoys across 0-66 deg of yaw: 8/8,
+    # where a raw (un-whitened) 4th harmonic confuses the two classes past
+    # 66 deg.
+    #
+    # Abstentions fall back to the detector's own class, so 'detector' is always
+    # a safe thing to switch back to.
+    shape_source: "geometry"               # [RO] "geometry" | "detector"
+    shape_min_radius: 6.0                  # [RO] marking radius [px] below
+                                           #      which it refuses. Synthetic
+                                           #      renders are unreliable under
+                                           #      ~6 px and solid by ~10 —
+                                           #      raise this to abstain more
+    shape_min_share: 0.6                   # [RO] share of a track's weighted
+                                           #      shape votes one answer needs.
+                                           #      Abstentions are never votes
     det_labels:                            # [RO] IN ENGINE ORDER — check the
       - "circle"                           #      dataset.yaml the engine was
       - "diamond"                          #      trained from, not this comment
     det_conf_min: 0.60                     # [RO] minimum detector confidence
     det_imgsz_height: 640                  # [RO] detector engine input height
     det_imgsz_width: 640                   # [RO] detector engine input width
-    # -- stage 2: LED colour classifier --
+    # -- stage 4: LED colour classifier --
     cls_engine: "/root/robotx_ws/models/led_classifier.engine"  # [RO] TensorRT
     cls_labels:                            # [RO] IN ENGINE ORDER. For an
       - "blue"                             #      ultralytics classifier that is
       - "green"                            #      the training FOLDER order,
       - "off"                              #      i.e. alphabetical — not the
       - "red"                              #      order you find natural
-    off_class: "off"                       # [RO] MUST be one of cls_labels. Its
-                                           #      probability is the flash
-                                           #      tracker's whole input; a name
-                                           #      that is not in the list turns
-                                           #      flash detection OFF and says so
-    cls_imgsz: 96                          # [RO] = exporter --crop-size
+    cls_imgsz: 64                          # [RO] = exporter --crop-size AND the
+                                           #      imgsz the engine was exported
+                                           #      at. 64, not 96: the LED crop is
+                                           #      ~87x48 px on real footage, so
+                                           #      96 was upsampling, and
+                                           #      4_export.py's default moved
     crop_pad: 0.10                         # [RO] = exporter's 1.2x box padding
-    crop_top_frac: 0.40                    # [RO] = exporter --crop-frac
-    min_crop_px: 10                        # [RO] padded-crop height below which
-                                           #      the band is a couple of rows
-    # -- stage 3: association --
+    crop_top_frac: 0.25                    # [RO] = exporter --crop-frac. NOTE
+                                           #      the meaning changed with
+                                           #      led_patch: it is the fraction
+                                           #      of the BUOY kept below the LED
+                                           #      (buoylib LED_FRAC), not the
+                                           #      fraction of the crop taken off
+                                           #      the top. 0.40 with the new
+                                           #      led_patch is a band far taller
+                                           #      than the exporter's
     iou_match: 0.25                        # [RO] IoU to continue a track
     max_missed: 10                         # [RO] frames a track survives unseen.
                                            #      Losing a track resets its flash
                                            #      window, so this is now worth
                                            #      more than it looks
-    # -- stage 3: colour vote. BYPASSED while flash_enable is true --
+    # -- stage 4: colour vote. BYPASSED while flash_enable is true --
     # Set flash_enable false with vote_decay 0.0 and vote_min 0.0 to see the RAW
     # per-frame classification, unsmoothed — the view you want when judging the
     # model itself rather than the tracker.
     vote_decay: 0.85                       # [RO] per-frame forgetting factor
     vote_min: 0.55                         # [RO] share needed to publish
-    # -- stage 3: flash detection --
+    # -- stage 5: flash detection --
     # RobotX 2026 Task 1: ten buoys, five light states (OFF, flashing RED /
     # GREEN / BLUE, solid BLUE), flashing at 1 s ON / 1 s OFF. Task 2 adds SOLID
     # red and green survey indicators. Flashing blue is the ENTRY buoy and solid
@@ -532,12 +565,31 @@ oak_detector:
     flash_window_s: 6.0                    # [RO] duty window; 3 full periods
     flash_min_span_s: 4.0                  # [RO] observed time before a verdict
     flash_min_samples: 8                   # [RO] frames before a verdict
-    flash_lo: 0.38                         # [RO] flashing band, low edge
-    flash_hi: 0.62                         # [RO] flashing band, high edge
     solid_min: 0.70                        # [RO] at/above this = solid
     off_max: 0.30                          # [RO] at/below this = off
     colour_min_share: 0.6                  # [RO] share of LIT frames one colour
                                            #      needs before it is named
+    # -- how "flashing" is actually decided --
+    # NOT by duty cycle alone, and that is the point. A 1 s ON / 1 s OFF light
+    # averages 0.5. A classifier hedging at 0.5 on every frame also averages
+    # 0.5. Duty cannot separate them, and hedging is precisely how this
+    # classifier fails — on a held-out session its `off` class scored 27% recall
+    # at 65% precision.
+    #
+    # So the tracker asks whether the signal MOVES LIKE A LIGHT: how strongly
+    # the lit score anti-correlates with itself half a period earlier. A square
+    # wave scores ~1.0 there; noise scores ~0. That test is SCALE-FREE, so a
+    # barely-visible green flash swinging 0.52 to 0.47 passes exactly as well as
+    # a bright red one swinging 1.0 to 0.0 — which matters, because green's
+    # whole margin over an unlit hull is +6 saturation points.
+    #
+    # Measured against 14 synthetic cases including 25% frame error, hedging at
+    # four noise levels, a slow drift and a wrong-period blink: 14/14.
+    flash_period_s: 2.0                    # [RO] FULL cycle [s]. Task 1 is
+                                           #      1 s ON / 1 s OFF = 2.0
+    flash_corr_min: 0.45                   # [RO] anti-correlation at half a
+                                           #      period needed to call it
+                                           #      flashing
     flash_debug_path: ""                   # [RO] jsonl of every observation, for
                                            #      replaying real footage through
                                            #      the tracker off-boat. Empty =
@@ -549,20 +601,25 @@ oak_detector:
     min_depth_samples: 5                   # [RO] valid pixels needed to range
     # -- output --
     frame_id: "camera_link"                # [RO] REP-103: x fwd, y left, z up
-    detections_topic: "oak/detections"     # [RO] = buoy_detector.detections_topic
+    detections_topic: "crsd/oak/detections"     # [RO] = buoy_detector.detections_topic
     health_topic: "crsd/oak_detector_health"   # [RO] std_msgs/String JSON;
                                            #      per-track light state, and the
                                            #      rate the flash tracker depends
                                            #      on. Same shape as
                                            #      crsd/lidar_cluster_health
-    # -- camera: MUST equal oakd_publisher and buoy_detector (check_config.py) --
+    # -- camera: fps and isp_denominator MUST equal the other OAK-D nodes.
+    # subpixel / lr_check / sync_threshold_ms used to live here too and are now
+    # constants in oak_pipeline.py — equal by construction, nothing to pin.
     fps: 30.0                              # [RO] = oakd_publisher.fps
     isp_denominator: 3                     # [RO] 3 -> 640x400. Raise resolution
                                            #      (2 -> 960x600) if no_crop is
                                            #      high — moves all three nodes
-    sync_threshold_ms: 50                  # [RO] = oakd_publisher.sync_threshold_ms
-    subpixel: true                         # [RO] = oakd_publisher.subpixel
-    lr_check: true                         # [RO] = oakd_publisher.lr_check
+    ae_compensation: -3                    # [RO] EV steps, -9..9; negative is
+                                           #      darker. A TRAINING CONTRACT:
+                                           #      must match the exposure the
+                                           #      classifier's footage was shot
+                                           #      at. oak_record.py also
+                                           #      defaults to -3. 0 = off
     poll_period_s: 0.01                    # [RO] output-queue poll period [s]
     queue_size: 4                          # [RO] device output queue depth
     health_period_s: 5.0                   # [RO] rate/health log period [s]
@@ -574,4 +631,3 @@ oak_detector:
                                            #      contend for the one camera, so
                                            #      never for the socket
     stream_quality: 60                     # [RO] JPEG quality for that view
-
