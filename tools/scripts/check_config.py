@@ -33,10 +33,25 @@ PARAMS_BASELINE = REPO / "params" / "working_crusader.params"
 # Every node that reads crusader_params.yaml. A section for a node that no longer
 # exists is a parameter set nobody reviews, and it reads as a capability the boat
 # still has; a node with no section fails at startup instead.
-CONFIG_DRIVEN_NODES = {"telemetry_bridge", "led_node",
-                       "pixhawk_led_status_node", "rc_heartbeat_watchdog",
-                       "oakd_publisher", "buoy_detector", "oak_detector", 
-                       "lidar_cluster_node", "target_tracker", "ground_station"}
+#
+# WRITTEN AS ONE STRING, SPLIT ON WHITESPACE, and that is deliberate. As a set
+# literal of quoted names, a single missing comma is not an error: Python joins
+# the two adjacent strings, so {"a" "b", "c"} silently becomes {"ab", "c"}. The
+# check then reports the wrong node as stale and the reader goes looking in the
+# YAML for a bug that is in this file. Splitting a string cannot do that.
+CONFIG_DRIVEN_NODES = set("""
+    telemetry_bridge
+    led_node
+    pixhawk_led_status_node
+    rc_heartbeat_watchdog
+    ocs_client
+    oakd_publisher
+    buoy_detector
+    oak_detector
+    lidar_cluster_node
+    target_tracker
+    ground_station
+""".split())
 
 # Topic names that two sections must agree on, as (producer, param) ->
 # (consumer, param). A producer and a consumer that disagree about a topic name
@@ -59,14 +74,18 @@ TOPIC_PAIRS = (
 # avoid their ports rather than share them.
 PORT_OWNERS = (("buoy_detector", "stream_port"), ("ground_station", "port"))
 
-# oakd_publisher and buoy_detector each build the SAME OAK-D pipeline (only one
-# runs at a time — the camera admits one client). These params decide the image
-# geometry, and depth is aligned to the RGB camera at exactly this size, so the
-# RGB intrinsics are only valid on the depth image while both agree. Let them
-# drift and nothing fails: ranges measured under one node just quietly stop
-# meaning what they meant under the other.
-CAMERA_PARAMS = ("fps", "isp_denominator", "sync_threshold_ms",
-                 "subpixel", "lr_check")
+# The three nodes that each build the SAME OAK-D pipeline (only one runs at a
+# time — the camera admits one client). Depth is aligned to the RGB camera at
+# exactly this geometry, so the RGB intrinsics are only valid on the depth image
+# while all three agree. Let them drift and nothing fails: ranges measured under
+# one node just quietly stop meaning what they meant under another.
+CAMERA_NODES = ("oakd_publisher", "buoy_detector", "oak_detector")
+
+# sync_threshold_ms, subpixel and lr_check used to be here. They are now module
+# constants in crusader_perception/oak_pipeline.py, shared by all three nodes by
+# construction, so there is nothing left for this check to compare. What remains
+# is the frame geometry, which is still per-node YAML.
+CAMERA_PARAMS = ("fps", "isp_denominator")
 
 failures = []
 
@@ -120,7 +139,9 @@ def check_params_yaml():
         extra = sections - CONFIG_DRIVEN_NODES
         fail("config sections match the shipped nodes",
              f"missing={sorted(missing)} stale={sorted(extra)} "
-             "(update CONFIG_DRIVEN_NODES here if a node was added or removed)")
+             "(missing = named here but no YAML section; stale = a YAML section "
+             "this list does not know about. Check `ros2 pkg executables` before "
+             "deleting either — the node may still ship and just not be running)")
     else:
         ok("config sections match the shipped nodes")
 
@@ -186,20 +207,25 @@ def check_params_yaml():
         ok("http ports distinct", ", ".join(f"{p}={n}" for p, n in
                                             sorted(seen.items())))
 
-    # The two OAK-D nodes must describe the same camera (see CAMERA_PARAMS).
+    # All three OAK-D nodes must describe the same camera (see CAMERA_NODES).
+    # Compared against the first node in the list rather than pairwise, so the
+    # message names one reference and the odd ones out.
+    reference = CAMERA_NODES[0]
     try:
-        publisher = cfg["oakd_publisher"]["ros__parameters"]
-        detector = cfg["buoy_detector"]["ros__parameters"]
-        differing = {name: (publisher[name], detector[name])
-                     for name in CAMERA_PARAMS
-                     if publisher[name] != detector[name]}
+        differing = {}
+        for name in CAMERA_PARAMS:
+            want = cfg[reference]["ros__parameters"][name]
+            for node in CAMERA_NODES[1:]:
+                got = cfg[node]["ros__parameters"][name]
+                if got != want:
+                    differing[f"{node}.{name}"] = (got, f"{reference}={want}")
         if differing:
             fail("oak camera params consistent",
-                 f"oakd_publisher vs buoy_detector differ: {differing} — depth "
-                 "is aligned at this geometry, so a range means different "
-                 "things under each node")
+                 f"{differing} — depth is aligned at this geometry, so a range "
+                 "means different things under each node")
         else:
-            ok("oak camera params consistent across both OAK-D nodes")
+            ok("oak camera params consistent",
+               f"{len(CAMERA_NODES)} nodes agree on {', '.join(CAMERA_PARAMS)}")
     except KeyError as e:
         fail("oak camera params consistent", f"missing key {e}")
 
