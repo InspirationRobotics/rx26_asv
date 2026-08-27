@@ -50,6 +50,7 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 
 from crusader_common import config as crsd_config
+from crusader_common.mjpeg_view import FrameBuffer, serve_mjpeg, stop_mjpeg
 from crusader_common.node_main import run_node
 from crusader_common.param_utils import declare_from_config
 from crusader_msgs.msg import Detection3D, Detection3DArray
@@ -97,10 +98,6 @@ PARAM_SPEC = {
     "fps": dict(read_only=True, lo=1.0, hi=60.0, description="camera frame rate [Hz]"),
     "isp_denominator": dict(read_only=True, lo=1, hi=8,
                             description="ISP downscale 1/N of 1920x1200"),
-    "sync_threshold_ms": dict(read_only=True, lo=1, hi=200,
-                              description="max RGB/depth pairing gap [ms]"),
-    "subpixel": dict(read_only=True, description="StereoDepth subpixel mode"),
-    "lr_check": dict(read_only=True, description="StereoDepth left/right check"),
     "poll_period_s": dict(read_only=True, lo=0.001, hi=1.0,
                           description="output-queue poll period [s]"),
     "queue_size": dict(read_only=True, lo=1, hi=30,
@@ -121,40 +118,6 @@ PARAM_SPEC = {
 FAMILY_COLORS = (("red", (0, 0, 255)), ("green", (0, 255, 0)),
                  ("yellow", (0, 255, 255)), ("blue", (255, 128, 0)),
                  ("black", (60, 60, 60)))
-
-
-class FrameBuffer:
-    """Latest annotated frame + a condition to wake waiting HTTP clients.
-
-    Holds exactly ONE frame, like tools/oak_view.py: a queue would let a slow
-    browser build a backlog and start showing the past, and the only question a
-    bring-up viewer answers is what the camera sees NOW.
-
-    `viewers` is read by the detection loop to skip annotation entirely when
-    nobody is watching — drawing and copying every frame for an audience of zero
-    is CPU taken from inference on a Jetson that has none to spare.
-    """
-
-    def __init__(self):
-        self._cond = threading.Condition()
-        self._frame = None
-        self._seq = 0
-        self.viewers = 0
-
-    def put(self, frame):
-        with self._cond:
-            self._frame = frame
-            self._seq += 1
-            self._cond.notify_all()
-
-    def get_after(self, last_seq, timeout=5.0):
-        """Block until a frame newer than `last_seq`. Returns (frame, seq), or
-        (None, last_seq) on timeout so a dead stream is visible as a stall
-        rather than a hang."""
-        with self._cond:
-            if not self._cond.wait_for(lambda: self._seq > last_seq, timeout):
-                return None, last_seq
-            return self._frame, self._seq
 
 
 class BuoyDetector(Node):
@@ -194,7 +157,11 @@ class BuoyDetector(Node):
         self._load_model()
         self._open_device()
         if p["stream_enable"]:
-            self._start_stream(int(p["stream_port"]), int(p["stream_quality"]))
+            import cv2                       # only needed to draw
+            self.cv2 = cv2
+            self.server = serve_mjpeg(int(p["stream_port"]),
+                                      int(p["stream_quality"]), self.buffer,
+                                      self.get_logger(), title="buoy_detector")
 
         self.create_timer(p["poll_period_s"], self._drain)
         self.create_timer(p["health_period_s"], self._health)
@@ -215,9 +182,7 @@ class BuoyDetector(Node):
         import depthai as dai                   # sensor SDK, function-local
 
         pipeline, self.width, self.height = oak_pipeline.build_rgbd(
-            isp_denominator=self.p["isp_denominator"], fps=self.p["fps"],
-            subpixel=self.p["subpixel"], lr_check=self.p["lr_check"],
-            sync_threshold_ms=self.p["sync_threshold_ms"])
+            isp_denominator=self.p["isp_denominator"], fps=self.p["fps"],)
 
         self.dai = dai
         self.device = dai.Device(pipeline)
@@ -417,94 +382,6 @@ class BuoyDetector(Node):
                     (255, 255, 255), 1)
         return image
 
-    def _start_stream(self, port, quality):
-        """Serve the annotated frames as MJPEG over HTTP.
-
-        Failure to bind is a WARNING, not a fatal error. This is a bring-up
-        viewer; a busy port (an oak_view left running, a second detector) must
-        not stop the boat from detecting buoys. The detections topic is the
-        product — this is a convenience.
-        """
-        import cv2
-        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-        self.cv2 = cv2
-        buffer = self.buffer
-        logger = self.get_logger()
-
-        class Handler(BaseHTTPRequestHandler):
-            protocol_version = "HTTP/1.0"
-
-            def do_GET(self):
-                if self.path in ("/", "/index.html"):
-                    return self._page()
-                return self._stream()
-
-            def _page(self):
-                body = ("<html><head><title>buoy_detector</title>"
-                        "<meta name='viewport' content='width=device-width,"
-                        "initial-scale=1'></head>"
-                        "<body style='margin:0;height:100vh;overflow:hidden;"
-                        "background:#111'>"
-                        "<img src='/stream' style='width:100%;height:100%;"
-                        "object-fit:contain;display:block'>"
-                        "</body></html>").encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html")
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def _stream(self):
-                self.send_response(200)
-                self.send_header("Content-Type",
-                                 "multipart/x-mixed-replace; boundary=frame")
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
-                with buffer._cond:
-                    buffer.viewers += 1
-                seq = 0
-                try:
-                    while True:
-                        frame, seq = buffer.get_after(seq)
-                        if frame is None:
-                            continue          # no frames yet; keep waiting
-                        ok, jpeg = cv2.imencode(
-                            ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
-                        if not ok:
-                            continue
-                        payload = jpeg.tobytes()
-                        self.wfile.write(
-                            b"--frame\r\nContent-Type: image/jpeg\r\n"
-                            b"Content-Length: " + str(len(payload)).encode()
-                            + b"\r\n\r\n")
-                        self.wfile.write(payload)
-                        self.wfile.write(b"\r\n")
-                except ConnectionError:
-                    pass                      # tab closed; normal
-                finally:
-                    # Must always run: a leaked viewer count keeps the detector
-                    # annotating every frame for nobody, forever.
-                    with buffer._cond:
-                        buffer.viewers -= 1
-
-            def log_message(self, *args):
-                pass                          # keep the console for ROS logs
-
-        try:
-            self.server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-        except OSError as e:
-            self.server = None
-            logger.warn(f"MJPEG view disabled — cannot bind port {port}: {e}")
-            return
-
-        self.server.daemon_threads = True
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        logger.info(f"annotated view on http://<JETSON_IP>:{port} "
-                    "(frames are only drawn while a browser is connected)")
-
-    # ---------------- helpers ----------------
     def _ros_stamp(self, message):
         """Device timestamp -> ROS time. Stamping with "now" would fold USB,
         decode and inference latency into the instant a consumer associates the
@@ -548,16 +425,8 @@ class BuoyDetector(Node):
             f"no_depth={self.no_depth}  viewers={self.buffer.viewers}")
 
     def destroy_node(self):
-        if self.server is not None:
-            # shutdown() before the device close: serve_forever runs on a daemon
-            # thread that touches the frame buffer, and tearing the camera out
-            # from under a mid-write handler is how a clean exit becomes a hang.
-            try:
-                self.server.shutdown()
-                self.server.server_close()
-            except Exception as e:
-                self.get_logger().warn(f"stream shutdown failed: {e}")
-            self.server = None
+        stop_mjpeg(self.server, self.buffer, self.get_logger())
+        self.server = None
         if self.device is not None:
             try:
                 self.device.close()      # one client only: a leaked handle

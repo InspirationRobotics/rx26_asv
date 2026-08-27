@@ -27,6 +27,8 @@ import threading
 import time
 
 TERM_GRACE_S = 5.0          # how long a node gets to shut down cleanly
+KILL_GRACE_S = 2.0          # ...and how long we then wait for SIGKILL to land
+                            # before admitting it is wedged in the kernel
 
 
 class ManagedProcess:
@@ -171,37 +173,56 @@ class ProcessManager:
     def stop(self, name):
         """SIGTERM the process group, escalate to SIGKILL. (ok, message).
 
-        Signals the GROUP, not the process: `ros2 run` is a launcher that execs
-        the node as a child, so signalling only the parent can leave the node
-        itself alive and orphaned — still holding the camera, still publishing.
+        `ros2 run` starts the node as a SEPARATE process and waits on it, so
+        there are always two. Both the signal and the "is it gone yet" check
+        have to cover both of them — signalling or checking only `ros2 run`
+        leaves the node running with the camera open.
         """
         with self._lock:
             proc = self._procs.get(name)
         if proc is None:
             return False, (f"{name} was not started by this server, so it "
                            "cannot be stopped from here")
-        if not proc.alive:
+        # start() used start_new_session, which makes the child a group leader:
+        # its group id is its own pid. Read it that way rather than asking
+        # os.getpgid(), which raises once _drain has reaped `ros2 run`.
+        pgid = proc.popen.pid
+        if not _group_alive(pgid):
             return True, f"{name} had already exited"
 
-        pgid = os.getpgid(proc.popen.pid)
         try:
             os.killpg(pgid, signal.SIGTERM)
         except ProcessLookupError:
             return True, f"{name} had already exited"
 
+        # Wait on the group, not on proc.alive: proc.alive only tells us about
+        # `ros2 run`, which dies in milliseconds. See _group_alive.
         deadline = time.time() + TERM_GRACE_S
         while time.time() < deadline:
-            if not proc.alive:
+            if not _group_alive(pgid):
                 return True, f"stopped {name}"
             time.sleep(0.1)
 
         try:
             os.killpg(pgid, signal.SIGKILL)
         except ProcessLookupError:
-            pass
+            return True, f"stopped {name}"
         if self.log:
             self.log(f"{name} ignored SIGTERM for {TERM_GRACE_S:.0f}s — killed")
-        return True, f"killed {name} (it ignored SIGTERM)"
+
+        # Confirm the SIGKILL actually landed. It usually does, but a process
+        # sitting in a USB call inside the kernel — depthai closing the OAK-D
+        # is the case that bites — does not die until that call returns, and
+        # SIGKILL waits. Saying "killed" while it still holds the camera is
+        # worse than saying nothing.
+        deadline = time.time() + KILL_GRACE_S
+        while time.time() < deadline:
+            if not _group_alive(pgid):
+                return True, f"killed {name} (it ignored SIGTERM)"
+            time.sleep(0.1)
+        return False, (f"{name} survived SIGKILL — it is stuck in the kernel, "
+                       "almost certainly on USB. Nothing this dashboard can "
+                       "send will end it; replug the camera or reboot.")
 
     def stop_external(self, name, pids):
         """Stop a process we did NOT start, by PID. (ok, message).
@@ -243,7 +264,13 @@ class ProcessManager:
                 pass
         if self.log:
             self.log(f"{name} ignored SIGTERM for {TERM_GRACE_S:.0f}s — killed")
-        return True, f"killed {name} (it ignored SIGTERM)"
+        deadline = time.time() + KILL_GRACE_S
+        while time.time() < deadline:
+            if not any(_alive(pid) for pid in stopped):
+                return True, f"killed {name} (it ignored SIGTERM)"
+            time.sleep(0.1)
+        return False, (f"{name} survived SIGKILL — stuck in the kernel, "
+                       "almost certainly on USB. Replug the camera or reboot.")
 
     def stop_all(self):
         """Teardown. Every child we own, on the way out."""
@@ -251,8 +278,70 @@ class ProcessManager:
             self.stop(name)
 
 
+def _group_alive(pgid):
+    """Is ANY process still in this group?
+
+    `ros2 run` IS NOT THE NODE. It starts the node as a separate process, and
+    it has no SIGTERM handler, so it dies instantly. The node does have one
+    (crusader_common.node_main), which is the whole point — it gets to run
+    destroy_node() and close the camera properly, and that takes seconds.
+
+    So popen.poll() answers the wrong question. Measured here: `ros2 run` reads
+    dead 0.05 s after the signal, the node 5.6 s. stop() used to poll the first
+    number, report "stopped", and return — so it never got as far as the
+    SIGKILL escalation, and a node that was NOT going to exit on its own just
+    stayed up. Asking about the group covers both processes.
+
+    ZOMBIES DO NOT COUNT. A process that has exited but has not been reaped is
+    still listed, and killpg(pgid, 0) still succeeds on it. Counting that as
+    alive means SIGKILLing something already dead and then reporting that the
+    SIGKILL failed. Reading the state letter out of /proc skips those. killpg
+    stays as a fallback if /proc cannot be read — that path is the old
+    behaviour, which is pessimistic rather than wrong.
+    """
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        try:
+            os.killpg(pgid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True              # exists, we just may not signal it
+
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat") as f:
+                stat = f.read()
+        except OSError:
+            continue                 # exited while we were looking at it
+        # comm is parenthesised and may itself contain spaces and parens, so
+        # split after the LAST ')': then fields are state, ppid, pgrp, ...
+        tail = stat.rpartition(")")[2].split()
+        if len(tail) < 3:
+            continue
+        if tail[0] == "Z":
+            continue                 # dead, just not reaped
+        if tail[2] == str(pgid):
+            return True
+    return False
+
+
 def _alive(pid):
-    """Is this PID still there? Signal 0 checks without delivering anything."""
+    """Is this PID still there AND not a zombie?
+
+    Same point as in _group_alive: a zombie has already exited, and calling it
+    alive turns a clean stop into a false "survived SIGKILL". State letter from
+    /proc, with signal 0 as the fallback.
+    """
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rpartition(")")[2].split()[0] != "Z"
+    except (OSError, IndexError):
+        pass
     try:
         os.kill(pid, 0)
         return True
