@@ -1,0 +1,47 @@
+#
+# TEMPLATE: __CRSD_USER__ / __CRSD_REPO__ are substituted by
+# setup/install_jetson_host.sh at install time. Do NOT `install` this file
+# verbatim — the placeholders must be expanded.
+#
+# Powers the Jetson down before a low pack is damaged. Reads the battery
+# voltage from MAVProxy's 14552 --out and asks crsd-power to poweroff when it
+# stays low long enough to be real. See tools/scripts/batt_watchdog.py for why
+# it is not root, why it does not share 14550, and every "blank over guess"
+# rule it enforces.
+[Unit]
+Description=Crusader low-voltage shutdown watchdog
+# Needs BOTH: mavproxy for the voltage, crsd-power for the poweroff. Wants=,
+# not Requires=, on purpose — if either is down this service should come up,
+# discover it has no voltage, and SAY so in the journal. A watchdog that
+# refuses to start is a watchdog nobody notices is missing.
+After=crsd-mavproxy.service crsd-power.service
+Wants=crsd-mavproxy.service crsd-power.service
+# StartLimit* live in [Unit], NOT [Service]. systemd moved them in v230 and
+# silently ignores them in the wrong section — "Unknown key name
+# 'StartLimitIntervalSec' in section 'Service', ignoring" in the journal, and a
+# crash loop that never actually gets rate-limited. Confirmed on this boat
+# 2026-09-03.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Unprivileged. The poweroff goes through crsd-power's socket, which is
+# 0660 root:crusader — group membership is the whole permission model here.
+User=__CRSD_USER__
+Group=crusader
+# Thresholds live in /etc/default/crusader alongside CRSD_BCAST_ADDR and the
+# livox settings, so retuning for a different pack needs no unit edit:
+#     CRSD_BATT_SHUTDOWN_V=13.2     4S LiPo @ 3.30 V/cell
+#     CRSD_BATT_WARN_V=14.0         4S LiPo @ 3.50 V/cell (logs only)
+#     CRSD_BATT_HOLD_S=30
+# Unset is fine — the script carries the same 4S defaults.
+EnvironmentFile=-/etc/default/crusader
+ExecStart=/usr/bin/python3 __CRSD_REPO__/tools/scripts/batt_watchdog.py
+# A watchdog that has died is indistinguishable from a healthy battery, so it
+# comes back. But a crash loop is a bug to fix, not a condition to paper over.
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

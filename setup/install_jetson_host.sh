@@ -53,7 +53,14 @@ echo "   livox container: $CRSD_LIVOX_CONTAINER"
 # crsd-power is the ground station's shutdown/reboot path: a container has no
 # init of its own to ask, so this root helper on the HOST is what actually
 # powers the machine off. See tools/scripts/crsd_power_helper.py.
-for unit in crsd-mavproxy crsd-container crsd-livox crsd-power; do
+# crsd-ros starts core.launch.py inside the container. It was missing from this
+# loop until 2026-09-03, so a Jetson built by following this script came up with
+# MAVProxy and the container running and NO ROS NODES — telemetry_bridge, the RC
+# watchdog and the LEDs all absent, on a boat that otherwise looked healthy. The
+# boat in the shed has had the unit installed by hand since; this makes a fresh
+# install match it.
+# crsd-battwatch is the low-voltage poweroff (tools/scripts/batt_watchdog.py).
+for unit in crsd-mavproxy crsd-container crsd-livox crsd-power crsd-ros crsd-battwatch; do
   sed -e "s|__CRSD_USER__|$CRSD_USER|g" -e "s|__CRSD_REPO__|$CRSD_REPO|g" \
       -e "s|__CRSD_CONTAINER__|$CRSD_CONTAINER|g" \
       -e "s|__CRSD_LIVOX_CONTAINER__|$CRSD_LIVOX_CONTAINER|g" \
@@ -65,9 +72,18 @@ for unit in crsd-mavproxy crsd-container crsd-livox crsd-power; do
   fi
 done
 systemctl daemon-reload
-systemctl enable crsd-mavproxy.service crsd-container.service crsd-livox.service crsd-power.service
+systemctl enable crsd-mavproxy.service crsd-container.service crsd-livox.service \
+                 crsd-power.service crsd-ros.service crsd-battwatch.service
 echo "   enabled; start now with:"
-echo "     systemctl start crsd-mavproxy crsd-container crsd-livox crsd-power"
+echo "     systemctl start crsd-mavproxy crsd-container crsd-livox crsd-power crsd-ros crsd-battwatch"
+# crsd-battwatch can POWER THE JETSON OFF. Its defaults are a 4S LiPo (13.2 V
+# sustained 30 s). Say so here rather than letting someone discover it on a
+# 3S bench pack that reads perfectly normally at 12.4 V.
+echo "   NOTE: crsd-battwatch powers the Jetson off below CRSD_BATT_SHUTDOWN_V"
+echo "         (default 13.2 V, a 4S LiPo at 3.30 V/cell, held for 30s)."
+echo "         Running a different pack? Set CRSD_BATT_SHUTDOWN_V in"
+echo "         /etc/default/crusader BEFORE starting it, and confirm the"
+echo "         reading first:  tools/scripts/batt_watchdog.py --dry-run"
 
 echo "== [3/5] container mounts (recordings must outlive the container) =="
 # crsd-container.service runs `docker start`, which CANNOT add mounts — they are
