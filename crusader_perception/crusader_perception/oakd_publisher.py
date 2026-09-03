@@ -83,13 +83,13 @@ PARAM_SPEC = {
     "isp_denominator": dict(read_only=True, lo=1, hi=8,
                             description="ISP downscale 1/N of 1920x1200 "
                                         "(3 -> 640x400, the stereo-native size)"),
-    "sync_threshold_ms": dict(read_only=True, lo=1, hi=200,
-                              description="max RGB/depth timestamp gap the "
-                                          "device Sync will pair [ms]"),
-    "subpixel": dict(read_only=True,
-                     description="StereoDepth subpixel mode (finer far-range depth)"),
-    "lr_check": dict(read_only=True,
-                     description="StereoDepth left/right check (rejects occlusions)"),
+    # sync_threshold_ms / subpixel / lr_check USED TO LIVE HERE. They were
+    # removed from oak_pipeline.build_rgbd and became constants inside it — see
+    # the "equal by construction, nothing to pin" note in crusader_params.yaml —
+    # but this node was not updated with it, so it kept declaring them and
+    # passing them on. They were never in the YAML either, so the node died at
+    # `p["subpixel"]` with a bare KeyError BEFORE reaching the call that would
+    # have raised TypeError for the stale signature. Fixed 2026-09-03.
     "poll_period_s": dict(read_only=True, lo=0.001, hi=1.0,
                           description="output-queue poll period [s]; must be well "
                                       "under 1/fps or frames queue up"),
@@ -143,10 +143,18 @@ class OakDPublisher(Node):
         failure rather than a node that sits there publishing nothing."""
         import depthai as dai                     # function-local: see docstring
 
+        # Same call as buoy_detector. ae_compensation is deliberately NOT passed,
+        # so this takes build_rgbd's default of 0 (off): this node hands out raw
+        # frames for viewing, and a deliberately darkened image is a poor view.
+        # NOTE the asymmetry, because it is a real open question and not an
+        # oversight here — oak_detector passes ae_compensation=-3 as a TRAINING
+        # CONTRACT (it decides what colour the LED records as), and
+        # tools/oak_record.py defaults to -3 too, while buoy_detector and this
+        # node both run at 0. Record training footage with oak_record.py, NOT by
+        # subscribing to this node's topics, or the exposure will not match the
+        # classifier's training set.
         pipeline, self.width, self.height = oak_pipeline.build_rgbd(
-            isp_denominator=p["isp_denominator"], fps=p["fps"],
-            subpixel=p["subpixel"], lr_check=p["lr_check"],
-            sync_threshold_ms=p["sync_threshold_ms"])
+            isp_denominator=p["isp_denominator"], fps=p["fps"])
 
         self.dai = dai
         self.device = dai.Device(pipeline)
