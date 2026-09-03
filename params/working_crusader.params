@@ -1,5 +1,22 @@
 # Onboard parameters for Vehicle 1
 #
+# BASELINE — this is POLICY, not a measurement. param_guard.py diffs against it
+# and preflight.py gates on it. Dated dumps of what the boat actually had at a
+# moment live in ../../QGC params/ and are evidence; do not confuse the two, and
+# do not re-export over this file just to make a diff go quiet.
+#
+# HAND CORRECTION 2026-09-03: PILOT_STEER_TYPE 0 -> 3. It was the only PROTECTED
+# param differing from the live boat, so param_guard returned FAIL on a correct
+# vehicle on every run — see docs/OPERATIONS.md §12. The live board, §12 and
+# param_guard's own PROTECTED comment all say 3; this file was the outlier.
+# Evidence: ../../QGC params/2026-09-03_crusader_ardurover463.params
+#
+# STILL STALE, deliberately left alone (all tunable, none protected):
+#   BATT_MONITOR here is 0, the boat is 3 with a calibrated BATT_VOLT_MULT of
+#   14.5964 and the analog backend params this file does not carry at all.
+#   MOT_THST_ASYM/EXPO here are 1.0/0.0, the boat runs 1.5/0.65 mid-tuning.
+# Fold those in when someone deliberately signs off on the tuning, not before.
+#
 # Stack: ArduPilot
 # Vehicle: Surface vessel, boat, ship
 # Version: 4.6.3 
@@ -519,7 +536,7 @@
 1	1	NTF_OREO_THEME	0	2
 1	1	OA_TYPE	0	2
 1	1	OSD_TYPE	0	2
-1	1	PILOT_STEER_TYPE	0	2
+1	1	PILOT_STEER_TYPE	3	2
 1	1	PLND_ENABLED	0	2
 1	1	PRX1_TYPE	0	2
 1	1	PRX2_TYPE	0	2
