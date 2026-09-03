@@ -31,9 +31,40 @@ There's a relay that controls the power to ESCs and it requires the magnetic coi
 Either will cut the power to ESCs
 
 # Device information
-Jetson WIFI IP: 192.168.8.109
-Jetson ETH IP: 192.168.1.5
-LiDar IP: 192.168.1.166
+Read off the boat 2026-09-03. This section used to say "Jetson WIFI IP:
+192.168.8.109", which was two errors in one line: 192.168.8.109 is on the WIRED
+interface, not WiFi, and the WiFi address had moved to a different subnet.
+
+Jetson hostname: crusader-asv   (user `crusader`; `crusader.local` does NOT
+                                 resolve from the lab laptop — use the address)
+
+Jetson WIFI  (wlP1p1s0): 192.168.100.109/24, DHCP, default route
+    Not fixed. It is whatever the WiFi hands out, and it has changed subnet
+    before — check `ip -brief addr` rather than trusting this line. SSID was
+    `MESAFSD` on 2026-09-03; `TeamInspirationField_2.0`, `TeamInspirationField`
+    and `TeamInspiration_5G` are also saved.
+
+Jetson ETH   (enP8p1s0): TWO static addresses on ONE cable
+    192.168.1.5/24     the LiDAR's subnet
+    192.168.8.109/24   the Bullet AC bridge, gateway 192.168.8.1
+
+    Deliberate: the Bullet link and the MID360 share the physical port and are
+    kept apart by subnet, so neither has to move when the other changes.
+    There is NO netplan on this machine — NetworkManager owns it, in the
+    profile `Wired connection 1` (ipv4.method manual):
+
+        nmcli -f ipv4 con show "Wired connection 1"
+
+    Do not "fix" the wired side with `sudo ip addr add`. That stacks a third
+    address on a config that is already correct, and it does not survive a
+    reboot. Edit the NM profile or leave it alone.
+
+LiDar IP: 192.168.1.166   (MID360; the driver binds 192.168.1.5, see
+                           MID360_config.json host_net_info)
+
+A note on diagnosing this: `enP8p1s0` reports 1000 Mb/s and `Link detected: yes`
+from the switch alone. On 2026-09-03 both the LiDAR and the Bullet were
+unpowered and the interface still looked perfect. Ping the device, not the link.
 
 # Mounting Information
 LiDar (mounted upside down at the BOW — a 180 deg roll about the forward axis,

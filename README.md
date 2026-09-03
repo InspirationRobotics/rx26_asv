@@ -193,7 +193,7 @@ Python ≥3.10 + pyyaml anywhere. Install via [setup/](setup/README.md).
 |---|---|
 | **ASV / USV** | Autonomous/unmanned surface vessel — the boat |
 | **GUIDED / MANUAL** | ArduRover modes. GUIDED = autopilot drives to pushed setpoints (cannot strafe on this frame — it turns instead) |
-| **MAVProxy rebroadcast** | MAVProxy owns the Pixhawk serial link and re-serves telemetry on UDP (14550 GCS + broadcast, 14551 ROS). The only way anything else talks to the autopilot |
+| **MAVProxy rebroadcast** | MAVProxy owns the Pixhawk serial link and re-serves telemetry on UDP: **14551** ROS (`telemetry_bridge`), **14552** `crsd-battwatch`, **14550** GCS + broadcast and ad-hoc tooling. The only way anything else talks to the autopilot. Every long-lived consumer gets its own port — a `udpin` bind steals datagrams, so sharing one means the loser gets silence rather than an error |
 | **`asv` container** | Where this whole repo runs, OAK-D included. Has ROS 2, CUDA/TensorRT, depthai, MAVProxy |
 | **livox container** | The only other container. Drives the MID360 and nothing else; publishes its `PointCloud2` |
 | **Autonomy-drop switch** | RC-channel-triggered software latch that kills any RC override within one control cycle, working beyond WiFi range. Gate G1 deliverable |
@@ -215,8 +215,15 @@ prequal — that is the version to port from when mission work restarts.
 
 ## Future development
 
-- **Topic contract with the livox container** — name, type, QoS, frame id for the MID360
-  cloud. Blocks the LiDAR half of `crusader_perception`.
+- **Topic contract with the livox container** — the observable half is settled
+  (measured 2026-09-03): `/livox/lidar` is `sensor_msgs/PointCloud2` at 10.0 Hz,
+  ~20k points/msg, RELIABLE/VOLATILE, frame `livox_frame`; `/livox/imu` is
+  `sensor_msgs/Imu` at 200.0 Hz, same frame. Both are visible from inside `asv` —
+  the containers share host network and the default `ROS_DOMAIN_ID`, so nothing needs
+  bridging. What still blocks the LiDAR half of `crusader_perception` is the **frame
+  convention**, not the plumbing: `livox_frame` is the raw upside-down sensor frame
+  (+y starboard, +z down) and nothing has yet agreed where the negation to REP-103
+  body happens.
 - **A G2-style bench check for the CAMERA's orientation.** Its mounting *translation* is in
   `Resources.md` and now in `target_tracker`'s `cam_x/y/z`, on the same hull-bottom datum as
   the LiDAR. Its *orientation* is recorded as "not yet bench-confirmed", which is the same

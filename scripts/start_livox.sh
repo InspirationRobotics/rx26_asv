@@ -10,12 +10,18 @@
 # ---------------------------------------------------------------------------
 # THE rviz TRAP — read this before changing CRSD_LIVOX_LAUNCH.
 #
-# livox_ros_driver2's `rviz_MID360_launch.py` starts rviz2 alongside the driver,
-# and the stock launch file registers an OnProcessExit handler that SHUTS DOWN
-# THE WHOLE LAUNCH when rviz exits. At boot there is no display, so rviz2 dies
-# immediately and takes the driver with it — systemd restarts, rviz dies again,
-# and you get a crash loop whose journal looks like an orderly shutdown rather
-# than an error. The LiDAR is simply never there.
+# livox_ros_driver2's `rviz_MID360_launch.py` starts rviz2 alongside the driver.
+# Where the STOCK launch file registers an OnProcessExit handler that SHUTS DOWN
+# THE WHOLE LAUNCH when rviz exits, a headless boot kills rviz2 immediately and
+# takes the driver with it — systemd restarts, rviz dies again, and you get a
+# crash loop whose journal looks like an orderly shutdown rather than an error.
+#
+# MEASURED ON THIS BOAT 2026-09-03: it does NOT happen here. rviz2 died at boot
+# (exit code -6) and the driver stayed up, publishing /livox/lidar at 10.0 Hz
+# hours later. The launch file inside crusader_legacy evidently lacks that
+# handler. So the rviz2 ERROR in the journal is not evidence the LiDAR is down —
+# check `ros2 topic hz /livox/lidar` from inside asv before chasing it. The
+# headless copy is still worth doing, as housekeeping rather than as a repair.
 #
 # It is still the default here because it is what publishes PointCloud2
 # (xfer_format 0); `msg_MID360_launch.py` publishes CustomMsg, which the ROS 2

@@ -104,16 +104,80 @@ You're on the Jetson when the prompt reads `crusader@crusader-asv`.
 ### Known field fix — QGC won't connect at the lake
 
 If MAVProxy is running but QGroundControl/Mission Planner never sees the boat,
-the wired interface may have no address in the laptop's subnet:
+**do not start by adding addresses.** As of 2026-09-03 the wired interface
+already carries two static addresses on purpose (`192.168.1.5` for the MID360,
+`192.168.8.109` for the Bullet bridge — see §2 and `Resources.md`), and an
+`ip addr add` of a *WiFi-subnet* address onto the wired NIC stacks a third one
+onto a config that is already correct, does not survive reboot, and gives you a
+host route that quietly competes with the real one.
 
-```bash
-sudo ip addr add 192.168.100.109/24 dev enP8p1s0
-```
+Work down this list instead:
 
-Confirm the interface name with `ip addr` first — it is not the same on every
-Jetson. This is not persistent across reboot.
+1. `ip -brief addr` — what does the boat actually have, on which interface?
+2. Is your laptop on the same subnet as any of them? Broadcast does not cross
+   subnets, and the Bullet bridge is its own.
+3. If not, add your laptop as an explicit unicast target — that is exactly what
+   `GCS_IPS` is for, and it is additive (below).
+4. Only if the wired *link itself* is misconfigured, fix it in the
+   NetworkManager profile (`nmcli con mod "Wired connection 1" ...`) so the fix
+   survives a reboot. There is no netplan on this machine.
 
 ---
+
+## 3.1 HEARTBEAT rate — why it is not a parameter
+
+`/crsd/fcu_status` (mode + armed) is fed by **HEARTBEAT alone**, and it has to be
+fresh enough to feed the RoboCommand link.
+
+The handbook (`Boat/handbook/3.4-communications-protocol.md` §3.4.11) says *"The
+OCS publishes a separate `RxReport` heartbeat on behalf of each active vehicle at
+2Hz"*, carrying robot state, position, speed/heading, roll/pitch and current
+task. **The 2 Hz emitter is our own OCS, not the boat** — the boat's job is to
+keep it supplied. A 1 Hz source cannot honestly feed a 2 Hz report, which is why
+the source is set comfortably above it rather than at it.
+
+**ArduPilot sends HEARTBEAT on a fixed 1 Hz timer belonging to no `SRx_*` stream
+group** — there is no `SR0_HEARTBEAT` to raise, and `--streamrate` does not touch
+it. The only lever is `MAV_CMD_SET_MESSAGE_INTERVAL`. Confirmed on Crusader
+2026-09-03: ArduRover 4.6.3 answers `MAV_RESULT_ACCEPTED` and the measured rate
+goes **1.00 → 5.33 Hz**.
+
+`start_mavproxy.sh` requests it on every start:
+
+```bash
+--cmd="long SET_MESSAGE_INTERVAL 0 200000"     # 200000 us = 5 Hz
+```
+
+Override with `CRSD_HEARTBEAT_US` in `/etc/default/crusader`.
+
+> **Interval `-1` means DISABLE, not "restore the default".** Sending it switches
+> HEARTBEAT off completely, which takes `/crsd/fcu_status`, the LED status stack
+> and the RC watchdog's `bridge_ok` with it — the boat goes dark in a way that
+> looks like a dead link. Use `0` for the vehicle default. Recovery is one more
+> SET_MESSAGE_INTERVAL at the rate you wanted.
+
+**SET_MESSAGE_INTERVAL is runtime state, not EEPROM.** The `--cmd` covers a host
+reboot and a `systemctl restart`. It does **not** cover the autopilot rebooting
+on its own — after that the rate silently falls back to 1 Hz, the source period
+again equals `telemetry_bridge`'s 1.0 s staleness threshold, and the log fills
+with `stream 'fcu_status' stale`. That storm is the signal, not the disease:
+
+```bash
+sudo systemctl restart crsd-mavproxy
+```
+
+Check the live rate any time with `tools/scripts/preflight.py`, or directly:
+
+```bash
+python3 -c "
+from pymavlink import mavutil, mavlink
+import time
+m=mavutil.mavlink_connection('udpin:127.0.0.1:14550'); m.wait_heartbeat()
+t0=time.time(); n=0
+while time.time()-t0 < 10:
+    if m.recv_match(type='HEARTBEAT', blocking=True, timeout=3): n+=1
+print(f'{n/10:.2f} Hz')"
+```
 
 ## 3. Telemetry to your laptop
 
@@ -462,9 +526,16 @@ Known-good params: **`params/working_crusader.params`**, committed in this repo
 and diffed against the live vehicle by `preflight.py` before every arm (§18).
 Re-export it from QGC after any deliberate param change.
 
-> **Unresolved:** that baseline currently has `PILOT_STEER_TYPE=0`, not the `3`
-> this section calls for. See §20 — do not assume either value is live without
-> checking the board.
+> **Resolved 2026-09-03.** The live board reads `PILOT_STEER_TYPE=3`, agreeing
+> with this section and with `param_guard`'s PROTECTED comment. The committed
+> baseline was the stale one and has been corrected to 3; evidence is
+> `QGC params/2026-09-03_crusader_ardurover463.params`.
+>
+> While it disagreed, `param_guard` returned **FAIL on a correct boat** — every
+> run, for weeks. That is worse than no gate: a check that always fails is a
+> check nobody reads. If preflight ever starts failing on something you believe
+> is right, suspect the baseline before you suspect the boat, and settle it by
+> dumping params rather than by editing either file to match the other.
 
 ---
 
@@ -496,6 +567,61 @@ the guard came out. The package formerly called `crusader_sensors` is now
 
 The pre-v0.5 LiDAR fusion was removed unverified. It is recoverable from git at `8c4ffa5`
 and worth reading before rewriting — see each package's README.
+
+### Battery voltage and the low-voltage shutdown
+
+**Crusader runs a 4S LiPo.** Voltage sensing was dead until 2026-09-03 and the
+way it failed is worth knowing, because it looks like working config:
+`BATT_MONITOR=3` (Analog V+I) was set, but the autopilot had never been rebooted
+since. **ArduPilot only creates the analog backend params on a reboot after
+`BATT_MONITOR` changes** — so `BATT_VOLT_PIN`, `BATT_VOLT_MULT`, `BATT_CURR_PIN`
+and `BATT_AMP_PERVLT` did not exist at all, and `SYS_STATUS.voltage_battery`
+read 0 mV while the parameter list looked correctly configured.
+
+After the reboot the backend appeared (`BATT_VOLT_PIN=2`, `BATT_CURR_PIN=3`) and
+the divider was calibrated against a multimeter to **`BATT_VOLT_MULT=14.5964`**.
+It now reads 16.39 V on a charged pack, ≈4.10 V/cell.
+
+> **Current is still not sensed.** `current_battery` reports −1 and
+> `BATT_CAPACITY` is a stock 3300 mAh that describes nothing aboard. Do not
+> build anything on mAh consumed.
+
+`crsd-battwatch` ([`tools/scripts/batt_watchdog.py`](../tools/scripts/batt_watchdog.py))
+reads MAVProxy's **14552** `--out` and asks `crsd-power` to poweroff when the
+voltage stays low. It is unprivileged and goes through that socket rather than
+being a second root program.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `CRSD_BATT_SHUTDOWN_V` | `13.2` | 4S LiPo at 3.30 V/cell. Poweroff below this |
+| `CRSD_BATT_WARN_V` | `14.0` | 4S LiPo at 3.50 V/cell. Logs only, never acts |
+| `CRSD_BATT_HOLD_S` | `30` | Must stay low continuously this long. Four T200s sag the pack hard on a step input; a momentary dip must not power the boat off |
+| `CRSD_BATT_STALE_S` | `10` | No sample for this long clears the countdown |
+| `CRSD_BATT_ENDPOINT` | `udp:127.0.0.1:14552` | Its own port. 14551 is telemetry_bridge's, 14550 stays free for tooling |
+
+**What it is for.** The boat sitting powered-up on the cart with nobody
+watching — that is how packs die here. It is not a mission-time energy policy:
+the Jetson is ~15 W against four T200s pulling hundreds, so powering it off does
+not meaningfully extend a run.
+
+**Before trusting a threshold on a new pack**, watch it without letting it act.
+**Stop the service first** — two readers on one UDP port split the datagrams
+between them, so a dry-run beside the live service blinds the live one. Measured
+2026-09-03: the service logged `no usable voltage (last good reading: 10s ago);
+not acting` for the whole 40 s the second process was up. It failed safe, but
+the boat had no low-voltage protection for those 40 seconds. The script now
+refuses to start in `--dry-run` when the port is already held.
+
+```bash
+sudo systemctl stop crsd-battwatch
+tools/scripts/batt_watchdog.py --dry-run
+sudo systemctl start crsd-battwatch
+```
+
+**Autopilot-side battery failsafe is deliberately still off** — `BATT_LOW_VOLT`,
+`BATT_CRT_VOLT`, `BATT_FS_LOW_ACT` and `BATT_FS_CRT_ACT` are all 0. Those change
+what the *vehicle* does on the water (Rover can RTL or Hold on them); the Jetson
+watchdog does not. Enabling them is a separate, deliberate decision.
 
 ### Starting the MID360
 
@@ -531,12 +657,24 @@ this needs a unit edit:
 > docker exec crusader_legacy bash -c 'ls -d /opt/ros/*/; find /opt /root -maxdepth 4 -name setup.bash -path "*install*"'
 > ```
 
-> **The rviz trap — this is what breaks the boot service.** `rviz_MID360_launch.py`
-> starts rviz2 alongside the driver, and the stock launch registers an
-> `OnProcessExit` handler that **shuts down the whole launch when rviz exits**. At
-> boot there is no display, so rviz2 dies instantly and takes the driver with it.
-> systemd restarts, it dies again, and the journal reads like an orderly shutdown
-> rather than an error — the LiDAR is simply never there.
+> **The rviz trap — but measure before you believe it here.**
+> `rviz_MID360_launch.py` starts rviz2 alongside the driver. Where the stock
+> launch registers an `OnProcessExit` handler that **shuts down the whole launch
+> when rviz exits**, a headless boot kills rviz2 instantly and takes the driver
+> with it; systemd restarts, it dies again, and the journal reads like an orderly
+> shutdown rather than an error — the LiDAR is simply never there.
+>
+> **On this boat, as of 2026-09-03, that does NOT happen.** rviz2 died at boot as
+> expected (`[ERROR] [rviz2-2]: process has died … exit code -6`) and the driver
+> stayed up: `livox_ros_driver2_node` still running hours later, `/livox/lidar`
+> still at 10.0 Hz, `/livox/imu` at 200.0 Hz. Whatever launch file
+> `crusader_legacy` actually carries does not register that handler.
+>
+> So the ERROR line in `journalctl -u crsd-livox` is **not** evidence the LiDAR is
+> down. Check the topic rate from inside `asv` before chasing it:
+> `ros2 topic hz /livox/lidar`. The headless copy below is still worth doing — it
+> removes a wasted process and a permanently alarming log line — but it is
+> housekeeping here, not a repair.
 >
 > It is still the default because it is the launch that publishes **PointCloud2**
 > (`xfer_format: 0`); `msg_MID360_launch.py` publishes `CustomMsg`, which ROS 2
@@ -746,19 +884,45 @@ Honest list — these are known-wrong or known-missing, not merely untested:
   point exists in `telemetry_bridge`; the bench harness that drove it was removed
   with the rest of the untested code, so [G1](G1_bench_procedure.md) needs a
   replacement publisher written first.
-- **`PILOT_STEER_TYPE` disagrees between the docs and the boat.** §12 records
-  `PILOT_STEER_TYPE=3` as the fix for autonomous reverse-spin (found 2026-07-16),
-  but the committed baseline `params/working_crusader.params` has it at **0**.
-  One of the two is wrong: either the value was never saved to the board, or it
-  was later reverted and §12 is stale. Resolve this before the next autonomous
-  run — it is on `param_guard`'s PROTECTED list precisely because it is not a
-  preference.
-- **`MOT_THST_ASYM` / `MOT_THST_EXPO` were mid-tuning** when §16's work stopped
-  (≈1.5 and ≈0.65 in progress); the baseline has 1.0 and 0.0. Tunable, not
-  protected — but know which one you are running.
-- **No topic contract with the livox container** yet, so the MID360 cloud has no
-  agreed name, type, QoS or frame id and nothing can consume it (§13). The
-  camera side is settled: `oak/detections`, `Detection3DArray`, `camera_link`.
+- ~~`PILOT_STEER_TYPE` disagrees between the docs and the boat.~~ **Closed
+  2026-09-03**: the live board reads 3, the baseline was stale and is now 3 too.
+  See §12.
+- **`MOT_THST_ASYM` / `MOT_THST_EXPO` were mid-tuning** when §16's work stopped.
+  Confirmed 2026-09-03: **the boat is running the in-progress pair**, `1.5` and
+  `0.65`, while the baseline still has `1.0` and `0.0`. Tunable, not protected —
+  but that is which one you are running, and the baseline is not it.
+- **The livox topic contract is half-settled.** Measured on the boat 2026-09-03:
+  `/livox/lidar` is `sensor_msgs/PointCloud2` at **10.0 Hz**, ~20k points per
+  message, RELIABLE/VOLATILE, frame `livox_frame`; `/livox/imu` is
+  `sensor_msgs/Imu` at **200.0 Hz**, same frame. Both are visible from inside
+  `asv` — the containers share host network and the default `ROS_DOMAIN_ID`, so
+  no bridge is needed. What is still open is not the plumbing but the **frame
+  convention**: `livox_frame` is the raw upside-down sensor frame (+y starboard,
+  +z down), and nothing downstream has yet agreed where the negation to REP-103
+  body happens. The camera side is settled: `oak/detections`,
+  `Detection3DArray`, `camera_link`.
+- ~~`fcu_status` trips its own staleness rule at idle.~~ **Closed 2026-09-03 by
+  raising HEARTBEAT to 5 Hz** (§3.1). `stream_timeout_s` stays at 1.0 s
+  deliberately: with a 0.2 s source period there is 5× margin, so that error now
+  means the rate request was lost rather than firing on jitter. Left as a note
+  because the reasoning matters — the threshold used to equal the source period
+  exactly (HEARTBEAT mean 1.000 s, max 1.028 s, 16 of 24 intervals over 1.0 s),
+  and an error that fires constantly on a healthy vehicle teaches everyone to
+  scroll past the one line that matters.
+- **The OAK-D LR is off the USB bus** (2026-09-03) and cannot be recovered in
+  software. `dmesg` records it enumerating on `usb 1-2.2` at t=1350 s and
+  disconnecting at t=1450 s, never returning; `lsusb` now shows no `03e7` device
+  and that port is empty. A bootloader reload needs the device to enumerate
+  first, so there is nothing to flash. This hub exposes no per-port power
+  control (`/sys/bus/usb/devices/1-2/port2/disable` does not exist) and
+  resetting the parent hub would drop the Pixhawk with it. **Reseat the cable
+  and check its power.** Worth noting it was on a USB 2.0 path (480 Mb/s) — the
+  SuperSpeed bus has two hubs and no devices, so the LR was never on USB 3.
+- **The `asv` container lacks the power-socket bind mount**, so the ground
+  station's System tab reports "power helper unreachable" and cannot shut the
+  Jetson down. Everything else on the page works. Fixing it requires recreating
+  the container, which destroys anything living only inside it — left alone
+  deliberately. `crsd-battwatch` is unaffected; it runs on the host.
 
 ### Confirmed hardware (2026-07-28)
 
