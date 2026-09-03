@@ -2,7 +2,14 @@
 # MAVProxy is the SOLE owner of the Pixhawk serial link (only ONE process may
 # open it). It rebroadcasts MAVLink over UDP to everything else:
 #   127.0.0.1:14551      -> telemetry_bridge (this repo's single ROS-side consumer)
-#   127.0.0.1:14550      -> spare local consumer (preflight, ad-hoc mavproxy/QGC on host)
+#   127.0.0.1:14552      -> batt_watchdog (crsd-battwatch, low-voltage poweroff)
+#   127.0.0.1:14550      -> ad-hoc tooling ONLY (preflight, param_guard --live,
+#                           dump_params, a scratch mavproxy/QGC on the host).
+#                           KEEP IT FREE: a udpin bind STEALS datagrams, so a
+#                           long-lived service squatting here would make those
+#                           tools sit in silence rather than fail with an error
+#                           that names the cause. Anything permanent gets its
+#                           own port, which is why the watchdog has 14552.
 #   <BCAST_ADDR>:14550   -> Mission Planner / QGroundControl on ANY laptop on the
 #                           field WiFi (broadcast, not unicast) — QGC/Mission
 #                           Planner both listen on 14550 for traffic from any
@@ -13,10 +20,10 @@
 #
 # CAVEAT: broadcast is subnet-scoped, not laptop-scoped. If two teams share the
 # same field network, every laptop on it sees every broadcasting boat's telemetry
-# — pick the right vehicle in QGC/Mission Planner's connection list. And if the
-# field network ever hands out a different subnet than 192.168.100.0/24, update
-# BCAST_ADDR to match (it must be that subnet's broadcast address, i.e. network
-# address with the host bits set to 1 — .255 for a /24).
+# — pick the right vehicle in QGC/Mission Planner's connection list. And when the
+# network hands out a subnet other than this script's default, update BCAST_ADDR
+# to match (it must be that subnet's broadcast address, i.e. the network address
+# with the host bits set to 1 — .255 for a /24).
 #
 # WHEN BROADCAST IS NOT ENOUGH. A subnet broadcast only reaches hosts ON that
 # subnet, and only if nothing between drops it — an AP with client isolation, a
@@ -41,7 +48,14 @@
 # Usage: ./start_mavproxy.sh [BCAST_ADDR]        (env: GCS_IPS, CRSD_PIXHAWK_DEV)
 set -euo pipefail
 
-BCAST_ADDR="${1:-192.168.8.255}"         # override if the field subnet changes
+# DEFAULT IS THE BULLET'S WIRED SUBNET, NOT THE FIELD WIFI. 192.168.8.255 is the
+# broadcast address of the 192.168.8.0/24 side of the Bullet AC bridge, which is
+# the link that exists at the venue. The Jetson's WiFi is a different subnet
+# (192.168.100.0/24 in the lab as of 2026-09-03), and a broadcast to one does
+# NOT reach the other. Pass the argument, or set CRSD_BCAST_ADDR in
+# /etc/default/crusader, to broadcast on the subnet you are actually on; use
+# GCS_IPS for a laptop on the far side of either.
+BCAST_ADDR="${1:-192.168.8.255}"
 MASTER="${CRSD_PIXHAWK_DEV:-/dev/crsd-pixhawk}"
 
 if [ ! -e "$MASTER" ]; then
@@ -56,6 +70,7 @@ fi
 # ROS-side consumer, and everything downstream of it (LEDs, RC watchdog, pose,
 # attitude) goes dark if it is missing.
 OUTS=(--out=udp:127.0.0.1:14551
+      --out=udp:127.0.0.1:14552
       --out=udp:127.0.0.1:14550
       --out=udpbcast:"${BCAST_ADDR}":14550)
 
@@ -93,8 +108,38 @@ done
 #
 # If SR0_* is ever left at 0 the vehicle streams nothing and telemetry_bridge
 # sits at "still no heartbeat" — check the params before suspecting the link.
+# HEARTBEAT AT 5 Hz, and why it cannot be done with a parameter.
+#
+# ArduPilot sends HEARTBEAT on a FIXED 1 Hz timer. It is in no SRx_* stream
+# group — there is no SR0_HEARTBEAT to raise — so the only way to change it is
+# MAV_CMD_SET_MESSAGE_INTERVAL at runtime. Confirmed on Crusader 2026-09-03:
+# ArduRover 4.6.3 returns MAV_RESULT_ACCEPTED and the rate goes 1.00 -> 5.33 Hz.
+#
+# It matters because /crsd/fcu_status (mode + armed) is fed by HEARTBEAT ALONE,
+# and the boat has to report state to RoboCommand at 2 Hz. A 1 Hz source cannot
+# honestly feed a 2 Hz report — and at 1 Hz the source period exactly equalled
+# telemetry_bridge's 1.0s staleness threshold, so ordinary jitter tripped it and
+# the log filled with "stream 'fcu_status' stale" on a perfectly healthy boat.
+# At 5 Hz there is 5x margin and that error means something again.
+#
+# 200000 us = 5 Hz. Interval 0 would mean "default rate"; interval -1 means
+# DISABLE, not restore — sending -1 here would switch heartbeat OFF and take
+# fcu_status, the LED stack and the RC watchdog's bridge_ok with it.
+#
+# THE CAVEAT, because it will bite someone: SET_MESSAGE_INTERVAL is RUNTIME
+# state, not EEPROM. It survives nothing. This --cmd re-requests it every time
+# MAVProxy starts, which covers a host reboot and a `systemctl restart`. It does
+# NOT cover the autopilot rebooting on its own — after that the rate silently
+# falls back to 1 Hz and the stale-stream errors return. That error storm IS the
+# signal: if you see it, the request was lost, and
+#     sudo systemctl restart crsd-mavproxy
+# puts it back. Check with:
+#     python3 -c "from pymavlink import mavutil; ..."   (or tools/scripts/preflight.py)
+HEARTBEAT_US="${CRSD_HEARTBEAT_US:-200000}"
+
 exec mavproxy.py \
   --master="$MASTER" \
   --daemon \
   --streamrate=-1 \
+  --cmd="long SET_MESSAGE_INTERVAL 0 ${HEARTBEAT_US}" \
   "${OUTS[@]}"
