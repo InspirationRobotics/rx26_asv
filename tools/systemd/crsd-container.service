@@ -7,9 +7,17 @@
 # node ever races MAVProxy for the serial device.
 [Unit]
 Description=Crusader ROS 2 container
-After=docker.service crsd-mavproxy.service
+# crsd-power BEFORE the container, because the container bind-mounts
+# /run/crsd-power.sock (that is how the ground station's shutdown button
+# reaches the host). Docker resolves bind sources at container START, and if
+# the socket does not exist yet Docker HELPFULLY CREATES A DIRECTORY at that
+# path — after which the helper cannot bind its socket and the button is dead
+# until someone deletes the directory by hand. Wants=, not Requires=: if the
+# helper is genuinely broken the boat should still come up and drive, just
+# without a shutdown button.
+After=docker.service crsd-mavproxy.service crsd-power.service
 Requires=docker.service
-Wants=crsd-mavproxy.service
+Wants=crsd-mavproxy.service crsd-power.service
 
 [Service]
 Type=simple

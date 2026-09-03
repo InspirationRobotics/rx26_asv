@@ -17,6 +17,12 @@
 [Unit]
 Description=Crusader power helper (shutdown/reboot socket for the ground station)
 After=local-fs.target
+# StartLimit* live in [Unit], NOT [Service]. They sat in [Service] here until
+# 2026-09-03, where systemd ignores them outright — "Unknown key name
+# 'StartLimitIntervalSec' in section 'Service', ignoring" — so this unit had no
+# rate limit at all and a crash loop would have restarted forever, quietly.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -30,12 +36,11 @@ EnvironmentFile=-/etc/default/crusader
 ExecStart=/usr/bin/python3 __CRSD_REPO__/tools/scripts/crsd_power_helper.py
 # RuntimeDirectory gives us /run/crsd owned by root and cleaned up on stop;
 # the default socket path sits in /run directly, which systemd also manages.
+# A helper that dies while the boat is running should come back, but a helper
+# crash-looping is a bug, not a condition to paper over — the rate limit that
+# enforces that is in [Unit] above.
 Restart=on-failure
 RestartSec=5
-# A helper that dies while the boat is running should come back, but a helper
-# crash-looping is a bug, not a condition to paper over.
-StartLimitIntervalSec=60
-StartLimitBurst=5
 
 [Install]
 WantedBy=multi-user.target
