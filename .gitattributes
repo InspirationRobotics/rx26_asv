@@ -1,0 +1,42 @@
+# Line endings — this file exists to stop a specific, already-observed failure.
+#
+# Developers work on Windows with core.autocrlf=true, which checks these files
+# out with CRLF. Copying one straight to the Jetson (scp/pscp, which is what the
+# deploy path actually does) carries the CRLF with it, and bash dies on it:
+#
+#     syntax error near unexpected token `$'do\r''
+#
+# The service already running does NOT notice — it is already exec'd — so the
+# boat looks perfectly healthy and fails on the NEXT restart or reboot. That is
+# the worst possible time to discover it. Caught on 2026-09-03 in
+# scripts/start_mavproxy.sh, before a restart, only because `bash -n` was run.
+#
+# Forcing LF in the working tree means a Windows checkout of these files is
+# already what the Jetson needs, and a direct copy is safe.
+#
+# Python tolerates CRLF, which is exactly why this hid: the .py files were fine
+# and only the shell scripts were broken. Pinning them too so the whole deploy
+# path behaves the same way.
+
+*.sh        text eol=lf
+*.bash      text eol=lf
+*.py        text eol=lf
+*.service   text eol=lf
+*.rules     text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+
+# Param dumps are read by param_guard/check_config on the Jetson.
+*.params    text eol=lf
+*.parm      text eol=lf
+
+# Docs get read on the boat over SSH as often as on a laptop.
+*.md        text eol=lf
+
+# Binary — never touch these.
+*.engine    binary
+*.tlog      binary
+*.raw       binary
+*.png       binary
+*.jpg       binary
+*.pt        binary
