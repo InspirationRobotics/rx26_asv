@@ -614,7 +614,7 @@ refuses to start in `--dry-run` when the port is already held.
 
 ```bash
 sudo systemctl stop crsd-battwatch
-tools/scripts/batt_watchdog.py --dry-run
+python3 tools/scripts/batt_watchdog.py --dry-run
 sudo systemctl start crsd-battwatch
 ```
 

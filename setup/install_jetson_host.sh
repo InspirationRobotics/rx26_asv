@@ -83,7 +83,7 @@ echo "   NOTE: crsd-battwatch powers the Jetson off below CRSD_BATT_SHUTDOWN_V"
 echo "         (default 13.2 V, a 4S LiPo at 3.30 V/cell, held for 30s)."
 echo "         Running a different pack? Set CRSD_BATT_SHUTDOWN_V in"
 echo "         /etc/default/crusader BEFORE starting it, and confirm the"
-echo "         reading first:  tools/scripts/batt_watchdog.py --dry-run"
+echo "         reading first:  python3 tools/scripts/batt_watchdog.py --dry-run"
 
 echo "== [3/5] container mounts (recordings must outlive the container) =="
 # crsd-container.service runs `docker start`, which CANNOT add mounts — they are

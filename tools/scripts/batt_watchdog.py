@@ -67,7 +67,7 @@ live service blinds the live one. It refuses to start rather than let you do
 that by accident.
 
     sudo systemctl stop crsd-battwatch
-    tools/scripts/batt_watchdog.py --dry-run
+    python3 tools/scripts/batt_watchdog.py --dry-run
     sudo systemctl start crsd-battwatch
 """
 import argparse
@@ -311,7 +311,7 @@ def main(argv=None):
             log("  the live watchdog for as long as this dry-run lasts.")
             log("  Stop it first, test, then start it again:")
             log("    sudo systemctl stop crsd-battwatch")
-            log("    tools/scripts/batt_watchdog.py --dry-run")
+            log("    python3 tools/scripts/batt_watchdog.py --dry-run")
             log("    sudo systemctl start crsd-battwatch")
             return 3
         log(f"WARNING: something else already holds UDP {port}. Datagrams will be")
