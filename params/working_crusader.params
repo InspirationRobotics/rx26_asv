@@ -12,8 +12,11 @@
 # Evidence: ../../QGC params/2026-09-03_crusader_ardurover463.params
 #
 # STILL STALE, deliberately left alone (all tunable, none protected):
-#   BATT_MONITOR here is 0, the boat is 3 with a calibrated BATT_VOLT_MULT of
-#   14.5964 and the analog backend params this file does not carry at all.
+#   BATT_MONITOR here is 0; the boat is 4 (voltage only) plus analog backend
+#   params this file does not carry at all. Its BATT_VOLT_MULT of 14.5964 is
+#   DISPUTED -- the bench meter reads lower than QGC, and the stock 10.1 (right
+#   for the GM V1.0 module fitted) reported 11.34 V for the same pack state.
+#   Do NOT promote that value here until a meter settles it.
 #   MOT_THST_ASYM/EXPO here are 1.0/0.0, the boat runs 1.5/0.65 mid-tuning.
 # Fold those in when someone deliberately signs off on the tuning, not before.
 #

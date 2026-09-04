@@ -579,8 +579,43 @@ and `BATT_AMP_PERVLT` did not exist at all, and `SYS_STATUS.voltage_battery`
 read 0 mV while the parameter list looked correctly configured.
 
 After the reboot the backend appeared (`BATT_VOLT_PIN=2`, `BATT_CURR_PIN=3`) and
-the divider was calibrated against a multimeter to **`BATT_VOLT_MULT=14.5964`**.
-It now reads 16.39 V on a charged pack, ≈4.10 V/cell.
+the divider was set to **`BATT_VOLT_MULT=14.5964`**, reporting 16.39 V.
+
+> ### That multiplier is DISPUTED — recalibrate before trusting any voltage
+>
+> Later the same day the bench meter read **lower** than QGC, consistently. The
+> evidence points at the stock value being right and 14.5964 being the error:
+> the fitted power module is a **GM V1.0**, an ordinary Pixhawk module with a
+> ~1/10.1 divider, and `10.1` (ArduPilot's default, and what the board carried
+> before) reported **11.34 V** for the same pack state that 14.5964 called
+> 16.39 V.
+>
+> **The procedure, in this order — the order is the safety-critical part:**
+>
+> ```bash
+> sudo systemctl stop crsd-battwatch     # BEFORE touching the multiplier
+> ```
+>
+> `BATT_VOLT_MULT` is a linear scale and `crsd-battwatch` reads the same
+> `SYS_STATUS` value QGC does. Lowering the multiplier lowers the reported
+> voltage below the 13.2 V shutdown threshold, and the watchdog powers the
+> Jetson off ~30 s later — mid-calibration.
+>
+> Then, with meter and QGC read at the SAME moment:
+>
+> ```
+> new_mult = 14.5964 × (meter ÷ QGC)
+> ```
+>
+> Then set `CRSD_BATT_SHUTDOWN_V` / `CRSD_BATT_WARN_V` for the real pack,
+> confirm with `python3 tools/scripts/batt_watchdog.py --dry-run`, and only then
+> `sudo systemctl start crsd-battwatch`.
+>
+> **Settle the cell count at the same time.** 11.3 V is a healthy 3S at
+> 3.78 V/cell and a nearly-dead 4S at 2.83 V/cell; the thresholds differ
+> completely. Count the balance leads: 4 wires = 3S, 5 = 4S. If it is 4S, the
+> inflated multiplier hid an over-discharged pack from the watchdog installed to
+> catch precisely that.
 
 > **Current is still not sensed.** `current_battery` reports −1 and
 > `BATT_CAPACITY` is a stock 3300 mAh that describes nothing aboard. Do not
