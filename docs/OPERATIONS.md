@@ -909,15 +909,22 @@ Honest list — these are known-wrong or known-missing, not merely untested:
   exactly (HEARTBEAT mean 1.000 s, max 1.028 s, 16 of 24 intervals over 1.0 s),
   and an error that fires constantly on a healthy vehicle teaches everyone to
   scroll past the one line that matters.
-- **The OAK-D LR is off the USB bus** (2026-09-03) and cannot be recovered in
-  software. `dmesg` records it enumerating on `usb 1-2.2` at t=1350 s and
-  disconnecting at t=1450 s, never returning; `lsusb` now shows no `03e7` device
-  and that port is empty. A bootloader reload needs the device to enumerate
-  first, so there is nothing to flash. This hub exposes no per-port power
-  control (`/sys/bus/usb/devices/1-2/port2/disable` does not exist) and
-  resetting the parent hub would drop the Pixhawk with it. **Reseat the cable
-  and check its power.** Worth noting it was on a USB 2.0 path (480 Mb/s) — the
-  SuperSpeed bus has two hubs and no devices, so the LR was never on USB 3.
+- ~~The OAK-D LR is off the USB bus.~~ **Closed 2026-09-03: it was the cable.**
+  The camera had dropped off the bus entirely — enumerating on `usb 1-2.2` and
+  disconnecting 100 s later, never returning, with no error chatter and no
+  `03e7` device left. Reseating the cable brought it back. Now confirmed
+  working: MX ID `194430101110C82F00` (matching the hardware table above), opens
+  at **SuperSpeed**, all three cameras present (`center`, `left`, `right`), and
+  `buoy_detector` sustains 30.0 fps with depth aligned and detections
+  publishing on `/crsd/oak/detections` at ~29.6 Hz.
+
+  The diagnostic worth keeping: **total silence in `dmesg` means no electrical
+  connection, not a software problem.** A connected-but-broken device still
+  enumerates and then fails. When the camera vanishes, check
+  `lsusb | grep 03e7` first — a bootloader reload cannot help a device that
+  never appears, and this hub exposes no per-port power control
+  (`/sys/bus/usb/devices/1-2/port2/disable` does not exist) so there is nothing
+  to power-cycle in software either.
 - **The `asv` container lacks the power-socket bind mount**, so the ground
   station's System tab reports "power helper unreachable" and cannot shut the
   Jetson down. Everything else on the page works. Fixing it requires recreating
