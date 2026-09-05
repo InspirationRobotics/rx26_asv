@@ -197,7 +197,12 @@ lidar_cluster_node:
     lidar_sign_z: -1.0                     # [RO] mounted upside down
     lidar_x: 0.32                          # [RO] m forward of geometry centre
     lidar_y: 0.05                          # [RO] m to PORT of centreline
-    lidar_z: 0.52                          # [RO] m above the hull-bottom datum
+    lidar_z: 0.52                          # [RO] m above the hull-bottom datum.
+                                           #      Draft is 0.24 m (measured
+                                           #      2026-09-05), so the sensor sits
+                                           #      0.28 m ABOVE THE WATERLINE —
+                                           #      low. See Resources.md for what
+                                           #      that costs in wave clearance.
     # -- self-return filters [DYN], applied in the SENSOR frame --
     r_min: 0.5                             # [DYN] clear sphere around the sensor;
                                            #       mount, cabling, deck beneath it
@@ -205,11 +210,29 @@ lidar_cluster_node:
                                            #       blocks the view aft of the beam,
                                            #       so returns behind it are the boat
     # -- levelled-frame gates [DYN] --
-    water_z: 0.10                          # [DYN] PLACEHOLDER. Waterline above the
-                                           #       hull datum; measure it floating
-                                           #       (G2 step 4) and update. Most of
-                                           #       this mount's FOV is water, so
-                                           #       this threshold does real work.
+    water_z: 0.24                          # [DYN] MEASURED 2026-09-05: the boat
+                                           #       floats 24 cm above the
+                                           #       hull-bottom datum. This is the
+                                           #       number G2 step 4 asks for.
+                                           #       Was 0.10, a placeholder.
+                                           #
+                                           #       The old value did almost
+                                           #       nothing: 0.10 + water_margin
+                                           #       0.15 = 0.25, i.e. the reject
+                                           #       line sat 1 cm above the real
+                                           #       waterline, so water returns
+                                           #       passed straight through into
+                                           #       clustering. It now sits 15 cm
+                                           #       clear. Most of this mount's FOV
+                                           #       is water, so the threshold does
+                                           #       real work.
+                                           #
+                                           #       Consequence to know: anything
+                                           #       less than water_margin above
+                                           #       the surface is discarded, so
+                                           #       very low debris is invisible by
+                                           #       design. Lower the margin, not
+                                           #       water_z, if that matters.
     water_margin: 0.15                     # [DYN] keep points this far above water
     z_ceiling: 4.0                         # [DYN] above this is sky/rain
     r_max: 40.0                            # [DYN] horizontal range ceiling [m]
@@ -281,7 +304,9 @@ target_tracker:
                                            #      (LiDAR is at 0.32 — 5 cm aft)
     cam_y: 0.0                             # [RO] m to PORT; camera is on the
                                            #      centreline, LiDAR is 5 cm port
-    cam_z: 0.65                            # [RO] m above the hull-bottom datum,
+    cam_z: 0.65                            # [RO] m above the hull-bottom datum
+                                           #      (= 0.41 m above the waterline;
+                                           #      draft 0.24 m, measured 2026-09-05),
                                            #      the SAME datum as lidar_z=0.52
     cam_yaw_deg: 0.0                       # [RO] mount yaw, + = aimed to PORT.
                                            #      ASSUMED, not bench-confirmed.

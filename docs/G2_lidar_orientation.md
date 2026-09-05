@@ -172,8 +172,19 @@ it is measured, that filter is guesswork.
 | `lidar_sign_y` | **−1.0** | starboard reads +y in raw frame | 2026-08-14 |
 | `lidar_sign_z` | **−1.0** | mounted upside down; ground below sensor | 2026-08-14 |
 | Hypothesis | **B** (180° roll about forward) | | 2026-08-14 |
-| `water_z` | ______ m | step 4 — **still outstanding** | |
+| `water_z` | **0.24 m** | step 4 — draft measured directly: the boat floats 24 cm above the hull-bottom datum | 2026-09-05 |
 | Range agrees with tape to | ______ m | step 3 — **still outstanding** | |
+
+> **`water_z` was 0.10 (a placeholder) until 2026-09-05.** At that value the
+> reject line `water_z + water_margin` = 0.25 m sat **1 cm above the real
+> waterline**, so water returns were passing almost unfiltered into clustering.
+> It is now 0.24 + 0.15 = 0.39 m, i.e. 15 cm of clearance.
+>
+> This was measured off the boat's draft rather than by eye against the return
+> band in `lidar_view.py`. The visual check in step 4 is still worth doing — it
+> validates the number against what the sensor actually reports, and a
+> disagreement would mean the extrinsic `lidar_z` is wrong rather than the
+> waterline. Do it the next time the boat is floating.
 
 - Performed by: ____________
 - `crusader_params.yaml` updated to match: **n/a until `lidar_cluster_node` exists**; the

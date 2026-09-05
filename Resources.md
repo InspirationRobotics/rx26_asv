@@ -67,6 +67,41 @@ from the switch alone. On 2026-09-03 both the LiDAR and the Bullet were
 unpowered and the interface still looked perfect. Ping the device, not the link.
 
 # Mounting Information
+
+DRAFT — measured 2026-09-05: the boat floats **24 cm above the hull-bottom
+plane**. Every mounting height below is quoted against that hull-bottom datum,
+so subtract 24 cm to get height above the waterline:
+
+    LiDAR   52 cm datum  ->  28 cm above waterline
+    Camera  65 cm datum  ->  41 cm above waterline
+
+This number is also `lidar_cluster_node.water_z` verbatim — it is exactly the
+measurement docs/G2 step 4 asks for, and the parameter sat at a 0.10 placeholder
+until now. At 0.10 the reject line (water_z + water_margin) sat 1 cm above the
+real waterline, so water returns passed straight into clustering.
+
+WHAT 28 cm COSTS. The LiDAR is low, and the number that suffers is wave
+clearance, not blind radius. Sight-line over a wave crest of height h_w at range
+R_w, to a target of height h_t at range R:
+
+    margin(H) = H*(1 - R_w/R) + h_t*(R_w/R) - h_w
+
+For a 30 cm wave at 8 m and a buoy top (0.5 m) at 25 m:
+
+    H = 0.28  ->  +0.05 m   marginal; any chop hides targets at range
+    H = 0.80  ->  +0.40 m   comfortable
+
+d(margin)/dH = 1 - R_w/R > 0, so clearance grows linearly with height. Blind
+radius is fine either way on this inverted mount: H/tan(52 deg - pitch) = 0.26 m
+even at 5 deg bow-up. Raising the LiDAR toward ~0.8 m is the single change that
+most improves detection in chop, and it also lifts more of the 360 deg clear of
+the hull. Confirm against real pitch data before committing — see the T-PITCH
+run in the mission plan.
+
+One consequence of being this low: a RoboBuoy's beacon box sits ~0.5 m above the
+water, i.e. 0.22 m ABOVE the sensor, and the inverted FOV reaches only +7 deg up.
+So inside ~1.8 m the beacon is out of the vertical FOV. The buoy body is still
+seen; the beacon is not.
 LiDar (mounted upside down at the BOW — a 180 deg roll about the forward axis,
 so both +y and +z flip relative to an upright sensor):
     Orientation (raw /livox/lidar, CONFIRMED ON THE BENCH 2026-08-14, docs/G2):
@@ -76,8 +111,8 @@ so both +y and +z flip relative to an upright sensor):
     Displacement from vehicle geometry center:
         x = 32 cm forward
         y = 5 cm to port
-    Height above ground (boat on the cart, measured to the hull-bottom plane):
-        z = 52 cm
+    Height (boat on the cart, measured to the hull-bottom plane):
+        z = 52 cm above hull bottom  =  28 cm above the waterline (draft 24 cm)
     Occlusion: the hull blocks most of the view aft of the beam, so returns
         behind it are the boat's own structure, not the world. Everything
         downstream works on the forward 180 deg only.
@@ -96,8 +131,8 @@ OAK D LR Camera:
     Displacement from vehicle geometry center:
         x = 37 cm forward
         y = 0
-    Height above ground (same hull-bottom datum as the LiDAR):
-        z = 65 cm
+    Height (same hull-bottom datum as the LiDAR):
+        z = 65 cm above hull bottom  =  41 cm above the waterline (draft 24 cm)
 
 
 
