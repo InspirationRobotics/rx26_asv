@@ -50,10 +50,41 @@ shared:
     # against.
     pose_timeout_s: 1.0
 
+    # THE flight modes that mean "we are driving, not the pilot". One list,
+    # because three separate places used to decide this independently and could
+    # drift apart:
+    #   telemetry_bridge     — whether to forward autonomous commands at all
+    #   pixhawk_led_status   — whether the mast light shows GREEN (5.3.1 makes
+    #                          the visual state a REQUIREMENT, not a nicety)
+    #   ocs_client           — whether RoboCommand is told STATE_AUTO
+    # "What the boat reports", "what the boat shows" and "what the boat obeys"
+    # have to be the same fact. Uppercase: mode_string_v10 returns "GUIDED".
+    #
+    # LOITER and DOCK are listed because they are autonomous, but note they get
+    # ArduPilot's simple avoidance only — BendyRuler/Dijkstra path planning runs
+    # in AUTO, GUIDED and RTL alone. Anything needing routing around an obstacle
+    # has to happen in GUIDED.
+    autonomous_modes: ["GUIDED", "AUTO", "LOITER", "RTL"]
+
 telemetry_bridge:
   ros__parameters:
     mav_endpoint: "udp:127.0.0.1:14551"   # [RO] MAVProxy rebroadcast, never serial
-    drop_channel: 7                        # [RO] autonomy-drop RC channel (1..18)
+    # The AUTONOMY INTERLOCK. = shared.autonomous_modes; the pilot leaving these
+    # modes on SC is the autonomy drop, and ArduPilot enforces the same decision
+    # independently by ignoring SET_POSITION_TARGET_* outside GUIDED/AUTO/RTL.
+    autonomous_modes: ["GUIDED", "AUTO", "LOITER", "RTL"]   # [RO]
+    mode_timeout_s: 1.0                    # [RO] s without HEARTBEAT before the
+                                           #      mode counts as UNKNOWN, which
+                                           #      is never autonomous. Fails closed.
+    # --- RC drop latch: governs the RC-OVERRIDE path only ---
+    # DO NOT set drop_channel back to 7. Channel 7 is the SB arm/e-stop switch
+    # (OPERATIONS.md §6: down ~994 e-stop, up ~1995 arm) and the latch trips at
+    # >= drop_threshold, so ARMING THE BOAT tripped it and blocked every
+    # override. Found 2026-09-05. Channel 9 (SE) is the intended switch and is
+    # not yet wired — an unwired channel reads 0, i.e. "not dropped", which is
+    # why the GUIDED path is gated on the MODE instead and does not depend on
+    # this latch at all.
+    drop_channel: 9                        # [RO] autonomy-drop RC channel (1..18)
     drop_threshold: 1700                   # [RO] us; crossing trips the latch
     drop_invert: false                     # [RO]
     rc_stale_timeout: 1.0                  # [RO] s without RC -> trip

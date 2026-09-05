@@ -75,10 +75,11 @@ import time
 
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
-from crusader_msgs.msg import Attitude, LatLonHead, FcuStatus, RcChannels
+from crusader_msgs.msg import (Attitude, FcuStatus, GuidedSetpoint, LatLonHead,
+                               RcChannels)
 
 from crusader_common import config as crsd_config
 from crusader_common import geo
@@ -102,6 +103,13 @@ PARAM_SPEC = {
     "stream_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
                              description="s without a MAVLink frame before "
                                          "that stream stops being republished"),
+    "autonomous_modes": dict(read_only=True,
+                             description="flight modes in which this bridge will "
+                                         "forward autonomous commands; anything "
+                                         "else is the pilot flying"),
+    "mode_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
+                           description="s without HEARTBEAT before the mode is "
+                                       "treated as unknown (= not autonomous)"),
 }
 
 RELEASE_FRAMES = 5          # all-zero override frames sent on trip
@@ -110,6 +118,12 @@ PUB_RATE_HZ = 20.0
 # Magic value ArduPilot requires in param2 of MAV_CMD_COMPONENT_ARM_DISARM to
 # force-disarm even while the vehicle is moving.
 FORCE_DISARM_MAGIC = 21196
+
+# ArduPilot's documented position-only SET_POSITION_TARGET_GLOBAL_INT mask —
+# the EXACT value the pre-integration gate_navigator used and field-exercised.
+# yaw on GuidedSetpoint is accepted but not commanded (left to ArduRover);
+# commanding yaw means clearing the yaw-ignore bit and is a separate change.
+POSITION_ONLY_TYPE_MASK = 0b110111111100  # 3580
 
 
 class TelemetryBridge(Node):
@@ -132,6 +146,28 @@ class TelemetryBridge(Node):
             invert=p["drop_invert"],
             stale_timeout=p["rc_stale_timeout"])
 
+        # THE AUTONOMY INTERLOCK IS THE FLIGHT MODE, not an RC channel.
+        #
+        # The pilot selects an autonomous mode on SC; anything else means they
+        # are flying it. That gives two independent things which must BOTH agree
+        # before the boat moves under our command:
+        #   * we choose to send        — this gate
+        #   * ArduPilot chooses to obey — SET_POSITION_TARGET_* is acted on only
+        #                                 in GUIDED/AUTO/RTL and ignored elsewhere
+        # so leaving the mode stops both at once, with no software in the path
+        # and nothing for us to get wrong. It also needs no spare RC channel,
+        # which matters because the drop_channel default (7) is the SB arm/e-stop
+        # switch — arming drives it to ~1995 and trips the RC latch.
+        #
+        # Uppercased once here: mode_string_v10 returns e.g. "GUIDED", and a YAML
+        # typo of "guided" silently meaning "never autonomous" is exactly the
+        # class of failure this repo keeps getting bitten by.
+        self.autonomous_modes = {str(m).upper() for m in p["autonomous_modes"]}
+        self._mode_timeout_s = p["mode_timeout_s"]
+        self.get_logger().info(
+            f"autonomy interlock: modes {sorted(self.autonomous_modes)} "
+            f"(mode staler than {self._mode_timeout_s:.1f}s counts as NOT autonomous)")
+
         latched_qos = QoSProfile(depth=1,
                                  reliability=ReliabilityPolicy.RELIABLE,
                                  durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -150,6 +186,15 @@ class TelemetryBridge(Node):
         # sanctioned disarm path from the ROS graph.
         self.create_subscription(Bool, "/crsd/force_disarm",
                                  self._force_disarm_cb, 10)
+        # Sanctioned GUIDED setpoint TX. Gated by the MODE interlock above, not
+        # by the RC drop latch — see _guided_cb.
+        self.create_subscription(GuidedSetpoint, "/crsd/guided_setpoint",
+                                 self._guided_cb, 10)
+        # Sanctioned mode-change TX. Fire-and-forget by design: there is no ack
+        # to wait on that is worth more than reading the mode back off
+        # /crsd/fcu_status, which is the autopilot's own answer rather than an
+        # acknowledgement of our request.
+        self.create_subscription(String, "/crsd/set_mode", self._set_mode_cb, 10)
         self.create_service(Trigger, "/crsd/autonomy_drop_reset", self._reset_cb)
 
         # Each stream is republished ONLY while it is fresh. Rebroadcasting the
@@ -297,6 +342,80 @@ class TelemetryBridge(Node):
             self.conn.target_system, self.conn.target_component, *ch8)
 
     # ---------- force-disarm TX (safety watchdog, latch-INDEPENDENT) ----------
+
+    # ---------- the mode interlock ----------
+
+    def _autonomy_allowed(self):
+        """(allowed, reason) — may we send an autonomous command right now?
+
+        Fails CLOSED on every uncertainty. An unknown mode is not autonomy: if
+        HEARTBEAT has gone stale we do not know what the pilot has selected, and
+        assuming the last known mode still holds is exactly the stale-value
+        failure StreamCache exists to prevent.
+        """
+        status = self._status.get(time.monotonic())
+        if status is None:
+            return False, f"mode unknown (no HEARTBEAT for >{self._mode_timeout_s:.1f}s)"
+        mode = str(status[0]).upper()
+        if mode not in self.autonomous_modes:
+            return False, f"mode {mode} is not autonomous"
+        return True, mode
+
+    # ---------- GUIDED setpoint TX (sanctioned, mode-gated) ----------
+
+    def _guided_cb(self, msg: GuidedSetpoint):
+        """Forward a position setpoint, but only while the pilot has given us the mode.
+
+        Deliberately NOT gated by the RC drop latch. The latch keys off
+        drop_channel, whose default (7) is the SB arm/e-stop switch — arming
+        drives it to ~1995 and trips the latch, which would block autonomy at
+        exactly the moment autonomy becomes possible. The mode is the honest
+        interlock and ArduPilot enforces the same decision independently.
+        """
+        allowed, reason = self._autonomy_allowed()
+        if not allowed:
+            # Throttled: a mission publishing at 1-20 Hz into a non-autonomous
+            # mode is the NORMAL state on the bench, not an error worth a line
+            # per message.
+            self.get_logger().warning(
+                f"guided setpoint DROPPED — {reason}", throttle_duration_sec=5.0)
+            return
+        time_boot_ms = int(time.monotonic() * 1000.0) & 0xFFFFFFFF
+        self.conn.mav.set_position_target_global_int_send(
+            time_boot_ms,
+            self.conn.target_system, self.conn.target_component,
+            self._mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+            POSITION_ONLY_TYPE_MASK,
+            int(msg.latitude * 1e7), int(msg.longitude * 1e7),
+            0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+    # ---------- mode-change TX (sanctioned) ----------
+
+    def _set_mode_cb(self, msg: String):
+        """Ask the autopilot to change flight mode.
+
+        NOT gated: this is how a mission ENTERS an autonomous mode, so gating it
+        on already being in one is circular. It is also how a mission can put the
+        boat somewhere safe. The pilot always outranks it — moving SC re-applies
+        the switch position and takes the mode back.
+
+        Refuses a mode this vehicle does not have rather than sending a number
+        the autopilot will silently ignore.
+        """
+        name = str(msg.data).strip().upper()
+        if not name:
+            return
+        try:
+            mapping = self.conn.mode_mapping() or {}
+        except Exception:                        # link not up yet
+            mapping = {}
+        if name not in mapping:
+            self.get_logger().error(
+                f"set_mode {name!r} refused — not a mode this vehicle offers "
+                f"({', '.join(sorted(mapping)) or 'mode map not yet known'})")
+            return
+        self.get_logger().info(f"set_mode -> {name}")
+        self.conn.set_mode(name)
 
     def _force_disarm_cb(self, msg: Bool):
         if not msg.data:

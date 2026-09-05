@@ -41,7 +41,16 @@ PARAM_SPEC = {
 }
 
 RED, YELLOW, GREEN = 1, 2, 3
-AUTO_MODES = ("AUTO", "GUIDED")
+# Which modes light the mast GREEN. Loaded from shared.autonomous_modes at
+# construction (see __init__) rather than hardcoded here, because the SAME list
+# decides three things that must never disagree: what telemetry_bridge will
+# obey, what this light shows, and what ocs_client reports to RoboCommand as
+# STATE_AUTO. handbook 5.3.1 makes the visual state a requirement, so a light
+# saying GREEN while the bridge refuses commands is a compliance problem, not
+# just a cosmetic one.
+#
+# This tuple is only the fallback for a config that predates the shared key.
+AUTO_MODES_FALLBACK = ("AUTO", "GUIDED")
 
 
 class PixhawkLEDStatusNode(Node):
@@ -52,6 +61,13 @@ class PixhawkLEDStatusNode(Node):
         self.estop_channel = p["estop_channel"]
         self.estop_threshold = p["estop_threshold"]
         self.autonomy_hold_s = p["autonomy_hold_s"]
+
+        # Same list telemetry_bridge gates commands on, so the light cannot say
+        # GREEN while the bridge is refusing to drive (or vice versa).
+        shared = crsd_config.shared_params()
+        self.auto_modes = {str(m).upper() for m in
+                           shared.get("autonomous_modes", AUTO_MODES_FALLBACK)}
+        self.get_logger().info(f"GREEN in modes: {sorted(self.auto_modes)}")
 
         self.led_pub = self.create_publisher(Int32, "/crsd/led_state", 10)
         self.create_subscription(FcuStatus, "/crsd/fcu_status", self._fcu_cb, 10)
@@ -85,7 +101,7 @@ class PixhawkLEDStatusNode(Node):
             return                       # no autopilot status yet
         if not self.armed or self.estop_active:
             state = RED
-        elif (self.mode in AUTO_MODES
+        elif (str(self.mode).upper() in self.auto_modes
               or (time.time() - self.autonomy_t) < self.autonomy_hold_s):
             state = GREEN
         else:
