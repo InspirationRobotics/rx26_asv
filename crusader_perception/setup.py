@@ -23,6 +23,7 @@ setup(
             "buoy_detector = crusader_perception.buoy_detector:main",
             "lidar_cluster_node = crusader_perception.lidar_cluster_node:main",
             "oak_detector = crusader_perception.oak_detector:main",
+            "proximity_bridge = crusader_perception.proximity_bridge_node:main",
         ],
     },
 )

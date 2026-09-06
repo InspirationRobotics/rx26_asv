@@ -49,6 +49,7 @@ CONFIG_DRIVEN_NODES = set("""
     buoy_detector
     oak_detector
     lidar_cluster_node
+    proximity_bridge
     target_tracker
     ground_station
 """.split())
@@ -65,6 +66,11 @@ TOPIC_PAIRS = (
      ("target_tracker", "detections_topic")),
     (("lidar_cluster_node", "clusters_topic"),
      ("target_tracker", "clusters_topic")),
+    # proximity_bridge is the second consumer of the LiDAR clusters. If it
+    # disagrees with the producer the boat drives with avoidance silently blind
+    # while every node reports healthy — see the paragraph above.
+    (("lidar_cluster_node", "clusters_topic"),
+     ("proximity_bridge", "clusters_topic")),
     (("target_tracker", "targets_topic"), ("ground_station", "targets_topic")),
 )
 

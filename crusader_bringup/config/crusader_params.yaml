@@ -277,6 +277,41 @@ lidar_cluster_node:
 # the angles stop being an assumption. It is [RO] for the LiDAR's reason —
 # retuning the mounting geometry live silently invalidates every target already
 # on the map.
+# proximity_bridge feeds the AUTOPILOT's avoidance, not ours. It is the missing
+# half of AVOID_ENABLE=3 / AVOID_MARGIN=2.0, which have been set with PRX1_TYPE=0
+# (no proximity source) — avoidance switched on with nothing feeding it.
+#
+# AUTOPILOT SIDE, which must be set or none of this does anything:
+#   PRX1_TYPE = 2      MAVLink proximity source. At 0 ArduPilot ignores
+#                      OBSTACLE_DISTANCE entirely and the viewer stays empty.
+#   AVOID_BEHAVE = 0   Slide, not Stop. Stop halts mid-course and scores nothing.
+#   OA_TYPE = 1        BendyRuler path planning — routes AROUND obstacles toward
+#                      the setpoint. Active in AUTO/GUIDED/RTL only.
+proximity_bridge:
+  ros__parameters:
+    clusters_topic: "crsd/lidar_clusters"  # [RO] = lidar_cluster_node.output
+    output_topic: "crsd/obstacle_distance" # [RO] telemetry_bridge puts it on the wire
+    send_rate_hz: 5.0                      # [RO] clusters arrive at 10 Hz; 5 is
+                                           #      plenty for avoidance and halves
+                                           #      the load on the USB link, which
+                                           #      is the same link a param
+                                           #      download is known to saturate
+    fov_deg: 180.0                         # [RO] = lidar_cluster_node.fov_deg.
+                                           #      The hull blocks aft; those
+                                           #      sectors go out as NO READING,
+                                           #      never as a near return
+    increment_deg: 5.0                     # [RO] 72 sectors x 5 deg = 360.
+                                           #      ArduPilot consolidates to 8
+                                           #      sectors of 45 deg anyway
+    min_range_m: 0.5                       # [RO] = lidar_cluster_node.r_min
+    max_range_m: 40.0                       # [RO] = lidar_cluster_node.r_max
+    min_half_deg: 1.0                      # [RO] floor on painted width so a
+                                           #      distant buoy still fills a sector
+    cluster_timeout_s: 1.0                 # [RO] stale clusters -> emit NOTHING.
+                                           #      Repeating the last map claims
+                                           #      the world still looks like that
+    health_period_s: 5.0                   # [RO]
+
 target_tracker:
   ros__parameters:
     detections_topic: "crsd/oak/detections"     # [RO] = buoy_detector.detections_topic

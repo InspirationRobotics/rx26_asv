@@ -79,7 +79,7 @@ from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
 from crusader_msgs.msg import (Attitude, FcuStatus, GuidedSetpoint, LatLonHead,
-                               RcChannels)
+                               ObstacleDistance, RcChannels)
 
 from crusader_common import config as crsd_config
 from crusader_common import geo
@@ -195,6 +195,13 @@ class TelemetryBridge(Node):
         # /crsd/fcu_status, which is the autopilot's own answer rather than an
         # acknowledgement of our request.
         self.create_subscription(String, "/crsd/set_mode", self._set_mode_cb, 10)
+        # Proximity TX. Deliberately NOT mode-gated: obstacle data is an input to
+        # the autopilot's own avoidance, not a command from us. The pilot flying
+        # in MANUAL benefits from ArduPilot knowing where things are just as much
+        # as an autonomous run does, and withholding it in MANUAL would make the
+        # boat's behaviour change with the mode switch for no good reason.
+        self.create_subscription(ObstacleDistance, "crsd/obstacle_distance",
+                                 self._obstacle_cb, 10)
         self.create_service(Trigger, "/crsd/autonomy_drop_reset", self._reset_cb)
 
         # Each stream is republished ONLY while it is fresh. Rebroadcasting the
@@ -388,6 +395,33 @@ class TelemetryBridge(Node):
             POSITION_ONLY_TYPE_MASK,
             int(msg.latitude * 1e7), int(msg.longitude * 1e7),
             0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+    # ---------- proximity TX (sanctioned, ungated) ----------
+
+    def _obstacle_cb(self, msg: ObstacleDistance):
+        """Forward a sector map as MAVLink OBSTACLE_DISTANCE.
+
+        Requires PRX1_TYPE=2 (MAVLink) on the autopilot or ArduPilot ignores it
+        entirely and the proximity viewer stays empty — which looks exactly like
+        this node being broken.
+
+        Both `increment` (uint8 degrees) and `increment_f` (float) are set.
+        ArduPilot has historically read the integer field when the float was
+        intended, rendering obstacles at wrong bearings; setting both makes the
+        message correct under either behaviour.
+        """
+        time_usec = int(time.time() * 1e6)
+        inc = float(msg.increment_deg)
+        self.conn.mav.obstacle_distance_send(
+            time_usec,
+            self._mavutil.mavlink.MAV_DISTANCE_SENSOR_LASER,
+            list(msg.distances),
+            int(round(inc)) & 0xFF,          # legacy integer field
+            int(msg.min_distance_cm),
+            int(msg.max_distance_cm),
+            inc,                             # increment_f, the one to trust
+            float(msg.angle_offset_deg),
+            self._mavutil.mavlink.MAV_FRAME_BODY_FRD)
 
     # ---------- mode-change TX (sanctioned) ----------
 

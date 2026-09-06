@@ -13,6 +13,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/RcChannels.msg"
   "msg/FcuStatus.msg"
   "msg/GuidedSetpoint.msg"
+  "msg/ObstacleDistance.msg"
   "msg/Detection3D.msg"
   "msg/Detection3DArray.msg"
   "msg/Cluster3D.msg"
