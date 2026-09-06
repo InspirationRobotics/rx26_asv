@@ -27,8 +27,11 @@
   <!-- Missions + the behaviour tree. Not in core.launch.py (nothing here
        has run on the water), but exec_depended for the same reason as the
        others: a package missing from this list is silently NOT BUILT by
-       rebuild.sh's `colcon build --packages-up-to crusader_bringup`, and
-       the failure surfaces as `ros2 run` not finding the node. -->
+       rebuild.sh's colcon build (packages-up-to crusader_bringup), and
+       the failure surfaces as `ros2 run` not finding the node.
+       NOTE: no double hyphen anywhere in this comment. XML forbids it inside
+       a comment, and writing the colcon flag out in full here is what broke
+       this file's parse once already. -->
   <exec_depend>crusader_mission</exec_depend>
   <exec_depend>ros2launch</exec_depend>
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""check_config — static guards on the two config files that can ground the boat.
+"""check_config — static guards on the files that can ground the boat.
 
 Exit 0 = both files are well-formed and internally consistent. Nonzero = fix
 before building. Needs nothing but the standard library plus pyyaml; no ROS, no
@@ -15,7 +15,16 @@ What it guards, and why each one is here:
    boat on 2026-07-29 and grounded the whole stack, LEDs included — including the
    LEDs, which meant the boat was dark rather than obviously broken.
 
-2. params/working_crusader.params must parse into real parameter names. The
+2. Every package.xml must be well-formed XML, and every package must be in
+   crusader_bringup's exec_depends. Both are build-time failures that only
+   happen ON THE JETSON, after a copy: rebuild.sh dies with a CMake wall of
+   text (a stray "--" inside an XML comment is illegal and did exactly this on
+   2026-09-05), or worse, the package is silently NOT BUILT by
+   "colcon build (packages-up-to crusader_bringup)" and the failure surfaces
+   much later as `ros2 run` not finding a node. Both are catchable on a laptop
+   in milliseconds.
+
+3. params/working_crusader.params must parse into real parameter names. The
    parameter dumps the team exports differ in WHERE the name sits (Mission
    Planner puts it first, QGroundControl puts it third), and a positional parser
    reads a QGC dump as ~900 copies of a parameter called "1". param_guard would
@@ -275,9 +284,78 @@ def check_param_baseline():
         ok("baseline holds the documented frame/heading/arming config")
 
 
+# --------------------------------------------------------------- package.xml
+
+def check_packages():
+    import xml.etree.ElementTree as ET
+
+    manifests = sorted(REPO.glob("*/package.xml"))
+    if not manifests:
+        fail("package manifests found", f"no */package.xml under {REPO}")
+        return
+
+    names = {}
+    for m in manifests:
+        try:
+            root = ET.parse(m).getroot()
+        except ET.ParseError as e:
+            fail(f"{m.parent.name}/package.xml parses",
+                 f"{e} — colcon dies on this with a CMake wall of text. A "
+                 'double hyphen inside an XML comment is the usual cause; XML '
+                 "forbids it, so a colcon flag written out in a comment breaks "
+                 "the manifest that mentions it")
+            continue
+        node = root.find("name")
+        if node is None or not (node.text or "").strip():
+            fail(f"{m.parent.name}/package.xml has a name", "no <name> element")
+            continue
+        pkg = node.text.strip()
+        if pkg != m.parent.name:
+            fail(f"{m.parent.name}/package.xml name matches its directory",
+                 f"declares {pkg!r}")
+        names[pkg] = root
+    if not any(f[0].endswith("parses") for f in failures):
+        ok("every package.xml is well-formed", f"{len(names)} manifests")
+
+    if "crusader_bringup" not in names:
+        fail("crusader_bringup manifest", "not found or did not parse")
+        return
+
+    # REACHABILITY, not direct declaration. `colcon build (packages-up-to
+    # crusader_bringup)` builds the transitive closure, so crusader_common and
+    # crusader_msgs are built via the packages that depend on them and do NOT
+    # need to be listed in bringup. Checking for direct listing instead would
+    # report those two as broken forever, and a check that cries wolf is a check
+    # people stop reading.
+    DEP_TAGS = ("depend", "exec_depend", "build_depend", "buildtool_depend",
+                "build_export_depend", "test_depend")
+    deps = {pkg: {e.text.strip() for e in root.iter()
+                  if e.tag in DEP_TAGS and e.text}
+            for pkg, root in names.items()}
+
+    reachable, stack = set(), ["crusader_bringup"]
+    while stack:
+        pkg = stack.pop()
+        if pkg in reachable or pkg not in deps:
+            continue
+        reachable.add(pkg)
+        stack.extend(deps[pkg])
+
+    orphans = sorted(set(names) - reachable)
+    if orphans:
+        fail("every package is reachable from crusader_bringup",
+             f"{orphans} — nothing depends on it, so it is silently NOT BUILT "
+             "and the failure surfaces later as `ros2 run` not finding a node. "
+             "Add it to crusader_bringup's exec_depends")
+    else:
+        ok("every package is reachable from crusader_bringup",
+           f"{len(reachable)} packages in the closure")
+
+
 def main():
     print(f"repo: {REPO}")
     check_params_yaml()
+    check_packages()
     check_param_baseline()
     print()
     if failures:
