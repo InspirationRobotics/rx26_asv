@@ -26,6 +26,19 @@
 *.yaml      text eol=lf
 *.yml       text eol=lf
 
+# Build and interface files. rosidl parses .msg/.action LINE BY LINE, and colcon
+# reads package.xml/CMakeLists.txt on the Jetson — none of them is a shell
+# script, but all of them are files a Windows checkout hands to a Linux parser,
+# which is the same class of bug. Pinned so the whole tree behaves one way
+# rather than most of it.
+*.msg       text eol=lf
+*.action    text eol=lf
+*.srv       text eol=lf
+*.xml       text eol=lf
+*.cfg       text eol=lf
+*.launch    text eol=lf
+CMakeLists.txt  text eol=lf
+
 # Param dumps are read by param_guard/check_config on the Jetson.
 *.params    text eol=lf
 *.parm      text eol=lf
