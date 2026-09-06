@@ -4,8 +4,9 @@
   <name>crusader_msgs</name>
   <version>0.5.0</version>
   <description>
-    Crusader message definitions: the typed contracts between packages.
-    Depends on nothing but std_msgs, so any container can build it cheaply.
+    Crusader message and action definitions: the typed contracts between
+    packages. One action = one mission. Depends on nothing but std_msgs and
+    action_msgs, so any container can build it cheaply.
   </description>
   <maintainer email="brandont3927@gmail.com">Team Inspiration</maintainer>
   <license>MIT</license>
@@ -15,6 +16,9 @@
   <buildtool_depend>rosidl_default_generators</buildtool_depend>
 
   <depend>std_msgs</depend>
+  <!-- Actions carry a goal id and a status array from action_msgs; without
+       this the .action files fail to generate. -->
+  <depend>action_msgs</depend>
 
   <exec_depend>rosidl_default_runtime</exec_depend>
   <member_of_group>rosidl_interface_packages</member_of_group>

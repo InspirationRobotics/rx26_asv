@@ -24,6 +24,12 @@
   <exec_depend>crusader_perception</exec_depend>
   <exec_depend>crusader_world_model</exec_depend>
   <exec_depend>crusader_groundstation</exec_depend>
+  <!-- Missions + the behaviour tree. Not in core.launch.py (nothing here
+       has run on the water), but exec_depended for the same reason as the
+       others: a package missing from this list is silently NOT BUILT by
+       rebuild.sh's `colcon build --packages-up-to crusader_bringup`, and
+       the failure surfaces as `ros2 run` not finding the node. -->
+  <exec_depend>crusader_mission</exec_depend>
   <exec_depend>ros2launch</exec_depend>
 
   <export>

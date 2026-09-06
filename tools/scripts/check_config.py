@@ -52,6 +52,7 @@ CONFIG_DRIVEN_NODES = set("""
     proximity_bridge
     target_tracker
     ground_station
+    safe_passage_server
 """.split())
 
 # Topic names that two sections must agree on, as (producer, param) ->

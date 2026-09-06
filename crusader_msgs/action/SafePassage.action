@@ -1,0 +1,67 @@
+# Task 1 Safe Passage, as ONE ROS action.
+#
+# The mission boundary is the action, deliberately:
+#   * it is standalone-testable with `ros2 action send_goal --feedback`, with no
+#     behaviour tree, no launch file and no other mission running;
+#   * it becomes a behaviour-tree leaf later with no change to this file;
+#   * cancel and timeout are part of the protocol rather than something each
+#     mission reinvents.
+#
+# THE GOAL CARRIES INTENT ONLY. World state (buoys, obstacles, our own pose)
+# arrives on topics. A goal that carried a buoy list would be stale the instant
+# it was sent, and would make the mission untestable against live perception.
+#
+#   ros2 action send_goal /crsd/safe_passage crusader_msgs/action/SafePassage \
+#     "{tier: 0, approach_latitude: 32.9238, approach_longitude: -117.0385}" --feedback
+
+# ---------------------------------------------------------------- GOAL
+uint8 TIER_CORE=0
+uint8 TIER_ADVANCED=1
+uint8 TIER_DISRUPTIVE=2
+uint8 tier
+
+# Team-provided approach point — where to go to START looking, not a place we
+# must touch. APPROACH ends on arrival OR on the entry gate resolving, whichever
+# comes first. Both 0.0 means "already on station, skip the drive".
+float64 approach_latitude
+float64 approach_longitude
+
+float32 orbit_radius_m        # 0 = use the node's configured default
+float32 timeout_s             # 0 = use the node's configured default.
+                              # There is NO "run forever" value: every goal
+                              # terminates, so a stuck mission can never leave
+                              # the boat sitting there with the tree blocked.
+---
+# ---------------------------------------------------------------- RESULT
+uint8 OUTCOME_SUCCESS=0
+uint8 OUTCOME_TIMEOUT=1
+uint8 OUTCOME_NO_ENTRY=2       # ran out of time before ENTRY/EXIT resolved
+uint8 OUTCOME_CANCELLED=3
+uint8 OUTCOME_NOT_AUTONOMOUS=4 # the pilot took the mode away; we do not fight
+uint8 OUTCOME_FAULT=5          # a precondition never arrived (no pose, no mode)
+uint8 outcome
+string detail                  # one human sentence; goes straight into a log
+
+uint32 buoys_classified
+# Post-hoc honesty check: which side of each red/green we ACTUALLY passed,
+# computed from the logged track at completion rather than from the plan we
+# intended to follow. The plan says what we meant to do; this says what we did.
+uint32 buoys_passed_correctly
+
+float64 entry_latitude
+float64 entry_longitude
+float64 exit_latitude
+float64 exit_longitude
+float64 elapsed_s
+---
+# ---------------------------------------------------------------- FEEDBACK
+string phase                   # IDLE APPROACH OBSERVE ORBIT_ENTRY TRANSIT
+                               # ORBIT_EXIT COMPLETE
+float32 progress               # 0..1, monotonic, phase-weighted
+uint32 buoys_known
+uint32 buoys_resolved
+uint32 plan_version            # bumps when the passage plan is recomputed, so a
+                               # watcher can tell "replanned" from "still going"
+string warning                 # "" when nothing is wrong. Non-empty is NOT a
+                               # failure — it is the mission saying what it is
+                               # unhappy about while it carries on.
