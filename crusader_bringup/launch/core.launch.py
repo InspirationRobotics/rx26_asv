@@ -10,18 +10,42 @@ Starts (all reading config/crusader_params.yaml from THIS package's share dir):
   * rc_watchdog           — crusader_behavior; force-disarm on RC-transmitter link
                             loss; consumes telemetry_bridge topics and routes the
                             disarm back through the bridge (/crsd/force_disarm)
+  * lidar_cluster_node    — crusader_perception; MID360 cloud -> crsd/lidar_clusters
+  * proximity_bridge      — crusader_perception; clusters -> OBSTACLE_DISTANCE,
+                            which is what feeds the autopilot's own avoidance
+
+THE LIDAR NOW GATES ARMING, and that is worth knowing before it surprises anyone
+on a dock. With PRX1_TYPE=2 the autopilot expects a MAVLink proximity source and
+refuses to arm without one:
+
+    PreArm: PRX1: No Data
+
+Those last two nodes are the source. They are in this launch precisely so that
+message does not appear on a healthy boat — it was exactly what happened on
+2026-09-05, when a power cycle left them behind because they were hand-started.
+The flip side is the coupling: if the MID360 is unpowered, or crsd-livox is down,
+or clusters stop, the boat cannot arm. That is the correct behaviour for a
+vehicle configured to rely on avoidance, and the escape hatch is deliberate and
+explicit rather than automatic:
+
+    PRX1_TYPE = 0      # no proximity source; arming stops depending on it
+
+Check the LiDAR before reaching for it — `ros2 topic hz /livox/lidar` should read
+10 Hz, and `ros2 topic echo /crsd/proximity_health --once` says what the bridge
+thinks it is seeing.
 
 World-model nodes are NOT here: that package is scaffolded and empty (see its
 README). Add a node to this launch once it has run on the boat, not when it
 compiles.
 
-`crusader_perception`'s nodes (`oakd_publisher`, `buoy_detector`) run in `asv`
-like everything else here, but are still NOT in this launch, for a different
-reason: they contend for the same OAK-D and the device admits exactly one
-client. Which of the two runs is an operator choice per session — frames for a
-human, or detections for the stack — so it cannot be a constant in a launch
-file. Start the one you want by hand. bringup still exec_depends on the package
-so it is built and checked with the rest.
+`crusader_perception`'s CAMERA nodes (`oakd_publisher`, `buoy_detector`,
+`oak_detector`) run in `asv` like everything else here, but are still NOT in this
+launch: they contend for the same OAK-D and the device admits exactly one client.
+Which one runs is an operator choice per session — frames for a human, or
+detections for the stack — so it cannot be a constant in a launch file. Start the
+one you want by hand. Its LiDAR nodes are different: nothing else competes for
+the MID360, so they can be constants, and the paragraph above is why they must
+be.
 
 MAVProxy itself (the sole Pixhawk owner) is started outside ROS by systemd — see
 scripts/start_mavproxy.sh — before this launch.
@@ -53,5 +77,13 @@ def generate_launch_description():
         Node(package="crusader_behavior", executable="rc_watchdog",
              output="screen", parameters=[params]),
         Node(package="crusader_groundstation", executable="ground_station",
+             output="screen", parameters=[params]),
+        # The proximity chain, in dependency order. Both take the params file
+        # for the reason at the top of generate_launch_description: a node's
+        # declared default and its launched value disagreeing is invisible until
+        # behaviour differs.
+        Node(package="crusader_perception", executable="lidar_cluster_node",
+             output="screen", parameters=[params]),
+        Node(package="crusader_perception", executable="proximity_bridge",
              output="screen", parameters=[params]),
     ])
