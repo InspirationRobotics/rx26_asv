@@ -318,7 +318,9 @@ class SafePassageServer(Node):
 
 def main(args=None):
     # MultiThreadedExecutor is not optional here — see the module docstring.
-    run_node(SafePassageServer, args, executor=MultiThreadedExecutor())
+    # Passed as a FACTORY: an Executor built before rclpy.init() dies with a
+    # bare AttributeError that names neither the executor nor init.
+    run_node(SafePassageServer, args, executor_factory=MultiThreadedExecutor)
 
 
 if __name__ == "__main__":
