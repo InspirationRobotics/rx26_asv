@@ -352,10 +352,44 @@ def check_packages():
            f"{len(reachable)} packages in the closure")
 
 
+# ------------------------------------------------------- msg/action hygiene
+
+def check_interfaces():
+    """Things rosidl chokes on, in messages that otherwise look fine.
+
+    rosidl feeds every .msg/.action through an empy IDL template. A trailing
+    backslash in a COMMENT makes that template fail to decode and the build dies
+    with
+
+        UnicodeDecodeError processing template 'struct.idl.em'
+
+    which names neither the file nor the line. Cost a full build round trip on
+    2026-09-05, on a shell command wrapped across two lines the way anyone would
+    write it.
+    """
+    files = [f for pattern in ("*/msg/*.msg", "*/action/*.action", "*/srv/*.srv")
+             for f in sorted(REPO.glob(pattern))]
+    if not files:
+        fail("interface files found", "no .msg/.action/.srv under the repo")
+        return
+    bad = []
+    for f in files:
+        for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            if line.endswith("\\"):
+                bad.append(f"{f.parent.parent.name}/{f.parent.name}/{f.name}:{n}")
+    if bad:
+        fail("no trailing backslash in an interface file",
+             f"{bad} — rosidl's IDL template fails to decode these, and the "
+             "build error names neither the file nor the line")
+    else:
+        ok("no trailing backslash in an interface file", f"{len(files)} files")
+
+
 def main():
     print(f"repo: {REPO}")
     check_params_yaml()
     check_packages()
+    check_interfaces()
     check_param_baseline()
     print()
     if failures:

@@ -11,8 +11,13 @@
 # arrives on topics. A goal that carried a buoy list would be stale the instant
 # it was sent, and would make the mission untestable against live perception.
 #
-#   ros2 action send_goal /crsd/safe_passage crusader_msgs/action/SafePassage \
-#     "{tier: 0, approach_latitude: 32.9238, approach_longitude: -117.0385}" --feedback
+#   NO BACKSLASH LINE CONTINUATIONS IN THIS FILE. rosidl feeds every comment
+#   through an empy IDL template, and a trailing backslash makes that template
+#   fail to decode: the build dies with "UnicodeDecodeError processing template
+#   struct.idl.em", naming neither this file nor the line. Write long commands
+#   on one line.
+#
+#   ros2 action send_goal /crsd/safe_passage crusader_msgs/action/SafePassage "{tier: 0, approach_latitude: 32.9238, approach_longitude: -117.0385}" --feedback
 
 # ---------------------------------------------------------------- GOAL
 uint8 TIER_CORE=0
