@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Task 1 Safe Passage.
+
+  TWO BANDS, and the split is the design.
+
+  The outer ReactiveSequence is the GUARD BAND: every child runs on every tick,
+  10 Hz, for the whole mission. Perception updates, the report goes out, and
+  autonomy is re-checked. Because IsAutonomous sits above everything, the pilot
+  moving SC out of GUIDED halts whatever is running below within one tick. That
+  is one line of XML replacing a check that would otherwise live in every leaf.
+
+  The inner Sequence is the MISSION BAND: it has memory, so it walks forward
+  once. SetTask fires at tick 1 and is never touched again.
+
+  WHAT ENDS THE TRANSIT IS ARRIVING AT THE EXIT, not running out of buoys.
+  NearExit succeeds -> Inverter turns that into FAILURE -> the ReactiveSequence
+  halts the running leg and fails -> KeepRunningUntilFailure converts that into
+  SUCCESS. Ending on an empty candidate list instead would make one missed
+  detection stop the boat mid-field, and would make the task's actual objective
+  implicit. NextWaypoint's own FAILURE is kept only as a secondary way out.
+
+  NearExit radius MUST stay larger than CircleBuoy radius (8 > 6), or transit
+  would stop inside the orbit and the circle would start from the wrong place.
+
+  The mission timeout and cancel are NOT here. They live in bt_runner_node, so a
+  tree that somehow never terminates still cannot strand the boat.
+
+  Obstacle avoidance is deliberately absent: it runs in the autopilot
+  (PRX1_TYPE=2, AVOID_ENABLE) and keeps working whether or not this is healthy.
+-->
+<root BTCPP_format="4" main_tree_to_execute="SafePassage">
+  <BehaviorTree ID="SafePassage">
+    <ReactiveSequence name="guard_band">
+
+      <IsAutonomous/>
+      <ResolveBuoyStates/>
+      <PublishSafePassageReport min_period_s="1.0"/>
+
+      <Sequence name="passage">
+
+        <!-- The course activates its beacons only once we report the attempt. -->
+        <SetTask token="TASK_SAFE_PASSAGE"/>
+
+        <!-- Drive the team waypoint, but bail the moment the entry resolves:
+             the waypoint is a hint about where to look, not a place to touch. -->
+        <ReactiveFallback name="approach">
+          <EntryResolved/>
+          <NavigateTo target="approach" tolerance="4.0"/>
+        </ReactiveFallback>
+
+        <!-- Hold station until it resolves, or give up. HoldStation never
+             succeeds on its own, so the Timeout is what ends this. -->
+        <ReactiveFallback name="observe">
+          <EntryResolved/>
+          <Timeout msec="30000">
+            <HoldStation/>
+          </Timeout>
+        </ReactiveFallback>
+
+        <!-- Core Tier: a FULL circle of the ENTRY buoy, CLOCKWISE. -->
+        <CircleBuoy anchor="entry" radius="6.0" points="5" direction="cw"/>
+
+        <!-- The gate count is unknown, so it is not in this file. -->
+        <KeepRunningUntilFailure name="transit">
+          <ReactiveSequence>
+            <Inverter>
+              <NearExit radius="8.0"/>
+            </Inverter>
+            <Sequence>
+              <NextWaypoint offset="4.0"/>
+              <NavigateTo target="waypoint" tolerance="2.5"/>
+            </Sequence>
+          </ReactiveSequence>
+        </KeepRunningUntilFailure>
+
+        <!-- Only earns its keep if transit ended without a resolved exit. -->
+        <ReactiveFallback name="find_exit">
+          <ExitResolved/>
+          <Timeout msec="20000">
+            <HoldStation/>
+          </Timeout>
+        </ReactiveFallback>
+
+        <!-- Core Tier: a FULL circle of the EXIT buoy, COUNTERCLOCKWISE.
+             This is what completes the task. -->
+        <CircleBuoy anchor="exit" radius="6.0" points="5" direction="ccw"/>
+
+      </Sequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

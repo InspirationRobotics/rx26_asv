@@ -31,6 +31,9 @@
 # script, but all of them are files a Windows checkout hands to a Linux parser,
 # which is the same class of bug. Pinned so the whole tree behaves one way
 # rather than most of it.
+*.cpp       text eol=lf
+*.hpp       text eol=lf
+*.h         text eol=lf
 *.msg       text eol=lf
 *.action    text eol=lf
 *.srv       text eol=lf

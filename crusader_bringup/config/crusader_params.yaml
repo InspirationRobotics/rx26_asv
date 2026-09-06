@@ -767,7 +767,23 @@ oak_detector:
 # operator cancels, clock expires).
 safe_passage_server:
   ros__parameters:
-    action_name: "/crsd/safe_passage"       # [RO] must equal the tree leaf's
+    action_name: "/crsd/safe_passage_dwell"  # [RO] SUPERSEDED by bt_runner_node,
+                                            #      which owns "/crsd/safe_passage"
+                                            #      and ticks the real behaviour
+                                            #      tree. This Python server walks
+                                            #      a fixed list of DWELL phases
+                                            #      and cannot move the boat. It is
+                                            #      kept, on its own action name,
+                                            #      because it is still the
+                                            #      cheapest way to exercise the
+                                            #      action WORKFLOW — accept,
+                                            #      feedback, cancel, result — with
+                                            #      no perception and no tree at
+                                            #      all. Two servers on ONE action
+                                            #      name is the collision this
+                                            #      avoids: the second to start
+                                            #      simply never gets a goal.
+                                            #      Was the tree leaf's
                                             #      action= in mission_spec.py.
                                             #      A mismatch is a leaf waiting
                                             #      forever for a server that
@@ -834,3 +850,58 @@ safe_passage_server:
                                             #      DEADLINE. Only OBSERVE's
                                             #      deadline is fatal (NO_ENTRY)
                                             #      — see safe_passage_core.
+
+# ---- Missions: bt_runner_node — one coarse action outside, a tree inside ----
+# Crusader's bt_navigator. It accepts a SafePassage goal, loads the Task 1
+# behaviour tree and ticks it; the tree's leaves are primitives that publish a
+# GuidedSetpoint and poll /crsd/pose for arrival. Render the tree with
+# `python3 tools/scripts/print_tree.py`; the runtime XML lives in
+# crusader_bt/behavior_trees/.
+#
+# NOT in core.launch.py. Nothing in this package has run on the water.
+bt_runner_node:
+  ros__parameters:
+    tree_file: "/root/robotx_ws/install/crusader_bt/share/crusader_bt/behavior_trees/task1_safe_passage.xml"
+                                            # [RO] absolute, INSIDE the container.
+                                            #      There is deliberately no
+                                            #      default in code: a runner that
+                                            #      silently ticks the wrong tree
+                                            #      is worse than one that refuses
+                                            #      to start.
+    action_name: "/crsd/safe_passage"       # [RO] the coarse mission action
+    tick_hz: 10.0                           # [RO] tree tick rate. ALSO the cancel
+                                            #      latency and the rate the
+                                            #      reactive guard band re-checks
+                                            #      the flight mode at.
+    default_timeout_s: 600.0                # [RO] used when the goal sends 0. The
+                                            #      timeout lives in the RUNNER,
+                                            #      not the XML, so a tree that
+                                            #      somehow never terminates still
+                                            #      cannot strand the boat.
+    mode_grace_s: 3.0                       # [RO] how long a missing HEARTBEAT is
+                                            #      tolerated at goal start. At
+                                            #      5 Hz this is 15 heartbeats.
+    stream_timeout_s: 1.0                   # [RO] = shared.pose_timeout_s. Older
+                                            #      than this and the tree is told
+                                            #      the pose is stale rather than
+                                            #      acting on it.
+    publish_setpoints: false                # [RO] FALSE = this node CANNOT move
+                                            #      the boat. Legs still poll for
+                                            #      arrival, so a human can drive
+                                            #      the mission and the tree will
+                                            #      follow it — that is the
+                                            #      read-only water test, and it
+                                            #      is worth more than a version
+                                            #      that faked arrival. Turning it
+                                            #      true is a G1 gate.
+    task_token: "TASK_SAFE_PASSAGE"         # [RO] = safe_passage_server.task_token;
+                                            #      an RxTask name, gated by
+                                            #      check_config against
+                                            #      ocs_link.RX_TASKS.
+    autonomous_modes: ["GUIDED", "AUTO", "LOITER", "RTL"]
+                                            # [RO] = shared.autonomous_modes. The
+                                            #      IsAutonomous leaf at the top of
+                                            #      the guard band reads this, so
+                                            #      what the boat obeys, shows on
+                                            #      the mast and reports to
+                                            #      RoboCommand stay one fact.

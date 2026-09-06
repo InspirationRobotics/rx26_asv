@@ -62,6 +62,7 @@ CONFIG_DRIVEN_NODES = set("""
     target_tracker
     ground_station
     safe_passage_server
+    bt_runner_node
 """.split())
 
 # Topic names that two sections must agree on, as (producer, param) ->
@@ -234,14 +235,19 @@ def check_params_yaml():
             "crusader_groundstation" / "ocs_link.py")
         link = importlib.util.module_from_spec(spec2)
         spec2.loader.exec_module(link)
-        token = cfg["safe_passage_server"]["ros__parameters"]["task_token"]
-        if token not in link.RX_TASKS:
+        bad = {}
+        for who in ("safe_passage_server", "bt_runner_node"):
+            token = cfg[who]["ros__parameters"]["task_token"]
+            if token not in link.RX_TASKS:
+                bad[who] = token
+        if bad:
             fail("task_token is a real RxTask",
-                 f"{token!r} is not in {sorted(link.RX_TASKS)} — protobuf's "
-                 "ParseDict rejects the whole frame, so every heartbeat sent "
-                 "during the mission is lost, not just this field")
+                 f"{bad} not in {sorted(link.RX_TASKS)} — protobuf's ParseDict "
+                 "rejects the whole frame, so every heartbeat sent during the "
+                 "mission is lost, not just this field")
         else:
-            ok("task_token is a real RxTask", token)
+            ok("task_token is a real RxTask",
+               cfg["bt_runner_node"]["ros__parameters"]["task_token"])
     except KeyError as e:
         fail("task_token is a real RxTask", f"missing key {e}")
 

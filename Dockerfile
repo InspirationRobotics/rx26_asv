@@ -62,8 +62,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-humble-cv-bridge \
         ros-humble-sensor-msgs-py \
         ros-humble-std-srvs \
+        ros-humble-behaviortree-cpp \
         build-essential cmake git \
     && rm -rf /var/lib/apt/lists/*
+# behaviortree_cpp is 4.x from apt, which is what crusader_bt's XML declares
+# (BTCPP_format="4"). Note it is the CORE library only: behaviortree_ros2, the
+# package that provides RosActionNode, is NOT released for Humble. We do not
+# need it — our leaves publish a setpoint and poll a topic rather than calling
+# an action, the same shape OUXT-Polaris used at RobotX 2022.
 
 # ----------------------------------------------------------------------------
 # Python deps. THE IMAGE IS THE ONLY PLACE RUNTIME DEPS ARE INSTALLED — nothing

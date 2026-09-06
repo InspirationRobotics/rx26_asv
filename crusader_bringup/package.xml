@@ -33,6 +33,9 @@
        a comment, and writing the colcon flag out in full here is what broke
        this file's parse once already. -->
   <exec_depend>crusader_mission</exec_depend>
+  <!-- The behaviour-tree runner and its leaves. Same reason as the rest:
+       a package nothing depends on is silently not built. -->
+  <exec_depend>crusader_bt</exec_depend>
   <exec_depend>ros2launch</exec_depend>
 
   <export>

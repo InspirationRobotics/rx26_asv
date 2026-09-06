@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>crusader_bt</name>
+  <version>0.5.0</version>
+  <description>
+    Missions as behaviour trees. bt_runner_node is Crusader's bt_navigator: it
+    exposes ONE coarse action per mission and ticks a tree of primitive leaves
+    inside it, the same shape Nav2 uses.
+
+    nav_math.hpp holds every piece of geometry and depends on nothing but the
+    standard library, so the arithmetic that can be silently wrong is compiled
+    and tested on a laptop rather than discovered on the water. The leaves on
+    top of it read a port, call nav_math, publish and poll.
+  </description>
+  <maintainer email="brandont3927@gmail.com">Team Inspiration</maintainer>
+  <license>MIT</license>
+  <url type="repository">https://github.com/InspirationRobotics/rx26_asv</url>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rclcpp_action</depend>
+  <depend>std_msgs</depend>
+  <depend>behaviortree_cpp</depend>
+  <depend>crusader_msgs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
