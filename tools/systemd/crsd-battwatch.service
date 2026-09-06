@@ -3,6 +3,12 @@
 # setup/install_jetson_host.sh at install time. Do NOT `install` this file
 # verbatim — the placeholders must be expanded.
 #
+# NOT INSTALLED. setup/install_jetson_host.sh stopped installing this unit on
+# 2026-09-05 because BATT_VOLT_MULT is disputed and a shutdown threshold built
+# on an unverified scale factor turns the boat off mid-run. The file is kept so
+# the shutdown can be restored once the multiplier and cell count are settled —
+# see docs/OPERATIONS.md, "Battery voltage".
+#
 # Powers the Jetson down before a low pack is damaged. Reads the battery
 # voltage from MAVProxy's 14552 --out and asks crsd-power to poweroff when it
 # stays low long enough to be real. See tools/scripts/batt_watchdog.py for why

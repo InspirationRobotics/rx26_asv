@@ -568,9 +568,9 @@ the guard came out. The package formerly called `crusader_sensors` is now
 The pre-v0.5 LiDAR fusion was removed unverified. It is recoverable from git at `8c4ffa5`
 and worth reading before rewriting — see each package's README.
 
-### Battery voltage and the low-voltage shutdown
+### Battery voltage (there is NO automatic shutdown any more)
 
-**Crusader runs a 4S LiPo.** Voltage sensing was dead until 2026-09-03 and the
+**Crusader is recorded as a 4S LiPo, unconfirmed — see the cell-count note below.** Voltage sensing was dead until 2026-09-03 and the
 way it failed is worth knowing, because it looks like working config:
 `BATT_MONITOR=3` (Analog V+I) was set, but the autopilot had never been rebooted
 since. **ArduPilot only creates the analog backend params on a reboot after
@@ -590,26 +590,16 @@ the divider was set to **`BATT_VOLT_MULT=14.5964`**, reporting 16.39 V.
 > before) reported **11.34 V** for the same pack state that 14.5964 called
 > 16.39 V.
 >
-> **The procedure, in this order — the order is the safety-critical part:**
->
-> ```bash
-> sudo systemctl stop crsd-battwatch     # BEFORE touching the multiplier
-> ```
->
-> `BATT_VOLT_MULT` is a linear scale and `crsd-battwatch` reads the same
-> `SYS_STATUS` value QGC does. Lowering the multiplier lowers the reported
-> voltage below the 13.2 V shutdown threshold, and the watchdog powers the
-> Jetson off ~30 s later — mid-calibration.
->
-> Then, with meter and QGC read at the SAME moment:
+> **The procedure.** With meter and QGC read at the SAME moment:
 >
 > ```
 > new_mult = 14.5964 × (meter ÷ QGC)
 > ```
 >
-> Then set `CRSD_BATT_SHUTDOWN_V` / `CRSD_BATT_WARN_V` for the real pack,
-> confirm with `python3 tools/scripts/batt_watchdog.py --dry-run`, and only then
-> `sudo systemctl start crsd-battwatch`.
+> This used to be safety-critical to sequence, because lowering the multiplier
+> dropped the reported voltage under the watchdog's threshold and powered the
+> Jetson off mid-calibration. **That watchdog is gone (below), so the
+> recalibration is now safe to do at any time.**
 >
 > **Settle the cell count at the same time.** 11.3 V is a healthy 3S at
 > 3.78 V/cell and a nearly-dead 4S at 2.83 V/cell; the thresholds differ
@@ -621,42 +611,58 @@ the divider was set to **`BATT_VOLT_MULT=14.5964`**, reporting 16.39 V.
 > `BATT_CAPACITY` is a stock 3300 mAh that describes nothing aboard. Do not
 > build anything on mAh consumed.
 
-`crsd-battwatch` ([`tools/scripts/batt_watchdog.py`](../tools/scripts/batt_watchdog.py))
-reads MAVProxy's **14552** `--out` and asks `crsd-power` to poweroff when the
-voltage stays low. It is unprivileged and goes through that socket rather than
-being a second root program.
+#### The automatic poweroff was REMOVED on 2026-09-05
 
-| Variable | Default | Notes |
-|---|---|---|
-| `CRSD_BATT_SHUTDOWN_V` | `13.2` | 4S LiPo at 3.30 V/cell. Poweroff below this |
-| `CRSD_BATT_WARN_V` | `14.0` | 4S LiPo at 3.50 V/cell. Logs only, never acts |
-| `CRSD_BATT_HOLD_S` | `30` | Must stay low continuously this long. Four T200s sag the pack hard on a step input; a momentary dip must not power the boat off |
-| `CRSD_BATT_STALE_S` | `10` | No sample for this long clears the countdown |
-| `CRSD_BATT_ENDPOINT` | `udp:127.0.0.1:14552` | Its own port. 14551 is telemetry_bridge's, 14550 stays free for tooling |
+`crsd-battwatch` used to power the Jetson off below `CRSD_BATT_SHUTDOWN_V`
+(13.2 V) sustained 30 s. **It is stopped, disabled, and no longer installed by
+`setup/install_jetson_host.sh`.**
 
-**What it is for.** The boat sitting powered-up on the cart with nobody
-watching — that is how packs die here. It is not a mission-time energy policy:
-the Jetson is ~15 W against four T200s pulling hundreds, so powering it off does
-not meaningfully extend a run.
+**Why it went.** It came within a fraction of a volt of firing during a bench
+session — the pack reported 13.45 V against a 13.2 V threshold — while
+`BATT_VOLT_MULT` is disputed and the cell count is unconfirmed. Nobody can
+currently say whether 13.45 V is a healthy pack about to be shut down for
+nothing, or a pack already at 9.3 V that should have been rescued hours ago. A
+shutdown threshold derived from an unverified scale factor is not a safety
+feature; it is a coin flip that turns the boat off mid-run.
 
-**Before trusting a threshold on a new pack**, watch it without letting it act.
-**Stop the service first** — two readers on one UDP port split the datagrams
-between them, so a dry-run beside the live service blinds the live one. Measured
-2026-09-03: the service logged `no usable voltage (last good reading: 10s ago);
-not acting` for the whole 40 s the second process was up. It failed safe, but
-the boat had no low-voltage protection for those 40 seconds. The script now
-refuses to start in `--dry-run` when the port is already held.
+> **So NOTHING protects the battery automatically now. Watch the pack yourself.**
+
+`tools/scripts/batt_watchdog.py` is still in the repo and still useful as a
+**monitor**. `--dry-run` logs voltage and says what it would have done, and
+never contacts the power helper:
 
 ```bash
-sudo systemctl stop crsd-battwatch
 python3 tools/scripts/batt_watchdog.py --dry-run
-sudo systemctl start crsd-battwatch
 ```
+
+It binds `udp:127.0.0.1:14552` (`CRSD_BATT_ENDPOINT`), which stays reserved for
+exactly this so a monitor run never has to take 14550. It refuses to start if
+something already holds the port — two readers split the datagrams and each sees
+half the stream.
+
+**To bring the automatic shutdown back**, once the meter comparison settles
+`BATT_VOLT_MULT` and the balance leads settle the cell count: re-derive
+`CRSD_BATT_SHUTDOWN_V` / `CRSD_BATT_WARN_V` for the real pack, prove them with
+`--dry-run` against that pack, put `crsd-battwatch` back in the unit loop and
+enable list in `setup/install_jetson_host.sh`, and
+`sudo systemctl enable --now crsd-battwatch`. The unit template
+(`tools/systemd/crsd-battwatch.service`) is kept for that.
+
+| Variable | Old default | Notes |
+|---|---|---|
+| `CRSD_BATT_SHUTDOWN_V` | `13.2` | assumed 4S at 3.30 V/cell — **re-derive, do not reuse** |
+| `CRSD_BATT_WARN_V` | `14.0` | assumed 4S at 3.50 V/cell. Logs only, never acted |
+| `CRSD_BATT_HOLD_S` | `30` | must stay low continuously this long. Four T200s sag the pack hard on a step input |
+| `CRSD_BATT_STALE_S` | `10` | no sample for this long clears the countdown |
+| `CRSD_BATT_ENDPOINT` | `udp:127.0.0.1:14552` | its own port. 14551 is telemetry_bridge's, 14550 stays free for tooling |
 
 **Autopilot-side battery failsafe is deliberately still off** — `BATT_LOW_VOLT`,
 `BATT_CRT_VOLT`, `BATT_FS_LOW_ACT` and `BATT_FS_CRT_ACT` are all 0. Those change
-what the *vehicle* does on the water (Rover can RTL or Hold on them); the Jetson
-watchdog does not. Enabling them is a separate, deliberate decision.
+what the *vehicle* does on the water (Rover can RTL or Hold on them), which the
+removed Jetson watchdog never did. With no companion-side protection left, this
+is now the ONLY place an automatic low-voltage response could come from —
+enabling it is a separate, deliberate decision, and it needs the same settled
+`BATT_VOLT_MULT` and cell count.
 
 ### Starting the MID360
 
@@ -964,7 +970,8 @@ Honest list — these are known-wrong or known-missing, not merely untested:
   station's System tab reports "power helper unreachable" and cannot shut the
   Jetson down. Everything else on the page works. Fixing it requires recreating
   the container, which destroys anything living only inside it — left alone
-  deliberately. `crsd-battwatch` is unaffected; it runs on the host.
+  deliberately. Nothing depends on that mount any more — `crsd-battwatch` was
+  the only other user of the socket and it was removed on 2026-09-05.
 
 ### Confirmed hardware (2026-07-28)
 

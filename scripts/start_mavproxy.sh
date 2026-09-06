@@ -2,14 +2,17 @@
 # MAVProxy is the SOLE owner of the Pixhawk serial link (only ONE process may
 # open it). It rebroadcasts MAVLink over UDP to everything else:
 #   127.0.0.1:14551      -> telemetry_bridge (this repo's single ROS-side consumer)
-#   127.0.0.1:14552      -> batt_watchdog (crsd-battwatch, low-voltage poweroff)
+#   127.0.0.1:14552      -> RESERVED for batt_watchdog --dry-run. The automatic
+#                           low-voltage poweroff (crsd-battwatch) was REMOVED on
+#                           2026-09-05; the port stays reserved so a monitor run
+#                           never has to take 14550.
 #   127.0.0.1:14550      -> ad-hoc tooling ONLY (preflight, param_guard --live,
 #                           dump_params, a scratch mavproxy/QGC on the host).
 #                           KEEP IT FREE: a udpin bind STEALS datagrams, so a
 #                           long-lived service squatting here would make those
 #                           tools sit in silence rather than fail with an error
 #                           that names the cause. Anything permanent gets its
-#                           own port, which is why the watchdog has 14552.
+#                           own port, which is why the watchdog keeps 14552.
 #   <BCAST_ADDR>:14550   -> Mission Planner / QGroundControl on ANY laptop on the
 #                           field WiFi (broadcast, not unicast) — QGC/Mission
 #                           Planner both listen on 14550 for traffic from any

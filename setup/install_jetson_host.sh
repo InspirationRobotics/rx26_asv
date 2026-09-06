@@ -59,8 +59,26 @@ echo "   livox container: $CRSD_LIVOX_CONTAINER"
 # watchdog and the LEDs all absent, on a boat that otherwise looked healthy. The
 # boat in the shed has had the unit installed by hand since; this makes a fresh
 # install match it.
-# crsd-battwatch is the low-voltage poweroff (tools/scripts/batt_watchdog.py).
-for unit in crsd-mavproxy crsd-container crsd-livox crsd-power crsd-ros crsd-battwatch; do
+# crsd-battwatch is DELIBERATELY NOT INSTALLED — removed 2026-09-05.
+#
+# It powered the Jetson off below CRSD_BATT_SHUTDOWN_V, and it was about to do
+# exactly that during a bench session: the pack reported 13.45 V against a
+# 13.2 V threshold. The problem is that BATT_VOLT_MULT is DISPUTED (14.5964 vs
+# the stock 10.1 for the GM V1.0 module actually fitted), so nobody can say
+# whether 13.45 V means a healthy pack about to be shut down for nothing, or a
+# pack at 9.3 V that should have been rescued hours ago.
+#
+# A shutdown threshold derived from an unverified scale factor is not a safety
+# feature, it is a coin flip that turns the boat off mid-run. So the automatic
+# poweroff is gone.
+#
+# tools/scripts/batt_watchdog.py is still there and still useful as a MONITOR:
+#     python3 tools/scripts/batt_watchdog.py --dry-run
+# logs voltage and says what it would have done, and never contacts the power
+# helper. Re-enable the automatic shutdown only after the meter comparison
+# settles BATT_VOLT_MULT and the cell count, and re-derive the thresholds for
+# the real pack when you do.
+for unit in crsd-mavproxy crsd-container crsd-livox crsd-power crsd-ros; do
   sed -e "s|__CRSD_USER__|$CRSD_USER|g" -e "s|__CRSD_REPO__|$CRSD_REPO|g" \
       -e "s|__CRSD_CONTAINER__|$CRSD_CONTAINER|g" \
       -e "s|__CRSD_LIVOX_CONTAINER__|$CRSD_LIVOX_CONTAINER|g" \
@@ -73,17 +91,14 @@ for unit in crsd-mavproxy crsd-container crsd-livox crsd-power crsd-ros crsd-bat
 done
 systemctl daemon-reload
 systemctl enable crsd-mavproxy.service crsd-container.service crsd-livox.service \
-                 crsd-power.service crsd-ros.service crsd-battwatch.service
+                 crsd-power.service crsd-ros.service
 echo "   enabled; start now with:"
-echo "     systemctl start crsd-mavproxy crsd-container crsd-livox crsd-power crsd-ros crsd-battwatch"
-# crsd-battwatch can POWER THE JETSON OFF. Its defaults are a 4S LiPo (13.2 V
-# sustained 30 s). Say so here rather than letting someone discover it on a
-# 3S bench pack that reads perfectly normally at 12.4 V.
-echo "   NOTE: crsd-battwatch powers the Jetson off below CRSD_BATT_SHUTDOWN_V"
-echo "         (default 13.2 V, a 4S LiPo at 3.30 V/cell, held for 30s)."
-echo "         Running a different pack? Set CRSD_BATT_SHUTDOWN_V in"
-echo "         /etc/default/crusader BEFORE starting it, and confirm the"
-echo "         reading first:  python3 tools/scripts/batt_watchdog.py --dry-run"
+echo "     systemctl start crsd-mavproxy crsd-container crsd-livox crsd-power crsd-ros"
+echo "   NOTE: NOTHING protects the battery automatically. The low-voltage"
+echo "         poweroff was removed on 2026-09-05 because BATT_VOLT_MULT is"
+echo "         disputed and a threshold built on an unverified scale factor"
+echo "         turns the boat off mid-run. Watch the pack yourself, or run"
+echo "         'python3 tools/scripts/batt_watchdog.py --dry-run' to log it."
 
 echo "== [3/5] container mounts (recordings must outlive the container) =="
 # crsd-container.service runs `docker start`, which CANNOT add mounts — they are

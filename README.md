@@ -193,7 +193,7 @@ Python ≥3.10 + pyyaml anywhere. Install via [setup/](setup/README.md).
 |---|---|
 | **ASV / USV** | Autonomous/unmanned surface vessel — the boat |
 | **GUIDED / MANUAL** | ArduRover modes. GUIDED = autopilot drives to pushed setpoints (cannot strafe on this frame — it turns instead) |
-| **MAVProxy rebroadcast** | MAVProxy owns the Pixhawk serial link and re-serves telemetry on UDP: **14551** ROS (`telemetry_bridge`), **14552** `crsd-battwatch`, **14550** GCS + broadcast and ad-hoc tooling. The only way anything else talks to the autopilot. Every long-lived consumer gets its own port — a `udpin` bind steals datagrams, so sharing one means the loser gets silence rather than an error |
+| **MAVProxy rebroadcast** | MAVProxy owns the Pixhawk serial link and re-serves telemetry on UDP: **14551** ROS (`telemetry_bridge`), **14552** reserved for `batt_watchdog --dry-run` (the automatic poweroff was removed 2026-09-05), **14550** GCS + broadcast and ad-hoc tooling. The only way anything else talks to the autopilot. Every long-lived consumer gets its own port — a `udpin` bind steals datagrams, so sharing one means the loser gets silence rather than an error |
 | **`asv` container** | Where this whole repo runs, OAK-D included. Has ROS 2, CUDA/TensorRT, depthai, MAVProxy |
 | **livox container** | The only other container. Drives the MID360 and nothing else; publishes its `PointCloud2` |
 | **Autonomy-drop switch** | RC-channel-triggered software latch that kills any RC override within one control cycle, working beyond WiFi range. Gate G1 deliverable |
