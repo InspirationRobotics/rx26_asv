@@ -17,7 +17,8 @@ THE CONVENTIONS, in the order they bite:
     UINT16_MAX -> "no reading here"   (a direction we cannot see)
     0          -> "touching the sensor"
   Filling unseen sectors with 0 tells the autopilot it is wedged against
-  something on every bearing, which with AVOID_BEHAVE=Stop halts the boat.
+  something on every bearing. Rover always STOPS on simple avoidance
+  (AVOID_BEHAVE is Copter-only), so that halts the boat.
 
 WHY CLUSTERS GET AN ANGULAR WIDTH. A buoy 0.3 m across at 5 m subtends 3.4
 degrees — most of one 5-degree sector. At 20 m it subtends 0.9 degrees and would

@@ -20,7 +20,8 @@
 # ENCODING RULES, both of which bite:
 #   * UINT16_MAX (65535) means "no reading" — a sector we cannot see.
 #   * 0 means an obstacle TOUCHING the sensor. Never use 0 for "nothing here":
-#     with AVOID_BEHAVE=Stop that halts the boat instantly.
+#     and Rover ALWAYS stops on simple avoidance (AVOID_BEHAVE is a Copter
+#     parameter), so that halts the boat instantly.
 # Only the forward sector is real on this hull; everything aft of the beam is the
 # boat's own structure and must be sent as UINT16_MAX, not as a near return.
 #

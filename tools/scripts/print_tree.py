@@ -6,6 +6,7 @@
     python3 tools/scripts/print_tree.py --dot | dot -Tpng -o tree.png
     python3 tools/scripts/print_tree.py --check          # exit 1 on a defect
     python3 tools/scripts/print_tree.py --check --live   # ...also check the boat
+    python3 tools/scripts/print_tree.py --fail safe_passage   # what if it fails?
 
 Stdlib only in the default paths, so this runs on the Windows laptop, in CI, and
 on the Jetson with nothing sourced. `--live` is the exception: it asks the ROS
@@ -81,9 +82,53 @@ def main():
     ap.add_argument("-o", "--out", help="write to a file instead of stdout")
     ap.add_argument("--missions", nargs="*", default=None,
                     help="only these missions (default: all)")
+    ap.add_argument("--fail", nargs="*", metavar="LEAF", default=None,
+                    help="simulate a tick with these leaves returning FAILURE, "
+                         "and show what the run does. The question this answers "
+                         "is 'if this mission fails, does the rest of the run "
+                         "still happen?' — scoring is per task, so it must.")
     a = ap.parse_args()
 
     root = mission_spec.build(a.missions)
+
+    if a.fail is not None:
+        names = {n.name for n, _d, _p in mission_spec.walk(root)
+                 if n.kind in mission_spec.LEAVES}
+        unknown = sorted(set(a.fail) - names)
+        if unknown:
+            print("no such leaf: {} — leaves are {}".format(unknown,
+                                                            sorted(names)))
+            return 1
+        trace = []
+        result = mission_spec.simulate(
+            root, {n: mission_spec.FAILURE for n in a.fail}, trace=trace)
+        print("failing: {}".format(sorted(a.fail) or "(nothing)"))
+        for depth, name, r in trace:
+            print("  {}{:<18} {}".format("  " * depth, name, r))
+        print()
+        print("run -> {}".format(result))
+        by_kind = {n.name: n.kind for n, _d, _p in mission_spec.walk(root)}
+        missions = [n for n, k in by_kind.items() if k == mission_spec.MISSION]
+        stopped = [m for m in missions if not any(t[1] == m for t in trace)]
+        if not stopped:
+            print("every mission was still attempted.")
+            return 0
+
+        # A failing GUARD stopping the run is the design, not a defect: if the
+        # boat is not autonomous, no mission should be ticking. Only a failing
+        # MISSION that costs another mission is the expensive kind, because
+        # scoring is per task.
+        guards = [n for n in a.fail if by_kind.get(n) == mission_spec.CONDITION]
+        if guards and not [n for n in a.fail
+                           if by_kind.get(n) == mission_spec.MISSION]:
+            print("not reached: {} — expected: the guard {} is what decides "
+                  "whether any mission runs at all".format(stopped,
+                                                           sorted(guards)))
+            return 0
+        print("NOT REACHED: {} — a failing MISSION ended the run early, and "
+              "scoring is per task, so this costs every task after "
+              "it".format(stopped))
+        return 1
 
     if a.check:
         problems = mission_spec.check(root)

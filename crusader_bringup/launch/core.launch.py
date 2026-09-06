@@ -13,6 +13,22 @@ Starts (all reading config/crusader_params.yaml from THIS package's share dir):
   * lidar_cluster_node    — crusader_perception; MID360 cloud -> crsd/lidar_clusters
   * proximity_bridge      — crusader_perception; clusters -> OBSTACLE_DISTANCE,
                             which is what feeds the autopilot's own avoidance
+  * lidar_view            — tools/lidar_view.py; plan + elevation MJPEG on :8081,
+                            the ground station's LiDAR tab
+
+A NOTE ON lidar_view, because the dependency runs the OTHER WAY round from how
+it reads. lidar_cluster_node does NOT need it: the cluster node subscribes to
+/livox/lidar, /crsd/pose and /crsd/attitude and would run identically with the
+viewer absent. What is true is a CODE dependency in the opposite direction —
+tools/lidar_view.py imports the transform and the filters from
+lidar_cluster_core, so the picture on :8081 is drawn through the same maths the
+clusters are, which is exactly what makes it worth having at boot: it is the
+only way to SEE what the cluster node is deciding.
+
+It is launched because it is nearly free when nobody is looking. Every panel is
+gated on FrameBuffer.has_clients, so with no browser attached it decodes nothing
+and encodes no JPEG. That is the same optimisation buoy_detector uses, and the
+same reason its health line reads ~0 fps with viewers=0.
 
 THE LIDAR NOW GATES ARMING, and that is worth knowing before it surprises anyone
 on a dock. With PRX1_TYPE=2 the autopilot expects a MAVLink proximity source and
@@ -54,8 +70,10 @@ scripts/start_mavproxy.sh — before this launch.
 """
 import os
 
+import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
+from launch.actions import ExecuteProcess
 from launch_ros.actions import Node
 
 
@@ -66,6 +84,21 @@ def generate_launch_description():
     params = os.path.join(
         get_package_share_directory("crusader_bringup"),
         "config", "crusader_params.yaml")
+
+    # tools/ is NOT installed into share — the viewers are plain scripts run from
+    # the source tree. Read the path OUT OF THE PARAMS FILE rather than deriving
+    # it: `ground_station.tools_dir` is the same value process_manager already
+    # uses to start these scripts from the web UI, so the two ways of launching
+    # lidar_view cannot point at different files.
+    #
+    # Explicitly NOT computed from the share dir. In the installed layout this
+    # lives in install/crusader_bringup/share/crusader_bringup while tools/ is in
+    # src/rx26_asv/tools, and no fixed number of ".." reaches it from here — the
+    # same path arithmetic crusader_common/config.py warns about at length, and
+    # which I got wrong once writing this file.
+    with open(params, encoding="utf-8") as f:
+        tools_dir = yaml.safe_load(f)["ground_station"]["ros__parameters"][
+            "tools_dir"]
 
     return LaunchDescription([
         Node(package="crusader_fcu", executable="telemetry_bridge",
@@ -86,4 +119,10 @@ def generate_launch_description():
              output="screen", parameters=[params]),
         Node(package="crusader_perception", executable="proximity_bridge",
              output="screen", parameters=[params]),
+        # A plain script, not a ROS entry point — hence ExecuteProcess rather
+        # than Node. It reads the LiDAR extrinsic out of the params file itself
+        # (see tools/lidar_view.py), so it takes no `parameters=`.
+        ExecuteProcess(
+            cmd=["python3", os.path.join(tools_dir, "lidar_view.py")],
+            output="screen"),
     ])

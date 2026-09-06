@@ -187,6 +187,28 @@ def selftest():
     chk("...and catches a mission that could end the run",
         len(tree.check(unprotected)) >= 1, True)
 
+    # THE property the tree exists to have: one mission failing must not cost
+    # the ones after it, because scoring is per task. Asserted by SIMULATING a
+    # tick rather than by reading the structure, so a decorator that is present
+    # but wired to the wrong child still fails this.
+    reached = []
+    result = tree.simulate(tree.build(), {"safe_passage": tree.FAILURE},
+                           trace=reached)
+    chk("a failing mission does NOT end the run", result, tree.SUCCESS)
+    chk("...and it was retried before giving up",
+        sum(1 for _d, n, _r in reached if n == "safe_passage"), 2)
+    chk("a failing guard DOES stop the run",
+        tree.simulate(tree.build(), {"is_autonomous": tree.FAILURE}),
+        tree.FAILURE)
+    # ...and the same simulation on a tree with no protection shows the
+    # difference, so the check above is not passing for the wrong reason.
+    two = tree.Sequence("run", tree.Mission("a", "/a", "T"),
+                        tree.Mission("b", "/b", "T"))
+    seen = []
+    tree.simulate(two, {"a": tree.FAILURE}, trace=seen)
+    chk("an unprotected tree loses the mission after the failure",
+        any(n == "b" for _d, n, _r in seen), False)
+
     print()
     if fails:
         print("FAIL — {} check(s):".format(len(fails)))

@@ -219,3 +219,64 @@ def _unprotected_missions(root):
 
     visit(root, False)
     return bad
+
+
+# ------------------------------------------------------------------ SIMULATION
+
+SUCCESS, FAILURE = "SUCCESS", "FAILURE"
+
+
+def simulate(root, leaf_results, trace=None):
+    """Tick the tree once with each leaf's result decided in advance.
+
+    leaf_results: {leaf_name: SUCCESS|FAILURE}. A leaf not named defaults to
+      SUCCESS. A FAILURE under a Retry is retried and then fails again — the
+      point is to see what the STRUCTURE does with a mission that cannot be
+      made to work, not to model a flaky one.
+    trace: optional list; each entry appended as (depth, name, result).
+
+    Returns the root's result.
+
+    THIS IS NOT A BEHAVIOUR TREE ENGINE, and must not grow into one. It answers
+    exactly one question, which is the one worth answering before a run:
+
+        if SafePassage fails, does the rest of the run still happen?
+
+    Scoring is per task, so the answer has to be yes, and finding out on the
+    water that it was no costs every task after the failure. py_trees and
+    BehaviorTree.CPP both implement these semantics; this reproduces them for
+    the four node kinds the tree actually uses, so the question can be answered
+    now rather than after the library choice is settled.
+    """
+    def tick(node, depth):
+        if node.kind in LEAVES:
+            r = leaf_results.get(node.name, SUCCESS)
+        elif node.kind == SEQUENCE:
+            r = SUCCESS
+            for c in node.children:
+                if tick(c, depth + 1) == FAILURE:
+                    r = FAILURE
+                    break                      # memory sequence: stop at the first failure
+        elif node.kind == FALLBACK:
+            r = FAILURE
+            for c in node.children:
+                if tick(c, depth + 1) == SUCCESS:
+                    r = SUCCESS
+                    break
+        elif node.kind == FORCE_SUCCESS:
+            tick(node.children[0], depth + 1)
+            r = SUCCESS
+        elif node.kind == RETRY:
+            attempts = int(node.attrs.get("num_attempts", 1))
+            r = FAILURE
+            for _ in range(max(1, attempts)):
+                r = tick(node.children[0], depth + 1)
+                if r == SUCCESS:
+                    break
+        else:                                   # unreachable: Node() validates kind
+            raise AssertionError("unhandled kind " + node.kind)
+        if trace is not None:
+            trace.append((depth, node.name, r))
+        return r
+
+    return tick(root, 0)

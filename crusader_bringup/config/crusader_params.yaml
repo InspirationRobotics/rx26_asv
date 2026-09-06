@@ -305,9 +305,19 @@ lidar_cluster_node:
 # AUTOPILOT SIDE, which must be set or none of this does anything:
 #   PRX1_TYPE = 2      MAVLink proximity source. At 0 ArduPilot ignores
 #                      OBSTACLE_DISTANCE entirely and the viewer stays empty.
-#   AVOID_BEHAVE = 0   Slide, not Stop. Stop halts mid-course and scores nothing.
+#   AVOID_BEHAVE       IGNORE IT. It is a COPTER parameter; ArduPilot's own docs
+#                      say Rover "attempts to stop the vehicle before it hits
+#                      objects in all modes except MANUAL" and always stops —
+#                      there is no Slide on this vehicle. An earlier comment
+#                      here told you to set it to Slide "because Stop halts
+#                      mid-course and scores nothing". The observation was right
+#                      and the lever was wrong: what actually routes AROUND an
+#                      obstacle is OA_TYPE below, not AVOID_BEHAVE.
 #   OA_TYPE = 1        BendyRuler path planning — routes AROUND obstacles toward
-#                      the setpoint. Active in AUTO/GUIDED/RTL only.
+#                      the setpoint, and the ONLY thing that does. "Only
+#                      applicable in AUTO, GUIDED, and RTL flight modes", so a
+#                      mission that must not stop dead has to run in GUIDED.
+#                      (OA_BR_TYPE = 1, horizontal, is Rover's only option.)
 proximity_bridge:
   ros__parameters:
     clusters_topic: "crsd/lidar_clusters"  # [RO] = lidar_cluster_node.output
