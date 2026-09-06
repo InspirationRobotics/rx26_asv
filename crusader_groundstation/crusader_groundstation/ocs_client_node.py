@@ -15,6 +15,21 @@ WHAT THIS NODE MUST NEVER DO IS ACT. Inbound commands are republished to
 this node has no opinion. The standing rule holds unchanged: the RC e-stop is the
 only safety path, and WiFi is never a safety mechanism.
 
+THE TASK IT REPORTS IS THE ONE A MISSION CLAIMS. `current_task` comes from
+/crsd/current_task, published by whichever mission action server is running, and
+it is not a cosmetic field: the handbook (3.4.11) makes the transition INTO a
+task value the start of that attempt and the transition to TASK_NONE the stand
+down, and above Core the beacons activate on it. Two rules guard it, both in
+_on_task/_current_task:
+
+  * a token not in RoboCommand's RxTask enum is REFUSED, not forwarded —
+    protobuf's ParseDict rejects the whole frame on an unknown enum name, so a
+    typo would cost every heartbeat sent while it was set, not just the field;
+  * if the publisher disappears while a task is claimed, we stand down to
+    TASK_NONE. The topic is latched and published only on transitions, so a dead
+    mission node would otherwise leave us telling RoboCommand a task is under way
+    on behalf of a process that no longer exists.
+
 TELEMETRY IT WILL NOT INVENT. If /crsd/pose or /crsd/fcu_status has gone stale,
 no heartbeat is sent at all. A fabricated position is worse than a gap: the gap is
 visible on the OCS as rising silence, while a made-up fix is indistinguishable
@@ -34,9 +49,12 @@ from crusader_common.param_utils import declare_from_config
 from crusader_common.stream_cache import StreamCache
 from crusader_msgs.msg import Attitude, FcuStatus, LatLonHead
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, String
 
-from crusader_groundstation.ocs_link import OcsLink, fake_report, rfc3339
+from crusader_groundstation.ocs_link import (TASK_NONE, OcsLink,
+                                             coerce_task, fake_report,
+                                             rfc3339)
 
 PARAM_SPEC = {
     "ocs_host": dict(read_only=True,
@@ -82,6 +100,9 @@ class OcsClient(Node):
         # flight mode does. See _build().
         self._autonomy = False
         self._kill = False
+        # The task a mission node claims to be attempting. See _current_task().
+        self._task = TASK_NONE
+        self._warned_tasks = set()
         self._auto_modes = {str(m).upper() for m in
                             crsd_config.shared_params().get(
                                 "autonomous_modes", ("AUTO", "GUIDED"))}
@@ -109,6 +130,15 @@ class OcsClient(Node):
             self.create_subscription(Bool, "/crsd/autonomy_active",
                                      self._on_autonomy, 10)
             self.create_subscription(Bool, "/crsd/kill_active", self._on_kill, 10)
+            # TRANSIENT_LOCAL to match safe_passage_server: current_task is
+            # published on TRANSITIONS, not periodically, so a VOLATILE
+            # subscription that starts mid-mission would never learn the task
+            # was already under way and would report TASK_NONE through the
+            # whole attempt.
+            self.create_subscription(
+                String, "/crsd/current_task", self._on_task,
+                QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                           durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
         self.link = OcsLink(p["ocs_host"], int(p["ocs_port"]),
                             on_command=self._inbox.append,
@@ -140,6 +170,50 @@ class OcsClient(Node):
 
     def _on_kill(self, msg):
         self._kill = bool(msg.data)
+
+    def _on_task(self, msg):
+        """Accept a task token only if RoboCommand's schema has that name.
+
+        A token the OCS cannot parse is not a cosmetic error: ParseDict rejects
+        the frame and the heartbeat never reaches RoboCommand at all. So an
+        unknown token costs EVERY heartbeat sent while it is set, not just the
+        field. Falling back to TASK_NONE keeps the position, speed and state
+        flowing, which is the part that cannot be reconstructed later.
+
+        Warned once per distinct bad token — a typo at 2 Hz would otherwise bury
+        the log in the same line.
+        """
+        token, error = coerce_task(msg.data)
+        if error and str(msg.data) not in self._warned_tasks:
+            self._warned_tasks.add(str(msg.data))
+            self.get_logger().error("REFUSING task token: " + error)
+        elif not error and token != self._task:
+            self.get_logger().info("current_task -> %s" % token)
+        self._task = token
+
+    def _current_task(self):
+        """The task to report, or TASK_NONE if nothing is claiming one.
+
+        THE LIVENESS CHECK IS THE POINT. current_task is latched and published
+        only on transitions, so if the mission node dies mid-attempt the last
+        value sits here forever and this node keeps telling RoboCommand a task
+        is under way. The handbook makes the transition to TASK_NONE the
+        stand-down signal, so a frozen token is not a stale field — it is a
+        claim we are still trying, made on behalf of a process that no longer
+        exists.
+
+        A publisher count of zero says exactly that, and needs no keepalive from
+        the mission node. The normal path is still the mission server's own
+        `finally`, which publishes TASK_NONE on every exit; this covers the
+        abnormal one.
+        """
+        if self._task != TASK_NONE and not self.count_publishers(
+                "/crsd/current_task"):
+            self.get_logger().warning(
+                "task source vanished while claiming %s — standing down to %s"
+                % (self._task, TASK_NONE))
+            self._task = TASK_NONE
+        return self._task
 
     # ---- the heartbeat ---------------------------------------------------
 
@@ -199,10 +273,10 @@ class OcsClient(Node):
             # exactly that -- scrubbing it here would hide a real fault.
             "heading_deg": pose.heading,
             "vehicle_type": "TYPE_USV",
-            # No task-state source exists on the boat yet. TASK_NONE is the
-            # honest value and TASK_UNKNOWN is refused by the OCS, so this is
-            # not a placeholder that can silently rot.
-            "current_task": "TASK_NONE",
+            # From /crsd/current_task, published by whichever mission action
+            # server is running. Validated against RoboCommand's own RxTask enum
+            # and defaulted to TASK_NONE — see _on_task and _current_task.
+            "current_task": self._current_task(),
         }
 
         att = self._att.get(now)

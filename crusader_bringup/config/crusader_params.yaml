@@ -793,21 +793,27 @@ safe_passage_server:
                                             #      no setpoints), NOT a fault.
                                             #      Turning it true is a G1 gate.
     orbit_radius_m: 6.0                     # [RO] default when the goal sends 0
-    task_token: "TASK_NONE"                 # [RO] published on
+    task_token: "TASK_SAFE_PASSAGE"         # [RO] published on
                                             #      /crsd/current_task while a
-                                            #      goal runs. It is TASK_NONE
-                                            #      because the REAL token for
-                                            #      Task 1 is not known: the
-                                            #      handbook (3.4.11) names only
-                                            #      TASK_NONE and TASK_UNKNOWN,
-                                            #      and the OCS DROPS a heartbeat
-                                            #      carrying a value it does not
-                                            #      recognise. A blank is a fact;
-                                            #      an invented TASK_SAFE_PASSAGE
-                                            #      would silently cost every
-                                            #      heartbeat sent during the run.
-                                            #      Set it once RoboNation's
-                                            #      schema confirms the string.
+                                            #      goal runs; ocs_client puts it
+                                            #      in the heartbeat, which is
+                                            #      what STARTS the task attempt
+                                            #      (handbook 3.4.11) and what
+                                            #      activates the beacons.
+                                            #
+                                            #      CONFIRMED against RxTask in
+                                            #      robonation/robocommand,
+                                            #      RobotX_2026/proto/robotx/
+                                            #      rx_common.proto. It was
+                                            #      TASK_NONE until 2026-09-05
+                                            #      because the handbook mirror
+                                            #      names only TASK_NONE and
+                                            #      TASK_UNKNOWN, and a token the
+                                            #      OCS cannot parse costs EVERY
+                                            #      heartbeat sent while it is
+                                            #      set, not just the field.
+                                            #      check_config gates this value
+                                            #      against ocs_link.RX_TASKS.
     phase_dwell_s: ["IDLE:0.5", "APPROACH:5.0", "OBSERVE:5.0",
                     "ORBIT_ENTRY:4.0", "TRANSIT:6.0", "ORBIT_EXIT:4.0",
                     "COMPLETE:0.5"]         # [RO] seconds per phase, ~25 s total.

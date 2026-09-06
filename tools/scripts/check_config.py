@@ -223,6 +223,28 @@ def check_params_yaml():
         ok("http ports distinct", ", ".join(f"{p}={n}" for p, n in
                                             sorted(seen.items())))
 
+    # The mission's task token must be a name RoboCommand's RxTask enum has.
+    # ParseDict REJECTS THE WHOLE FRAME on an unknown enum name, so a typo here
+    # does not degrade one field -- it stops every heartbeat reaching
+    # RoboCommand for as long as the mission runs, which is exactly the window
+    # that is being scored.
+    try:
+        spec2 = importlib.util.spec_from_file_location(
+            "ocs_link", REPO / "crusader_groundstation" /
+            "crusader_groundstation" / "ocs_link.py")
+        link = importlib.util.module_from_spec(spec2)
+        spec2.loader.exec_module(link)
+        token = cfg["safe_passage_server"]["ros__parameters"]["task_token"]
+        if token not in link.RX_TASKS:
+            fail("task_token is a real RxTask",
+                 f"{token!r} is not in {sorted(link.RX_TASKS)} — protobuf's "
+                 "ParseDict rejects the whole frame, so every heartbeat sent "
+                 "during the mission is lost, not just this field")
+        else:
+            ok("task_token is a real RxTask", token)
+    except KeyError as e:
+        fail("task_token is a real RxTask", f"missing key {e}")
+
     # All three OAK-D nodes must describe the same camera (see CAMERA_NODES).
     # Compared against the first node in the list rather than pairwise, so the
     # message names one reference and the odd ones out.

@@ -50,6 +50,57 @@ MAX_FRAME = 1 << 20
 #: How long a read blocks before we go round and check for something to send.
 _READ_TIMEOUT_S = 0.05
 
+# ---- RxTask, transcribed from RoboCommand's own schema ----------------------
+#
+# robonation/robocommand, RobotX_2026/proto/robotx/rx_common.proto, enum RxTask.
+# Transcribed rather than generated for the reason at the top of this file: the
+# boat carries no protobuf dependency. That makes this a COPY, with the usual
+# obligation — if RoboNation changes the enum, change it here in the same commit.
+#
+# Heartbeat.current_task is what starts and stands down a task attempt, so a
+# value the OCS cannot parse is not a cosmetic error: ParseDict rejects the frame
+# and the heartbeat never reaches RoboCommand at all. Every string that leaves
+# this boat is checked against this set first.
+RX_TASKS = frozenset((
+    "TASK_NONE",                    # deliberately idle / not attempting a task
+    "TASK_SAFE_PASSAGE",            # Task 1
+    "TASK_INFRA_SURVEY_REPAIR",     # Task 2
+    "TASK_COORDINATED_LOGISTICS",   # Task 3
+    "TASK_DYNAMIC_INCIDENT",        # Task 4
+))
+
+#: The idle value, and the fallback whenever a token cannot be trusted.
+TASK_NONE = "TASK_NONE"
+
+# TASK_UNKNOWN (proto value 0) is deliberately ABSENT from RX_TASKS. The schema
+# says it means "field unset or unparsed — not a stand-down signal", so sending
+# it claims nothing while looking like a report. If we do not know what we are
+# doing, TASK_NONE is the honest claim.
+TASK_UNKNOWN = "TASK_UNKNOWN"
+
+
+def coerce_task(token):
+    """(token_to_send, error_or_None). Never returns something unsendable.
+
+    Pure, so the one rule that decides whether a heartbeat survives the OCS can
+    be tested with no ROS and no link. The rule: a name RoboCommand's RxTask
+    enum does not have makes protobuf's ParseDict reject the WHOLE FRAME, so an
+    unknown token costs every heartbeat sent while it is set — position, speed,
+    state and all — not merely the task field. Falling back to TASK_NONE keeps
+    the part that cannot be reconstructed afterwards.
+
+    TASK_UNKNOWN is refused like any other invalid name even though the enum has
+    it: the schema says it means "unset or unparsed, NOT a stand-down signal",
+    so sending it deliberately claims nothing while looking like a report.
+    """
+    name = str(token).strip().upper()
+    if name in RX_TASKS:
+        return name, None
+    return TASK_NONE, (
+        "%r is not an RxTask the OCS can parse (valid: %s); reporting %s "
+        "instead — the alternative is that the OCS drops every heartbeat while "
+        "it is set" % (name, sorted(RX_TASKS), TASK_NONE))
+
 
 # ---- framing (mirror of OCS/rx_bridge/framing.py) ---------------------------
 
@@ -294,6 +345,48 @@ def fake_report(vehicle_id: str, team_id: str, t0: float, fault: str = "") -> di
             "sent_at": rfc3339(), "heartbeat": hb}
 
 
+def _selftest() -> int:
+    """The pure helpers, with no socket and no OCS. Exits nonzero on failure.
+
+        python3 -m crusader_groundstation.ocs_link --selftest
+
+    coerce_task is the one rule that decides whether a heartbeat survives the
+    OCS at all, so it is worth more than a code read.
+    """
+    fails = []
+
+    def chk(name, got, want):
+        good = got == want
+        if not good:
+            fails.append("%s: got %r want %r" % (name, got, want))
+        print("  [%s] %s" % ("ok" if good else "FAIL", name))
+
+    for token in sorted(RX_TASKS):
+        chk("%s survives" % token, coerce_task(token), (token, None))
+    chk("case and whitespace are tolerated",
+        coerce_task("  task_safe_passage  ")[0], "TASK_SAFE_PASSAGE")
+    for bad in (TASK_UNKNOWN, "TASK_SAFEPASSAGE", "", "SAFE_PASSAGE", None, 7):
+        token, err = coerce_task(bad)
+        chk("%r is refused" % (bad,), token, TASK_NONE)
+        chk("%r explains itself" % (bad,), bool(err), True)
+    chk("TASK_UNKNOWN is not in RX_TASKS", TASK_UNKNOWN in RX_TASKS, False)
+
+    # json_safe has to let NaN through as the quoted form protobuf wants: it is
+    # real data (unresolved GPS yaw), and the OCS validator exists to refuse it.
+    chk("NaN survives as the quoted form",
+        json_safe({"heading_deg": float("nan")}), {"heading_deg": "NaN"})
+    chk("frames round-trip", FrameReader().feed(encode(b"hi")), [b"hi"])
+
+    print()
+    if fails:
+        print("FAIL — %d check(s):" % len(fails))
+        for f in fails:
+            print("  " + f)
+        return 1
+    print("PASS")
+    return 0
+
+
 def main(argv=None) -> int:
     import argparse
     ap = argparse.ArgumentParser(
@@ -309,7 +402,12 @@ def main(argv=None) -> int:
     ap.add_argument("--rate", type=float, default=2.0, help="Hz")
     ap.add_argument("--fault", default="", choices=["", "nan", "unknown_task"],
                     help="provoke a fault the OCS validator must refuse")
+    ap.add_argument("--selftest", action="store_true",
+                    help="check the pure helpers and exit; no socket, no OCS")
     args = ap.parse_args(argv)
+
+    if args.selftest:
+        return _selftest()
 
     link = OcsLink(args.host, args.port)
     link.start()
