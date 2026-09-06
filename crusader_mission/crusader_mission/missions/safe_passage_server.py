@@ -59,8 +59,9 @@ from crusader_common.param_utils import declare_from_config
 from crusader_common.stream_cache import StreamCache
 
 from . import safe_passage_core as spc
-from .phase_sequencer import (OUTCOME_CANCELLED, OUTCOME_NAMES,
-                              OUTCOME_SUCCESS, PhaseSequencer)
+from .phase_sequencer import (OUTCOME_CANCELLED, OUTCOME_FAULT,
+                              OUTCOME_NAMES, OUTCOME_SUCCESS,
+                              PhaseSequencer)
 
 PARAM_SPEC = {
     "action_name": dict(read_only=True,
@@ -239,11 +240,22 @@ class SafePassageServer(Node):
             verdict = self._run_loop(goal_handle, seq)
 
             elapsed = time.monotonic() - started
-            log = self.get_logger()
-            say = log.info if verdict.outcome == OUTCOME_SUCCESS else log.warn
-            say("RESULT {} after {:.1f}s in {}: {}".format(
+            # TWO call sites, not one logger picked by a conditional. rclpy
+            # caches a logger's severity PER CALL SITE and raises
+            #   ValueError: Logger severity cannot be changed between calls
+            # the second time one line logs at a different level. `say = info if
+            # ok else warn` therefore works for the first result and throws for
+            # every result of the other kind afterwards — which lands INSIDE
+            # execute_callback, so rclpy returns a DEFAULT result and the caller
+            # sees outcome 0 (SUCCESS) on a run that timed out. Observed on the
+            # boat 2026-09-05: a TIMEOUT reported as outcome 0, status ABORTED.
+            line = "RESULT {} after {:.1f}s in {}: {}".format(
                 OUTCOME_NAMES.get(verdict.outcome, verdict.outcome), elapsed,
-                verdict.phase, verdict.detail))
+                verdict.phase, verdict.detail)
+            if verdict.outcome == OUTCOME_SUCCESS:
+                self.get_logger().info(line)
+            else:
+                self.get_logger().warn(line)
 
             # rclpy needs the terminal state set explicitly, and the RIGHT one:
             # a cancelled goal that is `succeed()`-ed reports success to the
@@ -256,6 +268,23 @@ class SafePassageServer(Node):
                 goal_handle.abort()
 
             return self._result(verdict, elapsed, entry, exit_)
+        except Exception as e:
+            # NEVER let an exception here reach rclpy: it returns a DEFAULT
+            # Result, whose outcome field is 0 — SUCCESS. A crash that reports
+            # success is worse than a crash.
+            self.get_logger().error("mission raised {}: {}".format(
+                type(e).__name__, e))
+            try:
+                goal_handle.abort()
+            except Exception:
+                pass
+            r = SafePassage.Result()
+            r.outcome = OUTCOME_FAULT
+            r.detail = "mission raised {}: {}".format(type(e).__name__, e)
+            r.elapsed_s = time.monotonic() - started
+            r.entry_latitude, r.entry_longitude = float("nan"), float("nan")
+            r.exit_latitude, r.exit_longitude = float("nan"), float("nan")
+            return r
         finally:
             # Everything here must happen on EVERY exit path, including an
             # exception thrown from the loop. Leaving current_task at the task
