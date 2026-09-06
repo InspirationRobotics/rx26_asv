@@ -77,8 +77,16 @@ class OcsClient(Node):
         self._pose = StreamCache(p["pose_timeout_s"])
         self._att = StreamCache(p["attitude_timeout_s"])
         self._status = StreamCache(p["status_timeout_s"])
+        # `_autonomy` (/crsd/autonomy_active) is still subscribed because the
+        # ground station shows it, but it no longer decides STATE_AUTO -- the
+        # flight mode does. See _build().
         self._autonomy = False
         self._kill = False
+        self._auto_modes = {str(m).upper() for m in
+                            crsd_config.shared_params().get(
+                                "autonomous_modes", ("AUTO", "GUIDED"))}
+        self.get_logger().info(
+            f"STATE_AUTO reported for modes: {sorted(self._auto_modes)}")
         self._t0 = time.time()
         self._skipped = 0
 
@@ -166,9 +174,18 @@ class OcsClient(Node):
             self._skipped += 1
             return None
 
+        # STATE_AUTO is decided by the SAME list telemetry_bridge gates commands
+        # on and pixhawk_led_status lights GREEN for (shared.autonomous_modes).
+        # Before this, three places decided "are we autonomous" independently and
+        # could disagree: the bridge could be refusing every setpoint while this
+        # reported STATE_AUTO to RoboCommand. Reporting a state we are not in is
+        # worse than reporting a boring one.
+        #
+        # `armed` stays in the AND: a disarmed boat is not driving itself
+        # whatever mode is selected.
         if self._kill:
             state = "STATE_KILLED"
-        elif self._autonomy and status.armed:
+        elif status.armed and str(status.mode).upper() in self._auto_modes:
             state = "STATE_AUTO"
         else:
             state = "STATE_MANUAL"
