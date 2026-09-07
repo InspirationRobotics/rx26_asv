@@ -59,6 +59,8 @@ status() {
   echo "ardurover : $(pgrep -c -f 'bin/ardurover' 2>/dev/null || echo 0) process(es)"
   echo "mavproxy  : $(pgrep -c -f 'mavproxy' 2>/dev/null || echo 0) process(es)"
   echo "endpoints : udp:127.0.0.1:14551 (ROS)   udp:127.0.0.1:14550 (tooling)"
+  local w; w="$(ip route 2>/dev/null | awk '/^default/ {print $3; exit}')"
+  [[ -n "$w" ]] && echo "            udp:$w:14550 (QGC on the Windows host)"
 }
 
 case "${1:-start}" in
@@ -89,10 +91,23 @@ nohup python3 Tools/autotest/sim_vehicle.py -v Rover -f "$FRAME" \
   > /tmp/sitl.log 2>&1 &
 sleep 10
 
+# QGC on the Windows side. WSL2 is NAT'd, so the Windows host is WSL's default
+# gateway — resolved dynamically because that address changes when WSL restarts.
+# QGC listens on UDP 14550 by DEFAULT and auto-connects, so pushing telemetry to
+# it here means nobody has to add a comm link by hand.
+WIN_HOST="$(ip route 2>/dev/null | awk '/^default/ {print $3; exit}')"
+QGC_OUT=""
+if [[ -n "$WIN_HOST" ]]; then
+  QGC_OUT="--out udp:${WIN_HOST}:14550"
+  echo "== QGC output -> ${WIN_HOST}:14550 (Windows host) =="
+fi
+
 echo "== starting MAVProxy on the boat's port map =="
+# shellcheck disable=SC2086  # QGC_OUT must word-split, or be absent entirely
 nohup mavproxy.py --master tcp:127.0.0.1:5760 \
   --out udp:127.0.0.1:14551 \
   --out udp:127.0.0.1:14550 \
+  $QGC_OUT \
   --streamrate=-1 \
   --cmd="long SET_MESSAGE_INTERVAL 0 200000" \
   --daemon --non-interactive \

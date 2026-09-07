@@ -59,7 +59,7 @@
 #include <vector>
 
 #include "behaviortree_cpp/bt_factory.h"
-#include "behaviortree_cpp/loggers/bt_cout_logger.h"
+#include "crusader_bt/tree_view.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "std_msgs/msg/bool.hpp"
@@ -162,6 +162,9 @@ public:
     avoid_pub_ = create_publisher<std_msgs::msg::Bool>("/crsd/avoidance_enable", latched);
     autonomy_pub_ = create_publisher<std_msgs::msg::Bool>("/crsd/autonomy_active", 10);
     report_pub_ = create_publisher<std_msgs::msg::String>("/crsd/safe_passage_report", 10);
+    // The live tree picture, for anything that wants to draw it — a terminal,
+    // the ground station, a recording. Plain text, no escapes.
+    bt_status_pub_ = create_publisher<std_msgs::msg::String>("/crsd/bt_status", 10);
 
     status_sub_ = create_subscription<crusader_msgs::msg::FcuStatus>(
       "/crsd/fcu_status", 10,
@@ -437,16 +440,11 @@ private:
       bb->set("ctx", ctx_);
       BT::Tree tree = factory.createTreeFromFile(tree_file_, bb);
 
-      // Every node transition, on stdout, as it happens:
-      //   [NavigateTo] IDLE -> RUNNING
-      //   [NavigateTo] RUNNING -> SUCCESS
-      // This is BehaviorTree.CPP's own logger and it is the cheapest honest
-      // answer to "is the tree working". Groot2 draws it live instead, but only
-      // in the PRO build; this needs nothing and works over ssh.
-      std::unique_ptr<BT::StdCoutLogger> logger;
-      if (verbose_tree_) {
-        logger = std::make_unique<BT::StdCoutLogger>(tree);
-      }
+      // The whole tree with every node's status, reprinted only when something
+      // changes. See tree_view.hpp for why this rather than the transition log
+      // BT.CPP ships: a scrolling list of transitions cannot answer "where is
+      // it now and what has it already done" without replaying it in your head.
+      TreeView view(tree);
 
       RCLCPP_INFO(
         get_logger(), "GOAL tier=%u timeout=%.0fs approach=(%.7f, %.7f)",
@@ -484,6 +482,23 @@ private:
 
         refreshFreshness();
         st = tree.tickOnce();
+
+        if (verbose_tree_) {
+          const std::string frame = view.renderIfChanged();
+          if (!frame.empty()) {
+            RCLCPP_INFO(get_logger(), "tree @ %5.1fs\n%s", elapsed, frame.c_str());
+          }
+        }
+        // JSON every tick, whether or not it changed: a GUI wants the current
+        // picture when it asks, not the last time something happened to move.
+        // Structured rather than the rendered text, because a viewer that has
+        // to parse box-drawing characters back into a tree is a viewer that
+        // breaks the first time a node is renamed.
+        {
+          std_msgs::msg::String bs;
+          bs.data = view.json(elapsed);
+          bt_status_pub_->publish(bs);
+        }
 
         // The LED heartbeat, inside the loop on purpose: the mast light goes
         // GREEN because a mission is actually ticking, not because a node is
@@ -642,6 +657,7 @@ private:
   rclcpp_action::Server<SafePassage>::SharedPtr server_;
   rclcpp::Publisher<crusader_msgs::msg::GuidedSetpoint>::SharedPtr setpoint_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr task_pub_, report_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr bt_status_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr avoid_pub_, autonomy_pub_;
   rclcpp::Subscription<crusader_msgs::msg::FcuStatus>::SharedPtr status_sub_;
   rclcpp::Subscription<crusader_msgs::msg::LatLonHead>::SharedPtr pose_sub_;
