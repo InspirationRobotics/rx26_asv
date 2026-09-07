@@ -117,7 +117,12 @@ class BtRunner : public rclcpp::Node
 {
 public:
   BtRunner()
-  : rclcpp::Node("safe_passage_server")
+  // The node name MUST equal its section in crusader_params.yaml, or ROS hands
+  // it a different node's parameters and it comes up misconfigured while
+  // looking perfectly healthy. Named "safe_passage_server" once, which is the
+  // PYTHON server's section, so it advertised that node's
+  // action_name (/crsd/safe_passage_dwell) and nobody could find it.
+  : rclcpp::Node("bt_runner_node")
   {
     tree_file_ = declare_parameter<std::string>("tree_file", "");
     action_name_ = declare_parameter<std::string>("action_name", "/crsd/safe_passage");

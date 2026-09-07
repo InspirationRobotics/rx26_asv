@@ -26,6 +26,12 @@
 #include "crusader_bt/context.hpp"
 #include "crusader_bt/nav_math.hpp"
 
+// NOTE ON PORTS. BT::InputPort has two overloads: (name, description) and
+// (name, default_value, description). There is NO (name, default_value) form —
+// it binds to the first, fails to convert the default into a StringView, and
+// emits a template error long enough to bury what it is telling you. A port
+// with a default MUST also carry a description.
+
 namespace crusader_bt
 {
 namespace
@@ -293,10 +299,10 @@ public:
   {
     return {
       BT::InputPort<std::string>("anchor", "entry", "entry | exit"),
-      BT::InputPort<double>("radius", 6.0),
-      BT::InputPort<int>("points", 5),
+      BT::InputPort<double>("radius", 6.0, "orbit radius, metres"),
+      BT::InputPort<int>("points", 5, "waypoints around the circle"),
       BT::InputPort<std::string>("direction", "cw", "cw | ccw"),
-      BT::InputPort<double>("tolerance", 2.0)};
+      BT::InputPort<double>("tolerance", 2.0, "arrival radius, metres")};
   }
 
   BT::NodeStatus onStart() override

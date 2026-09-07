@@ -65,6 +65,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-humble-behaviortree-cpp \
         build-essential cmake git \
     && rm -rf /var/lib/apt/lists/*
+# ros-humble-behaviortree-cpp installs libbehaviortree_cpp.so into
+# lib/<arch>-linux-gnu/ while ament_cmake_export_libraries looks in lib/, so a
+# find_package(behaviortree_cpp) fails with "exports the library
+# 'behaviortree_cpp' which couldn't be found" and says nothing about paths.
+# Arch-generic so it is right on the Jetson (aarch64) and a laptop (x86_64).
+RUN ln -sf "/opt/ros/humble/lib/$(uname -m)-linux-gnu/libbehaviortree_cpp.so"            /opt/ros/humble/lib/libbehaviortree_cpp.so
+
 # behaviortree_cpp is 4.x from apt, which is what crusader_bt's XML declares
 # (BTCPP_format="4"). Note it is the CORE library only: behaviortree_ros2, the
 # package that provides RosActionNode, is NOT released for Humble. We do not
