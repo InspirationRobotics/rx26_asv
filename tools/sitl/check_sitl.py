@@ -87,12 +87,34 @@ def main():
     chk("can enter HOLD", set_mode("HOLD"))
     chk("can enter GUIDED", set_mode("GUIDED"))
 
-    m.mav.command_long_send(m.target_system, m.target_component,
-                            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-                            0, 1, 0, 0, 0, 0, 0, 0)
-    ack = m.recv_match(type="COMMAND_ACK", blocking=True, timeout=6)
-    chk("arms", ack is not None and ack.result == 0,
-        "result={}".format(ack.result if ack else "no ack"))
+    # RETRY rather than try once. SITL needs 30-60 s after launch for the EKF to
+    # settle, and arming before then returns MAV_RESULT_FAILED (4) with a
+    # STATUSTEXT nobody sees. A one-shot attempt therefore reports "the guided
+    # path is broken" when the truth is "you asked too early" — which is a far
+    # more expensive wrong answer than waiting.
+    armed, last, reason = False, None, ""
+    t0 = time.time()
+    while time.time() - t0 < 60.0 and not armed:
+        m.mav.command_long_send(m.target_system, m.target_component,
+                                mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                                0, 1, 0, 0, 0, 0, 0, 0)
+        end = time.time() + 3.0
+        while time.time() < end:
+            msg = m.recv_match(type=["COMMAND_ACK", "STATUSTEXT"], blocking=False)
+            if msg is None:
+                time.sleep(0.05)
+                continue
+            if msg.get_type() == "STATUSTEXT" and "rearm" in msg.text.lower():
+                reason = msg.text.strip()
+            elif msg.get_type() == "COMMAND_ACK":
+                if msg.command != mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM:
+                    continue
+                last = msg.result
+                armed = msg.result == 0
+                break
+    chk("arms", armed,
+        "result={}{}".format(last, "  " + reason if reason and not armed else "")
+        + ("  after {:.0f}s".format(time.time() - t0) if armed else ""))
 
     if a.quick:
         return report()

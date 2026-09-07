@@ -74,7 +74,10 @@ esac
 
 # Version check, loud. A SITL on a different release than the boat is worse than
 # no SITL: it answers questions about a vehicle nobody is flying.
-ver="$("$AP/build/sitl/bin/ardurover" --help 2>&1 | grep -oE 'ArduRover V[0-9.]+' | head -1 || true)"
+# From the binary's strings, NOT --help: --help prints usage only and never the
+# version, so grepping it silently yields an empty string and the check below
+# "fails" on every healthy build.
+ver="$(strings "$AP/build/sitl/bin/ardurover" 2>/dev/null | grep -oE 'ArduRover V[0-9.]+' | sort -u | head -1 || true)"
 echo "== $ver  (the boat runs ArduRover V4.6.3) =="
 [[ "$ver" == "ArduRover V4.6.3" ]] || echo "   WARNING: version differs from the boat."
 
