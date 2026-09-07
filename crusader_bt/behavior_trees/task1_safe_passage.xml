@@ -15,10 +15,11 @@
 
   WHAT ENDS THE TRANSIT IS ARRIVING AT THE EXIT, not running out of buoys.
   NearExit succeeds -> Inverter turns that into FAILURE -> the ReactiveSequence
-  halts the running leg and fails -> KeepRunningUntilFailure converts that into
-  SUCCESS. Ending on an empty candidate list instead would make one missed
-  detection stop the boat mid-field, and would make the task's actual objective
-  implicit. NextWaypoint's own FAILURE is kept only as a secondary way out.
+  halts the running leg and fails -> KeepRunningUntilFailure returns FAILURE ->
+  and the ForceSuccess around it turns that into "carry on".
+
+  Ending on an empty candidate list instead would make one missed detection stop
+  the boat mid-field, and would make the task's actual objective implicit. NextWaypoint's own FAILURE is kept only as a secondary way out.
 
   NearExit radius MUST stay larger than CircleBuoy radius (8 > 6), or transit
   would stop inside the orbit and the circle would start from the wrong place.
@@ -61,18 +62,28 @@
         <!-- Core Tier: a FULL circle of the ENTRY buoy, CLOCKWISE. -->
         <CircleBuoy anchor="entry" radius="6.0" points="5" direction="cw"/>
 
-        <!-- The gate count is unknown, so it is not in this file. -->
-        <KeepRunningUntilFailure name="transit">
-          <ReactiveSequence>
-            <Inverter>
-              <NearExit radius="8.0"/>
-            </Inverter>
-            <Sequence>
-              <NextWaypoint offset="4.0"/>
-              <NavigateTo target="waypoint" tolerance="2.5"/>
-            </Sequence>
-          </ReactiveSequence>
-        </KeepRunningUntilFailure>
+        <!-- The gate count is unknown, so it is not in this file.
+
+             THE ForceSuccess IS NOT DECORATION. KeepRunningUntilFailure returns
+             FAILURE when its child finally fails — verified in BT.CPP's own
+             source, decorators/keep_running_until_failure_node.h. It does NOT
+             convert that into SUCCESS. So the loop ending normally (NearExit
+             fires -> Inverter -> the ReactiveSequence fails) would fail the
+             whole mission and the boat would never circle the exit buoy. The
+             ForceSuccess is what turns "the loop finished" into "carry on". -->
+        <ForceSuccess>
+          <KeepRunningUntilFailure name="transit">
+            <ReactiveSequence>
+              <Inverter>
+                <NearExit radius="8.0"/>
+              </Inverter>
+              <Sequence>
+                <NextWaypoint offset="4.0"/>
+                <NavigateTo target="waypoint" tolerance="2.5"/>
+              </Sequence>
+            </ReactiveSequence>
+          </KeepRunningUntilFailure>
+        </ForceSuccess>
 
         <!-- Only earns its keep if transit ended without a resolved exit. -->
         <ReactiveFallback name="find_exit">
