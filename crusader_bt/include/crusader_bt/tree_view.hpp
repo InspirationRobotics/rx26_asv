@@ -136,10 +136,19 @@ private:
   static void jsonWalk(BT::TreeNode * node, int depth, std::string & out, bool & first)
   {
     if (node == nullptr) {return;}
-    const char * kind = "leaf";
+    // Four kinds, because a viewer should show what a node IS. BT.CPP reports
+    // CONDITION separately from ACTION, and the difference is real: a condition
+    // only answers a question, an action changes something.
+    const char * kind = "action";
     auto * ctrl = dynamic_cast<BT::ControlNode *>(node);
     auto * dec = dynamic_cast<BT::DecoratorNode *>(node);
-    if (ctrl) {kind = "control";} else if (dec) {kind = "decorator";}
+    if (ctrl) {
+      kind = "control";
+    } else if (dec) {
+      kind = "decorator";
+    } else if (node->type() == BT::NodeType::CONDITION) {
+      kind = "condition";
+    }
 
     if (!first) {out += ',';}
     first = false;

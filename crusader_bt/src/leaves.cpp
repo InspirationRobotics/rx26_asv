@@ -123,11 +123,11 @@ public:
 /// has an obvious home that is already ticked at the right rate.
 ///
 /// ALWAYS SUCCESS. See the file header.
-class ResolveBuoyStates : public CrusaderCondition
+class ResolveBuoyStates : public CrusaderSyncAction
 {
 public:
   ResolveBuoyStates(const std::string & n, const BT::NodeConfig & c)
-  : CrusaderCondition(n, c) {}
+  : CrusaderSyncAction(n, c) {}
   static BT::PortsList providedPorts() {return {};}
 
   BT::NodeStatus tick() override
@@ -151,11 +151,11 @@ private:
 /// buoys are detected or the mapped buoy state changes" — not 10 a second.
 ///
 /// ALWAYS SUCCESS. See the file header.
-class PublishSafePassageReport : public CrusaderCondition
+class PublishSafePassageReport : public CrusaderSyncAction
 {
 public:
   PublishSafePassageReport(const std::string & n, const BT::NodeConfig & c)
-  : CrusaderCondition(n, c) {}
+  : CrusaderSyncAction(n, c) {}
   static BT::PortsList providedPorts()
   {
     return {BT::InputPort<double>("min_period_s", 1.0, "floor between reports")};
@@ -183,11 +183,11 @@ private:
 /// Publishes the task token. This is not bookkeeping: the course activates its
 /// light beacons only once a system reports it is attempting the passage
 /// (handbook 3.4.11), so nothing on the water is detectable before this runs.
-class SetTask : public CrusaderCondition
+class SetTask : public CrusaderSyncAction
 {
 public:
   SetTask(const std::string & n, const BT::NodeConfig & c)
-  : CrusaderCondition(n, c) {}
+  : CrusaderSyncAction(n, c) {}
   static BT::PortsList providedPorts()
   {
     return {BT::InputPort<std::string>("token", "TASK_SAFE_PASSAGE", "an RxTask name")};
@@ -339,11 +339,11 @@ private:
 ///
 /// It is named for what it does rather than for what it stands in for. A leaf
 /// called "DetectBuoy" that invented a buoy would be a lie in the tree.
-class TargetAhead : public CrusaderCondition
+class TargetAhead : public CrusaderSyncAction
 {
 public:
   TargetAhead(const std::string & n, const BT::NodeConfig & c)
-  : CrusaderCondition(n, c) {}
+  : CrusaderSyncAction(n, c) {}
   static BT::PortsList providedPorts()
   {
     return {
@@ -521,11 +521,11 @@ public:
 /// loop's secondary exit. The PRIMARY exit is NearExit — arriving at the exit
 /// buoy, not running out of buoys. Ending the transit on an empty candidate
 /// list would make a single missed detection stop the boat mid-field.
-class NextWaypoint : public CrusaderCondition
+class NextWaypoint : public CrusaderSyncAction
 {
 public:
   NextWaypoint(const std::string & n, const BT::NodeConfig & c)
-  : CrusaderCondition(n, c) {}
+  : CrusaderSyncAction(n, c) {}
   static BT::PortsList providedPorts()
   {
     return {BT::InputPort<double>("offset", 4.0, "metres to clear the buoy by")};

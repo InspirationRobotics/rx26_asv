@@ -70,6 +70,8 @@ h1{font-size:19px;margin:0;font-weight:600;letter-spacing:-.01em}
 .RUNNING .nm{color:var(--run);font-weight:600}
 .ty{color:var(--dim);font-size:11.5px}
 .kind-control .nm{color:var(--accent)}
+.kind-condition .nm{color:#9db4c8;font-style:italic}
+.kind-condition .nm::before{content:'? ';opacity:.6}
 .legend{display:flex;gap:16px;color:var(--dim);font-size:12px;flex-wrap:wrap}
 .legend b{font-family:"IBM Plex Mono",monospace;font-size:10.5px;padding:2px 7px;
   border-radius:3px;font-weight:600}
@@ -89,6 +91,7 @@ h1{font-size:19px;margin:0;font-weight:600;letter-spacing:-.01em}
     <span><b style="background:var(--ok-bg);color:var(--ok)">SUCCESS</b> finished, not re-run</span>
     <span><b style="background:var(--fail-bg);color:var(--fail)">FAILURE</b> its parent decides what that means</span>
     <span><b style="background:#ffffff08;color:var(--idle)">IDLE</b> not reached yet</span>
+    <span style="color:#9db4c8;font-style:italic">? italic = a condition (asks, changes nothing)</span>
   </div>
 </div>
 <script>

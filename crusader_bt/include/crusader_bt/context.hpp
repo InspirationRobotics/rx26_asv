@@ -149,7 +149,32 @@ protected:
   }
 };
 
-/// Base for leaves that answer in one tick and have no side effects.
+/// Base for a leaf that DOES something but finishes within one tick.
+///
+/// The distinction from CrusaderCondition is not decoration. BT.CPP's
+/// SyncActionNode::executeTick THROWS if the leaf returns RUNNING, which is the
+/// right guard for a leaf that is supposed to be instantaneous, and the two
+/// report different NodeType — so Groot, and tools/bt_view.py, draw a thing that
+/// publishes a topic differently from a thing that answers a question.
+///
+/// If it publishes, writes a port, or changes anything: this one.
+/// If it only reads state and answers yes/no: CrusaderCondition.
+class CrusaderSyncAction : public BT::SyncActionNode
+{
+public:
+  CrusaderSyncAction(const std::string & name, const BT::NodeConfig & cfg)
+  : BT::SyncActionNode(name, cfg), ctx_(contextFrom(cfg, name)) {}
+
+protected:
+  ContextPtr ctx_;
+
+  rclcpp::Logger log() const
+  {
+    return ctx_->node ? ctx_->node->get_logger() : rclcpp::get_logger("crusader_bt");
+  }
+};
+
+/// Base for leaves that answer in one tick and have NO side effects.
 class CrusaderCondition : public BT::ConditionNode
 {
 public:
