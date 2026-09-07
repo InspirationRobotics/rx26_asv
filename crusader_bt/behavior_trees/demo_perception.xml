@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  demo_perception.xml — how perception tells an action where to go.
+
+  THE WHOLE POINT IS THE {goal} WIRE:
+
+      <TargetAhead  ... out="{goal}"/>     a leaf DECIDES where
+      <NavigateTo   target="port" goal="{goal}"/>     a leaf DRIVES there
+
+  The data flow is visible in the XML. Rewiring which leaf feeds which is an
+  edit here, not a recompile, and a reviewer can see what feeds what without
+  reading any C++.
+
+  TargetAhead stands in for a detector. A real one reads ctx->buoys, which the
+  runner fills from /crsd/world_targets, picks the target it cares about and
+  writes its position to the SAME port. Nothing else in the tree changes, and
+  that substitution is the reason this shape is worth having.
+
+  Each leg is wrapped so the tour continues even if one target cannot be
+  produced: TargetAhead FAILS rather than guessing when the heading is NaN, and
+  on this boat NaN heading is a real state, not a theoretical one.
+-->
+<root BTCPP_format="4" main_tree_to_execute="DemoPerception">
+  <BehaviorTree ID="DemoPerception">
+    <ReactiveSequence name="guard_band">
+      <IsAutonomous/>
+
+      <Sequence name="tour">
+        <SetTask token="TASK_NONE"/>
+
+        <!-- leg 1: something 60 m dead ahead -->
+        <Sequence name="leg_ahead">
+          <TargetAhead range="60.0" bearing="0.0" why="contact_ahead" out="{goal}"/>
+          <NavigateTo target="port" goal="{goal}" tolerance="5.0"/>
+        </Sequence>
+
+        <!-- leg 2: 50 m off the starboard bow -->
+        <Sequence name="leg_starboard">
+          <TargetAhead range="50.0" bearing="60.0" why="contact_stbd" out="{goal}"/>
+          <NavigateTo target="port" goal="{goal}" tolerance="5.0"/>
+        </Sequence>
+
+        <!-- leg 3: 50 m off the port bow -->
+        <Sequence name="leg_port">
+          <TargetAhead range="50.0" bearing="-60.0" why="contact_port" out="{goal}"/>
+          <NavigateTo target="port" goal="{goal}" tolerance="5.0"/>
+        </Sequence>
+
+        <NavigateTo target="home" tolerance="6.0"/>
+      </Sequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

@@ -223,7 +223,12 @@ public:
   {
     return {
       BT::InputPort<std::string>("target", "waypoint",
-                                 "waypoint | approach | exit | home | fix"),
+                                 "port | waypoint | approach | exit | home | fix"),
+      // THE PERCEPTION WIRE. With target="port" this reads a Waypoint written
+      // by an upstream compute leaf, so the XML shows where the goal came from:
+      //     <SomeDetector out="{goal}"/>
+      //     <NavigateTo target="port" goal="{goal}"/>
+      BT::InputPort<Waypoint>("goal", "a Waypoint from an upstream leaf"),
       BT::InputPort<double>("lat", 0.0, "with target=fix: latitude"),
       BT::InputPort<double>("lon", 0.0, "with target=fix: longitude"),
       BT::InputPort<double>("tolerance", 2.0, "arrival radius, metres")};
@@ -269,6 +274,20 @@ public:
 private:
   bool resolve(const std::string & which, Vec2 & out)
   {
+    if (which == "port") {
+      const auto w = getInput<Waypoint>("goal");
+      if (!w) {
+        RCLCPP_WARN(
+          log(), "NavigateTo target=port but no goal on the blackboard: %s",
+          w.error().c_str());
+        return false;
+      }
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      if (!ctx_->origin_set) {return false;}
+      why_ = w.value().why;
+      out = nav::toLocal({w.value().lat, w.value().lon}, ctx_->origin);
+      return true;
+    }
     std::lock_guard<std::mutex> lk(ctx_->mu);
     if (which == "waypoint") {
       if (!ctx_->have_waypoint) {return false;}
@@ -306,6 +325,66 @@ private:
   }
 
   Vec2 goal_;
+  std::string why_;
+};
+
+/// A stand-in for a detector: turns "something is 50 m off the bow to
+/// starboard" into a Waypoint on the blackboard.
+///
+/// THIS IS THE SHAPE EVERY PERCEPTION LEAF HAS. A real one would read
+/// ctx_->buoys (which the runner fills from /crsd/world_targets), pick the
+/// target it cares about and write its position. This one computes the position
+/// from a range and bearing relative to the boat, so the wire from a compute
+/// leaf to an action leaf can be exercised in SITL with no camera at all.
+///
+/// It is named for what it does rather than for what it stands in for. A leaf
+/// called "DetectBuoy" that invented a buoy would be a lie in the tree.
+class TargetAhead : public CrusaderCondition
+{
+public:
+  TargetAhead(const std::string & n, const BT::NodeConfig & c)
+  : CrusaderCondition(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<double>("range", 50.0, "metres from the boat"),
+      BT::InputPort<double>("bearing", 0.0, "degrees relative to the bow, cw+"),
+      BT::InputPort<std::string>("why", "target", "what this is, for the log"),
+      BT::OutputPort<Waypoint>("out", "where the next action should drive")};
+  }
+
+  BT::NodeStatus tick() override
+  {
+    const double range = getInput<double>("range").value_or(50.0);
+    const double rel = getInput<double>("bearing").value_or(0.0);
+    const std::string why = getInput<std::string>("why").value_or("target");
+
+    Waypoint w;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      if (!ctx_->pose_fresh || !ctx_->origin_set) {
+        RCLCPP_WARN(log(), "TargetAhead: no fresh pose");
+        return BT::NodeStatus::FAILURE;
+      }
+      // Relative to the BOW, so it needs the heading. NaN heading means we do
+      // not know which way we are pointing, and a bearing off an unknown datum
+      // is a guess -- refuse rather than steer somewhere plausible.
+      if (!std::isfinite(ctx_->heading_deg)) {
+        RCLCPP_WARN(log(), "TargetAhead: heading is NaN, refusing to guess");
+        return BT::NodeStatus::FAILURE;
+      }
+      const Vec2 dir = nav::headingVec(ctx_->heading_deg + rel);
+      const nav::LatLon ll = nav::toLatLon(ctx_->boat + dir * range, ctx_->origin);
+      w.lat = ll.lat;
+      w.lon = ll.lon;
+      w.why = why;
+    }
+    setOutput("out", w);
+    RCLCPP_INFO(
+      log(), "TargetAhead: %s at %.0f m brg %+.0f -> %.7f, %.7f",
+      w.why.c_str(), range, rel, w.lat, w.lon);
+    return BT::NodeStatus::SUCCESS;
+  }
 };
 
 /// Drives `points` waypoints once around a buoy. Core Tier: ENTRY clockwise
@@ -491,6 +570,7 @@ void registerCrusaderNodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<CircleBuoy>("CircleBuoy");
   factory.registerNodeType<HoldStation>("HoldStation");
   factory.registerNodeType<NextWaypoint>("NextWaypoint");
+  factory.registerNodeType<TargetAhead>("TargetAhead");
 }
 
 }  // namespace crusader_bt

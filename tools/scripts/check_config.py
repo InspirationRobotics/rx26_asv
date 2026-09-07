@@ -33,6 +33,7 @@ What it guards, and why each one is here:
 """
 import importlib.util
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -383,7 +384,10 @@ def check_packages():
 # ------------------------------------------------------- msg/action hygiene
 
 def check_interfaces():
-    """Things rosidl chokes on, in messages that otherwise look fine.
+    """Behaviour trees that will not load, and messages rosidl chokes on.
+
+    Behaviour-tree XML is checked here too: a tree that does not parse fails at
+    RUNTIME, when a goal arrives, which on the boat means at the dock.
 
     rosidl feeds every .msg/.action through an empy IDL template. A trailing
     backslash in a COMMENT makes that template fail to decode and the build dies
@@ -395,6 +399,20 @@ def check_interfaces():
     2026-09-05, on a shell command wrapped across two lines the way anyone would
     write it.
     """
+    # Behaviour trees are XML and get the XML rules, including the one that
+    # keeps biting: a double hyphen is ILLEGAL inside an <!-- comment -->. It
+    # has now broken a package.xml, a Dockerfile and a behaviour tree in this
+    # repo, each time with an error that names a line and not a cause.
+    for tree in sorted(REPO.glob("*/behavior_trees/*.xml")):
+        try:
+            ET.parse(tree)
+        except ET.ParseError as e:
+            fail(f"{tree.parent.parent.name}/{tree.name} parses",
+                 f"{e} — if this is inside a comment, a DOUBLE HYPHEN is "
+                 "illegal there; XML forbids it")
+        else:
+            ok(f"{tree.parent.parent.name}/{tree.name} parses")
+
     files = [f for pattern in ("*/msg/*.msg", "*/action/*.action", "*/srv/*.srv")
              for f in sorted(REPO.glob(pattern))]
     if not files:

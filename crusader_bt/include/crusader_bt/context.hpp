@@ -84,6 +84,32 @@ struct Context
 
 using ContextPtr = std::shared_ptr<Context>;
 
+/// A place to go, passed BETWEEN LEAVES on the blackboard.
+///
+/// This is the channel perception uses to tell an action where to drive. A
+/// compute leaf writes one to an output port, an action leaf reads it from an
+/// input port, and the XML shows the wire:
+///
+///     <NextWaypoint buoys="{buoys}" out="{goal}"/>
+///     <NavigateTo   goal="{goal}"/>
+///
+/// NO convertFromString SPECIALISATION IS NEEDED, and that is worth knowing
+/// because the fear of needing one is why the first version of this package
+/// smuggled every position through the Context struct instead. A specialisation
+/// is only required to parse a LITERAL out of the XML (goal="1.28;103.85"). A
+/// value that only ever travels between leaves as {ref} is moved as the real
+/// type and never touches a string.
+///
+/// `why` is carried so a log line, a feedback message or a viewer can say WHICH
+/// buoy this is and why we are steering there — a bare lat/lon in a log tells
+/// you where the boat went and nothing about what it thought it was doing.
+struct Waypoint
+{
+  double lat = 0.0;
+  double lon = 0.0;
+  std::string why;
+};
+
 /// Fetch the context from the blackboard, or throw with a message that names
 /// the cause. A leaf constructed without it is a wiring bug in the runner, and
 /// failing loudly at tree-load beats a null dereference on the water.
