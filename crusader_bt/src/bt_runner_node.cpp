@@ -25,11 +25,29 @@
 //   * the terminal state — a cancelled goal that is succeed()-ed reports success
 //     to the caller, and the caller carries on as though the mission worked.
 //
-// THREADING. The action server runs in a ReentrantCallbackGroup under a
-// MultiThreadedExecutor: without both, execute_callback blocks the executor that
-// would have to service the cancel, and the cancel is noticed only when the
-// mission ends by itself. Subscriptions write Context under its mutex; the tick
-// loop reads under the same one.
+// THREADING — and where the "does the poll loop block the callbacks?" worry
+// actually lands, because it lands in a different place than you would expect.
+//
+// IT IS NOT IN THE LEAVES. A leaf never loops and never blocks. CircleBuoy's
+// onStart() publishes one waypoint and returns RUNNING; its onRunning() does one
+// distance comparison and returns. The polling loop that a per-primitive action
+// server would each need is HOISTED OUT of the leaves into the single tick loop
+// below — one loop for the whole mission instead of one per primitive, which is
+// most of the reason the leaves are 40 lines each.
+//
+// IT IS HERE. The tick loop does sleep, so it runs on its OWN thread (worker_)
+// rather than on an executor thread, and cannot starve the subscriptions that
+// feed it or the cancel that has to interrupt it. The action server also sits in
+// a ReentrantCallbackGroup under a MultiThreadedExecutor so the cancel callback
+// can run while a goal is executing. Cancel is polled at the top of every tick,
+// so its worst-case latency is one tick — 100 ms at 10 Hz — not one leaf.
+//
+// worker_ is OWNED AND JOINED, never detached: a detached thread outlives the
+// node and keeps publishing through destroyed members, and the moment that
+// happens is Ctrl+C or `systemctl stop` mid-mission.
+//
+// Subscriptions write Context under its mutex; the tick loop reads under the
+// same one.
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -170,7 +188,18 @@ public:
         return rclcpp_action::CancelResponse::ACCEPT;
       },
       [this](const std::shared_ptr<GoalHandle> gh) {
-        std::thread{[this, gh] {execute(gh);}}.detach();
+        // The mission runs on its OWN thread, not an executor thread, so its
+        // tick loop cannot starve the subscriptions that feed it or the cancel
+        // callback that has to interrupt it.
+        //
+        // Held and JOINED, never detached. A detached thread keeps touching
+        // `this`, the publishers and the context after the node is destroyed —
+        // and the moment that happens is Ctrl+C or `systemctl stop` DURING a
+        // mission, which is exactly when someone is already having a bad day.
+        // The previous goal is always finished by the time a new one is
+        // accepted (busy_ gates that), so this join is instant.
+        if (worker_.joinable()) {worker_.join();}
+        worker_ = std::thread([this, gh] {execute(gh);});
       },
       rcl_action_server_get_default_options(), group_);
 
@@ -186,6 +215,8 @@ public:
         "will follow. That is the read-only posture, not a fault.");
     }
   }
+
+  ~BtRunner() override {shutdown();}
 
 private:
   // ------------------------------------------------------------ subscriptions
@@ -395,7 +426,7 @@ private:
       auto fb = std::make_shared<SafePassage::Feedback>();
       BT::NodeStatus st = BT::NodeStatus::RUNNING;
 
-      while (rclcpp::ok()) {
+      while (rclcpp::ok() && !stop_) {
         // Cancel first. A cancel that waits for anything is a cancel that does
         // not work.
         if (gh->is_canceling()) {
@@ -537,8 +568,19 @@ private:
     }
   }
 
+  /// Stop the mission thread and JOIN it before any member it touches is
+  /// destroyed. Without this, a Ctrl+C or `systemctl stop` mid-mission tears
+  /// the node down under a thread that is still publishing through it.
+  void shutdown()
+  {
+    stop_ = true;
+    if (worker_.joinable()) {worker_.join();}
+  }
+
   // ------------------------------------------------------------------ state
   ContextPtr ctx_;
+  std::thread worker_;
+  std::atomic<bool> stop_{false};
   std::string tree_file_, action_name_, task_token_;
   double tick_hz_ = 10.0, default_timeout_s_ = 600.0, mode_grace_s_ = 3.0;
   double stream_timeout_s_ = 1.0;
