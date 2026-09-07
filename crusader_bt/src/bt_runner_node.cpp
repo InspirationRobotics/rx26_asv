@@ -59,6 +59,7 @@
 #include <vector>
 
 #include "behaviortree_cpp/bt_factory.h"
+#include "behaviortree_cpp/loggers/bt_cout_logger.h"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "std_msgs/msg/bool.hpp"
@@ -130,6 +131,7 @@ public:
     default_timeout_s_ = declare_parameter<double>("default_timeout_s", 600.0);
     mode_grace_s_ = declare_parameter<double>("mode_grace_s", 3.0);
     stream_timeout_s_ = declare_parameter<double>("stream_timeout_s", 1.0);
+    verbose_tree_ = declare_parameter<bool>("verbose_tree", true);
     task_token_ = declare_parameter<std::string>("task_token", "TASK_SAFE_PASSAGE");
     auto modes = declare_parameter<std::vector<std::string>>(
       "autonomous_modes", std::vector<std::string>{"GUIDED", "AUTO", "LOITER", "RTL"});
@@ -406,12 +408,24 @@ private:
     result->exit_longitude = std::nan("");
 
     consumed_.clear();
+    // BEFORE reading pose_fresh below. It is computed by refreshFreshness(),
+    // which otherwise only runs inside the tick loop — so at goal start it
+    // still holds whatever the last mission left, which on a freshly started
+    // runner is false. That made have_home false for the whole mission and
+    // NavigateTo target="home" fail at the very end of a tour that had
+    // otherwise worked. Found in SITL 2026-09-06.
+    refreshFreshness();
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       ctx_->approach_lat = goal->approach_latitude;
       ctx_->approach_lon = goal->approach_longitude;
       ctx_->has_approach = goal->approach_latitude != 0.0 || goal->approach_longitude != 0.0;
       ctx_->have_waypoint = false;
+      // "Home" is where THIS attempt started, captured once. Not the autopilot's
+      // HOME, which is wherever it was armed and is usually somewhere else after
+      // the boat has been driven out manually.
+      ctx_->home = ctx_->boat;
+      ctx_->have_home = ctx_->pose_fresh;
     }
 
     uint8_t outcome = SafePassage::Result::OUTCOME_FAULT;
@@ -422,6 +436,17 @@ private:
       auto bb = BT::Blackboard::create();
       bb->set("ctx", ctx_);
       BT::Tree tree = factory.createTreeFromFile(tree_file_, bb);
+
+      // Every node transition, on stdout, as it happens:
+      //   [NavigateTo] IDLE -> RUNNING
+      //   [NavigateTo] RUNNING -> SUCCESS
+      // This is BehaviorTree.CPP's own logger and it is the cheapest honest
+      // answer to "is the tree working". Groot2 draws it live instead, but only
+      // in the PRO build; this needs nothing and works over ssh.
+      std::unique_ptr<BT::StdCoutLogger> logger;
+      if (verbose_tree_) {
+        logger = std::make_unique<BT::StdCoutLogger>(tree);
+      }
 
       RCLCPP_INFO(
         get_logger(), "GOAL tier=%u timeout=%.0fs approach=(%.7f, %.7f)",
@@ -472,7 +497,12 @@ private:
         if (st != BT::NodeStatus::RUNNING) {
           if (st == BT::NodeStatus::SUCCESS) {
             outcome = SafePassage::Result::OUTCOME_SUCCESS;
-            detail = "entry circled, field transited, exit circled";
+            // Says what happened, not what a Task 1 run WOULD have done. The
+            // runner ticks whatever tree_file names — the demo tour reported
+            // "entry circled, field transited, exit circled" for a mission that
+            // did none of those, which is the kind of confident-and-wrong
+            // report that costs an hour later.
+            detail = "tree completed: " + treeName();
           } else {
             std::lock_guard<std::mutex> lk(ctx_->mu);
             if (!ctx_->autonomous) {
@@ -481,8 +511,8 @@ private:
                 "control; not fighting for it";
             } else {
               outcome = SafePassage::Result::OUTCOME_NO_ENTRY;
-              detail = "the tree failed; most likely the entry or exit buoy "
-                "never resolved";
+              detail = "tree " + treeName() + " returned FAILURE — see the "
+                "node transitions in the log for which leaf did it";
             }
           }
           break;
@@ -573,6 +603,16 @@ private:
     }
   }
 
+  /// The tree file's basename, for result messages that name what actually ran.
+  std::string treeName() const
+  {
+    const auto slash = tree_file_.find_last_of('/');
+    std::string n = slash == std::string::npos ? tree_file_
+      : tree_file_.substr(slash + 1);
+    const auto dot = n.find_last_of('.');
+    return dot == std::string::npos ? n : n.substr(0, dot);
+  }
+
   /// Stop the mission thread and JOIN it before any member it touches is
   /// destroyed. Without this, a Ctrl+C or `systemctl stop` mid-mission tears
   /// the node down under a thread that is still publishing through it.
@@ -589,6 +629,7 @@ private:
   std::string tree_file_, action_name_, task_token_;
   double tick_hz_ = 10.0, default_timeout_s_ = 600.0, mode_grace_s_ = 3.0;
   double stream_timeout_s_ = 1.0;
+  bool verbose_tree_ = true;
   std::set<std::string> auto_modes_;
   std::set<int> consumed_;
   std::atomic<bool> busy_{false};

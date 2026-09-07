@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  demo_waypoints.xml — the whole mission shape, with NO perception at all.
+
+  Out to two waypoints, a full circle round a fixed point, then home. Every
+  structural element the real Task 1 tree uses is here — the reactive guard
+  band, a memory sequence, NavigateTo, CircleBuoy, the runner's timeout and
+  cancel — but nothing needs a buoy, a camera or a LiDAR. So it runs against
+  bare SITL, and if it works the plumbing works.
+
+  Coordinates are LITERAL (target="fix"), which is why this tree needs the
+  lat/lon ports. They sit around 1.2818 N, 103.8557 E — the SITL home in
+  start_sitl.sh. Change them together with SITL_HOME or the boat will set off
+  for Singapore from wherever it actually is.
+
+  WHAT IS DELIBERATELY STILL HERE: IsAutonomous at the top. Even a demo must
+  stop when the pilot takes the mode away, and having it in every tree means
+  nobody has to remember to add it.
+-->
+<root BTCPP_format="4" main_tree_to_execute="DemoWaypoints">
+  <BehaviorTree ID="DemoWaypoints">
+    <ReactiveSequence name="guard_band">
+
+      <IsAutonomous/>
+
+      <Sequence name="tour">
+        <SetTask token="TASK_NONE"/>
+
+        <NavigateTo target="fix" lat="1.2824000" lon="103.8557000" tolerance="4.0"/>
+        <NavigateTo target="fix" lat="1.2824000" lon="103.8563000" tolerance="4.0"/>
+
+        <!-- A full circle, clockwise, the way Core Tier wants the ENTRY buoy
+             circled. 8 waypoints so the track reads as a circle in QGC rather
+             than a pentagon. -->
+        <CircleBuoy anchor="fix" lat="1.2827000" lon="103.8560000"
+                    radius="20.0" points="8" direction="cw" tolerance="4.0"/>
+
+        <NavigateTo target="home" tolerance="5.0"/>
+      </Sequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

@@ -61,6 +61,12 @@ struct Context
   nav::Vec2 entry;
   nav::Vec2 exitp;                            ///< `exit` is a libc function
 
+  /// Where the boat was when the goal was accepted. "Go home" in a mission
+  /// means "back to where this attempt started", not the autopilot's HOME —
+  /// those differ whenever the boat was driven out manually first.
+  nav::Vec2 home;
+  bool have_home = false;
+
   // ---- written by NextWaypoint, read by NavigateTo ----
   nav::Vec2 waypoint;
   bool have_waypoint = false;

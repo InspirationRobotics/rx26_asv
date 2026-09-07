@@ -222,7 +222,10 @@ public:
   static BT::PortsList providedPorts()
   {
     return {
-      BT::InputPort<std::string>("target", "waypoint", "waypoint | approach | exit"),
+      BT::InputPort<std::string>("target", "waypoint",
+                                 "waypoint | approach | exit | home | fix"),
+      BT::InputPort<double>("lat", 0.0, "with target=fix: latitude"),
+      BT::InputPort<double>("lon", 0.0, "with target=fix: longitude"),
       BT::InputPort<double>("tolerance", 2.0, "arrival radius, metres")};
   }
 
@@ -282,6 +285,23 @@ private:
       out = nav::toLocal({ctx_->approach_lat, ctx_->approach_lon}, ctx_->origin);
       return true;
     }
+    if (which == "home") {
+      if (!ctx_->have_home) {return false;}
+      out = ctx_->home;
+      return true;
+    }
+    if (which == "fix") {
+      // Literal coordinates from the XML. This is what lets a tree be written
+      // and driven with no perception at all -- the whole point of the
+      // waypoint-tour demo, which exercises every phase transition the real
+      // mission uses without needing a single buoy.
+      if (!ctx_->origin_set) {return false;}
+      const auto la = getInput<double>("lat");
+      const auto lo = getInput<double>("lon");
+      if (!la || !lo) {return false;}
+      out = nav::toLocal({la.value(), lo.value()}, ctx_->origin);
+      return true;
+    }
     return false;
   }
 
@@ -298,7 +318,9 @@ public:
   static BT::PortsList providedPorts()
   {
     return {
-      BT::InputPort<std::string>("anchor", "entry", "entry | exit"),
+      BT::InputPort<std::string>("anchor", "entry", "entry | exit | fix"),
+      BT::InputPort<double>("lat", 0.0, "with anchor=fix: latitude"),
+      BT::InputPort<double>("lon", 0.0, "with anchor=fix: longitude"),
       BT::InputPort<double>("radius", 6.0, "orbit radius, metres"),
       BT::InputPort<int>("points", 5, "waypoints around the circle"),
       BT::InputPort<std::string>("direction", "cw", "cw | ccw"),
@@ -315,12 +337,26 @@ public:
     Vec2 a, from;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
-      const bool have = (anchor == "exit") ? ctx_->have_exit : ctx_->have_entry;
-      if (!have || !ctx_->pose_fresh) {
-        RCLCPP_WARN(log(), "CircleBuoy: %s buoy or pose not available", anchor.c_str());
+      if (!ctx_->pose_fresh || !ctx_->origin_set) {
+        RCLCPP_WARN(log(), "CircleBuoy: no fresh pose");
         return BT::NodeStatus::FAILURE;
       }
-      a = (anchor == "exit") ? ctx_->exitp : ctx_->entry;
+      if (anchor == "fix") {
+        const auto la = getInput<double>("lat");
+        const auto lo = getInput<double>("lon");
+        if (!la || !lo) {
+          RCLCPP_WARN(log(), "CircleBuoy: anchor=fix needs lat and lon");
+          return BT::NodeStatus::FAILURE;
+        }
+        a = nav::toLocal({la.value(), lo.value()}, ctx_->origin);
+      } else {
+        const bool have = (anchor == "exit") ? ctx_->have_exit : ctx_->have_entry;
+        if (!have) {
+          RCLCPP_WARN(log(), "CircleBuoy: %s buoy not available", anchor.c_str());
+          return BT::NodeStatus::FAILURE;
+        }
+        a = (anchor == "exit") ? ctx_->exitp : ctx_->entry;
+      }
       from = ctx_->boat;
     }
     ring_ = nav::orbit(a, from, radius, points, cw);
