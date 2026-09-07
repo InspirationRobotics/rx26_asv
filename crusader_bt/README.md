@@ -66,6 +66,25 @@ The two "always SUCCESS" contracts are load-bearing. They sit in the reactive
 guard band that is re-ticked ten times a second, and a FAILURE there propagates
 to the root and ends the mission.
 
+## Subtrees need `_autoremap="true"`
+
+A `<SubTree>` gets its **own blackboard** and does not inherit the parent's
+entries. Every leaf here reads the shared `Context` from the blackboard key
+`ctx`, so without remapping, every leaf inside a subtree throws at tree-load:
+
+    tree raised: IsAutonomous: no 'ctx' on the blackboard
+
+Tested both ways against BT.CPP 4.9 on 2026-09-07:
+
+| | |
+|---|---|
+| `<SubTree ID="Leg"/>` | `OUTCOME_FAULT`, no 'ctx' on the blackboard |
+| `<SubTree ID="Leg" _autoremap="true"/>` | runs |
+
+This matters the moment the run-level tree wraps each mission as a subtree,
+which is the plan. The error message in `context.hpp` names the fix, because
+this is not a thing anyone guesses.
+
 ## Read-only posture
 
 `publish_setpoints: false` (the default) means the runner **cannot move the

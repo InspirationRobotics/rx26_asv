@@ -92,8 +92,14 @@ inline ContextPtr contextFrom(const BT::NodeConfig & cfg, const std::string & wh
   ContextPtr ctx;
   if (!cfg.blackboard || !cfg.blackboard->get("ctx", ctx) || !ctx) {
     throw BT::RuntimeError(
-      who + ": no 'ctx' on the blackboard. The runner must set it before "
-      "creating the tree.");
+      who + ": no 'ctx' on the blackboard. "
+      "If this node sits inside a <SubTree>, that is the cause: a subtree gets "
+      "its OWN blackboard and does not inherit the parent's entries. Add "
+      "_autoremap=\"true\" to the SubTree tag, e.g. "
+      "<SubTree ID=\"Whatever\" _autoremap=\"true\"/>. "
+      "Verified against BT.CPP 4.9 on 2026-09-07: without it every leaf in the "
+      "subtree throws this at tree-load; with it the subtree runs. "
+      "Otherwise the runner failed to set it before creating the tree.");
   }
   return ctx;
 }
