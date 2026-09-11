@@ -70,6 +70,7 @@ makes a dead MAVProxy indistinguishable from a healthy one, which silently
 disables rc_heartbeat_watchdog (both its RC-loss and its gateway-down paths).
 Silence must stay silent.
 """
+import os
 import threading
 import time
 
@@ -87,6 +88,25 @@ from crusader_common.drop_latch import DropLatch
 from crusader_common.node_main import run_node
 from crusader_common.param_utils import declare_from_config
 from crusader_common.stream_cache import StreamCache
+
+# MAVLink 2 is REQUIRED, and must be selected before pymavlink is first
+# imported anywhere in this process: mavutil binds its dialect module at
+# import time, and tests only for the PRESENCE of this variable, not its
+# value. The v1.0 dialect has no OBSTACLE_DISTANCE at all - msgid 330 is
+# above v1's 255 ceiling - so on v1 the proximity TX path does not fail at
+# startup. It fails on the FIRST crsd/obstacle_distance message and takes
+# the whole FCU gateway down with it, which is how a LiDAR feature became a
+# total telemetry and arming outage on 2026-09-05.
+os.environ["MAVLINK20"] = "1"
+
+# Every MAVLink sender this node uses, verified once against the dialect we
+# actually got (see _require_senders). Keep in step with the *_send calls.
+REQUIRED_SENDERS = (
+    "rc_channels_override_send",
+    "set_position_target_global_int_send",
+    "obstacle_distance_send",
+    "command_long_send",
+)
 
 # All bridge params are SAFETY CONFIG -> read_only: `ros2 param set` is
 # rejected; the change path is config/crusader_params.yaml + node restart.
@@ -219,6 +239,7 @@ class TelemetryBridge(Node):
         from pymavlink import mavutil
         self._mavutil = mavutil
         self.conn = mavutil.mavlink_connection(endpoint)
+        self._require_senders()
         self.get_logger().info(f"waiting for heartbeat on {endpoint} ...")
 
         self._stop = threading.Event()          # deterministic teardown
@@ -230,6 +251,28 @@ class TelemetryBridge(Node):
         self.get_logger().info(
             f"autonomy-drop: ch{self.latch.channel} thr={self.latch.threshold} "
             f"invert={self.latch.invert} — overrides BLOCKED until safe RC seen")
+
+    def _require_senders(self):
+        """Abort at STARTUP if the dialect cannot send what this node sends.
+
+        Raises:
+            RuntimeError: if any name in REQUIRED_SENDERS is missing from the
+                connection's MAVLink object.
+
+        A missing sender means MAVLINK20 was not in effect when pymavlink was
+        first imported - something imported it ahead of this module. Checked
+        here rather than left to the call site because the call site is a
+        subscriber callback: the failure would otherwise surface a second
+        after a clean-looking start, as an AttributeError with no hint that
+        the dialect is the cause.
+        """
+        missing = [n for n in REQUIRED_SENDERS
+                   if not hasattr(self.conn.mav, n)]
+        if missing:
+            raise RuntimeError(
+                f"pymavlink dialect is {self._mavutil.mavlink.__name__}, which "
+                f"cannot send: {', '.join(missing)}. MAVLINK20 was not set "
+                f"before pymavlink was first imported in this process.")
 
     # ---------- MAVLink RX ----------
 
