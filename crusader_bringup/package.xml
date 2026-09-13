@@ -36,6 +36,11 @@
   <!-- The behaviour-tree runner and its leaves. Same reason as the rest:
        a package nothing depends on is silently not built. -->
   <exec_depend>crusader_bt</exec_depend>
+  <!-- The UAV link. Not in core.launch.py either: it is only useful above Core
+       tier, and nothing has carried an RXL frame over a real radio yet. Listed
+       for the same reason as the rest, because a package nothing depends on is
+       silently not built. -->
+  <exec_depend>crusader_link</exec_depend>
   <exec_depend>ros2launch</exec_depend>
 
   <export>

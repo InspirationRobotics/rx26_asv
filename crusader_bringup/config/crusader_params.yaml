@@ -379,6 +379,49 @@ target_tracker:
     cam_pitch_deg: 0.0                     # [RO] mount tilt, + = aimed DOWN.
                                            #      ASSUMED, not bench-confirmed.
     # -- fusion gates [DYN] --
+    use_lidar: false                       # [DYN] FUSE LIDAR CLUSTERS AT ALL.
+                                           #       false = camera-only: clusters
+                                           #       are still subscribed and
+                                           #       still counted in the health
+                                           #       topic, then discarded before
+                                           #       fusion. Nothing anonymous can
+                                           #       reach the map, so every track
+                                           #       is a camera detection.
+                                           #
+                                           #       Set false 2026-09-09. An
+                                           #       unlabelled cluster means
+                                           #       different things in different
+                                           #       water: on open water it is
+                                           #       the object you wanted; in a
+                                           #       pool or alongside a dock it
+                                           #       is the wall. The wall
+                                           #       clusters cleanly, arrives
+                                           #       with no label, survives
+                                           #       track_unlabeled, clears
+                                           #       confirm_hits in three
+                                           #       sightings, and with
+                                           #       track_timeout_s at 0 never
+                                           #       leaves the map. See r_max
+                                           #       above for the measurement:
+                                           #       100+ permanent tracks at
+                                           #       15-28 m, all of them the room.
+                                           #
+                                           #       ON OPEN WATER SET IT TRUE,
+                                           #       with lidar_cluster_node.r_max
+                                           #       back at 25-40. Camera-only
+                                           #       range is stereo: ~6%
+                                           #       systematic plus ~4% random,
+                                           #       so a buoy at 25 m sits ~1.5 m
+                                           #       beyond truth and wanders by a
+                                           #       metre. The LiDAR is what
+                                           #       turns that into centimetres.
+                                           #
+                                           #       The five gates below are
+                                           #       INERT while this is false.
+                                           #       [DYN] rather than [RO]: unlike
+                                           #       the extrinsic, flipping it
+                                           #       invalidates nothing already
+                                           #       on the map.
     fuse_bearing_deg: 6.0                  # [DYN] camera/LiDAR bearing agreement.
                                            #       Stays wide for the mount
                                            #       ANGLES, which are assumed, not
@@ -401,6 +444,9 @@ target_tracker:
     track_unlabeled: true                  # [RO] keep LiDAR-only clusters. An
                                            #      unnamed obstacle is still an
                                            #      obstacle (package README).
+                                           #      INERT while use_lidar is
+                                           #      false — there are no
+                                           #      LiDAR-only sightings to keep.
     # -- tracking gates [DYN] --
     assoc_radius_m: 3.0                    # [DYN] world-frame association radius.
                                            #       The single most consequential
@@ -451,6 +497,27 @@ ground_station:
     bind_host: "0.0.0.0"                   # [RO] must NOT be 127.0.0.1 or the
                                            #      laptop cannot reach it
     targets_topic: "crsd/world_targets"    # [RO] = target_tracker.targets_topic
+    clusters_topic: "crsd/lidar_clusters"  # [RO] = lidar_cluster_node.clusters_topic.
+                                           #      Drawn on the map as the RAW
+                                           #      perception input, beside the
+                                           #      tracks built from it. Sent only
+                                           #      when the page asks for the
+                                           #      layer — see obstacle_topic.
+    obstacle_topic: "crsd/obstacle_distance"  # [RO] = proximity_bridge.output_topic.
+                                           #      The 72 sectors EXACTLY as
+                                           #      telemetry_bridge forwards them
+                                           #      to the autopilot, so the map
+                                           #      can be held against QGC's PRX1
+                                           #      view. If those two disagree,
+                                           #      the fault is between this node
+                                           #      and the FCU; if they agree and
+                                           #      the clusters disagree with
+                                           #      both, it is proximity_bridge.
+    clusters_timeout_s: 2.0                # [RO] stale -> the layer greys out.
+                                           #      Longer than pose: the LiDAR
+                                           #      window is ~0.5 s and a 1 s
+                                           #      budget would flap.
+    obstacle_timeout_s: 2.0                # [RO] proximity_bridge sends at 5 Hz
     tools_dir: "/root/robotx_ws/src/rx26_asv/tools"   # [RO] where the viewer
                                            #      scripts live INSIDE the asv
                                            #      container. Wrong path = the
@@ -905,3 +972,49 @@ bt_runner_node:
                                             #      what the boat obeys, shows on
                                             #      the mast and reports to
                                             #      RoboCommand stay one fact.
+
+# ---------------------------------------------------------------------------
+# rxl_link_node — the boat's end of the UAV link.
+#
+# Speaks MAVLink, to the RADIO, never to the Pixhawk. Different endpoint,
+# different dialect, and a message set with no command in it: it cannot arm,
+# set a mode, or move the boat. telemetry_bridge stays the only path to the
+# autopilot and the two never share a socket.
+#
+# NOT in core.launch.py. It is only useful above Core tier, and nothing here has
+# carried a frame over a real radio yet — only UDP loopback against the bench.
+rxl_link_node:
+  ros__parameters:
+    rxl_endpoint: "udpin:127.0.0.1:14555"   # [RO] BIND and listen. NOT "udp:",
+                                            #      which pymavlink resolves to an
+                                            #      outbound client that connects
+                                            #      nowhere and receives nothing,
+                                            #      silently.
+                                            #      14555 and not 14551: that one
+                                            #      is telemetry_bridge's, and a
+                                            #      udpin bind STEALS datagrams —
+                                            #      the displaced consumer sees
+                                            #      silence, not an error. 14550
+                                            #      stays free for ad-hoc tooling
+                                            #      and SITL's rover MAVProxy
+                                            #      fans out to 14552.
+    source_system: 42                       # [RO] the boat's MAVLink system id on
+                                            #      the MESH, not on the autopilot
+                                            #      link. Must differ from the
+                                            #      aircraft's or an inspector
+                                            #      files both vehicles' traffic
+                                            #      under one tree.
+    plan_topic: "crsd/passage_plan"         # [RO] PassagePlan out, ON ARRIVAL.
+                                            #      Never resampled: a timer that
+                                            #      republished the last plan would
+                                            #      defeat the staleness check
+                                            #      downstream, and the boat would
+                                            #      keep driving a passage nobody
+                                            #      can still confirm.
+    gate_topic: "crsd/next_gate"            # [RO] GatePair out, on arrival.
+    gate_reached_topic: "crsd/gate_reached" # [RO] std_msgs/UInt8 IN. The ONLY
+                                            #      thing the boat transmits on
+                                            #      this link.
+    quiet_warn_s: 15.0                      # [DYN] say so once when the link goes
+                                            #       quiet. Warns; publishes
+                                            #       nothing either way.

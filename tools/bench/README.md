@@ -37,6 +37,8 @@ as the boat swings past it, is a tracker that works.
 | `--no-camera` | LiDAR only — every track goes anonymous (empty label) |
 | `--no-lidar` | camera only — ranges carry the stereo bias, targets sit beyond truth and wander. Nothing is dropped; that is the package invariant |
 | `--sim-pose` | invent the **vessel** too: a boat circling the field, publishing `/crsd/pose` itself. Desk mode, for a laptop with no boat. **Do not use it while the core stack is up** |
+| `--field task1` | lay out the handbook 3.3.2 Safe Passage field instead of the default mixed one: ten buoys, one flashing-blue ENTRY at 20 m, three RED to starboard, three GREEN to port, two unlit BLACK, one steady-blue EXIT at 92 m. This is the field `task1_safe_passage.xml` expects — the default `tracker` field has no ENTRY or EXIT, so `EntryResolved` never fires and that tree stalls at `SetTask` |
+| `--gui` | place the field by hand in a browser on **:8086** instead of using a table. Starts from empty water. Click to place, drag to move, Delete to remove; the field reaches the sensor synthesis live. `--gui` and `--field` together is an **error**, not a silent precedence rule |
 
 `--chop` and `--drop-pose-after` apply only under `--sim-pose` and the script **errors**
 rather than ignoring them — a `--chop` run that quietly did nothing because the real
@@ -48,6 +50,33 @@ Under `--sim-pose` the boat circles rather than running straight, because a stra
 past a buoy never tests the two things most likely to be wrong — whether a track survives
 leaving the field of view, and whether it is still *one* track when it comes back into view
 from a different bearing. On the real boat you get that by driving a loop.
+
+### `--gui` — the pool mode
+
+A table sized for open water does not fit in the water you actually have. The Safe Passage
+field is 92 m from anchor to EXIT; a backyard pool is under 10 m, and `task1_safe_passage.xml`
+carries `CircleBuoy radius="6.0"` and `NearExit radius="8.0"` — an orbit wider than the pool
+and an exit radius larger than all of it, so `Inverter(NearExit)` fails on the first tick and
+the transit loop never runs. Sizing a field by eye against the water in front of you is the
+whole point of the GUI.
+
+The page works in **east/north metres from the anchor**, north up — not the `(right, ahead)`
+form the `FIELDS` tables use. That makes it a map rather than a bow-relative view, so a buoy
+stays put on screen while the boat swings, which is the only way to tell a tracker bug from a
+heading bug. Lat/lon in the table is computed **server-side** on purpose: `geo.py` owns
+`M_PER_DEG` and warns against re-deriving it, and a copy of that constant in JavaScript is
+exactly the drift it warns about.
+
+Nothing can be placed until a fix with a **resolved heading** anchors the field — the same
+gate `_on_pose` already applies, and the status line says how many fixes were dropped for
+unresolved GPS yaw so a pool with poor sky view is diagnosable rather than just silent. The
+boat marker **disappears** when its pose goes stale rather than freezing at its last position:
+a frozen marker reads as a stationary boat, which is the one failure this bench must not
+imitate.
+
+`field_gui.py` holds the server and the page and nothing else. The bench keeps ownership of
+the field, the anchor and the sensor synthesis, so the GUI cannot invent a buoy the sensor
+model would not have produced — the failure a second copy of the field would introduce.
 
 **What it cannot prove:** it builds detections with `geo.world_to_body_ypr`, the exact
 transpose of the transform the tracker runs, so a sign error shared by both cancels and the

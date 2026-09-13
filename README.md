@@ -31,9 +31,9 @@ and run in the `asv` container (`--packages-up-to crusader_bringup`).
 | [`crusader_common`](crusader_common/README.md) | Shared plumbing: params loader, node lifecycle, stream cache, drop latch, geodesy. No nodes | library |
 | [`crusader_fcu`](crusader_fcu/README.md) | `telemetry_bridge` — the only thing that speaks MAVLink. Localization source *and* Movement actuator | **field** |
 | [`crusader_perception`](crusader_perception/README.md) | Owns the OAK-D and detects in it: `oakd_publisher` → raw frames; `buoy_detector` → `oak/detections` in `camera_link`. Not launched — the two contend for the camera | 2 nodes |
-| [`crusader_world_model`](crusader_world_model/README.md) | `target_tracker` → camera+LiDAR fusion and earth-anchored target tracks on `crsd/world_targets`. Sensor-agnostic, driven off-boat by `tools/bench/bench_world_model.py`. Occupancy grid still unwritten | 1 node |
+| [`crusader_world_model`](crusader_world_model/README.md) | `target_tracker` → earth-anchored target tracks on `crsd/world_targets`. **Camera-only by default** (`use_lidar: false`); LiDAR fusion is a switch, on for open water. Sensor-agnostic, driven off-boat by `tools/bench/bench_world_model.py`. Occupancy grid still unwritten | 1 node |
 | [`crusader_behavior`](crusader_behavior/README.md) | `safety/` RC-loss force-disarm watchdog; `indicator/` LED status stack | **field** |
-| [`crusader_groundstation`](crusader_groundstation/README.md) | `ground_station` — one web page on `:8090`: node control, telemetry, the camera and LiDAR viewers, the map, and host power. The one package allowed to *know about* every other while importing none | 1 node |
+| [`crusader_groundstation`](crusader_groundstation/README.md) | `ground_station` — one web page on `:8090`: node control, telemetry, the camera and LiDAR viewers, the map, live parameter tuning, and host power. The one package allowed to *know about* every other while importing none | 1 node |
 | [`crusader_bringup`](crusader_bringup/README.md) | Launch files + the params YAML. Ships no code; build entry point | — |
 
 Cognition (missions, mission planner, RoboCommand interface) has no package yet — its

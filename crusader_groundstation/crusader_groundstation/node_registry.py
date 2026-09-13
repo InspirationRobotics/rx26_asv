@@ -96,11 +96,20 @@ REGISTRY = (
     NodeSpec("lidar_cluster_node", "lidar_cluster_node", "crusader_perception",
              "lidar_cluster_node", "perception",
              note="consumes the livox container's cloud"),
+    # In core.launch.py since "Put the proximity chain in core.launch.py", but
+    # it was never listed here — so the Nodes tab could not say whether the
+    # autopilot was being fed obstacles at all. The map's proximity layer draws
+    # what this node publishes, and a layer that is empty because the producer
+    # is down must be distinguishable from one that is empty because the water
+    # is clear.
+    NodeSpec("proximity_bridge", "proximity_bridge", "crusader_perception",
+             "proximity_bridge", "perception",
+             note="clusters -> OBSTACLE_DISTANCE for the autopilot (PRX1)"),
 
     # ---- world model ----
     NodeSpec("target_tracker", "target_tracker", "crusader_world_model",
              "target_tracker", "world",
-             note="camera + LiDAR -> earth-anchored targets"),
+             note="camera -> earth-anchored targets; use_lidar adds the LiDAR"),
 
     # ---- viewers: tools/ scripts, not ROS entry points ----
     NodeSpec("oak_view", "oak_view", "tools", "oak_view.py", "viewers",
@@ -124,6 +133,9 @@ PROFILES = {
                "buoy_detector", "lidar_cluster_node", "target_tracker")),
     "bench": ("Bench profile",
               ("telemetry_bridge", "lidar_cluster_node", "target_tracker")),
+    "avoidance": ("Avoidance check",
+                  ("telemetry_bridge", "lidar_cluster_node",
+                   "proximity_bridge", "lidar_view")),
 }
 
 # All three serve the camera tab on ONE port (8080). buoy_detector and

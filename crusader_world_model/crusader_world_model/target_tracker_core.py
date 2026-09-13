@@ -25,6 +25,24 @@ THE THREE STAGES, and why they are separate.
    Detection3DArray is camera_link, which is the same hull with a fixed offset
    applied here), so this stage is pure trigonometry with no attitude in it.
 
+   USE_LIDAR GATES THIS ENTIRE STAGE, and it defaults to FALSE. Fusing is the
+   right answer on open water and the wrong one anywhere with walls: every hard
+   surface in range clusters, arrives unlabelled, and — because track_unlabeled
+   keeps it and a CONFIRMED track never expires by default — becomes a
+   PERMANENT object on the map. That is not a tracker bug; it is the LiDAR
+   honestly reporting a building. But a mission consuming the track set cannot
+   tell that object from a buoy, and crusader_params.yaml already records what
+   it costs: at r_max 40 m the map filled with 100+ permanent tracks at 15-28 m,
+   which were the pool walls, the deck, and the room beyond them.
+
+   With use_lidar False the camera is the ONLY thing that can create a track,
+   so nothing anonymous can reach the map at all. The price is that every range
+   is now stereo — a few per cent of the distance rather than centimetres — and
+   the safety invariant below narrows with it: what is never dropped is every
+   camera detection, and an object the camera cannot see is no longer carried
+   by the LiDAR. Turn it back on for open water, where the nearest hard surface
+   IS the thing you wanted to see.
+
    The package's standing safety invariant applies HERE: a camera detection
    with no LiDAR support is passed through with its stereo range, NEVER
    dropped. A coarse range for a real buoy beats no buoy. The same goes the
@@ -90,12 +108,16 @@ class TrackerParams:
     cam_pitch_deg: float = 0.0   # mount tilt, + = aimed DOWN
 
     # -- fusion gates (stage 1)
+    use_lidar: bool = False          # False: clusters are counted, then dropped
+                                     # before stage 1 runs. See fuse().
     fuse_bearing_deg: float = 6.0    # max camera/LiDAR bearing disagreement
     fuse_range_m: float = 4.0        # absolute range-agreement gate
     fuse_range_frac: float = 0.25    # ... or this fraction of the camera range,
                                      # whichever is larger. See _range_gate.
     min_confidence: float = 0.50     # re-threshold above buoy_detector's own
-    track_unlabeled: bool = True     # keep LiDAR-only clusters as tracks
+    track_unlabeled: bool = True     # keep LiDAR-only clusters as tracks.
+                                     # Inert while use_lidar is False: there
+                                     # are no LiDAR-only sightings to keep.
 
     # -- tracking gates (stage 3)
     assoc_radius_m: float = 3.0      # world-frame association radius
@@ -270,7 +292,9 @@ def fuse(cameras, lidars, p: TrackerParams):
 
     Args:
       cameras: list[CameraDetection], in camera_link.
-      lidars: list[LidarCluster], in base_link.
+      lidars: list[LidarCluster], in base_link. Counted and then DISCARDED
+        when p.use_lidar is False, which is the default — see the module
+        docstring for why, and stats['lidar_ignored'] for how to see it.
       p: TrackerParams.
 
     Returns:
@@ -285,12 +309,26 @@ def fuse(cameras, lidars, p: TrackerParams):
     that gets the good range is the close one — which is the one about to be
     hit.
 
-    Nothing is discarded for failing to pair. Every camera detection above
-    min_confidence and (if track_unlabeled) every cluster comes out the other
-    side; the only thing pairing changes is which range the sighting carries.
+    Nothing is discarded for FAILING TO PAIR. Every camera detection above
+    min_confidence and (if use_lidar and track_unlabeled) every cluster comes
+    out the other side; the only thing pairing changes is which range the
+    sighting carries. Discarding the LiDAR wholesale on use_lidar is a
+    different decision, taken once at the top and stated in the stats, not a
+    detection quietly failing a gate.
     """
     stats = {"cam_in": len(cameras), "lidar_in": len(lidars),
-             "cam_low_conf": 0, "fused": 0, "cam_only": 0, "lidar_only": 0}
+             "cam_low_conf": 0, "fused": 0, "cam_only": 0, "lidar_only": 0,
+             "lidar_ignored": 0}
+
+    if not p.use_lidar:
+        # Counted FIRST, then dropped. A cluster stream that is arriving and
+        # being deliberately ignored must not look like a LiDAR that has
+        # stopped: "lidar_in 10, lidar_ignored 10" is a configuration and
+        # "lidar_in 0" is a dead sensor, and one health topic has to tell them
+        # apart. Zeroing the list here rather than skipping the loops below
+        # keeps ONE place where the switch is read.
+        stats["lidar_ignored"] = len(lidars)
+        lidars = []
 
     # Move the camera onto the hull first, so every bearing below is measured
     # about the same origin the LiDAR's already is. Skipping this puts the

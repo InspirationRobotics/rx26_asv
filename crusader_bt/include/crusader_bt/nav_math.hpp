@@ -276,7 +276,11 @@ struct NextWaypoint
 /// Note what is NOT here: pairing buoys into gates. The handbook constrains
 /// each RED/GREEN buoy individually and says nothing about pairs, so pairing is
 /// an inference we do not need and that fails badly when one of a pair is
-/// missed.
+/// missed. That reasoning still holds for anything the BOAT infers on its own.
+///
+/// Above Core tier it is not an inference: the UAV can see the whole passage
+/// from above and NAMES the pair, so the boat is told (red_id, green_id) rather
+/// than guessing it. gateWaypoints() below is for that case only.
 inline NextWaypoint nextWaypoint(
   const std::vector<Buoy> & buoys, Vec2 boat, double heading_deg, bool has_exit,
   Vec2 exit_p, double offset_m)
@@ -310,6 +314,94 @@ inline NextWaypoint nextWaypoint(
   }
   if (has_exit) {return {true, exit_p, -1};}
   return {};
+}
+
+// -------------------------------------------------------------------- gates
+
+/// The UAV's "id not known" sentinel. Matches NO_BUOY in Mesh/rxl.py, which is
+/// what RXL_NEXT_BUOY_SET puts in a buoy_id field it cannot fill.
+constexpr int kNoBuoy = 255;
+
+/// A gate the UAV has named, resolved into two places to steer.
+struct Gate
+{
+  bool valid = false;
+  Vec2 approach;                     ///< line up here, short of the gate
+  Vec2 through;                      ///< then cross to here, past the middle
+  double heading_deg = 0.0;          ///< the course through, deg cw from north
+  const char * why = "no gate";      ///< why it is invalid, for the log
+};
+
+/// Where to steer to run the gate made by one RED and one GREEN buoy.
+///
+/// THE THROUGH-COURSE IS FIXED BY THE PAIR ALONE:
+///
+///     heading = bearingDeg(green -> red) - 90
+///
+/// RED must end up to starboard and GREEN to port, so the vector from green to
+/// red points along the boat's starboard beam, and starboard is 90 deg clockwise
+/// of the course. Subtracting 90 recovers the course.
+///
+/// Note what this does NOT read: the boat's own heading. That independence is
+/// the point. `nextWaypoint` has to fall back on the live heading when the exit
+/// is unknown, and in SITL on 2026-09-09 that lost the whole transit — a 360 deg
+/// entry orbit ended the boat pointing at 207 deg, both gate buoys 25 m north
+/// scored dot(rel, travel) < 0, and every one of them was discarded as astern.
+/// A gate cannot be mis-ordered that way: the pair says which way through.
+///
+/// `approach` sits short of the middle and `through` past it, so the boat lines
+/// up and then CROSSES rather than stopping between the buoys and turning.
+///
+/// Invalid when the two are closer than `min_width_m`: below that the bearing
+/// between them is dominated by position noise, and a wrong bearing here puts
+/// the boat through the gate sideways or backwards. Refusing is the honest
+/// answer; the caller can still fall back on sideWaypoint() for a lone buoy.
+inline Gate gateWaypoints(
+  Vec2 red, Vec2 green, double standoff_m, double approach_m,
+  double min_width_m = 2.0)
+{
+  const double width = norm(red - green);
+  if (!(width >= min_width_m)) {          // NaN-safe: a NaN width is invalid
+    return {false, {}, {}, 0.0, "gate too narrow to take a bearing"};
+  }
+
+  double h = bearingDeg(green, red) - 90.0;
+  if (h < 0.0) {h += 360.0;}
+
+  const Vec2 u = headingVec(h);
+  const Vec2 mid = (red + green) * 0.5;
+  return {true, mid - u * approach_m, mid + u * standoff_m, h, ""};
+}
+
+/// The buoy with this id, or nullptr. Ids are the UAV's, not the tracker's.
+inline const Buoy * findById(const std::vector<Buoy> & buoys, int id)
+{
+  if (id < 0 || id == kNoBuoy) {return nullptr;}
+  for (const Buoy & b : buoys) {
+    if (b.id == id) {return &b;}
+  }
+  return nullptr;
+}
+
+/// gateWaypoints() for a pair the UAV named by id.
+///
+/// Every way this can fail says so in `why` rather than steering somewhere
+/// plausible: an unfilled id (255), an id for a buoy we have never seen, and
+/// the same id twice — which would otherwise give a zero-width gate and a
+/// meaningless bearing.
+inline Gate gateFromIds(
+  const std::vector<Buoy> & buoys, int red_id, int green_id,
+  double standoff_m, double approach_m, double min_width_m = 2.0)
+{
+  if (red_id == green_id) {
+    return {false, {}, {}, 0.0, "red and green are the same buoy"};
+  }
+  const Buoy * r = findById(buoys, red_id);
+  const Buoy * g = findById(buoys, green_id);
+  if (r == nullptr && g == nullptr) {return {false, {}, {}, 0.0, "neither buoy known"};}
+  if (r == nullptr) {return {false, {}, {}, 0.0, "red buoy not known"};}
+  if (g == nullptr) {return {false, {}, {}, 0.0, "green buoy not known"};}
+  return gateWaypoints(r->p, g->p, standoff_m, approach_m, min_width_m);
 }
 
 /// The first buoy in `buoys` with the given beacon state, or nullptr.

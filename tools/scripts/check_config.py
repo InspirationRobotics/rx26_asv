@@ -32,6 +32,7 @@ What it guards, and why each one is here:
    clean PASS — a preflight gate that cannot fail is worse than no gate.
 """
 import importlib.util
+import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -64,6 +65,7 @@ CONFIG_DRIVEN_NODES = set("""
     ground_station
     safe_passage_server
     bt_runner_node
+    rxl_link_node
 """.split())
 
 # Topic names that two sections must agree on, as (producer, param) ->
@@ -84,6 +86,10 @@ TOPIC_PAIRS = (
     (("lidar_cluster_node", "clusters_topic"),
      ("proximity_bridge", "clusters_topic")),
     (("target_tracker", "targets_topic"), ("ground_station", "targets_topic")),
+    (("lidar_cluster_node", "clusters_topic"),
+     ("ground_station", "clusters_topic")),
+    (("proximity_bridge", "output_topic"),
+     ("ground_station", "obstacle_topic")),
 )
 
 # Ports that must stay distinct: two servers cannot bind one socket, and the
@@ -204,6 +210,44 @@ def check_params_yaml():
                  "the consumer receives nothing")
         else:
             ok(f"topic {pn}.{pk} -> {cn}.{ck}", a)
+
+    # UDP port discipline on the MAVLink links.
+    #
+    # The boat owns 1455x so an operator reading a --out line never has to work
+    # out which vehicle it is. Within the boat, the flight stack's port is never
+    # taken by anything else: a udpin bind STEALS datagrams, and the displaced
+    # consumer sees silence rather than an error -- which on this vehicle means
+    # /crsd/pose goes stale and the mission stops for no visible reason.
+    def _udp_port(endpoint):
+        """Port out of 'udpin:host:port' / 'udp:host:port', or None."""
+        m = re.search(r":(\d+)\s*$", str(endpoint))
+        return int(m.group(1)) if m else None
+
+    try:
+        mav_ep = cfg["telemetry_bridge"]["ros__parameters"]["mav_endpoint"]
+        rxl_ep = cfg["rxl_link_node"]["ros__parameters"]["rxl_endpoint"]
+    except KeyError as e:
+        fail("mavlink udp ports", f"missing key {e}")
+    else:
+        mav_p, rxl_p = _udp_port(mav_ep), _udp_port(rxl_ep)
+        if mav_p is None or rxl_p is None:
+            fail("mavlink udp ports",
+                 f"could not read a port from {mav_ep!r} / {rxl_ep!r}")
+        elif mav_p == rxl_p:
+            fail("mavlink udp ports",
+                 f"rxl_link_node and telemetry_bridge both on {mav_p} — the "
+                 "second to bind steals the first's datagrams and the boat "
+                 "loses pose with nothing logging an error")
+        elif not (14550 <= rxl_p <= 14559):
+            fail("mavlink udp ports",
+                 f"rxl_endpoint port {rxl_p} is outside the boat's 1455x range "
+                 "(the aircraft owns 1454x)")
+        elif not str(rxl_ep).startswith("udpin:"):
+            fail("mavlink udp ports",
+                 f"rxl_endpoint {rxl_ep!r} must be udpin: to BIND and listen; "
+                 "'udp:' is an outbound client that receives nothing, silently")
+        else:
+            ok("mavlink udp ports", f"telemetry_bridge {mav_p}, rxl_link {rxl_p}")
 
     # Distinct HTTP ports (see PORT_OWNERS).
     seen = {}

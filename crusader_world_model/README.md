@@ -30,8 +30,13 @@ water, it is in the wrong file.
 oak/detections (camera_link) ─┐
                               ├─ 1. FUSE (body) ─ 2. PROJECT (world) ─ 3. TRACK ─→ crsd/world_targets
 crsd/lidar_clusters (base_link)┘         ▲                    ▲
-                               /crsd/attitude ──────── /crsd/pose
+      counted, then dropped     /crsd/attitude ──────── /crsd/pose
+      unless use_lidar
 ```
+
+**`use_lidar` is `false` by default, so the camera is the only thing that can create a
+track.** Read [the switch](#the-switch-use_lidar) before anything below about fusion — five
+of the six knobs in stage 1 are inert while it is off.
 
 **1. Fuse.** The camera knows *where to look* and *what it is*: its bearing is an angle read
 off a rectified image, good to a fraction of a degree. The LiDAR knows *how far*: a
@@ -40,6 +45,10 @@ So fusion is not an average — it keeps the camera's **direction** and the LiDA
 **distance** and throws away each sensor's weak number. Both inputs are body-frame already,
 so this stage has no attitude in it.
 
+With `use_lidar: false` this stage is a pass-through: camera detections above
+`min_confidence` become sightings with their own stereo range, clusters are counted into
+`lidar_ignored` and discarded, and nothing else in the stage runs.
+
 **2. Project.** One call to `geo.body_to_world_ypr` per sighting. This is the only place
 attitude enters, and it is not a refinement: at 20 m, 5° of uncompensated roll moves a
 target 1.7 m, which is most of a buoy gate.
@@ -47,6 +56,41 @@ target 1.7 m, which is most of a buoy gate.
 **3. Track.** Nearest-neighbour association in the world frame, an EMA whose gain decays as
 `1/hits`, and two decay timeouts. This is what turns a stream of sightings into an object
 that persists while the boat looks away — the thing a mission actually needs.
+
+### The switch: `use_lidar`
+
+Default **`false`**. The question it answers is not "which sensor is better" — it is **what
+an unlabelled cluster means in the water you are actually in.**
+
+On open water, the nearest hard surface in range is the object you wanted to see. In a pool,
+or alongside a dock, it is the wall. The wall clusters beautifully. It arrives with no
+label, survives `track_unlabeled`, clears `confirm_hits` in three sightings, and — with
+`track_timeout_s` at `0` — never leaves the map. `crusader_params.yaml` records the
+measurement next to `lidar_cluster_node.r_max`: at 40 m the map filled with **100+ permanent
+tracks at 15–28 m**, which were the pool walls, the deck and the room beyond them. Cutting
+`r_max` to 10 m took clusters per cycle from 60+ to about 10 — better, and still ten
+buildings a mission has to treat as buoys.
+
+None of that is a tracker bug. It is the LiDAR honestly reporting a room, and a consumer of
+`crsd/world_targets` has no way to tell that object from a buoy: `bt_runner_node` skips
+tentative tracks and takes every confirmed one, so a confirmed wall is a confirmed obstacle
+in the Task 1 tree.
+
+**What it costs.** Every range becomes stereo — roughly 6 % systematic bias plus 4 % random,
+so a buoy at 25 m sits about 1.5 m beyond truth and wanders by a metre. Inside a pool that
+is invisible; at competition ranges it is most of a gate. The never-drop invariant narrows
+with it: what is never dropped is every *camera* detection, and an object the camera cannot
+see is no longer carried by the LiDAR.
+
+**So turn it on for open water**, together with `lidar_cluster_node.r_max` back at 25–40. It
+is `[DYN]` precisely so that is a checkbox in the ground station's Tuning tab and not a
+redeploy — and unlike the extrinsic, flipping it invalidates nothing already on the map:
+camera-derived targets stay exactly as true as they were.
+
+**How to see it working.** `crsd/world_model_health` carries `lidar_in` and `lidar_ignored`
+side by side, so "10 arriving, 10 discarded" is a configuration and "0 arriving" is a dead
+sensor — the node also says so on `/rosout` once a minute rather than leaving a healthy,
+connected, contributing-nothing LiDAR invisible.
 
 ### Remembering the course
 
@@ -79,8 +123,13 @@ track is being fed two objects) rather than into covariance propagation.
 
 1. **A detection with no supporting range from a second sensor is passed through with what
    it has — never dropped.** Losing an obstacle is worse than carrying a coarse range for
-   it. This cuts both ways: an unlabelled LiDAR cluster is a thing that is *there* and
-   reaches the map with an empty label rather than being filtered for being anonymous.
+   it. With `use_lidar` on this cuts both ways: an unlabelled LiDAR cluster is a thing that
+   is *there* and reaches the map with an empty label rather than being filtered for being
+   anonymous. **`use_lidar: false` narrows it to the camera** — every camera detection above
+   `min_confidence` still reaches the map with whatever range it has, and the LiDAR no longer
+   contributes an object of its own. That is a deliberate scope change, taken once at the top
+   of `fuse()` and counted in `lidar_ignored`; it is not a detection quietly failing a gate,
+   which is what this invariant exists to forbid.
 2. **Two different labels never merge**, however close. A red buoy and a green buoy 2 m
    apart are a gate; averaging them into one object at the midpoint puts a waypoint through
    the middle of nothing.
@@ -93,14 +142,28 @@ track is being fed two objects) rather than into covariance propagation.
 5. **Track ids are never reused**, not even after a track is dropped, so a consumer that
    stored "target 7" cannot have that reference silently re-pointed at a different buoy.
 
-### The parameter that matters most
+### The parameters that matter most
 
-`assoc_radius_m` (default 3.0). Too wide merges a gate pair into one object at the midpoint;
+`use_lidar` (default `false`) decides whether anything anonymous can reach the map at all,
+and is the first thing to check when the map is crowded. See [the switch](#the-switch-use_lidar).
+
+Then `assoc_radius_m` (default 3.0). Too wide merges a gate pair into one object at the midpoint;
 too narrow splits one buoy into a new track every few seconds. Watch `position_stddev` on
 the map — small and steady is a solid fix, growing means the gate is wrong.
 
-Second is `fuse_bearing_deg`, currently loose at 6.0° to absorb the **unmeasured camera
-extrinsic** (see below). Tighten it once `cam_*` are real numbers.
+It matters more in camera-only mode, not less: with no LiDAR range, a target's distance
+carries the full stereo error, so a buoy at 25 m can re-project a metre or more along the
+bearing ray between sightings and split into a second track. At pool ranges that noise is
+~0.4 m and 3.0 m is comfortable; if duplicates appear strung out along a bearing at long
+range, this gate is the one to widen.
+
+Then `confirm_hits` (default 3). With `track_timeout_s: 0` it is **the only thing between a
+detector false-positive and a permanent phantom.** Raise it if phantoms accumulate even with
+the LiDAR off.
+
+`fuse_bearing_deg` is inert while `use_lidar` is false. When it is on, it is loose at 6.0° to
+absorb the **unmeasured camera extrinsic** (see below); tighten it once `cam_*` are real
+numbers.
 
 ## The camera extrinsic: translation measured, orientation assumed
 
@@ -216,7 +279,13 @@ map looks perfect anyway. It proves plumbing, association, decay, fusion arbitra
 display. It does **not** prove the frame convention — that is a bench exercise against real
 hardware, the way [docs/G2](../docs/G2_lidar_orientation.md) did it for the LiDAR.
 
-## If the map fills up with anonymous targets, that is the water
+## If the map fills up with anonymous targets, check `use_lidar` first
+
+With `use_lidar: false` — the default — this cannot happen: no cluster becomes an
+observation, so every track on the map has a label from the camera. A map full of
+unlabelled targets means the switch is on. The rest of this section is what to do about it
+when you have deliberately turned it on.
+
 
 `lidar_cluster_node`'s `water_z` is still the 0.10 m placeholder — the waterline above the
 hull datum, to be measured floating (G2 step 4). Until it is, water returns can survive the
@@ -230,6 +299,10 @@ suppresses them, but only as a temporary measure while `water_z` is wrong: it al
 away every genuine obstacle the camera cannot name, which is the exact trade the package
 README forbids making permanently.
 
+`water_z` has since been measured at 0.24 m (2026-09-05), which closes the placeholder half
+of this. What it does not close is a hard surface *above* the waterline — a wall, a dock,
+a hull — which is a real return at a real height and is exactly what `use_lidar` is for.
+
 ## What is still missing
 
 - **The occupancy grid.** `occupancy_core.py` and `occupancy_grid_node.py` were removed
@@ -239,7 +312,10 @@ README forbids making permanently.
   be overwritten by perception). Its `Occupancy`/`Grid`/`Cell` messages are in the same
   commit — re-add them when the node that fills them is landing.
 - **The measured camera extrinsic**, above. Everything fused is provisional until then.
-- **A consumer.** Nothing reads `crsd/world_targets` yet. Cognition has no package.
+- ~~**A consumer.**~~ `crusader_bt`'s `bt_runner_node` now subscribes `/crsd/world_targets`
+  and fills the behaviour tree's buoy field from it. It takes **confirmed tracks only** —
+  which is why a confirmed phantom is a mission problem and not just a map problem, and most
+  of the argument for `use_lidar` defaulting off.
 
 ## Change impact
 
@@ -247,6 +323,7 @@ README forbids making permanently.
 |---|---|
 | `target_tracker_core.py` | `tools/bench/bench_world_model.py` and compare against the printed truth; it needs no hardware, so there is no excuse for skipping it |
 | the fusion or association gates in `crusader_params.yaml` | `python3 tools/scripts/check_config.py`, then the bench with `--chop` — watch `position_stddev` on the map |
+| `use_lidar` | nothing to rebuild — it is `[DYN]`. Confirm in `crsd/world_model_health` that `lidar_ignored` moved, and re-run the bench with `--no-lidar` to exercise the same path it now takes by default. Note the default bench field's unlabelled member is invisible with it off: that buoy exists to prove the LiDAR-only path, and there is no longer one |
 | `cam_x/y/z/yaw/pitch` | every fused position shifts; re-check against real buoys at known ranges, and tighten `fuse_bearing_deg` |
 | `map_server_core.py`'s page | open it in a browser and confirm the **stale** path still fires — feed it a snapshot with `ok: false` and check the banner, not just the healthy case |
 | `TrackedTarget`/`TrackedTargetArray` fields | full `tools/scripts/rebuild.sh`; a mismatched message is a silent deserialization failure |

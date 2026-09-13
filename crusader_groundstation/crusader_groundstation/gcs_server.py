@@ -26,7 +26,8 @@ class GcsServer:
 
     Args:
       page_bytes: the rendered page.
-      snapshot_fn: zero-arg callable -> JSON-serialisable dict.
+      snapshot_fn: callable(layers:set) -> JSON-serialisable dict. `layers`
+        is the set of optional extras the requesting page asked for.
       action_fn: (path, payload) -> dict with at least {ok, message}.
     """
 
@@ -50,18 +51,34 @@ class GcsServer:
             def do_GET(self):
                 if self.path in ("/", "/index.html"):
                     return self._send(outer.page, "text/html; charset=utf-8")
-                if self.path == "/state":
-                    try:
-                        body = json.dumps(outer.snapshot_fn()).encode()
-                    except Exception as e:
-                        # A snapshot that raises must not become a dead page
-                        # with no explanation; the banner needs something to
-                        # show, and the log needs the traceback's summary.
-                        body = json.dumps({"error": f"snapshot failed: {e}"}).encode()
-                    return self._send(body, "application/json", nocache=True)
+                if self.path == "/state" or self.path.startswith("/state?"):
+                    return self._state()
                 if self.path.startswith("/record/download"):
                     return self._download()
                 self.send_error(404)
+
+            def _state(self):
+                """The snapshot, plus whichever optional layers were asked for.
+
+                Layers ride in the QUERY STRING rather than a POST because
+                /state is a read and has to stay one — the same rule that puts
+                the actions on POST, applied from the other side. They are
+                per-request rather than a server-side preference because two
+                laptops can have the page open at once, and a stored
+                preference would let one operator's choice silently change
+                what the other one is looking at.
+                """
+                query = parse_qs(urlparse(self.path).query)
+                layers = {name for value in query.get("layers", [])
+                          for name in value.split(",") if name}
+                try:
+                    body = json.dumps(outer.snapshot_fn(layers)).encode()
+                except Exception as e:
+                    # A snapshot that raises must not become a dead page with
+                    # no explanation; the banner needs something to show, and
+                    # the log needs the traceback's summary.
+                    body = json.dumps({"error": f"snapshot failed: {e}"}).encode()
+                return self._send(body, "application/json", nocache=True)
 
             def _download(self):
                 """Stream one recording session out as .tar.gz.

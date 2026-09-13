@@ -1,13 +1,17 @@
-"""target_tracker_node — camera + LiDAR + pose in, earth-anchored targets out.
+"""target_tracker_node — camera (+ LiDAR) + pose in, earth-anchored targets out.
 
 NOTE: unverified on the boat. Exercised only against
 tools/bench/bench_world_model.py's invented detections. It is deliberately NOT
-in core.launch.py, and it commands nothing — it publishes a picture, and
-nothing downstream consumes it yet.
+in core.launch.py, and it commands nothing directly — but it is no longer
+publishing into the void: crusader_bt's bt_runner_node subscribes
+/crsd/world_targets and fills the behaviour tree's buoy field from it, taking
+CONFIRMED tracks only. That is why a confirmed phantom here is a mission
+problem and not just an untidy map.
 
 Subscribes:
   oak/detections       crusader_msgs/Detection3DArray  — camera_link
-  crsd/lidar_clusters  crusader_msgs/Cluster3DArray    — base_link
+  crsd/lidar_clusters  crusader_msgs/Cluster3DArray    — base_link, and
+                       COUNTED BUT DISCARDED unless use_lidar (see below)
   /crsd/pose           crusader_msgs/LatLonHead        — position + heading
   /crsd/attitude       crusader_msgs/Attitude          — roll/pitch/yaw
 Publishes:
@@ -17,6 +21,20 @@ Publishes:
 All the geometry and all the state live in target_tracker_core, which has no
 ROS imports and runs on a laptop. This file is I/O, parameters and freshness,
 mirroring lidar_cluster_node.py.
+
+CAMERA-ONLY BY DEFAULT. `use_lidar` is False, so a cluster reaches the health
+counters and nothing else, and every track on the map came from a camera
+detection. This is not a statement about which sensor is better — it is about
+what an unlabelled cluster MEANS in the water you are in. On open water the
+nearest hard surface is the object you wanted; in a pool or alongside a dock it
+is the wall, which clusters perfectly, arrives with no label, survives
+track_unlabeled, reaches confirm_hits in three sightings and then — with
+track_timeout_s at 0 — never leaves the map. crusader_params.yaml records the
+measurement: at r_max 40 m that was 100+ permanent tracks at 15-28 m.
+
+The switch is [DYN], so it flips from the ground station's Tuning tab without a
+restart. Turn it on for open water and the ranges go from stereo (a few per
+cent of the distance) back to time-of-flight (centimetres).
 
 WHY A TIMER AND NOT A CALLBACK PER DETECTION. The four inputs run at four
 different rates — camera detections at ~30 Hz, LiDAR clusters at ~2 Hz windows,
@@ -38,11 +56,16 @@ WHAT HAPPENS WHEN AN INPUT GOES STALE, and why the answers differ:
         boat has already left. The existing tracks still age and still expire.
         This is the frozen-pose failure StreamCache exists to prevent, and it
         is the one case where doing nothing is the correct action.
-  detections stale        -> the cycle runs on LiDAR alone. Anonymous tracks,
-        which is what the LiDAR can honestly support.
+  detections stale        -> with use_lidar, the cycle runs on LiDAR alone:
+        anonymous tracks, which is what the LiDAR can honestly support. WITHOUT
+        it the camera is the only input, so the cycle ingests nothing and only
+        ages the tracks — and the log says so rather than claiming another
+        sensor is carrying it.
   clusters stale          -> the cycle runs on the camera alone. Coarse stereo
         ranges, which is what the camera can honestly support, and exactly the
-        case the package's never-drop invariant is written for.
+        case the package's never-drop invariant is written for. Without
+        use_lidar this is not an event at all and is not logged: an input that
+        is ignored by configuration cannot go stale in any sense that matters.
 
 The array is published on EVERY tick regardless, empty or not — silence means
 this node is dead, not that the water is clear.
@@ -98,6 +121,16 @@ PARAM_SPEC = {
     "cam_pitch_deg": dict(read_only=True, lo=-90.0, hi=90.0,
                           description="mount tilt, + = aimed DOWN"),
     # --- fusion gates [DYN] ---
+    # use_lidar leads the group because the five below it are inert while it is
+    # False. [DYN] rather than [RO] on purpose: unlike the extrinsic, flipping
+    # it does not invalidate the targets already on the map — the camera-derived
+    # ones stay exactly as true as they were, and the LiDAR simply starts or
+    # stops contributing range to new sightings.
+    "use_lidar": dict(read_only=False,
+                      description="fuse LiDAR clusters. False (default) = "
+                                  "camera-only: clusters are counted and "
+                                  "discarded, and nothing anonymous can reach "
+                                  "the map. True for open water"),
     "fuse_bearing_deg": dict(read_only=False, lo=0.5, hi=45.0,
                              description="camera/LiDAR bearing agreement"),
     "fuse_range_m": dict(read_only=False, lo=0.5, hi=20.0,
@@ -133,7 +166,7 @@ PARAM_SPEC = {
 # rather than inferred so that adding a node-level parameter which is NOT a
 # core parameter does not silently end up inside the core.
 _CORE_PARAMS = (
-    "cam_x", "cam_y", "cam_z", "cam_yaw_deg", "cam_pitch_deg",
+    "cam_x", "cam_y", "cam_z", "cam_yaw_deg", "cam_pitch_deg", "use_lidar",
     "fuse_bearing_deg", "fuse_range_m", "fuse_range_frac", "min_confidence",
     "track_unlabeled", "assoc_radius_m", "pos_alpha", "vel_alpha",
     "confirm_hits", "tentative_timeout_s", "track_timeout_s", "max_tracks")
@@ -205,9 +238,16 @@ class TargetTrackerNode(Node):
 
         self.create_timer(1.0 / p["update_rate_hz"], self._tick)
         self.create_timer(p["health_period_s"], self._health)
+        # Which sensors are actually feeding it, in the first line of the log.
+        # "subscribed and discarded" rather than silence: someone reading this
+        # after wondering where the LiDAR went should not have to find the
+        # parameter to learn that it is being received and thrown away.
+        sources = (f"'{p['detections_topic']}' + '{p['clusters_topic']}'"
+                   if p["use_lidar"] else
+                   f"'{p['detections_topic']}' ONLY — use_lidar is FALSE, so "
+                   f"'{p['clusters_topic']}' is subscribed and discarded")
         self.get_logger().info(
-            f"tracking into '{p['targets_topic']}' from "
-            f"'{p['detections_topic']}' + '{p['clusters_topic']}'; camera "
+            f"tracking into '{p['targets_topic']}' from {sources}; camera "
             f"mount ({p['cam_x']:.2f}, {p['cam_y']:.2f}, {p['cam_z']:.2f}) m "
             f"yaw={p['cam_yaw_deg']:.1f} pitch={p['cam_pitch_deg']:.1f} deg")
 
@@ -257,17 +297,38 @@ class TargetTrackerNode(Node):
 
     # ---------- the cycle ----------
 
+    def _stale_consequence(self, name):
+        """What a stale input costs, or None when it costs nothing.
+
+        The wording is the whole value of the line this feeds. "continuing on
+        the other sensor" is only true when there IS another sensor: with
+        use_lidar False the camera is the only one, so a stale detections topic
+        means the world model has stopped seeing entirely, and a stale clusters
+        topic means nothing at all. Reporting that second case as an error
+        teaches an operator to ignore the error, which is the expensive way to
+        lose the one that mattered.
+        """
+        if name in ("pose", "attitude"):
+            return "NOT ingesting observations until it returns"
+        if self.params.use_lidar:
+            return "continuing on the other sensor"
+        if name == "clusters":
+            return None                # ignored by configuration, not a fault
+        return ("use_lidar is FALSE, so the camera is the ONLY input — no "
+                "observations at all until it returns; tracks age but nothing "
+                "new is placed")
+
     def _tick(self):
         """One fuse/track cycle, then publish — every tick, empty or not."""
         now = time.monotonic()
         for name, cache in (("pose", self._pose), ("attitude", self._att),
                             ("detections", self._det), ("clusters", self._clu)):
-            if cache.went_stale(now):
+            if not cache.went_stale(now):
+                continue
+            why = self._stale_consequence(name)
+            if why:
                 self.get_logger().error(
-                    f"world model input {name!r} went stale — "
-                    + ("NOT ingesting observations until it returns"
-                       if name in ("pose", "attitude")
-                       else "continuing on the other sensor"))
+                    f"world model input {name!r} went stale — {why}")
 
         pose = self._pose.get(now)
         att = self._att.get(now)
@@ -428,8 +489,21 @@ class TargetTrackerNode(Node):
                 f"'{self.p['clusters_topic']}' are actually publishing.",
                 throttle_duration_sec=15.0)
         stats = self.tracker.stats
-        if (stats.get("cam_in") and stats.get("lidar_in")
-                and not stats.get("fused")):
+        if stats.get("lidar_ignored"):
+            # INFO, not WARN: this is the configured state, and a warning that
+            # fires forever on a correct configuration is one nobody reads. It
+            # is said out loud at all because "the LiDAR is connected, healthy,
+            # and contributing nothing" is otherwise invisible from the outside.
+            self.get_logger().info(
+                f"use_lidar is FALSE: {stats['lidar_ignored']} LiDAR clusters "
+                "received and discarded in the last cycle. Every track on the "
+                "map is "
+                "a camera detection, so every range is stereo — a few per cent "
+                "of the distance, not centimetres. Set use_lidar true (Tuning "
+                "tab, or ros2 param set) on open water.",
+                throttle_duration_sec=60.0)
+        if (self.params.use_lidar and stats.get("cam_in")
+                and stats.get("lidar_in") and not stats.get("fused")):
             self.get_logger().warn(
                 f"both sensors are producing ({stats['cam_in']} detections, "
                 f"{stats['lidar_in']} clusters) but NOTHING fused — every "

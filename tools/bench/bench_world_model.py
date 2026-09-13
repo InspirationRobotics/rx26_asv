@@ -37,9 +37,9 @@ demo: the tracker's output is a number you can compare against a number you
 chose. A track that settles within a metre of its truth row, keeps its id, and
 does not split in two as the boat swings past it, is a tracker that works.
 
-Publishes:
-  oak/detections      10 Hz   buoy_detector's topic, camera_link, EVERY frame
-  crsd/lidar_clusters  2 Hz   lidar_cluster_node's accumulation windows
+Publishes (topic names READ FROM crusader_params.yaml, never restated here):
+  target_tracker.detections_topic  10 Hz  camera_link, EVERY frame, empty or not
+  target_tracker.clusters_topic     2 Hz  lidar_cluster_node's accumulation windows
 and, ONLY under --sim-pose:
   /crsd/pose          20 Hz   /crsd/attitude 30 Hz   /crsd/fcu_status 1 Hz
 
@@ -58,6 +58,7 @@ SDKs, and no camera or LiDAR.
 import argparse
 import math
 import random
+import threading
 import time
 
 import rclpy
@@ -72,6 +73,10 @@ from crusader_common.stream_cache import StreamCache
 
 from crusader_world_model import target_tracker_core as core
 
+# A sibling file, not a package: running this script puts tools/bench on
+# sys.path, which is the only reason a bare name works here.
+import field_gui                                       # noqa: E402
+
 # Fallback origin for --sim-pose only: St Petersburg, FL — RoboNation's water.
 # In the default (real vessel) mode the origin is the boat's own first fix and
 # this is never used.
@@ -84,15 +89,56 @@ SIM_ORIGIN = (27.7745, -82.6320)
 # the camera will never name — that last one is there to prove an anonymous
 # LiDAR cluster still reaches the map instead of being quietly filtered for
 # having no label.
-FIELD = [
-    #  label          right  ahead
-    ("red_buoy",       -3.0, 25.0),
-    ("green_buoy",      3.0, 25.0),
-    ("red_buoy",      -12.0, 48.0),
-    ("green_buoy",     -4.0, 52.0),
-    ("yellow_buoy",    18.0, 35.0),
-    ("",               22.0, 60.0),    # LiDAR sees it; the camera never will
-]
+#
+# TWO FIELDS, chosen with --field. "tracker" is the original and stays the
+# default: changing what an existing bench invents would silently change what
+# every previous run of it meant.
+#
+# Labels are not free text. bt_runner_node's beaconFromLabel() matches on
+# substrings, in this order: red, green, blue, off/black. So "flashing_blue"
+# and "steady_blue" are the only way to say ENTRY and EXIT, and a label may
+# never contain two colour words.
+FIELDS = {
+    # The original: a gate to run, a pair of channel markers beyond it, and one
+    # unlabelled object the camera will never name — that last one is there to
+    # prove an anonymous LiDAR cluster still reaches the map instead of being
+    # quietly filtered for having no label.
+    "tracker": [
+        #  label          right  ahead
+        ("red_buoy",       -3.0, 25.0),
+        ("green_buoy",      3.0, 25.0),
+        ("red_buoy",      -12.0, 48.0),
+        ("green_buoy",     -4.0, 52.0),
+        ("yellow_buoy",    18.0, 35.0),
+        ("",               22.0, 60.0),   # LiDAR sees it; the camera never will
+    ],
+
+    # Task 1 Safe Passage, handbook 3.3.2: ten buoys, one flashing-blue ENTRY,
+    # one steady-blue EXIT, RED passed to STARBOARD and GREEN to PORT, plus two
+    # unlit BLACK buoys that carry no side constraint and are pure obstacles.
+    #
+    # RED sits to +right and GREEN to -right because the boat transits along
+    # +ahead: that is what puts red on its starboard hand. Mirror the two
+    # columns and the field becomes a test that the boat drives the wrong side
+    # of every buoy, which is worth doing deliberately and never by accident.
+    #
+    # 92 m from the anchor to the EXIT buoy. The ENTRY sits at 20 m so it is
+    # inside CAM_MAX_M at the moment the field anchors — the rest is discovered
+    # on the way, which is the honest version of the problem.
+    "task1": [
+        #  label                right  ahead
+        ("flashing_blue_buoy",    0.0, 20.0),   # ENTRY — circle it CLOCKWISE
+        ("red_buoy",             +6.0, 38.0),
+        ("green_buoy",           -6.0, 38.0),
+        ("black_buoy",          +14.0, 45.0),   # unlit: obstacle, either side
+        ("red_buoy",             +7.0, 56.0),
+        ("green_buoy",           -5.0, 56.0),
+        ("black_buoy",          -16.0, 62.0),   # unlit: obstacle, either side
+        ("red_buoy",             +5.0, 74.0),
+        ("green_buoy",           -7.0, 74.0),
+        ("steady_blue_buoy",      0.0, 92.0),   # EXIT — circle it ANTICLOCKWISE
+    ],
+}
 
 # Height of a buoy's centre above the hull-bottom datum that base_link sits on
 # [m]: roughly the placeholder waterline (0.10) plus what floats above it. Not
@@ -139,12 +185,26 @@ class WorldModelBench(Node):
 
         self.origin = None          # (lat, lon) of the field frame's zero
         self.field = []             # [(label, east, north)] once anchored
+        self.anchor_heading = 0.0   # rad, the bow at anchor time
+        # self.field is read by the synthesis timers on the executor thread and
+        # rewritten by the GUI's HTTP thread. It is only ever REPLACED whole,
+        # never mutated in place, and both sides take this lock around that one
+        # assignment — so a reader always iterates a complete field, never one
+        # caught halfway through an edit.
+        self._field_lock = threading.Lock()
+        self._nan_heading = 0       # fixes dropped for unresolved GPS yaw
         self._warned_no_pose = False
 
+        # The TOPIC NAMES come from the same params file as the extrinsic, and
+        # for the same reason. They were hardcoded here as "oak/detections"
+        # while target_tracker subscribed "crsd/oak/detections", so the bench
+        # published into a topic nothing read: the tracker kept publishing an
+        # EMPTY target array at its usual 10 Hz, which looks exactly like a
+        # bench that is running and a tracker that sees nothing.
         self.det_pub = self.create_publisher(Detection3DArray,
-                                             "oak/detections", 10)
+                                             p["detections_topic"], 10)
         self.clu_pub = self.create_publisher(Cluster3DArray,
-                                             "crsd/lidar_clusters", 10)
+                                             p["clusters_topic"], 10)
         self.create_timer(1 / 10.0, self._detections)
         self.create_timer(1 / 2.0, self._clusters)
 
@@ -164,8 +224,8 @@ class WorldModelBench(Node):
         self.create_timer(5.0, self._waiting_check)
         self.get_logger().info(
             "using the REAL vessel: /crsd/pose + /crsd/attitude. Publishing "
-            "only oak/detections and crsd/lidar_clusters. The buoy field will "
-            "be anchored ahead of the bow at the first fix.")
+            f"only {self.det_pub.topic_name} and {self.clu_pub.topic_name}. "
+            "The buoy field will be anchored ahead of the bow at the first fix.")
 
     def _on_pose(self, msg: LatLonHead):
         """Cache the fix, anchoring the field on the first usable one.
@@ -177,6 +237,7 @@ class WorldModelBench(Node):
         boat may never look, and the ground-truth table would be wrong.
         """
         if math.isnan(msg.heading):
+            self._nan_heading += 1
             return
         if self.origin is None:
             self._anchor(msg.latitude, msg.longitude,
@@ -184,6 +245,45 @@ class WorldModelBench(Node):
         e, n = geo.latlon_to_xy(msg.latitude, msg.longitude, self.origin)
         self._pose.set((e, n, math.radians(msg.heading), msg.ground_speed),
                        time.monotonic())
+
+    # ---------- field access, and the GUI's two callables ----------
+
+    def _snapshot(self):
+        """The field as it is right now. Callers iterate this, not self.field."""
+        with self._field_lock:
+            return list(self.field)
+
+    def _gui_set_field(self, buoys):
+        """Replace the field. Called from the HTTP thread, never the executor."""
+        with self._field_lock:
+            self.field = [(str(l), float(e), float(n)) for l, e, n in buoys]
+
+    def _gui_state(self):
+        """What the page polls. Every number here is either fresh or absent.
+
+        The boat is omitted entirely once its pose goes stale rather than being
+        sent at its last known position: a marker frozen on a map is read as a
+        stationary boat, which is the one failure this bench must not imitate.
+        """
+        if self.origin is None:
+            return {"anchored": False, "boat": None, "buoys": [],
+                    "nan_heading": self._nan_heading}
+        now = time.monotonic()
+        v = self._pose.get(now) if self._pose else None
+        boat = None
+        if v is not None:
+            e, n, yaw, _speed = v
+            boat = {"east": round(e, 2), "north": round(n, 2),
+                    "heading_deg": round(math.degrees(yaw), 1),
+                    "age_s": round(self._pose.age(now), 2)}
+        out = []
+        for label, e, n in self._snapshot():
+            lat, lon = geo.xy_to_latlon(e, n, self.origin)
+            out.append({"label": label, "east": round(e, 2), "north": round(n, 2),
+                        "lat": lat, "lon": lon})
+        return {"anchored": True, "origin": list(self.origin),
+                "anchor_heading_deg": round(math.degrees(self.anchor_heading), 1),
+                "boat": boat, "buoys": out, "nan_heading": self._nan_heading}
 
     def _on_att(self, msg: Attitude):
         self._att.set((msg.roll, msg.pitch), time.monotonic())
@@ -279,18 +379,26 @@ class WorldModelBench(Node):
         a different angle.
         """
         self.origin = (lat0, lon0)
+        self.anchor_heading = heading0
         ch, sh = math.cos(heading0), math.sin(heading0)
-        self.field = []
-        for label, right, ahead in FIELD:
+        built = []
+        for label, right, ahead in FIELDS[self.args.field]:
             east = right * ch + ahead * sh
             north = -right * sh + ahead * ch
-            self.field.append((label, east, north))
+            built.append((label, east, north))
+        # --gui starts from empty water on purpose: a page that opened with a
+        # 92 m open-water field already laid out would have the operator
+        # deleting ten buoys before placing the first one they wanted.
+        if self.args.gui:
+            built = []
+        with self._field_lock:
+            self.field = built
 
         log = self.get_logger()
         log.info(f"field anchored at {lat0:.7f}, {lon0:.7f} "
                  f"heading {math.degrees(heading0):.1f} deg")
         log.info("GROUND TRUTH — compare the tracker's output against this:")
-        for label, e, n in self.field:
+        for label, e, n in self._snapshot():
             lat, lon = geo.xy_to_latlon(e, n, self.origin)
             log.info(f"  {label or '(unlabelled)':>14}  "
                      f"E{e:+7.1f} N{n:+7.1f}   {lat:.7f}, {lon:.7f}")
@@ -342,7 +450,7 @@ class WorldModelBench(Node):
             return None
         e, n, yaw, roll, pitch = v
         out = []
-        for label, be, bn in self.field:
+        for label, be, bn in self._snapshot():
             x, y, z = geo.world_to_body_ypr(be, bn, BUOY_Z, roll, pitch, yaw,
                                             e, n)
             r = math.hypot(x, y)
@@ -448,6 +556,18 @@ def main():
                     help="LiDAR only — every track goes anonymous")
     ap.add_argument("--no-lidar", action="store_true",
                     help="camera only — ranges carry the stereo bias")
+    ap.add_argument("--field", choices=sorted(FIELDS), default="tracker",
+                    help="which invented field to lay out: 'tracker' (default, "
+                         "the original mixed field) or 'task1' (handbook 3.3.2 "
+                         "Safe Passage: 10 buoys with an ENTRY and an EXIT)")
+    ap.add_argument("--gui", action="store_true",
+                    help="place the field by hand in a browser instead of "
+                         "using a --field table. Starts empty; serves on "
+                         "--gui-port. This is the pool mode: a table sized for "
+                         "open water does not fit in the water you have")
+    ap.add_argument("--gui-port", type=int, default=field_gui.DEFAULT_PORT,
+                    help=f"port for --gui (default {field_gui.DEFAULT_PORT}; "
+                         "8080/8081/8085/8090 are already taken on the boat)")
     ap.add_argument("--seed", type=int, default=1, help="RNG seed")
     sim = ap.add_argument_group("--sim-pose only")
     sim.add_argument("--radius", type=float, default=30.0,
@@ -473,14 +593,31 @@ def main():
                      "(stop telemetry_bridge to test a dropout for real)")
     if args.no_camera and args.no_lidar:
         ap.error("--no-camera and --no-lidar together publish nothing at all")
+    # Refused rather than quietly ignored: --gui empties the field at anchor
+    # time, so a --field given alongside it would name a table that never gets
+    # laid out, and the run would look like the table was wrong.
+    if args.gui and args.field != "tracker":
+        ap.error("--gui replaces the --field table (it starts from empty "
+                 "water); pass one or the other, not both")
 
     rclpy.init()
     node = WorldModelBench(args)
+    gui = None
+    if args.gui:
+        gui = field_gui.FieldGui(node._gui_state, node._gui_set_field,
+                                 args.gui_port)
+        gui.start()
+        node.get_logger().info(
+            f"field GUI on http://<this-host>:{args.gui_port} — the field "
+            "starts EMPTY and cannot be edited until a fix with a resolved "
+            "heading anchors it")
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
+        if gui:
+            gui.stop()
         node.destroy_node()
         rclpy.try_shutdown()
 

@@ -21,6 +21,11 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Cluster3DArray.msg"
   "msg/TrackedTarget.msg"
   "msg/TrackedTargetArray.msg"
+  # The Task 1 passage as the UAV reports it. PassageBuoy must precede
+  # PassagePlan, which contains an array of it.
+  "msg/PassageBuoy.msg"
+  "msg/PassagePlan.msg"
+  "msg/GatePair.msg"
   # Actions. Same rule as above: a file not listed here is silently not
   # generated, and the import fails at node start, on the boat.
   "action/SafePassage.action"

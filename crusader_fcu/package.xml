@@ -7,7 +7,15 @@
     The autopilot gateway. telemetry_bridge is the single ROS-side consumer of
     the MAVProxy rebroadcast and the single sender back to it, so it is both
     the Localization source and the Movement actuator. Nothing else in the
-    workspace may open a MAVLink connection.
+    workspace may open a MAVLink connection TO THE AUTOPILOT.
+
+    Narrowed from "may open a MAVLink connection" on 2026-09-10, when
+    crusader_link/rxl_link_node was added. That node speaks MAVLink to the
+    RADIO: a different endpoint, the RobotX dialect, and a message set with no
+    command in it, so it cannot arm, set a mode or move the boat. The invariant
+    that matters is unchanged and is about the AUTOPILOT -- one path in, one
+    path out, mode-gated. Any node that wants to reach the Pixhawk still goes
+    through this one.
   </description>
   <maintainer email="brandont3927@gmail.com">Team Inspiration</maintainer>
   <license>MIT</license>

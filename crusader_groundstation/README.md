@@ -13,12 +13,150 @@ header and is not in `core.launch.py`.
 |---|---|---|
 | Nodes | every node in the registry, running or not, from the ROS graph | start anything, stop what it started, run a profile |
 | Telemetry | lat/lon, speed, heading, roll/pitch/yaw, mode, armed | — |
-| Camera | `buoy_detector`'s annotated view or `oak_view`, on :8080 | start whichever is missing |
-| LiDAR | `lidar_view`'s plan/elevation, on :8081 | start it |
-| Map | vessel, wake, and `crsd/world_targets` on a north-up plan | pan, zoom, follow, clear trail |
-| Record | sessions on disk, sizes, live capture state | start/stop a session, download a `.tar.gz`, delete |
+| Camera | whether `buoy_detector`/`oak_view` is up on :8080 | **show/stop the stream** (off by default), start whichever is missing |
+| LiDAR | whether `lidar_view` is up on :8081 | **show/stop the stream**, start it |
+| Map | vessel, wake, `crsd/world_targets`, and optionally raw clusters and the PRX1 sectors | pan, zoom, follow, **bow-up**, **layer toggles**, clear trail |
+| Tuning | any running node's parameters, with its own descriptions and ranges | set a dynamic value live; revert one to the YAML |
+| Record | sessions on disk, sizes, live capture state, **live bag growth rate** | tick topics, start/stop a session **with a rosbag**, download a `.tar.gz`, delete |
 | Logs | every node's `/rosout` output, filterable by level and node | clear the buffer |
 | System | CPU, temperature, memory, disk, uptime | shut down / reboot the host |
+
+## Day mode
+
+The **&#9728; day** button in the top-right swaps to a high-contrast palette and
+remembers the choice per browser. It is not "the light theme" — it is a *sunlight*
+theme, for a laptop on a dock in Singapore at midday, which is a different design
+problem. Text goes to near-black on near-white, borders are dark enough to survive
+glare, and the status colours are **darkened rather than lightened**: the night
+palette's `#5fbf6a` green is pleasant on `#111` and invisible on white in sun, which
+would make the one thing worth seeing at a glance — is it OK or not — the first thing
+to disappear.
+
+Every colour on the page is a CSS variable, including button faces and field
+backgrounds, because the map is a `<canvas>` and cannot inherit CSS: it reads the same
+variables back out of the computed style at theme-change time. A hardcoded hex anywhere
+is therefore a bug that shows up as one element staying dark in daylight. The attribute
+is set by a tiny inline script in `<head>`, before the body paints, so there is no frame
+of the dark theme on load — one frame of an unreadable screen is exactly what this mode
+exists to prevent.
+
+## The viewer streams are opt-in
+
+Tearing the iframe down on tab switch was already here and was not enough. The expensive
+case is the operator who *wants* the Camera tab open — to see whether the detector is
+up, to reach the Start buttons — and gets a live MJPEG stream with it. That stream is
+640&times;400 JPEG at quality 60, 30 fps: **order 1 MB/s, against roughly 0.5 Mbps for
+everything else this page sends per client.** Opening the tab cost more than the whole
+rest of the dashboard by more than an order of magnitude.
+
+So the tab shows the viewer's *status* for free and streams only when asked, and stops
+again when the **browser tab goes to the background** — a dashboard on a second monitor
+or behind a chart window was streaming the whole time. Backgrounding suspends it without
+clearing the choice, so coming back does not need another click. `mjpeg_server` counts
+clients and skips encoding when nobody is attached, so an un-started stream costs the
+Jetson nothing either: the saving is on both ends of the link.
+
+## The map's three layers, and why they are not the same thing
+
+| Layer | Topic | What it is |
+|---|---|---|
+| targets | `crsd/world_targets` | what the tracker **believes**, after fusion, association and decay |
+| clusters | `crsd/lidar_clusters` | what the LiDAR actually **returned** this window, before any of that |
+| PRX1 | `crsd/obstacle_distance` | what the autopilot was **told** — the same 72 sectors `telemetry_bridge` forwards as MAVLink `OBSTACLE_DISTANCE` |
+
+Laying the three over one another turns "avoidance is behaving oddly" into a question
+with an answer:
+
+- PRX1 here matches QGC's proximity view but the clusters under it do not → the bug is
+  in `proximity_bridge`'s sector maths.
+- PRX1 here and QGC disagree → the fault is between this ROS graph and the flight
+  controller.
+- Clusters agree with both but the targets are elsewhere → it is the tracker.
+
+`UINT16_MAX` sectors are **not drawn**, ever. `ObstacleDistance.msg` is emphatic that
+"not seen" and "seen and clear" are different facts, and a ring of max-range arcs would
+render the whole unseen aft sector as a wall.
+
+**Bow-up** rotates the map so the bow points up, which is the frame PRX1 is drawn in, so
+the two can be read side by side without arithmetic. It is implemented by rotating the
+*coordinate mapping*, not the canvas — a canvas rotation carries the text with it, and a
+bow-up map whose labels are sideways is unreadable at exactly the moment you are using it
+to read a range off an obstacle. The north arrow turns with the view, because in bow-up it
+is the only thing left telling you which way north is.
+
+Both extra layers are **off by default and ride in the query string** (`/state?layers=…`)
+rather than a server-side preference: with a shoreline in view the cluster layer is a few
+KB per poll, and two laptops can have the page open with different layers on. Clusters
+carry both their body-frame and world-frame positions, computed server-side through
+`geo.body_to_world_ypr`, because that is the repo's one implementation of that transform
+and a JavaScript copy would be a second one that drifts.
+
+## Recording: telemetry, frames, and a real rosbag
+
+A session is one directory holding three things, and they are not redundant:
+
+- `telemetry.jsonl` — the one that still parses after a power cut mid-line.
+- `camera/`, `lidar/` — MJPEG frames pulled from whichever viewer is up. **The bag cannot
+  replace these**: `buoy_detector` publishes no image topic unless `publish_frames` is on,
+  and that is off because it costs 38 MB/s on the DDS bus. These are the only record of
+  what the operator was actually looking at.
+- `bag/` — a real rosbag2 of whichever topics were ticked. The replayable one, and the only
+  one that can carry the point cloud.
+
+The topic list is **the live ROS graph**, not a curated set: a recording is worth making
+because something unexpected happened, and the curated list is the judgement that turns
+out to be wrong on the day. Presets tick everything except `PointCloud2`/`Image` (matched
+on **type**, never on topic name, so a renamed or second sensor is still caught).
+
+`ros2 bag record` runs as a **separate process**. `rosbag2_py` is available and would be
+fewer moving parts, but it would put `/livox/lidar` — a few MB a second — through this
+node's single-threaded executor, and the dashboard would stall exactly when a recording is
+running, which is when nobody can afford to restart it.
+
+**It is stopped with SIGINT, not SIGTERM**, and that is why it is not a second caller of
+`process_manager`. rosbag2 finalises the sqlite database and writes `metadata.yaml` in its
+SIGINT handler; a bag without `metadata.yaml` will not open, and `ros2 bag info` and
+`ros2 bag play` both refuse it. The recording looks fine right up until somebody needs it.
+If it has to be escalated to SIGKILL the tab says so, in those words.
+
+**The size problem is not solved by a warning.** With 38 GB free and `/livox/lidar` ticked,
+the disk fills in under three hours. So the tab does not estimate — it measures the bag
+directory as it grows and shows MB/s and hours-remaining at the current rate, and shows a
+blank until there are two samples far enough apart to divide. A reassuring number computed
+from no data is the thing this repo keeps designing out.
+
+## The Tuning tab
+
+Every knob that matters is discovered on the water, and the alternative to this tab is an
+SSH session on the same laptop that is already showing the map.
+
+**It knows nothing about any parameter.** Rows are built from the target node's own
+`ParameterDescriptor`s, which already carry the description, the numeric range and the
+`read_only` posture because `crusader_common.param_utils.declare` puts them there. A knob
+appears in the list because a node declares it, never because this package was edited to
+match — which is also why the node selector is the live ROS graph rather than the registry:
+anything running can be tuned, including something started by hand in another terminal.
+
+**Read-only parameters are listed, greyed, with the reason.** A knob you cannot turn and a
+knob you cannot see are different problems, and the second one sends someone looking for it
+in the wrong file.
+
+**It validates nothing.** The page's `min`/`max` are hints from the descriptor; the refusal
+comes from the node's own set-callback, in the node's own words — `assoc_radius_m=99
+outside [0.2, 20.0]` is `check_range`'s message, not this package's. Two validators
+disagreeing is worse than one, and a second copy of the bounds here is a copy that goes
+stale.
+
+**Nothing persists.** A set lands in the running node and dies with it. `crusader_params.yaml`
+stays the source of truth, and a browser POST has no business rewriting a file whose
+comments are most of its value. So the tab shows the live value against the YAML default and
+marks the drift — that marker *is* the product of a tuning session: it is the list of lines
+to write back into the file before the next run. Every set is also logged to `/rosout`, so a
+value changed from a browser and nowhere else is still findable afterwards.
+
+Costs nothing when unopened: values are fetched by `POST /params/list` on demand, never in
+`/state`, so the poll budget below is unchanged, and the service clients are created on
+first use.
 
 ## Why this is its own package
 

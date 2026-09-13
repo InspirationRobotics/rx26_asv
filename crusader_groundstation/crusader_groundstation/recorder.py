@@ -74,7 +74,13 @@ def free_gb(path):
     return st.f_bavail * st.f_frsize / 1073741824.0
 
 
-def dir_size_mb(path):
+def dir_size_bytes(path):
+    """Total size of everything under `path`, skipping what it cannot stat.
+
+    Skipping rather than raising: a file being written while this walks is the
+    normal case here — that is what a live recording IS — and a size readout
+    that throws mid-session would take the whole snapshot down with it.
+    """
     total = 0
     for base, _dirs, files in os.walk(path):
         for f in files:
@@ -82,7 +88,11 @@ def dir_size_mb(path):
                 total += os.path.getsize(os.path.join(base, f))
             except OSError:
                 pass
-    return round(total / 1048576.0, 1)
+    return total
+
+
+def dir_size_mb(path):
+    return round(dir_size_bytes(path) / 1048576.0, 1)
 
 
 class MjpegPuller(threading.Thread):

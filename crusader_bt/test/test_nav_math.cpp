@@ -215,6 +215,92 @@ int main()
       !nextWaypoint({}, boat, north, false, {}, 4.0).ok);
   }
 
+  // ------------------------------------------------------------------ gates
+  //
+  // The whole claim is: heading = bearingDeg(green -> red) - 90. Each case
+  // below names the compass direction the boat should end up on, because a
+  // mirrored implementation passes any symmetric case perfectly.
+  {
+    // red EAST of green -> the boat runs NORTH, red on its starboard hand.
+    const Gate g = gateWaypoints({3, 0}, {-3, 0}, 6.0, 8.0);
+    chk("gate red-E green-W is valid", g.valid);
+    chk_near("... course is north", g.heading_deg, 0.0, 1e-9);
+    chk_near("... approach is SHORT of the middle", g.approach.y, -8.0, 1e-9);
+    chk_near("... through is PAST the middle", g.through.y, 6.0, 1e-9);
+    chk_near("... both sit on the gate centreline", g.through.x, 0.0, 1e-9);
+  }
+  {
+    // Mirrored. If the signs were wrong this is the case that catches it.
+    const Gate g = gateWaypoints({-3, 0}, {3, 0}, 6.0, 8.0);
+    chk_near("gate red-W green-E runs south", g.heading_deg, 180.0, 1e-9);
+    chk_near("... approach is north of the middle", g.approach.y, 8.0, 1e-9);
+  }
+  chk_near("gate red-N green-S runs west",
+    gateWaypoints({0, 3}, {0, -3}, 6.0, 8.0).heading_deg, 270.0, 1e-9);
+  chk_near("gate red-S green-N runs east",
+    gateWaypoints({0, -3}, {0, 3}, 6.0, 8.0).heading_deg, 90.0, 1e-9);
+  chk_near("gate on the NE/SW diagonal runs NW",
+    gateWaypoints({2, 2}, {-2, -2}, 6.0, 8.0).heading_deg, 315.0, 1e-9);
+  chk_near("a skewed pair still resolves",
+    gateWaypoints({5, 1}, {-1, 4}, 6.0, 8.0).heading_deg, 26.565, 1e-3);
+
+  {
+    // The property, stated independently of any hand-worked number: standing at
+    // the gate centre on the computed course, RED is to starboard and GREEN to
+    // port. This is what the boat actually has to get right.
+    const Vec2 red{5, 1}, green{-1, 4};
+    const Gate g = gateWaypoints(red, green, 6.0, 8.0);
+    const Vec2 u = headingVec(g.heading_deg);
+    const Vec2 mid = (red + green) * 0.5;
+    chk("on course, RED is to starboard", dot(red - mid, starboardOf(u)) > 0.0);
+    chk("on course, GREEN is to port", dot(green - mid, portOf(u)) > 0.0);
+    chk("approach -> through points along the course",
+      dot(g.through - g.approach, u) > 0.0);
+  }
+
+  // Degenerate pairs: every one of these must REFUSE, not steer somewhere
+  // plausible. A gate is the one place a wrong bearing drives the boat between
+  // the buoys backwards.
+  {
+    chk("a gate narrower than the minimum is refused",
+      !gateWaypoints({0.5, 0}, {-0.5, 0}, 6.0, 8.0, 2.0).valid);
+    chk("two buoys in the same place are refused",
+      !gateWaypoints({4, 4}, {4, 4}, 6.0, 8.0).valid);
+    const Gate g = gateWaypoints({0.5, 0}, {-0.5, 0}, 6.0, 8.0, 2.0);
+    chk("... and says why", std::string(g.why).find("narrow") != std::string::npos);
+  }
+
+  // ------------------------------------------------------- gates, by UAV id
+  {
+    std::vector<Buoy> f{
+      {0, {0, 20}, Beacon::FlashingBlue, false},
+      {1, {6, 38}, Beacon::FlashingRed, false},
+      {2, {-6, 38}, Beacon::FlashingGreen, false},
+      {9, {0, 92}, Beacon::SteadyBlue, false}};
+
+    const Gate g = gateFromIds(f, 1, 2, 6.0, 8.0);
+    chk("gate from ids resolves", g.valid);
+    chk_near("... and runs north up the field", g.heading_deg, 0.0, 1e-9);
+
+    chk("findById finds a real id", findById(f, 9) != nullptr);
+    chk("findById refuses NO_BUOY", findById(f, kNoBuoy) == nullptr);
+    chk("findById refuses a negative id", findById(f, -1) == nullptr);
+
+    chk("an unfilled red id (255) is refused",
+      !gateFromIds(f, kNoBuoy, 2, 6.0, 8.0).valid);
+    chk("an unfilled green id (255) is refused",
+      !gateFromIds(f, 1, kNoBuoy, 6.0, 8.0).valid);
+    chk("an id we have never seen is refused",
+      !gateFromIds(f, 1, 7, 6.0, 8.0).valid);
+    chk("the same id twice is refused",
+      !gateFromIds(f, 1, 1, 6.0, 8.0).valid);
+
+    // The pair the UAV sends when the passage is finished. It must read as
+    // "no gate", never as a gate at the origin.
+    chk("the 255/255 end-of-passage pair is not a gate",
+      !gateFromIds(f, kNoBuoy, kNoBuoy, 6.0, 8.0).valid);
+  }
+
   // ------------------------------------------------------------- findBeacon
   {
     std::vector<Buoy> f{

@@ -24,6 +24,15 @@ the operator's controls rather than inside the package that computes it — whic
 also puts the testable half of the world model back to pure geometry, with no
 HTTP server bolted to it.
 
+THE TUNING TAB WRITES TO OTHER NODES, and it is the only thing here that
+does. Everything else in this file reads: four subscriptions, a process table,
+a disk. `/params/set` reaches into a running node and changes a value, which is
+a real outward effect and is why it is confined to what the TARGET node already
+declared dynamic — a read-only parameter is refused by the node itself, not by
+a rule kept here. It cannot persist anything: crusader_params.yaml stays the
+source of truth, the page shows live-versus-YAML drift, and writing the file
+back from a browser would destroy the comments that are most of its value.
+
 THE TWO RULES THIS NODE HOLDS, and holds again on every request no matter what
 the page rendered:
 
@@ -37,6 +46,7 @@ the page rendered:
 """
 import json
 import math
+import os
 import socket
 import time
 from collections import deque
@@ -45,7 +55,8 @@ from rclpy.node import Node
 
 from rcl_interfaces.msg import Log
 
-from crusader_msgs.msg import (Attitude, FcuStatus, LatLonHead,
+from crusader_msgs.msg import (Attitude, Cluster3DArray, FcuStatus,
+                               LatLonHead, ObstacleDistance,
                                TrackedTargetArray)
 
 from crusader_common import config as crsd_config
@@ -55,9 +66,11 @@ from crusader_common.param_utils import declare_from_config, make_set_callback
 from crusader_common.stream_cache import StreamCache
 
 from crusader_groundstation import node_registry as reg
-from crusader_groundstation import power_client, proc_scan, system_info
+from crusader_groundstation import bag_recorder, param_client, power_client
+from crusader_groundstation import proc_scan, system_info
 from crusader_groundstation.log_buffer import LogBuffer
 from crusader_groundstation.recorder import Recorder
+from crusader_groundstation.recorder import free_gb as recorder_free_gb
 from crusader_groundstation.gcs_page import render as render_page
 from crusader_groundstation.gcs_server import GcsServer
 from crusader_groundstation.process_manager import ProcessManager
@@ -68,6 +81,13 @@ PARAM_SPEC = {
     "bind_host": dict(read_only=True,
                       description="0.0.0.0 so the laptop can reach it"),
     "targets_topic": dict(read_only=True, description="TrackedTargetArray in"),
+    "clusters_topic": dict(read_only=True,
+                           description="Cluster3DArray in, for the map layer"),
+    "obstacle_topic": dict(read_only=True,
+                           description="ObstacleDistance in, as the autopilot "
+                                       "receives it"),
+    "clusters_timeout_s": dict(read_only=True, lo=0.2, hi=30.0),
+    "obstacle_timeout_s": dict(read_only=True, lo=0.2, hi=30.0),
     "tools_dir": dict(read_only=True,
                       description="where tools/*.py live, for the viewers"),
     "power_socket": dict(read_only=True,
@@ -117,6 +137,11 @@ class GroundStation(Node):
         self._att = StreamCache(p["attitude_timeout_s"])
         self._status = StreamCache(p["status_timeout_s"])
         self._targets = StreamCache(p["targets_timeout_s"])
+        # Map layers. Subscribed always, sent only when a page asks — see
+        # _snapshot. A subscription costs one callback per message; putting
+        # sixty clusters into every /state for every client is what costs.
+        self._clusters = StreamCache(p["clusters_timeout_s"])
+        self._obstacles = StreamCache(p["obstacle_timeout_s"])
 
         self._origin = None
         self._trail = deque(maxlen=int(p["trail_length"]) or 1)
@@ -127,6 +152,11 @@ class GroundStation(Node):
             tools_dir=p["tools_dir"],
             logger=lambda m: self.get_logger().info(m))
 
+        # Parameter services against every OTHER node. Clients are created on
+        # first use, so a session that never opens the Tuning tab adds no graph
+        # entities at all.
+        self.tuning = param_client.ParamBridge(self)
+
         # /rosout rather than journalctl: we are inside a container and the
         # host journal is on the other side of that boundary, while /rosout
         # crosses the DDS domain and needs no privilege. See log_buffer.
@@ -135,6 +165,12 @@ class GroundStation(Node):
 
         self.recorder = Recorder(p["record_dir"], p["record_min_free_gb"],
                                  logger=lambda m: self.get_logger().warn(m))
+        # The bag is a SEPARATE child process writing into the same session
+        # directory. Separate because it must be stopped with SIGINT to be
+        # readable at all, and because /livox/lidar must never go through this
+        # node's executor — see bag_recorder's header for both.
+        self.bags = bag_recorder.BagRecorder(
+            logger=lambda m: self.get_logger().info(m))
         self._persist = self._check_persistence(p["record_dir"])
         self.create_timer(1.0 / p["record_telemetry_hz"], self._record_sample)
 
@@ -148,6 +184,7 @@ class GroundStation(Node):
         # poll per client would put graph traffic on the wire in proportion to
         # how many people have the page open.
         self._graph = set()
+        self._graph_full = []
         self.create_timer(p["graph_period_s"], self._scan_graph)
 
         self.create_subscription(LatLonHead, "/crsd/pose", self._on_pose, 10)
@@ -156,6 +193,10 @@ class GroundStation(Node):
                                  self._on_status, 10)
         self.create_subscription(TrackedTargetArray, p["targets_topic"],
                                  self._on_targets, 10)
+        self.create_subscription(Cluster3DArray, p["clusters_topic"],
+                                 self._on_clusters, 10)
+        self.create_subscription(ObstacleDistance, p["obstacle_topic"],
+                                 self._on_obstacles, 10)
 
         self.server = GcsServer(render_page(p["poll_period_s"] * 1000.0),
                                 self._snapshot, self._action,
@@ -217,6 +258,12 @@ class GroundStation(Node):
     def _on_targets(self, msg: TrackedTargetArray):
         self._targets.set(msg, time.monotonic())
 
+    def _on_clusters(self, msg: Cluster3DArray):
+        self._clusters.set(msg, time.monotonic())
+
+    def _on_obstacles(self, msg: ObstacleDistance):
+        self._obstacles.set(msg, time.monotonic())
+
     def _scan_graph(self):
         """Which registry nodes are present in the ROS graph right now.
 
@@ -225,8 +272,14 @@ class GroundStation(Node):
         the telemetry bridge is down because it did not personally start it.
         """
         try:
-            names = {n for n, _ns in self.get_node_names_and_namespaces()}
-            self._graph = names
+            pairs = self.get_node_names_and_namespaces()
+            self._graph = {n for n, _ns in pairs}
+            # Fully qualified as well, for the parameter services. A node in a
+            # namespace answers /ns/node/set_parameters, and the bare name
+            # addresses a node that does not exist — which fails as a timeout,
+            # i.e. as "that node is down", which it is not.
+            self._graph_full = param_client.visible_nodes(
+                ns.rstrip("/") + "/" + n for n, ns in pairs)
         except Exception:
             pass                       # discovery hiccup; keep the last answer
         # One /proc pass for every registry entry at once. Catches what the
@@ -252,6 +305,17 @@ class GroundStation(Node):
     def _record_sample(self):
         """One telemetry line, if a session is live. Also runs the disk guard."""
         self.recorder.tick()
+        self.bags.tick()
+        # The Recorder's disk guard stops the SESSION when free space crosses
+        # the floor. A bag left running past that point would keep filling the
+        # disk the guard just fired to protect, and would do it invisibly,
+        # because the session that was reporting the size has closed.
+        if self.bags.recording and not (
+                self.recorder.session
+                and self.recorder.session.stopped is None):
+            self.get_logger().warn(
+                "session ended with a bag still recording — closing the bag")
+            self.bags.stop()
         if not (self.recorder.session
                 and self.recorder.session.stopped is None):
             return
@@ -367,7 +431,7 @@ class GroundStation(Node):
                            for n in sources],
         }
 
-    def _snapshot(self):
+    def _snapshot(self, layers=()):
         now = time.monotonic()
         pose = self._pose.get(now)
         att = self._att.get(now)
@@ -390,7 +454,7 @@ class GroundStation(Node):
         sysinfo = system_info.snapshot(self._cpu, self.p["disk_path"])
         sysinfo["uptime_text"] = system_info.format_uptime(sysinfo["uptime_s"])
 
-        return {
+        snap = {
             "boat": boat,
             "fcu": {"ok": status is not None,
                     "age": _round(self._status.age(now)),
@@ -408,6 +472,13 @@ class GroundStation(Node):
             },
             "profiles": [{"id": k, "label": v[0]}
                          for k, v in reg.PROFILES.items()],
+            # NAMES ONLY. The Tuning tab's values come from /params/list, on
+            # demand, because three parameter service round trips per browser
+            # poll per client would put graph traffic on the wire in proportion
+            # to how many people have the page open — the same reason the ROS
+            # graph is scanned on a timer. A couple of hundred bytes of node
+            # names is inside the poll budget; a parameter table is not.
+            "tuning": {"nodes": self._graph_full},
             "tabs": {
                 "camera": self._viewer_tab(
                     reg.CAMERA_TAB_SOURCES, "Camera viewer not running",
@@ -422,6 +493,8 @@ class GroundStation(Node):
             "power": self._power_state(),
             "logs": {"counts": self.logs.counts(),
                      "nodes": self.logs.nodes()},
+            "layers": {"clusters": "clusters" in layers,
+                       "prox": "prox" in layers},
             "record": {
                 "sessions": self.recorder.sessions(),
                 "live": (self.recorder.session.status()
@@ -435,8 +508,93 @@ class GroundStation(Node):
                 # the one thing about it worth stating on screen, and it is not
                 # guessable from the path — see system_info.mount_for.
                 "persist": self._persist,
+                # Status only — small, and the operator needs the growth rate
+                # in front of them while it runs. The topic table is fetched
+                # once, by /record/topics, when the tab is opened.
+                "bag": self.bags.status(
+                    _free_bytes(self.p["record_dir"])),
             },
         }
+        # Optional map layers, built ONLY when a page asked for them. With a
+        # shoreline in view the cluster layer is a few KB — an order of
+        # magnitude more than everything else in /state put together, which is
+        # cheap while you are verifying avoidance and pure waste five times a
+        # second while you are not. Same reasoning as the Tuning tab fetching
+        # on demand; the difference is that these belong in the map's own poll
+        # rather than a separate request, because they have to be drawn
+        # against the SAME boat position as the targets beside them.
+        if "clusters" in layers:
+            snap["clusters"] = self._cluster_layer(now, pose, att)
+        if "prox" in layers:
+            snap["prox"] = self._prox_layer(now)
+        return snap
+
+    def _cluster_layer(self, now, pose, att):
+        """Raw LiDAR clusters, in BOTH frames, or an empty stale marker.
+
+        Each cluster carries its BODY-frame position — what the sensor
+        actually said, and the frame QGC's PRX1 view is drawn in — and its
+        WORLD-frame position, so it can be laid over the tracks built from it.
+
+        Both are computed here rather than rotating in the page, because
+        geo.body_to_world_ypr is this repo's one implementation of that
+        transform and a JavaScript copy would be a second one that drifts.
+        It is the same argument tools/lidar_view.py makes for reading the
+        LiDAR extrinsic out of the params file instead of restating it: a
+        viewer that models the geometry differently from the node under test
+        fails and passes for reasons that have nothing to do with the thing
+        being checked.
+
+        `placed` is false when pose or attitude is stale. The body-frame
+        numbers are still true then — they do not depend on knowing where the
+        boat is — so they are still sent, and the page falls back to the
+        bow-up view rather than drawing the world layer at a position the
+        boat has already left.
+        """
+        msg = self._clusters.get(now)
+        placed = pose is not None and att is not None
+        out = {"ok": msg is not None, "age": _round(self._clusters.age(now)),
+               "placed": bool(placed and msg is not None), "items": []}
+        if msg is None:
+            return out
+        for c in msg.clusters:
+            item = {"x": round(c.x, 2), "y": round(c.y, 2), "z": round(c.z, 2),
+                    "ex": round(c.extent_x, 2), "ey": round(c.extent_y, 2),
+                    "n": int(c.n_points), "r": round(c.range, 2)}
+            if placed:
+                wx, wy, _wz = geo.body_to_world_ypr(
+                    c.x, c.y, c.z, att[0], att[1], att[2], pose[4], pose[5])
+                item["wx"], item["wy"] = round(wx, 2), round(wy, 2)
+            out["items"].append(item)
+        return out
+
+    def _prox_layer(self, now):
+        """The 72 sectors exactly as the autopilot receives them.
+
+        Not summarised, not rescaled, not cleaned up. The entire value of this
+        layer is that it is what telemetry_bridge forwards as MAVLink
+        OBSTACLE_DISTANCE, so laying it beside QGC's PRX1 view answers a
+        question nothing else here can: if the two disagree, the fault is
+        between this boat's ROS graph and the flight controller; if they agree
+        with each other and disagree with the clusters, it is
+        proximity_bridge's sector maths.
+
+        UINT16_MAX survives as UINT16_MAX. ObstacleDistance.msg is explicit
+        that it means NO READING and that 0 means touching the hull, so the
+        page draws nothing for it rather than a maximum-range arc — "not seen"
+        and "seen and clear" are different facts, and this is the repo that
+        keeps insisting they must not render the same.
+        """
+        msg = self._obstacles.get(now)
+        out = {"ok": msg is not None, "age": _round(self._obstacles.age(now))}
+        if msg is None:
+            return out
+        out.update(d=[int(v) for v in msg.distances],
+                   increment=round(float(msg.increment_deg), 3),
+                   offset=round(float(msg.angle_offset_deg), 3),
+                   min_cm=int(msg.min_distance_cm),
+                   max_cm=int(msg.max_distance_cm))
+        return out
 
     def _power_state(self):
         if not self.p["allow_power"]:
@@ -489,18 +647,21 @@ class GroundStation(Node):
         if path == "/trail/clear":
             self._trail.clear()
             return {"ok": True, "message": "trail cleared"}
+        if path == "/params/list":
+            return self._params_list(payload)
+        if path == "/params/set":
+            return self._params_set(payload)
         if path == "/logs":
             return self._logs(payload)
         if path == "/logs/clear":
             self.logs.clear()
             return {"ok": True, "message": "log buffer cleared"}
+        if path == "/record/topics":
+            return self._record_topics()
         if path == "/record/start":
-            ok, message = self.recorder.start(self._record_sources(),
-                                              self.p["record_frame_hz"])
-            return {"ok": ok, "message": message}
+            return self._record_start(payload)
         if path == "/record/stop":
-            ok, message = self.recorder.stop()
-            return {"ok": ok, "message": message}
+            return self._record_stop()
         if path == "/record/delete":
             ok, message = self.recorder.delete(payload.get("name", ""))
             return {"ok": ok, "message": message}
@@ -519,6 +680,132 @@ class GroundStation(Node):
         records, newest, dropped = self.logs.read(since, level, node)
         return {"ok": True, "message": "", "records": records,
                 "newest": newest, "dropped": dropped}
+
+    def _param_call(self, payload, call):
+        """(node, result, error) for one parameter endpoint. Two of three are set.
+
+        Both endpoints need the same preamble, so it lives here once: the
+        target must be in the ROS graph — checked before any service call, so
+        an unreachable name fails immediately instead of costing the browser a
+        full service timeout to learn the same thing — and ParamBridge raises
+        rather than returning a sentinel, because a caller that wanted the
+        value has no use for one. Turning that into a sentence an operator can
+        read is the HTTP layer's job, and there is one HTTP layer.
+
+        Args:
+          payload: the POST body; its "node" key names the target.
+          call: one-arg callable, given the node name, returning the result.
+        """
+        name = payload.get("node") or ""
+        if name not in self._graph_full:
+            return name, None, {"ok": False,
+                                "message": f"{name or 'no node'} is not in "
+                                           "the ROS graph"}
+        try:
+            return name, call(name), None
+        except (TimeoutError, RuntimeError) as exc:
+            return name, None, {"ok": False, "message": str(exc)}
+
+    def _params_list(self, payload):
+        """One node's parameters, described, valued, and set against the YAML."""
+        name, params, err = self._param_call(
+            payload, lambda n: self.tuning.list(n, _yaml_defaults(n)))
+        return err or {"ok": True, "message": "", "node": name,
+                       "params": params}
+
+    def _params_set(self, payload):
+        """Apply {name: value} to one node and report what it said.
+
+        Every result comes back, successes included, because a set that was
+        accepted and then clamped by the node's own callback is a different
+        outcome from one that took the value verbatim, and the operator is
+        about to act on which of the two happened. The node's reason is passed
+        through unedited for the same reason.
+        """
+        values = payload.get("values")
+        if not isinstance(values, dict) or not values:
+            return {"ok": False, "message": "no values to set"}
+        name, results, err = self._param_call(
+            payload, lambda n: self.tuning.set(n, values))
+        if err:
+            return err
+
+        bad = [r for r in results if not r["ok"]]
+        # Logged as well as returned: a parameter changed from a browser and
+        # nowhere else is a change nobody can find afterwards, and /rosout is
+        # what the Logs tab and any recording already capture.
+        log = self.get_logger()
+        for r in results:
+            line = (f"{name} {r['name']} <- {values.get(r['name'])!r}: "
+                    + ("applied" if r["ok"] else f"REFUSED — {r['reason']}"))
+            (log.info if r["ok"] else log.warn)(line)
+        message = ("; ".join(f"{r['name']}: {r['reason'] or 'refused'}"
+                             for r in bad) if bad
+                   else f"applied {', '.join(sorted(values))} on "
+                        f"{name.lstrip('/')}")
+        return {"ok": not bad, "message": message, "results": results}
+
+    def _record_topics(self):
+        """Every topic in the graph, typed, for the Record tab's checkboxes.
+
+        On demand rather than in /state, for the Tuning tab's reason: a topic
+        table is a couple of KB and would be resent to every client five times
+        a second to be looked at once, at the start of a session.
+
+        The list is the LIVE GRAPH, not a curated set. A recording is worth
+        making because something unexpected happened, and a curated list is a
+        judgement made weeks earlier about what would matter — which is exactly
+        the judgement that turns out to be wrong on the day.
+        """
+        try:
+            pairs = self.get_topic_names_and_types()
+        except Exception as e:
+            return {"ok": False, "message": f"could not read the graph: {e}"}
+        return {"ok": True, "message": "",
+                "topics": bag_recorder.describe_topics(pairs)}
+
+    def _record_start(self, payload):
+        """Begin a session, and a bag inside it if any topics were ticked.
+
+        Order matters: the Recorder creates the session directory, and the bag
+        goes INSIDE it, so `ros2 bag record --output` gets a path whose parent
+        exists and whose own name does not. A bag started first would have
+        nowhere to live, and one started outside the session would not be in
+        the tarball the Download button produces.
+        """
+        topics = payload.get("topics") or []
+        if not isinstance(topics, list) or any(not isinstance(t, str)
+                                               for t in topics):
+            return {"ok": False, "message": "topics must be a list of names"}
+
+        ok, message = self.recorder.start(self._record_sources(),
+                                          self.p["record_frame_hz"])
+        if not ok or not topics:
+            return {"ok": ok, "message": message}
+
+        bag_dir = os.path.join(self.recorder.session.dir, "bag")
+        bag_ok, bag_message = self.bags.start(bag_dir, topics)
+        # A failed bag does NOT fail the session. Telemetry and frames are
+        # already being written, and throwing those away because rosbag2 would
+        # not start is the wrong trade — but the operator has to be told, or
+        # they will sail on believing the topics are being captured.
+        return {"ok": True,
+                "message": message + ("; " + bag_message if not bag_ok
+                                      else f"; {bag_message}")}
+
+    def _record_stop(self):
+        """Stop the bag FIRST, then the session.
+
+        The bag has to finish writing into the session directory before the
+        session writes its meta.json, or the size the session records is the
+        size before rosbag2 flushed.
+        """
+        bag_message = ""
+        if self.bags.recording:
+            _ok, bag_message = self.bags.stop()
+        ok, message = self.recorder.stop()
+        return {"ok": ok,
+                "message": message + (f"; {bag_message}" if bag_message else "")}
 
     def archive(self, name, fileobj):
         """Stream one recording session out as .tar.gz. Used by the GET path."""
@@ -649,6 +936,31 @@ def _port_open(port, host="127.0.0.1", timeout=0.25):
             return s.connect_ex((host, port)) == 0
     except OSError:
         return False
+
+
+def _free_bytes(path):
+    """Free space where recordings are written, or None off a real filesystem.
+
+    None rather than 0 when statvfs is unavailable: the hours-remaining figure
+    it feeds must go blank rather than read as "no time left", which would be
+    an alarm nobody could act on.
+    """
+    gb = recorder_free_gb(path)
+    return None if gb is None else gb * 1073741824.0
+
+
+def _yaml_defaults(node_name):
+    """crusader_params.yaml's section for a node, or {} when it has none.
+
+    Not having a section is not an error here. bt_runner_node and anything
+    started by hand are real nodes with real parameters and no entry in the
+    file, and the tab has to open for them — it just has nothing to compare
+    their values against, which it says rather than implying agreement.
+    """
+    try:
+        return crsd_config.node_params(node_name.rstrip("/").split("/")[-1])
+    except Exception:
+        return {}
 
 
 def _round(v, n=2):
