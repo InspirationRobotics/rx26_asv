@@ -17,7 +17,7 @@ header and is not in `core.launch.py`.
 | LiDAR | whether `lidar_view` is up on :8081 | **show/stop the stream**, start it |
 | Map | vessel, wake, `crsd/world_targets`, and optionally raw clusters and the PRX1 sectors | pan, zoom, follow, **bow-up**, **layer toggles**, clear trail |
 | Tuning | any running node's parameters, with its own descriptions and ranges | set a dynamic value live; revert one to the YAML |
-| Record | sessions on disk, sizes, live capture state, **live bag growth rate** | tick topics, start/stop a session **with a rosbag**, download a `.tar.gz`, delete |
+| Record | sessions on disk, sizes, live capture state, **live bag growth rate** | tick topics, **set camera and LiDAR fps for the session**, start/stop a session **with a rosbag**, download a `.tar.gz`, delete |
 | Logs | every node's `/rosout` output, filterable by level and node | clear the buffer |
 | System | CPU, temperature, memory, disk, uptime | shut down / reboot the host |
 
@@ -102,6 +102,36 @@ A session is one directory holding three things, and they are not redundant:
   what the operator was actually looking at.
 - `bag/` — a real rosbag2 of whichever topics were ticked. The replayable one, and the only
   one that can carry the point cloud.
+
+### The frame rate is per viewer, and per session
+
+The camera and the LiDAR are not the same recording problem. The camera pipeline runs at
+about **30 fps**, so a capture below that is deliberately throwing frames away — and
+sometimes that is exactly what you want and sometimes it is the whole point of recording.
+The LiDAR plan view is redrawn from a **10 Hz** sensor, so anything above 10 there is
+copies of frames that never changed. One rate for both meant asking for full-rate camera
+tripled the LiDAR half of the session for nothing.
+
+So the Record tab sets them **separately**, and the numbers ride with Start rather than
+being written back to the parameter. That is deliberate: 30 fps is roughly **1 MB/s, about
+3.6 GB an hour**, and a sticky 30 fps would still be 30 fps on a session weeks later that
+nobody chose it for — where the first feedback is the disk guard stopping a run you
+needed. The YAML's `record_frame_hz` is the **default** the boxes start from and the value
+that comes back on the next boot.
+
+The parameter's ceiling is **60**, not 30, because it is the *parameter's* limit rather
+than an assumption about today's camera — pinning it to 30 would silently under-record the
+day somebody runs a faster one. The page reads the range out of the snapshot, which reads
+it off the node's own `PARAM_SPEC`, so a value the boxes accept is never one the node then
+quietly rewrites. Both ends still clamp, because the browser is not trusted; a rate that
+gets clamped or ignored comes back in the "recording" message rather than being applied
+silently.
+
+While a session runs, the tab shows the rate **read back off the pullers**, not the number
+the page asked for — those differ the moment a session was started before the box was
+changed. The same figures go into `meta.json`, because "why is this session twenty times
+the size of the last one" gets asked weeks later, off the laptop, with nothing else left
+to answer it.
 
 The topic list is **the live ROS graph**, not a curated set: a recording is worth making
 because something unexpected happened, and the curated list is the judgement that turns
