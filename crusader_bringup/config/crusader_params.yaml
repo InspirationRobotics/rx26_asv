@@ -564,9 +564,19 @@ ground_station:
                                            #      recordings to survive the
                                            #      container being recreated.
     record_telemetry_hz: 2.0               # [DYN] telemetry.jsonl sample rate
-    record_frame_hz: 1.0                   # [DYN] frames saved per second PER
-                                           #       viewer, pulled from the MJPEG
-                                           #       servers rather than re-encoded
+    record_frame_hz: 1.0                   # [DYN] DEFAULT frames saved per second
+                                           #       PER viewer, pulled from the
+                                           #       MJPEG servers rather than
+                                           #       re-encoded. The Record tab
+                                           #       sets camera and lidar
+                                           #       SEPARATELY for one session
+                                           #       without writing this back, so
+                                           #       an afternoon at full rate does
+                                           #       not become the boat's normal.
+                                           #       Range 0.05-60. The camera
+                                           #       pipeline runs at ~30 fps, so
+                                           #       30 saves every frame it sends
+                                           #       - about 1 MB/s, 3.6 GB/hour.
     record_min_free_gb: 2.0                # [DYN] refuse to start, and stop
                                            #       mid-run, below this. A full
                                            #       root filesystem takes down the

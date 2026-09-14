@@ -71,6 +71,7 @@ from crusader_groundstation import proc_scan, system_info
 from crusader_groundstation.log_buffer import LogBuffer
 from crusader_groundstation.recorder import Recorder
 from crusader_groundstation.recorder import free_gb as recorder_free_gb
+from crusader_groundstation.recorder import frame_rates
 from crusader_groundstation.gcs_page import render as render_page
 from crusader_groundstation.gcs_server import GcsServer
 from crusader_groundstation.process_manager import ProcessManager
@@ -112,11 +113,30 @@ PARAM_SPEC = {
     "record_dir": dict(read_only=True, description="where sessions are written"),
     "record_telemetry_hz": dict(read_only=False, lo=0.1, hi=20.0,
                                 description="telemetry.jsonl sample rate"),
-    "record_frame_hz": dict(read_only=False, lo=0.05, hi=10.0,
-                            description="frames saved per second per viewer"),
+    # 60, not 30, and not the old 10. The old ceiling made the camera's own
+    # frame rate unreachable: the pipeline runs at ~30 fps, so anything below
+    # that is deliberately throwing frames away and there was no way to ask for
+    # all of them. 60 rather than 30 because this is the PARAMETER's limit, and
+    # pinning it to today's camera would silently under-record the day somebody
+    # runs a faster one. The page reads this range out of the snapshot, so its
+    # boxes and this check can never disagree.
+    "record_frame_hz": dict(read_only=False, lo=0.05, hi=60.0,
+                            description="default frames per second per viewer; "
+                                        "the Record tab overrides it per "
+                                        "session"),
     "record_min_free_gb": dict(read_only=False, lo=0.5, hi=500.0,
                                description="stop recording below this"),
 }
+
+
+# The frame keys, and where each one's stream comes from. Module level, and
+# published in the snapshot, because the Record tab needs the KEYS to lay out
+# one fps control per viewer — a second list of them in the page is how a third
+# viewer would get added everywhere except the control that sets its rate.
+FRAME_SOURCES = (("camera", reg.CAMERA_TAB_SOURCES),
+                 ("lidar", reg.LIDAR_TAB_SOURCES))
+
+FRAME_KEYS = [k for k, _ in FRAME_SOURCES]
 
 
 class GroundStation(Node):
@@ -357,8 +377,7 @@ class GroundStation(Node):
         """
         _items, running = self._node_items()
         sources = {}
-        for key, names in (("camera", reg.CAMERA_TAB_SOURCES),
-                           ("lidar", reg.LIDAR_TAB_SOURCES)):
+        for key, names in FRAME_SOURCES:
             src, starting = reg.tab_source(names, running, self._serving)
             if src and not starting:
                 spec = reg.BY_NAME[src]
@@ -501,6 +520,12 @@ class GroundStation(Node):
                          if self.recorder.session else None),
                 "sources": sorted(self._record_sources()),
                 "frame_hz": self.p["record_frame_hz"],
+                # The page's fps boxes clamp to the same range this node does,
+                # read from the same PARAM_SPEC entry, so a value the page
+                # accepts is never one the node then quietly rewrites.
+                "frame_hz_range": [PARAM_SPEC["record_frame_hz"]["lo"],
+                                   PARAM_SPEC["record_frame_hz"]["hi"]],
+                "frame_keys": FRAME_KEYS,
                 "telemetry_hz": self.p["record_telemetry_hz"],
                 "min_free_gb": self.p["record_min_free_gb"],
                 "dir": self.p["record_dir"],
@@ -789,10 +814,28 @@ class GroundStation(Node):
                                                for t in topics):
             return {"ok": False, "message": "topics must be a list of names"}
 
-        ok, message = self.recorder.start(self._record_sources(),
-                                          self.p["record_frame_hz"])
-        if not ok or not topics:
-            return {"ok": ok, "message": message}
+        # PER SESSION, and deliberately NOT a parameter write. The Record tab's
+        # fps boxes apply to this recording only, and the YAML default comes
+        # back on the next boot. A sticky 30 fps is 1 MB/s — about 3.6 GB an
+        # hour — on every later session too, and the first feedback you would
+        # get is the disk guard stopping a run you needed, weeks after the
+        # afternoon you actually wanted full rate.
+        sources = self._record_sources()
+        spec = PARAM_SPEC["record_frame_hz"]
+        rates, notes = frame_rates(payload.get("frame_hz"), sources.keys(),
+                                   self.p["record_frame_hz"],
+                                   spec["lo"], spec["hi"])
+
+        ok, message = self.recorder.start(sources, rates)
+        if not ok:
+            return {"ok": False, "message": message}
+        # Notes only once the session is real: explaining which fps was clamped
+        # on a session that refused to start is noise in front of the reason it
+        # refused.
+        if notes:
+            message += " (" + "; ".join(notes) + ")"
+        if not topics:
+            return {"ok": True, "message": message}
 
         bag_dir = os.path.join(self.recorder.session.dir, "bag")
         bag_ok, bag_message = self.bags.start(bag_dir, topics)

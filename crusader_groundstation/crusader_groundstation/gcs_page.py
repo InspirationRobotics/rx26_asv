@@ -533,6 +533,111 @@ function power(verb){
    be live — is the only thing on the 5 Hz path. */
 var recTopics = null, recSel = {}, recBusy = false, recErr = '';
 
+/* Capture rate, PER VIEWER and PER SESSION. Sent with Start; it is not a
+   parameter write, so the YAML default comes back on the next boot and a 30 fps
+   afternoon does not become the boat's new normal.
+
+   Lives in JavaScript for the same reason the checkboxes do, and one reason
+   more: the status block above repaints five times a second, and a number box
+   rebuilt under the cursor loses the digits you are part-way through typing.
+   So this pane is painted only when the value changes or a recording starts. */
+var recFps = null, recWasLive = null;
+var FPS_PRESETS = [0.5, 1, 2, 5, 10, 30];
+
+/* Both of these come from the snapshot, which reads them off the node's own
+   PARAM_SPEC and FRAME_SOURCES — so the boxes and the node can never disagree
+   about what is allowed or about which viewers exist. The fallbacks are only
+   for the first paint, before any snapshot has landed. */
+function recCfg(name, dflt){
+  return (S.record && S.record[name]) || dflt;
+}
+function recFpsRange(){ return recCfg('frame_hz_range', [0.05, 60]); }
+function recFpsKeys(){ return recCfg('frame_keys', ['camera', 'lidar']); }
+function recSetFps(key, hz){
+  var r = recFpsRange();
+  hz = Number(hz);
+  if(!isFinite(hz)) return;
+  recFps[key] = Math.min(r[1], Math.max(r[0], hz));
+  paintRecFps();
+  paintRecStatus();
+}
+function recFpsSummary(){
+  if(!recFps) return fmt(S.record.frame_hz, 2) + ' fps';
+  var up = S.record.sources || [];
+  if(!up.length) return 'no viewer';
+  return up.map(function(k){
+    return k + ' ' + fmt(recFps[k], 2) + ' fps'; }).join(', ');
+}
+
+function paintRecFps(){
+  var box = el('recfps');
+  if(!box || !S.record) return;
+  var keys = recFpsKeys(), rng = recFpsRange();
+  if(!recFps){
+    recFps = {};
+    keys.forEach(function(k){ recFps[k] = S.record.frame_hz; });
+  }
+  /* Both branches below open the row the same way — a lit dot when the thing
+     exists, then the viewer's name. Written once so the two halves of this
+     pane cannot drift into different-looking rows. */
+  function rowHead(k, lit){
+    return '<div class="row"><span class="dot' + (lit ? ' up' : '') + '">'
+         + '</span><span class="nm">' + esc(k) + '</span>';
+  }
+  var live = S.record.live && S.record.live.recording ? S.record.live : null;
+  var out = '<h3>Frame rate</h3>';
+  if(live){
+    /* The rates a running session is ACTUALLY pulling at, read back off the
+       pullers by the node — not what this page asked for, which would still
+       say 30 if the session had started before you changed the box. */
+    out += '<div class="hint">Fixed for the running session. Stop and start '
+        +  'again to change it.</div>';
+    keys.forEach(function(k){
+      var hz = (live.frame_hz || {})[k];
+      out += rowHead(k, hz != null)
+          +  '<span class="meta" style="flex:1">'
+          +  (hz == null ? 'not being recorded — no viewer was up'
+                         : fmt(hz,2) + ' fps · '
+                           + ((live.frames||{})[k] || 0) + ' frames saved')
+          +  '</span></div>';
+    });
+    box.innerHTML = out;
+    return;
+  }
+  var up = {};
+  (S.record.sources || []).forEach(function(k){ up[k] = true; });
+  out += '<div class="hint">Per viewer, and for this session only — it '
+      +  'does not change the saved default. The camera stream is 640&times;400 '
+      +  'JPEG at quality 60 and the pipeline runs at about 30 fps, so '
+      +  '<b>30 saves every frame it sends, at roughly 1 MB/s — about 3.6 '
+      +  'GB an hour</b>. The LiDAR view is redrawn from a 10 Hz sensor, so '
+      +  'anything above 10 there is copies.</div>';
+  keys.forEach(function(k){
+    var v = recFps[k];
+    out += rowHead(k, up[k])
+        +  '<input type="number" data-fps="' + esc(k) + '" value="' + v + '"'
+        +  ' min="' + rng[0] + '" max="' + rng[1] + '" step="0.5"'
+        +  ' style="width:72px"><span class="meta">fps</span>';
+    FPS_PRESETS.forEach(function(p){
+      out += '<button data-fps-key="' + esc(k) + '" data-fps-val="' + p + '"'
+          +  (Math.abs(v - p) < 1e-6 ? ' class="go"' : '') + '>' + p + '</button>';
+    });
+    out += '<span class="meta" style="flex:1">'
+        +  (up[k] ? '' : 'no viewer running — nothing to pull')
+        +  '</span></div>';
+  });
+  box.innerHTML = out;
+  box.querySelectorAll('button[data-fps-key]').forEach(function(b){
+    b.onclick = function(){ recSetFps(b.dataset.fpsKey, b.dataset.fpsVal); };
+  });
+  /* onchange, NOT oninput: clamping on every keystroke turns typing "30" into
+     "3" the instant the first digit lands, because 3 is inside the range and
+     the box gets rewritten under you. */
+  box.querySelectorAll('input[data-fps]').forEach(function(x){
+    x.onchange = function(){ recSetFps(x.dataset.fps, x.value); };
+  });
+}
+
 function recLoadTopics(){
   if(recBusy) return;
   recBusy = true;
@@ -625,9 +730,16 @@ function paintRecTopics(){
 
 function renderRec(){
   if(!el('recstatus')){
-    el('p-rec').innerHTML = '<div id="recstatus"></div><div id="rectopics"></div>';
+    el('p-rec').innerHTML = '<div id="recstatus"></div><div id="recfps"></div>'
+                          + '<div id="rectopics"></div>';
     recLoadTopics();
   }
+  /* Repainted on exactly two events: the first snapshot (which carries the
+     default this has no other way to learn) and each start/stop transition
+     (because a running session shows measured rates instead of boxes). Never
+     on the 5 Hz path — see recFps. */
+  var live = !!(S.record && S.record.live && S.record.live.recording);
+  if(recFps === null || live !== recWasLive){ recWasLive = live; paintRecFps(); }
   paintRecStatus();
 }
 
@@ -676,7 +788,7 @@ function paintRecStatus(){
         +  'is exactly when you want it. Download once you are back alongside.</div>'
         +  '<div class="hint">Storage: ' + pw + '.</div>'
         +  '<div class="hint" style="margin-top:6px">Will capture: <b>' + esc(srcs)
-        +  '</b> at ' + fmt(r.frame_hz,2) + ' fps, telemetry at '
+        +  '</b> at ' + esc(recFpsSummary()) + ', telemetry at '
         +  fmt(r.telemetry_hz,1) + ' Hz, plus <b>' + recSelected().length
         +  '</b> topic(s) as a rosbag. Stops itself below '
         +  fmt(r.min_free_gb,1) + ' GB free.</div>'
@@ -704,7 +816,9 @@ function paintRecStatus(){
     b.onclick = function(){ delSession(b.dataset.del); };
   });
 }
-function recStart(){ post('/record/start', {topics: recSelected()}); }
+function recStart(){
+  post('/record/start', {topics: recSelected(), frame_hz: recFps || {}});
+}
 function recStop(){ post('/record/stop', {}); }
 function delSession(name){
   if(!confirm('Delete recording ' + name + '? This cannot be undone.')) return;

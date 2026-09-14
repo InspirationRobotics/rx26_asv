@@ -66,6 +66,59 @@ def safe_session_dir(root, name):
     return target
 
 
+# Only reached when a caller hands start() a mapping that does not name one of
+# its own sources, which is a caller bug rather than operator input. Named so
+# the fallback is a stated decision and not a bare literal inside the loop.
+FALLBACK_FRAME_HZ = 1.0
+
+
+def frame_rates(requested, keys, default, lo=None, hi=None):
+    """Per-viewer capture rates as {key: hz}, from whatever the operator sent.
+
+    Args:
+      requested: None, a single number meaning "the same rate everywhere"
+        (which is all the parameter alone could ever mean), or a {key: hz}
+        mapping naming only the viewers it wants to change.
+      keys: the viewers this session will actually pull from.
+      default: the parameter's value, used for every key `requested` omits.
+      lo, hi: the parameter's own range, so a rate the page accepted is never
+        one this then quietly rewrites.
+
+    Returns:
+      (rates, notes). A bad value costs you the OVERRIDE, not the recording:
+      refusing a session because one field was mistyped loses the thing you
+      were about to record, and that is rarely repeatable. But it is never
+      silent - whatever was ignored or clamped comes back in `notes` and is
+      shown beside the "recording" message, because a capture quietly running
+      at a rate you did not choose is worse than one that refused outright.
+    """
+    notes = []
+    if requested is None:
+        requested = {}
+    elif isinstance(requested, bool) or not isinstance(requested,
+                                                       (dict, int, float)):
+        notes.append("frame_hz must be a number or a per-viewer object, not "
+                     f"{type(requested).__name__} - using {default:g} fps")
+        requested = {}
+    elif not isinstance(requested, dict):
+        requested = {k: requested for k in keys}
+
+    rates = {}
+    for key in keys:
+        v = requested.get(key, default)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            notes.append(f"{key} fps {v!r} is not a number - using {default:g}")
+            v = default
+        elif lo is not None and v < lo:
+            notes.append(f"{key} fps {v:g} is below {lo:g} - using {lo:g}")
+            v = lo
+        elif hi is not None and v > hi:
+            notes.append(f"{key} fps {v:g} is above {hi:g} - using {hi:g}")
+            v = hi
+        rates[key] = float(v)
+    return rates, notes
+
+
 def free_gb(path):
     try:
         st = os.statvfs(path)
@@ -251,13 +304,31 @@ class Session:
             pass
         self.write_meta()
 
+    def puller_stats(self):
+        """(saved frame counts, capture rates) per viewer, in one walk.
+
+        Read back OFF the pullers rather than echoed from what was asked for,
+        so the number on screen and in meta.json is the rate frames are
+        actually being saved at. Both status() and write_meta() need the pair,
+        and two copies of the comprehension is how they end up disagreeing
+        after one of them is changed.
+        """
+        return ({k: p.count for k, p in self.pullers.items()},
+                {k: round(1.0 / p.period, 2) for k, p in self.pullers.items()})
+
     def write_meta(self):
+        counts, rates = self.puller_stats()
         meta = {
             "name": self.name,
             "started": self.started,
             "stopped": self.stopped,
             "samples": self.samples,
-            "frames": {k: p.count for k, p in self.pullers.items()},
+            "frames": counts,
+            # Recorded into the archive, not just shown live: "why is this
+            # session twenty times the size of the last one" is a question
+            # asked weeks later, off the laptop, with nothing else left to
+            # answer it.
+            "frame_hz": rates,
             "error": self.error,
         }
         try:
@@ -269,12 +340,14 @@ class Session:
         return meta
 
     def status(self):
+        counts, rates = self.puller_stats()
         return {
             "name": self.name,
             "recording": self.stopped is None,
             "elapsed_s": round((self.stopped or time.time()) - self.started, 1),
             "samples": self.samples,
-            "frames": {k: p.count for k, p in self.pullers.items()},
+            "frames": counts,
+            "frame_hz": rates,
             "size_mb": dir_size_mb(self.dir),
             "free_gb": None if free_gb(self.dir) is None
                        else round(free_gb(self.dir), 1),
@@ -295,6 +368,12 @@ class Recorder:
     def start(self, sources, frame_hz):
         """Begin a session. `sources` is {key: url} for MJPEG endpoints.
 
+        `frame_hz` is one rate for every source, or a {key: hz} mapping from
+        frame_rates(). PER SOURCE because the camera and the LiDAR are not the
+        same recording problem: 30 fps of annotated camera is the whole point
+        of asking for 30 fps, while 30 fps of a plan view redrawn from a 10 Hz
+        sensor is three copies of every frame and a third of the disk.
+
         Returns (ok, message). Refuses when a session is already live rather
         than silently starting a second one — two recorders writing one
         directory is a corrupted session that looks fine until it is read.
@@ -306,12 +385,22 @@ class Recorder:
             return False, (f"refusing to start: {free:.1f} GB free, floor is "
                            f"{self.min_free_gb:.1f} GB")
         name = time.strftime("%Y%m%d-%H%M%S")
+        # Resolved once, for every source, so the puller and the log line
+        # cannot be told two different numbers.
+        rates = {k: (frame_hz.get(k, FALLBACK_FRAME_HZ)
+                     if isinstance(frame_hz, dict) else frame_hz)
+                 for k in sources}
         self.session = Session(self.root, name, self.min_free_gb, self.log)
         for key, url in sources.items():
-            self.session.add_puller(key, url, frame_hz)
+            self.session.add_puller(key, url, rates[key])
         if self.log:
+            # The RATE is in the log line, not just the source name: "why is
+            # this session 20x the size of the last one" is the question this
+            # answers, and the answer is not otherwise written down anywhere.
             self.log(f"recording {name} (sources: "
-                     f"{', '.join(sources) or 'telemetry only'})")
+                     + (", ".join(f"{k} @ {rates[k]:g} fps"
+                                  for k in sorted(sources))
+                        or "telemetry only") + ")")
         return True, f"recording {name}"
 
     def stop(self):
