@@ -84,6 +84,30 @@ map looks perfect anyway. It proves plumbing, association, decay, fusion arbitra
 display — never the frame convention. That is bench work against real hardware, the way
 [docs/G2](../../docs/G2_lidar_orientation.md) did it for the LiDAR.
 
+## `bench_gate_pairs.py` — a gate pair means red-to-starboard either way round
+
+```bash
+python3 tools/bench/bench_gate_pairs.py     # no ROS, no node, ~1 s
+```
+
+The boat gets a gate's crossing heading from `bearing(green → red) − 90`
+(`nav::gateWaypoints`). That is a pure function of the pair — it never looks at
+the boat, the entry or the exit — which is what lets it work with GPS yaw
+unresolved, and equally what makes an **inverted pair come out 180° wrong
+instead of failing**.
+
+That happened on 2026-09-13 in SITL: the page authored pairs in click order, the
+operator clicked green-then-red, and the aircraft said "red 3, green 1" about a
+green 3 and a red 1. The boat crossed the first gate correctly, turned around,
+and drove back through it with RED TO PORT. Every line in every log was `[INFO]`.
+
+So `UavLink` now re-derives which buoy is red from the transmitted plan, and
+this bench holds it to that. It also pins the two things the fix must **not**
+do: alter a pair that is not one red and one green (that is an operator mistake
+to show, not one to guess at), and rewind `_served` on the 0.2 Hz retransmit
+(which would answer every request with gate 1 and send the boat round in
+circles).
+
 ## The four throughput benches — where do the frames go?
 
 Four scripts, one variable at a time, to answer a question the running node cannot:
