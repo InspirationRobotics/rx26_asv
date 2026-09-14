@@ -22,6 +22,7 @@
 #define CRUSADER_BT__CONTEXT_HPP_
 
 #include <cmath>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -55,11 +56,50 @@ struct Context
   bool pose_fresh = false;
   nav::Vec2 boat;
   double heading_deg = std::nan("");          ///< NaN when GPS yaw is unresolved
-  std::vector<nav::Buoy> buoys;
+  std::vector<nav::Buoy> buoys;               ///< FUSED: plan + tracker
   bool have_entry = false;
   bool have_exit = false;
   nav::Vec2 entry;
   nav::Vec2 exitp;                            ///< `exit` is a libc function
+
+  // ---- the UAV's passage plan, above Core tier ----
+  //
+  // `buoys` above is the FUSION of this and the tracker's targets, and the
+  // beacon state in it always came from here. See nav::fusePassage.
+  //
+  // entry/exitp come from the plan too, not from findBeacon over the boat's own
+  // targets: the EXIT sits 92 m out in a full-size field, far past the camera,
+  // and a transit that waits to SEE it never starts.
+  std::vector<nav::PlanBuoy> plan;
+  std::uint32_t plan_version = 0;             ///< bumps on every new plan
+  bool plan_fresh = false;                    ///< aged like pose_fresh
+  double plan_age_s = 0.0;                    ///< seconds since the last plan
+  std::vector<nav::Buoy> obstacles;           ///< tracked, but not in the plan
+
+  // ---- the gate handshake ----
+  //
+  // The boat publishes gate_reached(gate_seq) and waits for a pair carrying the
+  // SAME seq. Matching on the sequence is what makes a retransmission on a
+  // lossy radio distinguishable from the answer to the next request.
+  std::uint8_t gate_seq = 0;
+  int gate_red_id = -1;                       ///< -1 = no pair for this seq yet
+  int gate_green_id = -1;
+  bool have_gate = false;                     ///< a pair for gate_seq arrived
+  /// The UAV answered 255/255: no more gates, go to the exit. This is the ONLY
+  /// thing that ends the transit loop. Proximity to the exit is not a
+  /// substitute -- the boat must clear every gate first, and the exit buoy can
+  /// sit well inside any sane arrival radius of the last one.
+  bool passage_complete = false;
+  /// Did the boat actually finish the gate it last asked about?
+  ///
+  /// RequestNextGate advances the sequence ONLY when this is set. Without it
+  /// any failure inside the leg -- an AwaitGatePair timeout, an unusable pair,
+  /// or a PlanChanged re-task -- sends the transit loop round again and the
+  /// next request asks for the FOLLOWING gate, so the boat never drives the one
+  /// it was on. Observed in SITL on 2026-09-13: "plan v2 supersedes v1 -
+  /// re-planning this leg" was followed 100 ms later by "gate 2: asked the
+  /// aircraft", and gate 1 was skipped entirely.
+  bool gate_cleared = false;
 
   /// Where the boat was when the goal was accepted. "Go home" in a mission
   /// means "back to where this attempt started", not the autopilot's HOME —
@@ -80,6 +120,9 @@ struct Context
   std::function<void(const std::string &)> set_task;
   std::function<void()> publish_report;
   std::function<void(int)> consume_buoy;      ///< mark a buoy dealt with
+  /// Tell the aircraft a gate is cleared and ask for the next pair. Publishes
+  /// std_msgs/UInt8 on crsd/gate_reached; rxl_link_node puts it on the air.
+  std::function<void(std::uint8_t)> report_gate_reached;
 };
 
 using ContextPtr = std::shared_ptr<Context>;

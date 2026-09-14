@@ -64,11 +64,14 @@
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/string.hpp"
+#include "std_msgs/msg/u_int8.hpp"
 
 #include "crusader_msgs/action/safe_passage.hpp"
 #include "crusader_msgs/msg/fcu_status.hpp"
+#include "crusader_msgs/msg/gate_pair.hpp"
 #include "crusader_msgs/msg/guided_setpoint.hpp"
 #include "crusader_msgs/msg/lat_lon_head.hpp"
+#include "crusader_msgs/msg/passage_plan.hpp"
 #include "crusader_msgs/msg/tracked_target_array.hpp"
 
 #include "crusader_bt/context.hpp"
@@ -131,6 +134,10 @@ public:
     default_timeout_s_ = declare_parameter<double>("default_timeout_s", 600.0);
     mode_grace_s_ = declare_parameter<double>("mode_grace_s", 3.0);
     stream_timeout_s_ = declare_parameter<double>("stream_timeout_s", 1.0);
+    // The UAV plan arrives at ~0.2 Hz, so its timeout is a different order of
+    // magnitude from a 20 Hz pose stream and cannot share stream_timeout_s.
+    plan_timeout_s_ = declare_parameter<double>("plan_timeout_s", 15.0);
+    assoc_radius_m_ = declare_parameter<double>("assoc_radius_m", 5.0);
     verbose_tree_ = declare_parameter<bool>("verbose_tree", true);
     task_token_ = declare_parameter<std::string>("task_token", "TASK_SAFE_PASSAGE");
     auto modes = declare_parameter<std::vector<std::string>>(
@@ -156,6 +163,7 @@ public:
     // proximity_bridge coming up late and defaulting to off would silently
     // disarm avoidance.
     auto latched = rclcpp::QoS(1).reliable().transient_local();
+    gate_reached_pub_ = create_publisher<std_msgs::msg::UInt8>("/crsd/gate_reached", 10);
     setpoint_pub_ = create_publisher<crusader_msgs::msg::GuidedSetpoint>(
       "/crsd/guided_setpoint", 10);
     task_pub_ = create_publisher<std_msgs::msg::String>("/crsd/current_task", latched);
@@ -172,6 +180,10 @@ public:
     pose_sub_ = create_subscription<crusader_msgs::msg::LatLonHead>(
       "/crsd/pose", 10,
       [this](crusader_msgs::msg::LatLonHead::SharedPtr m) {onPose(m);});
+    plan_sub_ = create_subscription<crusader_msgs::msg::PassagePlan>(
+      "/crsd/passage_plan", 10, [this](crusader_msgs::msg::PassagePlan::SharedPtr m) {onPlan(m);});
+    gate_sub_ = create_subscription<crusader_msgs::msg::GatePair>(
+      "/crsd/next_gate", 10, [this](crusader_msgs::msg::GatePair::SharedPtr m) {onGate(m);});
     targets_sub_ = create_subscription<crusader_msgs::msg::TrackedTargetArray>(
       "/crsd/world_targets", 10,
       [this](crusader_msgs::msg::TrackedTargetArray::SharedPtr m) {onTargets(m);});
@@ -252,6 +264,13 @@ private:
       RCLCPP_INFO(
         get_logger(), "local frame origin pinned at %.7f, %.7f",
         m->latitude, m->longitude);
+      // A plan can arrive BEFORE the first fix -- rxl_link_node is up long
+      // before telemetry_bridge has a position -- and refuseLocked() bails out
+      // when there is no origin to express it in. Without this the plan sits
+      // unused until the NEXT one arrives, which at 0.2 Hz is up to 5 s, and a
+      // goal sent in that window fails with "entry buoy not available" while
+      // the guard band happily reports the plan as fresh.
+      refuseLocked();
     }
     ctx_->boat = nav::toLocal({m->latitude, m->longitude}, ctx_->origin);
     ctx_->heading_deg = m->heading;      // NaN when GPS yaw is unresolved
@@ -280,15 +299,112 @@ private:
       b.consumed = consumed_.count(b.id) > 0;
       next.push_back(b);
     }
-    ctx_->buoys.swap(next);
+    tracked_.swap(next);          // RAW. ctx_->buoys is the FUSION; see below.
+    targets_t_ = now();
+    refuseLocked();
+  }
 
+  /// The UAV's passage. Stored raw and folded in by refuseLocked(), because a
+  /// plan can arrive before the first GPS fix and there would be no origin to
+  /// express it in yet -- dropping it then would lose the plan the whole
+  /// mission is gated on.
+  void onPlan(const crusader_msgs::msg::PassagePlan::SharedPtr m)
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    plan_raw_ = m;
+    plan_t_ = now();
+    ctx_->plan_version = m->plan_version;
+    refuseLocked();
+  }
+
+  /// The next gate pair. Accepted ONLY when it answers the sequence we asked
+  /// about: on a lossy radio a retransmission of the previous answer is
+  /// otherwise indistinguishable from the answer to this request, and the boat
+  /// would drive the wrong gate with nothing in any log looking wrong.
+  void onGate(const crusader_msgs::msg::GatePair::SharedPtr m)
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    if (m->gate_seq != ctx_->gate_seq) {
+      RCLCPP_WARN(
+        get_logger(), "ignoring a pair for gate %u; we asked about %u",
+        static_cast<unsigned>(m->gate_seq),
+        static_cast<unsigned>(ctx_->gate_seq));
+      return;
+    }
+    const bool done = m->red_id == crusader_msgs::msg::GatePair::NO_BUOY &&
+      m->green_id == crusader_msgs::msg::GatePair::NO_BUOY;
+    ctx_->passage_complete = done;
+    ctx_->gate_red_id = done ? -1 : static_cast<int>(m->red_id);
+    ctx_->gate_green_id = done ? -1 : static_cast<int>(m->green_id);
+    ctx_->have_gate = true;
+    gate_t_ = now();
+  }
+
+  /// Re-mark buoys the mission has already dealt with. Both regimes need it.
+  void applyConsumed(std::vector<nav::Buoy> & buoys) const
+  {
+    for (auto & b : buoys) {b.consumed = consumed_.count(b.id) > 0;}
+  }
+
+  /// Rebuild ctx_->buoys from the plan and the tracker. CALL WITH ctx_->mu HELD.
+  ///
+  /// One place, called from both inputs, because fusing in each callback means
+  /// two copies of the rule and only one of them gets the next fix.
+  void refuseLocked()
+  {
+    if (!ctx_->origin_set) {return;}
+
+    std::vector<nav::PlanBuoy> plan;
+    if (plan_raw_) {
+      plan.reserve(plan_raw_->buoys.size());
+      for (const auto & pb : plan_raw_->buoys) {
+        nav::PlanBuoy b;
+        b.id = static_cast<int>(pb.id);
+        b.p = nav::toLocal({pb.latitude, pb.longitude}, ctx_->origin);
+        b.state = static_cast<nav::Beacon>(pb.beacon);
+        plan.push_back(b);
+      }
+    }
+    ctx_->plan = plan;
+
+    // NO PLAN MEANS CORE TIER, and there the tracker is the only source there
+    // is. fusePassage() is right to call every unmatched contact an obstacle --
+    // that is what "the UAV wins" means -- but running it against an EMPTY plan
+    // would put the whole field in `obstacles` and leave ctx_->buoys empty, so
+    // the Core tree would see no buoys at all. Caught in SITL on 2026-09-13:
+    // the tracker was publishing and the tree reported buoys_known 0.
+    if (plan.empty()) {
+      ctx_->buoys = tracked_;
+      ctx_->obstacles.clear();
+    } else {
+      nav::Fused f = nav::fusePassage(plan, tracked_, assoc_radius_m_);
+      ctx_->buoys.swap(f.passage);
+      ctx_->obstacles.swap(f.obstacles);
+    }
+    // Consumption is the RUNNER's, not the fusion's: fusePassage is pure and
+    // runs fresh on every input, so a buoy already dealt with would come back
+    // un-consumed and the boat would steer to it again.
+    applyConsumed(ctx_->buoys);
+
+    if (plan_raw_) {
+      // ENTRY and EXIT come from the PLAN above Core tier. Not from findBeacon
+      // over what the boat can see: the EXIT sits ~92 m out in a full field,
+      // far past the camera, and a transit that waits to SEE it never starts.
+      ctx_->entry = nav::toLocal(
+        {plan_raw_->entry_latitude, plan_raw_->entry_longitude}, ctx_->origin);
+      ctx_->exitp = nav::toLocal(
+        {plan_raw_->exit_latitude, plan_raw_->exit_longitude}, ctx_->origin);
+      ctx_->have_entry = true;
+      ctx_->have_exit = true;
+      return;
+    }
+    // Core tier: no aircraft, so the boat's own eyes are all there is.
     const nav::Buoy * e = nav::findBeacon(ctx_->buoys, nav::Beacon::FlashingBlue);
     const nav::Buoy * x = nav::findBeacon(ctx_->buoys, nav::Beacon::SteadyBlue);
     ctx_->have_entry = e != nullptr;
     if (e) {ctx_->entry = e->p;}
     ctx_->have_exit = x != nullptr;
     if (x) {ctx_->exitp = x->p;}
-    targets_t_ = now();
   }
 
   // ---------------------------------------------------------------- outputs
@@ -306,6 +422,11 @@ private:
     ctx_->set_task = [this](const std::string & t) {publishTask(t);};
     ctx_->consume_buoy = [this](int id) {consumed_.insert(id);};
     ctx_->publish_report = [this] {publishReport();};
+    ctx_->report_gate_reached = [this](std::uint8_t seq) {
+        std_msgs::msg::UInt8 m;
+        m.data = seq;
+        gate_reached_pub_->publish(m);
+      };
   }
 
   void publishTask(const std::string & token)
@@ -392,6 +513,20 @@ private:
     std::lock_guard<std::mutex> lk(ctx_->mu);
     ctx_->pose_fresh = ctx_->origin_set &&
       (t - pose_t_).seconds() < stream_timeout_s_;
+
+    // THE PLAN AGES LIKE THE POSE. A dead radio must stop the boat, not leave
+    // it driving a passage nobody can still confirm -- rxl_link_node publishes
+    // NOTHING when the link is quiet, exactly so this can notice.
+    ctx_->plan_age_s = plan_raw_ ? (t - plan_t_).seconds() : 0.0;
+    ctx_->plan_fresh = plan_raw_ != nullptr && ctx_->plan_age_s < plan_timeout_s_;
+
+    // And so do the buoys. targets_t_ was recorded here for weeks and never
+    // read, so a tracker that died left ctx_->buoys frozen and perfectly
+    // convincing. Blanks over guesses: if nothing has arrived, say so.
+    if (!tracked_.empty() && (t - targets_t_).seconds() >= stream_timeout_s_) {
+      tracked_.clear();
+      refuseLocked();
+    }
     if (have_status_ && (t - status_t_).seconds() >= stream_timeout_s_) {
       ctx_->autonomous = false;        // a dead HEARTBEAT is not permission
     }
@@ -424,6 +559,28 @@ private:
       ctx_->approach_lon = goal->approach_longitude;
       ctx_->has_approach = goal->approach_latitude != 0.0 || goal->approach_longitude != 0.0;
       ctx_->have_waypoint = false;
+      // THE GATE HANDSHAKE IS PER-MISSION STATE AND MUST START EMPTY.
+      //
+      // passage_complete latches when the aircraft answers 255/255, and it used
+      // to survive the end of the mission. The next goal then found it already
+      // true on the FIRST tick: PassageComplete succeeded, the Inverter failed,
+      // KeepRunningUntilFailure ended, and the boat orbited the entry, drove to
+      // the exit, orbited that, and reported RESULT SUCCESS having never asked
+      // for a single gate. 62.6 s, no warning, no failed leaf. SITL 2026-09-13.
+      //
+      // gate_seq carried over the same way, so a second run also re-asked under
+      // whatever sequence number the last one stopped at. The aircraft answers a
+      // REPEATED seq idempotently -- that is what makes a lossy radio safe --
+      // which means a stale seq is answered with the previous run's pair rather
+      // than being noticed as wrong.
+      //
+      // The aircraft rewinds its own half in set_gates; this is the boat's.
+      ctx_->passage_complete = false;
+      ctx_->gate_seq = 0;
+      ctx_->gate_cleared = false;
+      ctx_->have_gate = false;
+      ctx_->gate_red_id = -1;
+      ctx_->gate_green_id = -1;
       // "Home" is where THIS attempt started, captured once. Not the autopilot's
       // HOME, which is wherever it was armed and is usually somewhere else after
       // the boat has been driven out manually.
@@ -592,7 +749,10 @@ private:
       if (b.state != nav::Beacon::Unknown) {++resolved;}
     }
     fb->buoys_resolved = resolved;
-    fb->plan_version = static_cast<uint32_t>(consumed_.size());
+    // Was consumed_.size(), which was a placeholder from before a plan
+    // version existed: the field is documented as the UAV's plan version and
+    // an operator watching it would have read buoy progress as re-tasking.
+    fb->plan_version = ctx_->plan_version;
     fb->warning = ctx_->pose_fresh ? "" : "pose is stale";
     gh->publish_feedback(fb);
   }
@@ -644,6 +804,8 @@ private:
   std::string tree_file_, action_name_, task_token_;
   double tick_hz_ = 10.0, default_timeout_s_ = 600.0, mode_grace_s_ = 3.0;
   double stream_timeout_s_ = 1.0;
+  double plan_timeout_s_ = 15.0;
+  double assoc_radius_m_ = 5.0;
   bool verbose_tree_ = true;
   std::set<std::string> auto_modes_;
   std::set<int> consumed_;
@@ -652,16 +814,24 @@ private:
   rclcpp::Time pose_t_{0, 0, RCL_ROS_TIME};
   rclcpp::Time status_t_{0, 0, RCL_ROS_TIME};
   rclcpp::Time targets_t_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time plan_t_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time gate_t_{0, 0, RCL_ROS_TIME};
+  /// RAW inputs. ctx_->buoys is the FUSION of these two; see refuseLocked().
+  std::vector<nav::Buoy> tracked_;
+  crusader_msgs::msg::PassagePlan::SharedPtr plan_raw_;
 
   rclcpp::CallbackGroup::SharedPtr group_;
   rclcpp_action::Server<SafePassage>::SharedPtr server_;
   rclcpp::Publisher<crusader_msgs::msg::GuidedSetpoint>::SharedPtr setpoint_pub_;
+  rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr gate_reached_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr task_pub_, report_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr bt_status_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr avoid_pub_, autonomy_pub_;
   rclcpp::Subscription<crusader_msgs::msg::FcuStatus>::SharedPtr status_sub_;
   rclcpp::Subscription<crusader_msgs::msg::LatLonHead>::SharedPtr pose_sub_;
   rclcpp::Subscription<crusader_msgs::msg::TrackedTargetArray>::SharedPtr targets_sub_;
+  rclcpp::Subscription<crusader_msgs::msg::PassagePlan>::SharedPtr plan_sub_;
+  rclcpp::Subscription<crusader_msgs::msg::GatePair>::SharedPtr gate_sub_;
 };
 
 }  // namespace crusader_bt

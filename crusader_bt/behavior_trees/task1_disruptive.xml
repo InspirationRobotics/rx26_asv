@@ -1,0 +1,103 @@
+<?xml version="1.0"?>
+<!--
+  Task 1 Safe Passage, ADVANCED and DISRUPTIVE tier.
+
+  Alongside task1_safe_passage.xml, not replacing it: Core tier still has no
+  aircraft, and the runner picks the file by parameter so both stay loadable.
+
+  WHAT IS DIFFERENT FROM CORE, and why.
+
+  1. THE AIRCRAFT OWNS THE PASSAGE. handbook 3.3.2 says that above Core the
+     passage is only detectable from the air. So ENTRY, EXIT and every beacon
+     state come from the plan, and the boat's own OAK-D only refines POSITION
+     (nav::fusePassage). That is why there is no `observe` phase here: there is
+     nothing to wait to see.
+
+  2. THE AIRCRAFT ENDS THE LOOP, NOT GEOMETRY. Core used
+     `Inverter(NearExit radius=8)`, which is a guess, and a wrong one: the boat
+     must clear EVERY gate before the exit, and the exit buoy can sit well
+     inside 8 m of the last one. Here the transit ends only when the UAV answers
+     a request with 255/255, which PassageComplete reads.
+
+  3. A NEW PLAN RESTARTS THE LEG. PlanChanged sits inside the leg's own
+     ReactiveSequence, re-ticked at 10 Hz, so a revision halts the in-flight
+     NavigateTo. The ForceSuccess around the leg is what makes that a RESTART
+     rather than the end of the transit: without it a failed leg would fail
+     KeepRunningUntilFailure and the boat would head for the exit mid-passage.
+
+  4. A FAILED LEG RETRIES THE SAME GATE, it does not move on. MarkGateCleared
+     is the last step of the leg, and RequestNextGate advances the sequence
+     only when it ran. Anything that fails first (an AwaitGatePair timeout, an
+     unusable pair, a PlanChanged re-task) leaves the gate un-cleared, so
+     the next request asks for the SAME pair again and the aircraft, which
+     answers a repeated sequence number idempotently, gives the same one back.
+
+     Without that, the ForceSuccess in point 3 silently SKIPPED a gate on every
+     retry: SITL on 2026-09-13 logged "re-planning this leg" and asked for the
+     next gate 100 ms later, having never driven the one it was on.
+
+  THE GUARD BAND is re-ticked every tick and halts everything below it in one
+  tick. PassagePlanFresh is in it twice over: it is the handbook's "the UAV must
+  report before the USV may transit" gate, AND the dead-link stop.
+
+  TIMEOUT AND CANCEL live in bt_runner_node, not here.
+  OBSTACLE AVOIDANCE lives in the autopilot, not here.
+-->
+<root BTCPP_format="4" main_tree_to_execute="SafePassageDisruptive">
+  <BehaviorTree ID="SafePassageDisruptive">
+    <ReactiveSequence name="guard_band">
+
+      <IsAutonomous/>
+      <PassagePlanFresh max_age_s="15.0"/>
+      <ResolveBuoyStates/>
+      <PublishSafePassageReport min_period_s="1.0"/>
+
+      <Sequence name="passage">
+
+        <SetTask token="TASK_SAFE_PASSAGE"/>
+
+        <!-- The entry buoy is known from the plan the moment it arrives, so
+             this drives straight at it instead of loitering to spot it. -->
+        <CircleBuoy anchor="entry" radius="6.0" points="5" direction="cw"/>
+
+        <ForceSuccess>
+          <KeepRunningUntilFailure name="transit">
+            <ReactiveSequence>
+
+              <!-- FAILURE here ends the transit. It is the only thing that
+                   should, and only the aircraft can say it. -->
+              <Inverter>
+                <PassageComplete/>
+              </Inverter>
+
+              <!-- One gate. Anything that fails inside restarts the leg. -->
+              <ForceSuccess>
+                <ReactiveSequence name="leg">
+                  <Inverter>
+                    <PlanChanged/>
+                  </Inverter>
+                  <Sequence>
+                    <RequestNextGate/>
+                    <AwaitGatePair timeout_s="5.0"/>
+                    <GateWaypoint point="approach" standoff="6.0" approach="8.0" out="{goal}"/>
+                    <NavigateTo target="port" goal="{goal}" tolerance="3.0"/>
+                    <GateWaypoint point="through" standoff="6.0" approach="8.0" out="{goal}"/>
+                    <NavigateTo target="port" goal="{goal}" tolerance="2.5"/>
+                    <MarkGateCleared/>
+                  </Sequence>
+                </ReactiveSequence>
+              </ForceSuccess>
+
+            </ReactiveSequence>
+          </KeepRunningUntilFailure>
+        </ForceSuccess>
+
+        <!-- From the plan, not from perception. Fails only if the aircraft
+             never sent an exit at all. -->
+        <ExitResolved/>
+        <CircleBuoy anchor="exit" radius="6.0" points="5" direction="ccw"/>
+
+      </Sequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>
