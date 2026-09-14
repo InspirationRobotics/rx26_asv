@@ -734,11 +734,22 @@ class GroundStation(Node):
         # Logged as well as returned: a parameter changed from a browser and
         # nowhere else is a change nobody can find afterwards, and /rosout is
         # what the Logs tab and any recording already capture.
-        log = self.get_logger()
+        # TWO CALL SITES, DELIBERATELY, and not the tidier
+        # `(log.info if ok else log.warn)(line)`. rclpy caches logger
+        # configuration per SOURCE LINE, so one line used at two severities
+        # raises `Logger severity cannot be changed between calls` on the
+        # second one. Here that exception escaped into the HTTP reply and
+        # replaced the node's real refusal ("r_max=9999.0 outside [1.0,
+        # 100.0]") with a message about logging — hiding the one sentence the
+        # operator needed. Caught on the boat 2026-09-12; a mock cannot
+        # reproduce it, because it only happens inside real rclpy.
         for r in results:
             line = (f"{name} {r['name']} <- {values.get(r['name'])!r}: "
                     + ("applied" if r["ok"] else f"REFUSED — {r['reason']}"))
-            (log.info if r["ok"] else log.warn)(line)
+            if r["ok"]:
+                self.get_logger().info(line)
+            else:
+                self.get_logger().warn(line)
         message = ("; ".join(f"{r['name']}: {r['reason'] or 'refused'}"
                              for r in bad) if bad
                    else f"applied {', '.join(sorted(values))} on "
