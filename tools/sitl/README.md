@@ -11,6 +11,45 @@ bash tools/sitl/start_sitl.sh --stop
 After `start_sitl.sh`, **`udp:127.0.0.1:14551` is an ArduRover 4.6.3** on the
 same port map the boat uses, so `telemetry_bridge` connects to it unchanged.
 
+## The whole Task 1 rig, in one click
+
+`start_sitl.sh` is only the autopilot. Two Windows launchers bring up and take
+down *everything* — SITL, the seven ROS nodes in the `crsd-sim` container, the
+three browser tabs and QGroundControl:
+
+| Double-click | What it does |
+|---|---|
+| **`SIM_UP.cmd`** | sync → SITL → the ROS rig → waits for :8086/:8085/:8090 to answer → opens the tabs and QGC |
+| **`SIM_DOWN.cmd`** | ROS nodes → SITL → the container → closes QGC. Leaves the WSL VM up |
+
+Clicking `SIM_UP.cmd` **twice is a clean restart**, by design: the boat returns
+to the home position. Between two attempts at the same mission the GUI's
+*Return to start* button is the cheaper move — it drives home under GUIDED
+without dropping the link.
+
+Neither one builds. A C++ change needs, from Windows:
+
+```bash
+bash tools/sitl/sim.sh 'colcon build --packages-select crusader_bt'
+```
+
+The Python tools run straight out of `src`, so the sync covers those.
+
+| File | Runs in | Does |
+|---|---|---|
+| `SIM_UP.cmd` / `SIM_DOWN.cmd` | Windows | the clickable half — tabs, QGC, and nothing else |
+| `sim_up.sh` / `sim_down.sh` | WSL | the order of operations |
+| `task1_sim_up.sh` | container | starts the seven nodes |
+| `nodes_down.sh` | container | stops them |
+| `rig_processes.txt` | — | the `pkill -f` patterns, read from **both** ends |
+| `start_sitl.sh` | WSL | the autopilot alone |
+| `sim.sh` | Windows | one ad-hoc command in the container |
+| `sync_to_wsl.sh` | WSL | Windows checkout → WSL workspace |
+
+`rig_processes.txt` is a file rather than a loop because `pkill -f` matches the
+argv of the shell running it: a pattern typed on a command line kills its own
+shell, exit 143, no output, indistinguishable from a hang.
+
 ## Why this exists
 
 Until 2026-09-06 nothing in this codebase had ever sent a real

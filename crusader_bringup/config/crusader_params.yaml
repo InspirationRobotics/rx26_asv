@@ -952,6 +952,23 @@ bt_runner_node:
                                             #      than this and the tree is told
                                             #      the pose is stale rather than
                                             #      acting on it.
+    plan_timeout_s: 15.0                    # [RO] the UAV plan arrives at ~0.2 Hz,
+                                            #      so it cannot share the 20 Hz
+                                            #      pose stream's timeout. Older
+                                            #      than this and the tree is told
+                                            #      the plan is stale, which halts
+                                            #      the mission: a dead radio must
+                                            #      STOP the boat, not leave it
+                                            #      driving a passage nobody can
+                                            #      still confirm.
+    assoc_radius_m: 5.0                     # [RO] how near a tracked contact has
+                                            #      to be to count as the same
+                                            #      object as a plan buoy. Too
+                                            #      large and two buoys claim one
+                                            #      contact; the fusion is global
+                                            #      greedy so it cannot double-
+                                            #      claim, but it CAN pair the
+                                            #      wrong two.
     publish_setpoints: false                # [RO] FALSE = this node CANNOT move
                                             #      the boat. Legs still poll for
                                             #      arrival, so a human can drive

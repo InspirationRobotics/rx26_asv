@@ -404,6 +404,100 @@ inline Gate gateFromIds(
   return gateWaypoints(r->p, g->p, standoff_m, approach_m, min_width_m);
 }
 
+// ------------------------------------------------------------------- fusion
+
+/// One buoy exactly as the UAV reported it, before anything local touches it.
+struct PlanBuoy
+{
+  int id = -1;                     ///< the UAV's index, 0..9. NOT a tracker id.
+  Vec2 p;
+  Beacon state = Beacon::Unknown;
+};
+
+struct Fused
+{
+  /// The passage, keyed by UAV id. Beacon state always came from the plan.
+  std::vector<Buoy> passage;
+  /// Tracked contacts no plan buoy claimed. Beacon is always Unknown, and
+  /// these can never become a gate candidate.
+  std::vector<Buoy> obstacles;
+};
+
+/// Merge what the aircraft says with what the boat can see.
+///
+/// THE RULE IS "THE UAV WINS", and it is narrower than it sounds:
+///
+///   * BEACON STATE always comes from the plan. Above Core tier the handbook
+///     says the passage is only detectable from the air, so the boat's own
+///     guess at a colour is not evidence, it is noise with an opinion.
+///   * POSITION comes from the TRACKER when a contact was associated, and from
+///     the plan otherwise. That is not a contradiction of the rule above: LiDAR
+///     range is excellent close in, which is exactly when metre accuracy at a
+///     gate decides whether the boat clears it. The UAV's position is better
+///     far out, when it does not matter yet.
+///   * THE ID stays the UAV's, because that is the key RXL_NEXT_BUOY_SET names
+///     a gate pair with. The tracker's own id is a different number space and
+///     the two must never be compared.
+///
+/// A tracked contact that matches nothing in the plan is NOT a passage buoy. It
+/// goes to `obstacles` with Beacon::Unknown so it can never be chosen as one
+/// half of a gate. The tree does no avoidance anyway -- that is the autopilot's
+/// OA params -- so these exist for the report and the log.
+///
+/// Association is GLOBAL greedy nearest-pair, not per-buoy nearest. Per-buoy
+/// lets one contact be claimed twice, which puts two gate buoys on the same
+/// point and makes the gate bearing meaningless. The field is at most ten
+/// buoys, so the cost of doing it properly is nothing.
+///
+/// `consumed` is NOT carried here. The caller owns it -- bt_runner_node keeps a
+/// set of consumed ids and re-applies it after every rebuild -- because this
+/// function is pure and gets called fresh on every tick.
+inline Fused fusePassage(
+  const std::vector<PlanBuoy> & plan, const std::vector<Buoy> & tracked,
+  double assoc_radius_m)
+{
+  Fused out;
+  std::vector<bool> claimed(tracked.size(), false);
+  std::vector<int> match(plan.size(), -1);
+
+  // Greedy: take the closest pair still available, repeat. At most
+  // min(|plan|, |tracked|) rounds over a ten-buoy field.
+  for (;;) {
+    double best = assoc_radius_m;
+    int bi = -1, bj = -1;
+    for (std::size_t i = 0; i < plan.size(); ++i) {
+      if (match[i] >= 0) {continue;}
+      for (std::size_t j = 0; j < tracked.size(); ++j) {
+        if (claimed[j]) {continue;}
+        const double r = norm(tracked[j].p - plan[i].p);
+        if (r <= best) {
+          best = r;
+          bi = static_cast<int>(i);
+          bj = static_cast<int>(j);
+        }
+      }
+    }
+    if (bi < 0) {break;}
+    match[bi] = bj;
+    claimed[bj] = true;
+  }
+
+  for (std::size_t i = 0; i < plan.size(); ++i) {
+    Buoy b;
+    b.id = plan[i].id;
+    b.state = plan[i].state;                       // the UAV wins, always
+    b.p = (match[i] >= 0) ? tracked[match[i]].p : plan[i].p;
+    out.passage.push_back(b);
+  }
+  for (std::size_t j = 0; j < tracked.size(); ++j) {
+    if (claimed[j]) {continue;}
+    Buoy o = tracked[j];
+    o.state = Beacon::Unknown;    // whatever the boat thought it saw, it is not
+    out.obstacles.push_back(o);   // part of the passage
+  }
+  return out;
+}
+
 /// The first buoy in `buoys` with the given beacon state, or nullptr.
 inline const Buoy * findBeacon(const std::vector<Buoy> & buoys, Beacon want)
 {

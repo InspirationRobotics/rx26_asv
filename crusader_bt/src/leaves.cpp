@@ -18,6 +18,8 @@
 //   when there is nothing sensible left to steer to.
 #include <algorithm>
 #include <cmath>
+#include <chrono>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -557,6 +559,310 @@ public:
 
 }  // namespace
 
+// ============================================================== Disruptive tier
+//
+// Six leaves the UAV handshake needs. NONE of them is a ROS action client:
+// four decide in one tick and return, one publishes once and returns, and only
+// AwaitGatePair can be RUNNING -- so it is the only one that needs onHalted().
+//
+// The runner owns every subscription, as always. These read the Context fields
+// its /crsd/passage_plan and /crsd/next_gate callbacks filled in.
+
+/// Has the aircraft reported, and recently enough to still believe?
+///
+/// THE HANDBOOK GATE. Above Core tier the UAV must complete its overfly and
+/// report before the USV may transit into the field, so this sits in the guard
+/// band and its FAILURE halts the whole mission in one tick.
+///
+/// It is also the dead-radio stop. rxl_link_node publishes NOTHING when the
+/// link goes quiet -- it never repeats the last plan -- precisely so the age
+/// here keeps climbing and the boat stops instead of driving a passage nobody
+/// can still confirm.
+class PassagePlanFresh : public CrusaderCondition
+{
+public:
+  PassagePlanFresh(const std::string & n, const BT::NodeConfig & c)
+  : CrusaderCondition(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {BT::InputPort<double>("max_age_s", 15.0,
+      "seconds; the plan arrives at ~0.2 Hz so this is not the pose timeout")};
+  }
+
+  BT::NodeStatus tick() override
+  {
+    const double max_age = getInput<double>("max_age_s").value_or(15.0);
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    if (ctx_->plan_version == 0) {
+      warnOnce("no passage plan yet: the UAV has not reported");
+      return BT::NodeStatus::FAILURE;
+    }
+    if (!ctx_->plan_fresh || ctx_->plan_age_s > max_age) {
+      warnOnce("passage plan is stale");
+      return BT::NodeStatus::FAILURE;
+    }
+    warned_ = false;
+    return BT::NodeStatus::SUCCESS;
+  }
+
+private:
+  /// The guard band re-ticks at 10 Hz, so an un-gated log line is ten copies of
+  /// the same sentence every second.
+  void warnOnce(const char * why)
+  {
+    if (warned_) {return;}
+    warned_ = true;
+    RCLCPP_WARN(log(), "%s (age %.1fs, v%u) - not transiting", why,
+      ctx_->plan_age_s, static_cast<unsigned>(ctx_->plan_version));
+  }
+  bool warned_ = false;
+};
+
+/// Did the UAV supersede the plan since we last looked?
+///
+/// The Disruptive trigger, and the whole reason the tier needs no new
+/// machinery: this sits in a reactive branch, so a new plan halts an in-flight
+/// NavigateTo and the leg restarts against the new one.
+///
+/// PRIMES ON ITS FIRST TICK rather than comparing against zero. The tree is
+/// rebuilt per goal, so a plan that arrived BEFORE the goal would otherwise
+/// read as a change on tick one and cancel the first leg before it started.
+class PlanChanged : public CrusaderCondition
+{
+public:
+  PlanChanged(const std::string & n, const BT::NodeConfig & c)
+  : CrusaderCondition(n, c) {}
+  static BT::PortsList providedPorts() {return {};}
+
+  BT::NodeStatus tick() override
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    const std::uint32_t v = ctx_->plan_version;
+    if (!primed_) {
+      primed_ = true;
+      seen_ = v;
+      return BT::NodeStatus::FAILURE;          // "no change", by construction
+    }
+    if (v == seen_) {return BT::NodeStatus::FAILURE;}
+    RCLCPP_INFO(log(), "plan v%u supersedes v%u - re-planning this leg",
+      static_cast<unsigned>(v), static_cast<unsigned>(seen_));
+    seen_ = v;            // consumed: report a change ONCE, not every tick
+    return BT::NodeStatus::SUCCESS;
+  }
+
+private:
+  bool primed_ = false;
+  std::uint32_t seen_ = 0;
+};
+
+/// Has the aircraft said there are no more gates?
+///
+/// The ONLY thing that ends the transit loop. Set when a pair arrives as
+/// 255/255. Deliberately not a geometric test: the boat must clear every gate
+/// before the exit, and the exit buoy can sit well inside any sane arrival
+/// radius of the last one.
+class PassageComplete : public CrusaderCondition
+{
+public:
+  PassageComplete(const std::string & n, const BT::NodeConfig & c)
+  : CrusaderCondition(n, c) {}
+  static BT::PortsList providedPorts() {return {};}
+
+  BT::NodeStatus tick() override
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    return ctx_->passage_complete ?
+           BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
+  }
+};
+
+/// Tell the aircraft this gate is done and ask about the next one.
+///
+/// One publish, SUCCESS in the same tick. This is the light end of the scale:
+/// no goal, no round trip, nothing to wait on -- the WAITING is AwaitGatePair,
+/// and splitting the two is what keeps this one free.
+///
+/// It ADVANCES the sequence and clears the previous answer before publishing,
+/// so AwaitGatePair can never mistake the last gate's pair for this one's.
+class RequestNextGate : public CrusaderSyncAction
+{
+public:
+  RequestNextGate(const std::string & n, const BT::NodeConfig & c)
+  : CrusaderSyncAction(n, c) {}
+  static BT::PortsList providedPorts() {return {};}
+
+  BT::NodeStatus tick() override
+  {
+    std::uint8_t seq;
+    bool retry;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      // ADVANCE ONLY ON A CLEARED GATE. The transit loop re-enters this leaf
+      // after ANY failure in the leg, because the ForceSuccess above turns a
+      // failed leg into "go round again" -- which is what makes a re-task
+      // restart the leg instead of ending the transit. Incrementing here
+      // unconditionally turned every one of those into a SKIPPED GATE.
+      //
+      // Re-asking the same sequence number is a proper retry, not a stutter:
+      // the aircraft answers a repeated seq with the same pair it gave before,
+      // so the boat gets another go at the gate it did not finish.
+      retry = !ctx_->gate_cleared && ctx_->gate_seq != 0;
+      if (!retry) {
+        ctx_->gate_seq = static_cast<std::uint8_t>(ctx_->gate_seq + 1);
+      }
+      ctx_->gate_cleared = false;
+      ctx_->have_gate = false;
+      ctx_->gate_red_id = -1;
+      ctx_->gate_green_id = -1;
+      seq = ctx_->gate_seq;
+    }
+    if (ctx_->report_gate_reached) {
+      ctx_->report_gate_reached(seq);
+    } else {
+      RCLCPP_WARN(log(), "no gate_reached publisher wired; asking nobody");
+    }
+    RCLCPP_INFO(log(), "gate %u: %s", static_cast<unsigned>(seq),
+      retry ? "did not finish - asking again for the SAME pair"
+            : "asked the aircraft for the next pair");
+    return BT::NodeStatus::SUCCESS;
+  }
+};
+
+/// The boat is through this gate. Only this lets the sequence advance.
+///
+/// Last step of the leg, so anything that fails before it leaves the gate
+/// un-cleared and RequestNextGate re-asks rather than moving on. That is the
+/// whole mechanism stopping a failed or re-planned leg from skipping a pair.
+class MarkGateCleared : public CrusaderSyncAction
+{
+public:
+  MarkGateCleared(const std::string & n, const BT::NodeConfig & c)
+  : CrusaderSyncAction(n, c) {}
+  static BT::PortsList providedPorts() {return {};}
+
+  BT::NodeStatus tick() override
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    ctx_->gate_cleared = true;
+    RCLCPP_INFO(log(), "gate %u cleared", static_cast<unsigned>(ctx_->gate_seq));
+    return BT::NodeStatus::SUCCESS;
+  }
+};
+
+/// Wait for the aircraft to answer THIS gate's request.
+///
+/// The only new leaf that can be RUNNING, so the only one that needs a halt.
+/// FAILURE on timeout is a retry, not an abort: the enclosing ForceSuccess
+/// sends the loop round again and RequestNextGate asks under a fresh sequence
+/// number. A genuinely dead link is caught by PassagePlanFresh in the guard
+/// band, which stops the mission rather than retrying forever.
+class AwaitGatePair : public CrusaderAction
+{
+public:
+  AwaitGatePair(const std::string & n, const BT::NodeConfig & c)
+  : CrusaderAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {BT::InputPort<double>("timeout_s", 5.0,
+      "how long to wait for the pair before asking again")};
+  }
+
+  BT::NodeStatus onStart() override
+  {
+    t0_ = std::chrono::steady_clock::now();
+    return onRunning();
+  }
+
+  BT::NodeStatus onRunning() override
+  {
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      if (ctx_->have_gate) {return BT::NodeStatus::SUCCESS;}
+    }
+    const double waited = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - t0_).count();
+    if (waited >= getInput<double>("timeout_s").value_or(5.0)) {
+      RCLCPP_WARN(log(), "no pair after %.1fs - asking again", waited);
+      return BT::NodeStatus::FAILURE;
+    }
+    return BT::NodeStatus::RUNNING;
+  }
+
+  /// Nothing latched, nothing to undo. The request already went out, and a late
+  /// answer is still a valid answer for that sequence number.
+  void onHalted() override {}
+
+private:
+  std::chrono::steady_clock::time_point t0_;
+};
+
+/// Turn the UAV's (red_id, green_id) into somewhere to steer.
+///
+/// Two points per gate, chosen with `point`: "approach" sits short of the
+/// middle so the boat lines up, "through" sits past it so the boat CROSSES
+/// rather than stopping between the buoys and turning.
+///
+/// FALLS BACK rather than refusing when only one of the pair is known: a lone
+/// RED or GREEN still carries its side constraint, and nav::sideWaypoint has
+/// always handled that. The direction of travel for the fallback comes from the
+/// EXIT, never the boat's heading -- see nav::gateWaypoints for the SITL run
+/// where a post-orbit heading threw away the whole field as astern.
+class GateWaypoint : public CrusaderSyncAction
+{
+public:
+  GateWaypoint(const std::string & n, const BT::NodeConfig & c)
+  : CrusaderSyncAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<std::string>("point", "through", "approach | through"),
+      BT::InputPort<double>("standoff", 6.0, "metres past the middle"),
+      BT::InputPort<double>("approach", 8.0, "metres short of the middle"),
+      BT::InputPort<double>("offset", 4.0, "metres to clear a LONE buoy by"),
+      BT::OutputPort<Waypoint>("out", "where the next action should drive")};
+  }
+
+  BT::NodeStatus tick() override
+  {
+    const std::string which = getInput<std::string>("point").value_or("through");
+    const double standoff = getInput<double>("standoff").value_or(6.0);
+    const double approach = getInput<double>("approach").value_or(8.0);
+    const double offset = getInput<double>("offset").value_or(4.0);
+
+    nav::Vec2 target;
+    std::string why;
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    if (!ctx_->origin_set) {return BT::NodeStatus::FAILURE;}
+
+    const int r = ctx_->gate_red_id;
+    const int g = ctx_->gate_green_id;
+    const nav::Gate gate = nav::gateFromIds(ctx_->buoys, r, g, standoff, approach);
+
+    if (gate.valid) {
+      target = (which == "approach") ? gate.approach : gate.through;
+      why = "gate " + std::to_string(static_cast<int>(ctx_->gate_seq)) + " " +
+        which + " (red " + std::to_string(r) + ", green " + std::to_string(g) + ")";
+    } else {
+      const nav::Buoy * lone = nav::findById(ctx_->buoys, r);
+      if (lone == nullptr) {lone = nav::findById(ctx_->buoys, g);}
+      if (lone == nullptr || !ctx_->have_exit) {
+        RCLCPP_WARN(log(), "gate %u unusable: %s",
+          static_cast<unsigned>(ctx_->gate_seq), gate.why);
+        return BT::NodeStatus::FAILURE;
+      }
+      const nav::Vec2 travel = ctx_->exitp - ctx_->boat;
+      target = nav::sideWaypoint(lone->p, travel, lone->state, offset);
+      why = "lone buoy " + std::to_string(lone->id) + " (" + gate.why + ")";
+      RCLCPP_WARN(log(), "gate %u: %s - steering past the one we have",
+        static_cast<unsigned>(ctx_->gate_seq), gate.why);
+    }
+
+    const nav::LatLon ll = nav::toLatLon(target, ctx_->origin);
+    setOutput("out", Waypoint{ll.lat, ll.lon, why});
+    return BT::NodeStatus::SUCCESS;
+  }
+};
+
 void registerCrusaderNodes(BT::BehaviorTreeFactory & factory)
 {
   factory.registerNodeType<IsAutonomous>("IsAutonomous");
@@ -571,6 +877,14 @@ void registerCrusaderNodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<HoldStation>("HoldStation");
   factory.registerNodeType<NextWaypoint>("NextWaypoint");
   factory.registerNodeType<TargetAhead>("TargetAhead");
+  // Disruptive tier: the UAV handshake.
+  factory.registerNodeType<PassagePlanFresh>("PassagePlanFresh");
+  factory.registerNodeType<PlanChanged>("PlanChanged");
+  factory.registerNodeType<PassageComplete>("PassageComplete");
+  factory.registerNodeType<RequestNextGate>("RequestNextGate");
+  factory.registerNodeType<AwaitGatePair>("AwaitGatePair");
+  factory.registerNodeType<GateWaypoint>("GateWaypoint");
+  factory.registerNodeType<MarkGateCleared>("MarkGateCleared");
 }
 
 }  // namespace crusader_bt

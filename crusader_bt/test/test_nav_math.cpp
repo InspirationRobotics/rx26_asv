@@ -301,6 +301,71 @@ int main()
       !gateFromIds(f, kNoBuoy, kNoBuoy, 6.0, 8.0).valid);
   }
 
+  // ----------------------------------------------------------------- fusion
+  {
+    // A plan the aircraft sent, and what the boat's own tracker made of the
+    // same water. The tracker is a metre or so off, has NOT seen the far buoy
+    // at all, and has invented a contact the plan knows nothing about.
+    std::vector<PlanBuoy> plan{
+      {0, {0, 20}, Beacon::FlashingBlue},
+      {1, {6, 38}, Beacon::FlashingRed},
+      {2, {-6, 38}, Beacon::FlashingGreen},
+      {9, {0, 92}, Beacon::SteadyBlue}};
+    std::vector<Buoy> tracked{
+      {100, {0.4, 20.3}, Beacon::FlashingBlue, false},
+      {101, {6.2, 37.6}, Beacon::FlashingGreen, false},   // WRONG colour
+      {102, {-5.7, 38.4}, Beacon::FlashingGreen, false},
+      {103, {30, 12}, Beacon::Off, false}};               // not in the plan
+
+    const Fused f = fusePassage(plan, tracked, 3.0);
+
+    chk("every plan buoy survives fusion", f.passage.size() == 4);
+    chk("an unmatched contact becomes an obstacle", f.obstacles.size() == 1);
+    chk("... and it is the one the plan never mentioned",
+      f.obstacles.size() == 1 && f.obstacles[0].id == 103);
+    chk("an obstacle carries NO beacon state",
+      f.obstacles.size() == 1 && f.obstacles[0].state == Beacon::Unknown);
+
+    const Buoy * red = findById(f.passage, 1);
+    chk("ids stay the UAV's, not the tracker's", red != nullptr);
+    // The whole point of "the UAV wins": the tracker called this one GREEN.
+    chk("THE UAV WINS on a colour disagreement",
+      red != nullptr && red->state == Beacon::FlashingRed);
+    chk("... and the tracker's better position is kept",
+      red != nullptr && std::fabs(red->p.x - 6.2) < 1e-9 &&
+      std::fabs(red->p.y - 37.6) < 1e-9);
+
+    const Buoy * far = findById(f.passage, 9);
+    chk("a buoy the tracker never saw keeps the plan's position",
+      far != nullptr && std::fabs(far->p.y - 92.0) < 1e-9);
+
+    // Association must be mutually exclusive. Two plan buoys 1 m apart with a
+    // single contact between them: per-buoy nearest would give BOTH the same
+    // point, the gate would have zero width, and gateWaypoints would refuse a
+    // gate that is really there.
+    std::vector<PlanBuoy> tight{
+      {1, {0.5, 0}, Beacon::FlashingRed},
+      {2, {-0.5, 0}, Beacon::FlashingGreen}};
+    std::vector<Buoy> one{{200, {0, 0}, Beacon::Unknown, false}};
+    const Fused g = fusePassage(tight, one, 5.0);
+    chk("one contact is claimed by exactly one plan buoy",
+      g.passage.size() == 2 &&
+      !(g.passage[0].p.x == g.passage[1].p.x &&
+        g.passage[0].p.y == g.passage[1].p.y));
+
+    // Degenerate inputs.
+    chk("a plan with no tracker at all still yields the passage",
+      fusePassage(plan, {}, 3.0).passage.size() == 4);
+    chk("... using the plan's own positions",
+      std::fabs(fusePassage(plan, {}, 3.0).passage[1].p.x - 6.0) < 1e-9);
+    chk("no plan means no passage, whatever the tracker saw",
+      fusePassage({}, tracked, 3.0).passage.empty());
+    chk("... and every contact is then an obstacle",
+      fusePassage({}, tracked, 3.0).obstacles.size() == 4);
+    chk("a zero radius associates nothing",
+      std::fabs(fusePassage(plan, tracked, 0.0).passage[0].p.y - 20.0) < 1e-9);
+  }
+
   // ------------------------------------------------------------- findBeacon
   {
     std::vector<Buoy> f{

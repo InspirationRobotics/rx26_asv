@@ -67,6 +67,7 @@ class RxlLinkNode(Node):
         self._conn_lock = threading.Lock()
         self._stop = threading.Event()
         self._plan_version = 0
+        self._last_sig = None
         self._last_rx = None
         self._warned_quiet = False
 
@@ -123,10 +124,20 @@ class RxlLinkNode(Node):
         m.entry_latitude, m.entry_longitude = d["entry"]
         m.exit_latitude, m.exit_longitude = d["exit"]
 
-        # The version is counted HERE, by arrivals, because RXL_SAFE_PASSAGE
-        # carries no version field of its own. Every received plan supersedes
-        # the last one, which is exactly what the tree needs to react to.
-        self._plan_version += 1
+        # The version is counted HERE, because RXL_SAFE_PASSAGE carries no
+        # version field of its own -- but it counts CHANGES, not arrivals.
+        #
+        # The aircraft retransmits the whole passage on a timer (0.2 Hz) so a
+        # boat that missed one still gets it. Bumping on arrival made every one
+        # of those look like a re-tasking: PlanChanged fired every 5 s, halted
+        # the leg, and the boat re-requested a gate it already had. Seen in
+        # SITL on 2026-09-13 as "gate 3 asked again" on a run where nothing
+        # about the passage had changed.
+        sig = self._signature(d)
+        changed = sig != self._last_sig
+        if changed:
+            self._last_sig = sig
+            self._plan_version += 1
         m.plan_version = self._plan_version
 
         for b in d["buoys"]:
@@ -141,10 +152,27 @@ class RxlLinkNode(Node):
             self.get_logger().warn(
                 "a plan claimed more than %d buoys; took the first %d"
                 % (rxl_codec.MAX_BUOYS, rxl_codec.MAX_BUOYS))
-        self.get_logger().info(
-            "plan v%d: %d buoys, entry %.7f %.7f, exit %.7f %.7f"
-            % (m.plan_version, len(m.buoys), m.entry_latitude,
-               m.entry_longitude, m.exit_latitude, m.exit_longitude))
+        # Only on CHANGE. The same line every 5 s reads as a stream of new
+        # plans; the retransmissions are the link working, not news.
+        if changed:
+            self.get_logger().info(
+                "plan v%d: %d buoys, entry %.7f %.7f, exit %.7f %.7f"
+                % (m.plan_version, len(m.buoys), m.entry_latitude,
+                   m.entry_longitude, m.exit_latitude, m.exit_longitude))
+
+    @staticmethod
+    def _signature(d):
+        """What makes two plans the SAME passage.
+
+        Positions are rounded to 1e-7 deg (~1 cm) before comparing: they arrive
+        as degE7 integers so an unchanged plan is bit-identical, and rounding
+        here only guards a future sender that recomputes them in floating point.
+        """
+        def ll(t):
+            return (round(t[0], 7), round(t[1], 7))
+        return (ll(d["entry"]), ll(d["exit"]),
+                tuple((b["id"], round(b["lat"], 7), round(b["lon"], 7), b["beacon"])
+                      for b in d["buoys"]))
 
     def _publish_gate(self, d):
         m = GatePair()
