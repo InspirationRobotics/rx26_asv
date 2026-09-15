@@ -182,11 +182,20 @@ class RxlLinkNode(Node):
         m.green_id = d["green_id"]
         self.gate_pub.publish(m)
 
-        done = (d["red_id"] == rxl_codec.NO_BUOY and
-                d["green_id"] == rxl_codec.NO_BUOY)
-        self.get_logger().info(
-            "gate %d: %s" % (m.gate_seq, "PASSAGE COMPLETE (255/255)" if done
-                             else "red %d, green %d" % (m.red_id, m.green_id)))
+        # 255/255 is the NORMAL ack now. It used to mean "passage complete",
+        # back when the aircraft assigned gates and the boat waited to be told
+        # it was finished; the boat pairs its own buoys and counts its own gates
+        # today, so these two fields carry nothing and are sent as NO_BUOY.
+        # A pair that IS filled in means an aircraft on older software.
+        stale = (d["red_id"] != rxl_codec.NO_BUOY or
+                 d["green_id"] != rxl_codec.NO_BUOY)
+        if stale:
+            self.get_logger().warning(
+                "gate %d confirmed, but the aircraft also sent a pair "
+                "(red %d, green %d). The boat ignores it and plans its own."
+                % (m.gate_seq, m.red_id, m.green_id))
+        else:
+            self.get_logger().info("gate %d: confirmed by the aircraft" % m.gate_seq)
 
     # ------------------------------------------------------------------ TX
 

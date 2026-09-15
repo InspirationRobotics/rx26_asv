@@ -26,6 +26,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "behaviortree_cpp/action_node.h"
@@ -76,29 +77,58 @@ struct Context
   double plan_age_s = 0.0;                    ///< seconds since the last plan
   std::vector<nav::Buoy> obstacles;           ///< tracked, but not in the plan
 
-  // ---- the gate handshake ----
+  // ---- the passage the BOAT planned ----
   //
-  // The boat publishes gate_reached(gate_seq) and waits for a pair carrying the
-  // SAME seq. Matching on the sequence is what makes a retransmission on a
-  // lossy radio distinguishable from the answer to the next request.
-  std::uint8_t gate_seq = 0;
-  int gate_red_id = -1;                       ///< -1 = no pair for this seq yet
-  int gate_green_id = -1;
-  bool have_gate = false;                     ///< a pair for gate_seq arrived
-  /// The UAV answered 255/255: no more gates, go to the exit. This is the ONLY
-  /// thing that ends the transit loop. Proximity to the exit is not a
-  /// substitute -- the boat must clear every gate first, and the exit buoy can
-  /// sit well inside any sane arrival radius of the last one.
-  bool passage_complete = false;
-  /// Did the boat actually finish the gate it last asked about?
+  // The aircraft sends ten buoys and their colours. Which pair is a gate, and
+  // what order to drive them in, is worked out here by nav::planPassage over
+  // `buoys` -- the FUSED field, so the aircraft's colours and the tracker's
+  // positions. Re-planned every tick, because a confirmation can bring new
+  // colours and the answer must follow them.
+  nav::Passage passage;
+
+  /// Gates already driven, as (red_id, green_id).
   ///
-  /// RequestNextGate advances the sequence ONLY when this is set. Without it
-  /// any failure inside the leg -- an AwaitGatePair timeout, an unusable pair,
-  /// or a PlanChanged re-task -- sends the transit loop round again and the
-  /// next request asks for the FOLLOWING gate, so the boat never drives the one
-  /// it was on. Observed in SITL on 2026-09-13: "plan v2 supersedes v1 -
-  /// re-planning this leg" was followed 100 ms later by "gate 2: asked the
-  /// aircraft", and gate 1 was skipped entirely.
+  /// BY BUOY IDS, NOT BY COUNT. A confirmation can recolour the field, the plan
+  /// re-runs, and the order can change underneath the boat; "I have done two,
+  /// start at index two" then skips a gate that was never driven. Ids survive
+  /// a reorder and survive the pair itself swapping colours.
+  std::vector<std::pair<int, int>> cleared_gates;
+
+  // ---- the confirmation handshake ----
+  //
+  // Having crossed a gate, the boat publishes gate_reached(gate_seq) and waits
+  // for an acknowledgement carrying the SAME seq before driving the next one.
+  // The question it is asking is "is the next pair still where you said it
+  // was" -- the aircraft answers by acking and retransmitting the whole field.
+  //
+  // Matching on the sequence is what makes a retransmission on a lossy radio
+  // distinguishable from the answer to the next request.
+  std::uint8_t gate_seq = 0;
+  int gate_red_id = -1;                       ///< the gate being driven now
+  int gate_green_id = -1;
+  bool have_confirmation = false;             ///< an ack for gate_seq arrived
+  /// Every gate in `passage` is in `cleared_gates`: go to the exit.
+  ///
+  /// THE BOAT DECIDES THIS NOW, from its own plan -- it holds the whole field,
+  /// so it can count. The aircraft used to end the transit with a 255/255
+  /// answer, which it can no longer do because it no longer assigns gates.
+  ///
+  /// Proximity to the exit is still not a substitute, for the reason it never
+  /// was: the boat must clear every gate first, and the exit buoy can sit well
+  /// inside any sane arrival radius of the last one.
+  bool passage_complete = false;
+  /// Did the boat finish the gate it last asked about?
+  ///
+  /// RequestConfirmation advances the sequence ONLY when this is set, so a leg
+  /// that failed re-asks under the SAME seq and the aircraft's idempotent
+  /// answer gives the same reply. Without it every failure inside the leg --
+  /// a confirmation timeout, an unusable pair, a PlanChanged re-task -- burns
+  /// a sequence number, and back when the sequence number chose the gate that
+  /// also SKIPPED one. SITL 2026-09-13.
+  ///
+  /// It is no longer what stops a gate being skipped -- cleared_gates is, and
+  /// it is keyed on the buoys rather than on a counter -- but it still keeps
+  /// the sequence numbering honest.
   bool gate_cleared = false;
 
   /// Where the boat was when the goal was accepted. "Go home" in a mission

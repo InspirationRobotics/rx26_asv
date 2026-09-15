@@ -321,22 +321,40 @@ private:
   /// about: on a lossy radio a retransmission of the previous answer is
   /// otherwise indistinguishable from the answer to this request, and the boat
   /// would drive the wrong gate with nothing in any log looking wrong.
+  /// The aircraft's answer to a confirmation request.
+  ///
+  /// THIS IS AN ACKNOWLEDGEMENT, NOT AN ASSIGNMENT. The message used to carry
+  /// the next pair for the boat to drive; the boat now works its own gate order
+  /// out of the ten buoys, so all that matters here is the sequence number --
+  /// "yes, the field I just retransmitted is current as of your gate N".
+  ///
+  /// The red_id/green_id fields are vestigial and are deliberately IGNORED
+  /// rather than removed: the message is on the air between two vehicles whose
+  /// software is updated separately, and a boat that quietly drove whatever
+  /// pair an older aircraft happened to put in them would be worse than one
+  /// that ignores them. They are logged when set, so a mismatched aircraft is
+  /// visible rather than silent.
   void onGate(const crusader_msgs::msg::GatePair::SharedPtr m)
   {
     std::lock_guard<std::mutex> lk(ctx_->mu);
     if (m->gate_seq != ctx_->gate_seq) {
       RCLCPP_WARN(
-        get_logger(), "ignoring a pair for gate %u; we asked about %u",
+        get_logger(), "ignoring a confirmation for gate %u; we asked about %u",
         static_cast<unsigned>(m->gate_seq),
         static_cast<unsigned>(ctx_->gate_seq));
       return;
     }
-    const bool done = m->red_id == crusader_msgs::msg::GatePair::NO_BUOY &&
-      m->green_id == crusader_msgs::msg::GatePair::NO_BUOY;
-    ctx_->passage_complete = done;
-    ctx_->gate_red_id = done ? -1 : static_cast<int>(m->red_id);
-    ctx_->gate_green_id = done ? -1 : static_cast<int>(m->green_id);
-    ctx_->have_gate = true;
+    const bool carried_a_pair =
+      m->red_id != crusader_msgs::msg::GatePair::NO_BUOY ||
+      m->green_id != crusader_msgs::msg::GatePair::NO_BUOY;
+    if (carried_a_pair) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 10000,
+        "the aircraft is still sending gate assignments (red %u, green %u). "
+        "Ignored - the boat plans its own gate order now.",
+        static_cast<unsigned>(m->red_id), static_cast<unsigned>(m->green_id));
+    }
+    ctx_->have_confirmation = true;
     gate_t_ = now();
   }
 
@@ -578,9 +596,11 @@ private:
       ctx_->passage_complete = false;
       ctx_->gate_seq = 0;
       ctx_->gate_cleared = false;
-      ctx_->have_gate = false;
+      ctx_->have_confirmation = false;
       ctx_->gate_red_id = -1;
       ctx_->gate_green_id = -1;
+      ctx_->cleared_gates.clear();
+      ctx_->passage = nav::Passage{};
       // "Home" is where THIS attempt started, captured once. Not the autopilot's
       // HOME, which is wherever it was armed and is usually somewhere else after
       // the boat has been driven out manually.
