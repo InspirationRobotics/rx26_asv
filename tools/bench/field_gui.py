@@ -325,6 +325,63 @@ function renderRadio(){
     return '<div>' + l.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</div>';
   }).join('');
 }
+// RESTORED. These four went out with the gate-authoring code on 2026-09-14:
+// the edit sliced from the "Author gates" button to poll() and took
+// everything in between, not just the gate functions. poll() then threw a
+// ReferenceError on renderMission every cycle, and push() -- the ONLY thing
+// that POSTs the field -- was gone, so a placed buoy never reached the server
+// and the next poll overwrote it with the server's older list. It looked
+// exactly like "placing a buoy deletes the previous one".
+function push(){
+  fetch('/field', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({buoys: buoys.map(function(b){
+      return {label:b.label, east:b.east, north:b.north}; })})});
+}
+function note(text, cls){
+  var d = document.getElementById('mdetail');
+  d.textContent = text; d.className = 'hint ' + (cls || '');
+}
+function renderMission(m){
+  if (!m) return;
+  var st = document.getElementById('mstate');
+  var go = document.getElementById('go'), stop = document.getElementById('stop');
+  var running = (m.state === 'active' || m.state === 'starting' ||
+                 m.state === 'cancelling');
+  go.hidden = running;
+  stop.hidden = !running;
+  document.getElementById('mbarwrap').hidden = !running;
+  if (running){
+    st.textContent = m.state === 'active'
+      ? (m.phase || 'running') + '  \u00b7  plan v' + m.plan_version +
+        '  \u00b7  ' + m.buoys_known + ' buoys'
+      : m.state;
+    st.className = 'hint warn';
+    document.getElementById('mbar').style.width =
+      Math.round((m.progress || 0) * 100) + '%';
+    if (!document.getElementById('mdetail').classList.contains('bad')) note('');
+  } else if (m.state === 'done'){
+    var okish = (m.outcome === 0);
+    st.textContent = okish ? 'completed' : 'stopped';
+    st.className = 'hint ' + (okish ? 'ok' : 'bad');
+    note((OUTCOME[m.outcome] || ('outcome ' + m.outcome)) +
+         (m.elapsed_s ? '  \u00b7  ' + m.elapsed_s.toFixed(1) + ' s' : '') +
+         (m.detail ? '  \u00b7  ' + m.detail : ''), okish ? 'ok' : 'bad');
+  } else {
+    st.textContent = 'idle';
+    st.className = 'hint';
+  }
+}
+function renderReset(r){
+  var b = document.getElementById('rst');
+  if (!r) { b.hidden = true; return; }
+  b.hidden = false;
+  var busy = (r.state === 'running');
+  b.disabled = busy;
+  b.textContent = busy ? 'Returning\u2026' : 'Return to start';
+  if (r.state === 'running') note(r.detail, 'warn');
+  else if (r.state === 'failed') note('return failed: ' + r.detail, 'bad');
+  else if (r.state === 'done') note(r.detail, 'ok');
+}
 function poll(){
   fetch('/state').then(function(r){ return r.json(); }).then(function(s){
     anchored = s.anchored; boat = s.boat;
