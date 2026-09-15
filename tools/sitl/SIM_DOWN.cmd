@@ -28,6 +28,13 @@ if not defined HERE goto :nowsl
 wsl.exe -d %DISTRO% -- bash -lc "tr -d '\r' < '%HERE%/sim_down.sh' > /tmp/rx26_sim_down.sh && bash /tmp/rx26_sim_down.sh '%HERE%/../..'"
 
 echo.
+echo === the WSL keepalive ===
+rem Started by SIM_UP to stop WSL idling the VM out from under the rig. Matched
+rem on its window title so this cannot take out another WSL session.
+%SYS%\taskkill.exe /f /fi "WINDOWTITLE eq rx26-wsl-keepalive*" >nul 2>&1
+echo   released
+
+echo.
 echo === QGroundControl ===
 %SYS%\tasklist.exe /NH /FI "IMAGENAME eq QGroundControl.exe" 2>nul | %SYS%\find.exe /I "QGroundControl.exe" >nul
 if errorlevel 1 goto :noqgc
