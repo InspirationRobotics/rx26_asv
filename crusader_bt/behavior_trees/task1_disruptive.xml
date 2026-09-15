@@ -83,12 +83,6 @@
                    picked up on the next tick with no special case. -->
               <PlanPassage max_width="20.0" min_width="2.0"/>
 
-              <!-- FAILURE here ends the transit, and it is the only thing that
-                   should. The boat counts its own gates. -->
-              <Inverter>
-                <PassageComplete/>
-              </Inverter>
-
               <!-- One gate. Anything that fails inside restarts the leg. -->
               <ForceSuccess>
                 <ReactiveSequence name="leg">
@@ -126,14 +120,50 @@
                     <MarkGateCleared/>
 
                     <!-- "Is the next pair still where you said it was?" The
-                         ForceSuccess is the deliberate give-up: see note 3. -->
+                         ForceSuccess is the deliberate give-up: see note 3.
+
+                         TWO MINUTES, NOT TWENTY SECONDS, and the reason is that
+                         the guard band already covers the case this timeout
+                         looks like it is for. A dead radio is caught by
+                         PassagePlanFresh above, within max_age_s, which halts
+                         the whole mission rather than letting the boat drive an
+                         unconfirmed field. What is left for this timeout is the
+                         aircraft that is ALIVE and retransmitting but not
+                         answering, which is a fault in the aircraft and not
+                         something to give up on in a hurry.
+
+                         Ekko will answer in milliseconds. The long window is for
+                         the operator standing in for it, who is recolouring
+                         buoys on a map before confirming - 20 s was not enough
+                         for that, and the boat drove on twice in SITL with the
+                         answer arriving a quarter of a second too late. -->
                     <RequestConfirmation/>
                     <ForceSuccess>
-                      <AwaitConfirmation timeout_s="20.0" retry_s="3.0"/>
+                      <AwaitConfirmation timeout_s="120.0" retry_s="3.0"/>
                     </ForceSuccess>
                   </Sequence>
                 </ReactiveSequence>
               </ForceSuccess>
+
+              <!-- FAILURE here ends the transit, and it is the only thing that
+                   should. The boat counts its own gates.
+
+                   IT IS AFTER THE LEG, AND THAT ORDER IS THE WHOLE POINT. A
+                   ReactiveSequence re-ticks every child above the running one on
+                   every tick, so with this ABOVE the leg it was re-evaluated
+                   while AwaitConfirmation was waiting. MarkGateCleared on the
+                   LAST gate makes it true, so one tick later the leg was halted
+                   and the transit ended - the boat asked the aircraft to confirm
+                   and left 100 ms later without waiting for the answer.
+
+                   Below the leg it is reached only BETWEEN legs, when the leg
+                   has actually finished, confirmation included. SITL 2026-09-15:
+                   a one-gate field asked once and went straight to RESULT, while
+                   gate 1 of a two-gate field re-asked at 3, 6, 9, 12, 15 and 18 s
+                   and timed out properly. Every gate except the last waited. -->
+              <Inverter>
+                <PassageComplete/>
+              </Inverter>
 
             </ReactiveSequence>
           </KeepRunningUntilFailure>

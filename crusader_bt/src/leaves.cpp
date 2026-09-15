@@ -981,7 +981,7 @@ public:
   static BT::PortsList providedPorts()
   {
     return {
-      BT::InputPort<double>("timeout_s", 20.0,
+      BT::InputPort<double>("timeout_s", 120.0,
         "give up waiting and drive on with the last field"),
       BT::InputPort<double>("retry_s", 3.0,
         "how often to re-send the request while waiting")};
@@ -1020,7 +1020,7 @@ public:
         static_cast<unsigned>(seq), waited);
     }
 
-    if (waited >= getInput<double>("timeout_s").value_or(20.0)) {
+    if (waited >= getInput<double>("timeout_s").value_or(120.0)) {
       RCLCPP_WARN(
         log(),
         "gate %u NOT confirmed after %.0fs - driving on with the last field the "
