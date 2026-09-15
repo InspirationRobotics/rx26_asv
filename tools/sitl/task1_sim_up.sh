@@ -36,6 +36,37 @@ TREE="${TREE:-$BT/task1_disruptive.xml}"
 bash "$SRC/tools/sitl/nodes_down.sh"
 sleep 1
 
+# IS ANYTHING RUNNING FROM A STALE install/? Nodes import from install/, never
+# from src/, and this script deliberately does NOT build - a colcon build is
+# minutes and a bring-up should be seconds. The cost of that choice is that
+# edited code silently does not run, and it is impossible to see from the
+# outside: the node starts, logs normally, and serves the old behaviour.
+#
+# 2026-09-14: the ground station on :8090 was serving a page less than half the
+# size of the one in src, and the param its newer code needed was sitting
+# unused in crusader_bringup. Nothing was wrong with either file. Neither
+# package had been rebuilt in this container for a day.
+#
+# The sync only rewrites files whose CONTENT differs, so an unchanged file
+# keeps its mtime and this does not cry wolf after every bring-up.
+newest() { find "$1" -type f -printf '%T@
+' 2>/dev/null | sort -rn | head -1; }
+stale=""
+for d in "$SRC"/*/; do
+  pkg=$(basename "$d")
+  [ -d "$WS/install/$pkg" ] || continue
+  src_t=$(newest "$d"); ins_t=$(newest "$WS/install/$pkg")
+  [ -n "$src_t" ] && [ -n "$ins_t" ] || continue
+  awk -v a="$src_t" -v b="$ins_t" 'BEGIN{exit !(a > b + 1)}' && stale="$stale $pkg"
+done
+if [ -n "$stale" ]; then
+  echo
+  echo "  *** SOURCE IS NEWER THAN install/ FOR:$stale"
+  echo "  *** those nodes will run the OLD code. To fix, from Windows:"
+  echo "  ***   bash tools/sitl/sim.sh 'colcon build --packages-select$stale'"
+  echo
+fi
+
 up() { local name=$1 log=$2; shift 2; nohup "$@" > "$log" 2>&1 &
        printf '  %-18s -> %s\n' "$name" "$log"; }
 
