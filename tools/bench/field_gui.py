@@ -24,6 +24,7 @@ against re-deriving it elsewhere; a copy of that constant in JavaScript is
 exactly the drift it warns about, so the page is sent finished numbers.
 """
 import json
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -303,6 +304,30 @@ function flash(btn, text){
   var was = btn.textContent; btn.textContent = text;
   setTimeout(function(){ btn.textContent = was; }, 1800);
 }
+// RESTORED, same cause as push/note/renderMission above: the gate-authoring
+// removal sliced a whole region out, and these three went with it. They are
+// ASSIGNMENTS rather than declarations, so comparing "functions defined"
+// between the old and new file did not show them missing -- which is why the
+// first repair looked complete and Send goal, Cancel and Return to start were
+// all still dead. The buttons were in the markup the whole time, wired to
+// nothing, so clicking them did exactly nothing and logged nothing.
+document.getElementById('go').onclick = function(){
+  var b = this; b.disabled = true;
+  fetch('/goal', {method:'POST'}).then(function(r){
+    return r.text().then(function(t){ return [r.status, t]; });
+  }).then(function(rt){
+    b.disabled = false;
+    if (rt[0] !== 200) note(rt[1], 'bad');
+  });
+};
+document.getElementById('stop').onclick = function(){
+  fetch('/cancel', {method:'POST'});
+};
+document.getElementById('rst').onclick = function(){
+  fetch('/reset', {method:'POST'}).then(function(r){
+    return r.text().then(function(t){ return [r.status, t]; });
+  }).then(function(rt){ if (rt[0] !== 200) note(rt[1], 'bad'); });
+};
 document.getElementById('confirm').onclick = function(){
   var b = this;
   fetch('/confirm', {method:'POST'}).then(function(r){ return r.text(); })
@@ -509,6 +534,37 @@ class _Handler(BaseHTTPRequestHandler):
         pass          # one line per 500 ms poll would bury the bench's own log
 
 
+def _check_page_is_wired():
+    """Every button in the markup must have a handler. Raises if one does not.
+
+    A DEAD BUTTON IS SILENT. It sits in the page looking enabled, clicking it
+    does nothing, and neither side logs a thing -- there is no error to go
+    looking for.
+
+    This exists because removing the gate-authoring UI on 2026-09-14 sliced a
+    whole region out of the script and took four functions and three button
+    handlers with it. The first repair restored the functions, because comparing
+    "functions defined" before and after showed those up; the handlers are
+    ASSIGNMENTS rather than declarations, so that comparison said nothing about
+    them, and Send goal, Cancel and Return to start stayed dead through a fix
+    that looked complete.
+
+    Checked in start() rather than in a test, so it fires wherever the bench is
+    actually run.
+    """
+    buttons = set(re.findall(r'<button id="([A-Za-z0-9_]+)"', PAGE))
+    wired = set(re.findall(
+        r"getElementById\('([A-Za-z0-9_]+)'\)\s*\.\s*(?:onclick|addEventListener)",
+        PAGE))
+    dead = sorted(buttons - wired)
+    if dead:
+        raise RuntimeError(
+            "field_gui: %d button(s) in the page are wired to nothing: %s. "
+            "A dead button clicks silently and reports no error, so this fails "
+            "at startup rather than becoming a surprise on the water."
+            % (len(dead), ", ".join(dead)))
+
+
 class FieldGui:
     """Serves the page and relays edits back to the bench.
 
@@ -532,6 +588,7 @@ class FieldGui:
         self._srv = None
 
     def start(self):
+        _check_page_is_wired()
         _Handler.gui = self
         # Bound on all interfaces because the browser is on the laptop and the
         # bench runs on the Jetson — the same reason lidar_view and bt_view do.
