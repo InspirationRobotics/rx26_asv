@@ -143,17 +143,22 @@ FIELDS = {
     # 92 m from the anchor to the EXIT buoy. The ENTRY sits at 20 m so it is
     # inside CAM_MAX_M at the moment the field anchors — the rest is discovered
     # on the way, which is the honest version of the problem.
+    # TWO red-green pairs, ten buoys. Ten because that is what
+    # RXL_SAFE_PASSAGE carries and what the aircraft really sends; two pairs
+    # because that is the passage. The four unlit blacks are not padding -- they
+    # are what proves the boat's pairing ignores everything that is not a
+    # beacon, and what the autopilot's avoidance has to deal with.
     "task1": [
         #  label                right  ahead
         ("flashing_blue_buoy",    0.0, 20.0),   # ENTRY — circle it CLOCKWISE
-        ("red_buoy",             +6.0, 38.0),
+        ("red_buoy",             +6.0, 38.0),   # gate 1
         ("green_buoy",           -6.0, 38.0),
         ("black_buoy",          +14.0, 45.0),   # unlit: obstacle, either side
-        ("red_buoy",             +7.0, 56.0),
-        ("green_buoy",           -5.0, 56.0),
-        ("black_buoy",          -16.0, 62.0),   # unlit: obstacle, either side
-        ("red_buoy",             +5.0, 74.0),
-        ("green_buoy",           -7.0, 74.0),
+        ("black_buoy",          -16.0, 50.0),
+        ("red_buoy",             +7.0, 62.0),   # gate 2
+        ("green_buoy",           -5.0, 62.0),
+        ("black_buoy",          +12.0, 72.0),
+        ("black_buoy",           -9.0, 80.0),
         ("steady_blue_buoy",      0.0, 92.0),   # EXIT — circle it ANTICLOCKWISE
     ],
 }
@@ -362,12 +367,11 @@ class WorldModelBench(Node):
             else:
                 raise RuntimeError("did not get back within 180 s")
 
-            # Re-arm the AIRCRAFT too: set_gates rewinds which gates have been
-            # served and forgets the answers already given, so the next run
-            # starts at gate one instead of replying PASSAGE COMPLETE to its
-            # first request.
+            # Re-arm the AIRCRAFT too, or the next run's first request -- seq 1
+            # again -- is answered instantly from the cache as a lost-reply
+            # repeat, and the operator never gets to change the field first.
             if self.uav is not None:
-                self.uav.set_gates(self.uav.status()["gates"])
+                self.uav.rewind()
 
             self.mission = {"state": "idle", "phase": "", "progress": 0.0,
                             "outcome": None, "detail": "", "plan_version": 0,
@@ -388,6 +392,18 @@ class WorldModelBench(Node):
         """
         if self._goal_handle is not None and self.mission["state"] == "active":
             raise RuntimeError("a mission is already running")
+
+        # A NEW RUN MEANS THE AIRCRAFT FORGETS TOO. bt_runner resets gate_seq to
+        # 0 when it accepts a goal, so the next run asks about gate 1 again --
+        # and an aircraft still holding the last run's answer for seq 1 treats
+        # that as a lost-reply repeat and acks it instantly, from the cache,
+        # with whatever field it had. The operator never gets the pause the
+        # confirmation exists to give them.
+        #
+        # Seen in SITL 2026-09-14: a second run's gate 1 was "confirmed" 200 ms
+        # after it was asked, with nobody at the keyboard.
+        if self.uav is not None:
+            self.uav.rewind()
         if not self.action.server_is_ready():
             # One second, not forever: if bt_runner is not up, say so on the
             # page rather than leaving a button that looks like it did nothing.
@@ -436,15 +452,17 @@ class WorldModelBench(Node):
 
     # ---------------------------------------------- the radio, under --uav
 
-    def _uav_transmit(self):
-        """Send the CURRENT field as the passage. Called from the HTTP thread.
+    def _plan_from_field(self):
+        """The current field as (buoys, entry, exit_) for the radio.
+
+        Shared by Transmit and Confirm, because those send the SAME thing --
+        the difference is only whether an acknowledgement follows. Two copies
+        of this drifted once already.
 
         Buoy ids are the index in the field list, which is exactly the number
-        the page draws on each marker -- so a gate authored by clicking two
-        markers names the same two buoys the boat will look up.
+        the page draws on each marker, so a colour changed on screen reaches
+        the boat against the id it already knows.
         """
-        if self.uav is None:
-            raise RuntimeError("no radio")
         with self._field_lock:
             field = list(self.field)
             origin = self.origin
@@ -474,12 +492,27 @@ class WorldModelBench(Node):
                 missing.append("EXIT (steady blue)")
             raise RuntimeError("place an " + " and an ".join(missing) + " first")
 
+        return buoys, entry, exit_
+
+    def _uav_transmit(self):
+        """Send the current field as the passage. Called from the HTTP thread."""
+        if self.uav is None:
+            raise RuntimeError("no radio")
+        buoys, entry, exit_ = self._plan_from_field()
         self.uav.send_plan(buoys, entry, exit_)
         return "sent %d buoys" % len(buoys)
 
-    def _uav_set_gates(self, gates):
-        if self.uav is not None:
-            self.uav.set_gates(gates)
+    def _uav_confirm(self):
+        """Answer the boat's outstanding request with the field as it is NOW.
+
+        The field is re-read here rather than repeating what was last
+        transmitted, so "recolour a buoy, then confirm" carries the new colours
+        in the same breath. That is the whole operator gesture.
+        """
+        if self.uav is None:
+            raise RuntimeError("no radio: start with --uav")
+        buoys, entry, exit_ = self._plan_from_field()
+        return self.uav.confirm(buoys, entry, exit_)
 
     def _gui_set_field(self, buoys):
         """Replace the field. Called from the HTTP thread, never the executor."""
@@ -740,11 +773,39 @@ class WorldModelBench(Node):
             cx, cy, cz = core.body_to_camera(rr * math.cos(b), rr * math.sin(b),
                                              z, self.extrinsic)
             d = Detection3D()
-            d.label, d.confidence = label, round(random.uniform(0.62, 0.95), 2)
+            d.label = self._maybe_miscolour(label)
+            d.confidence = round(random.uniform(0.62, 0.95), 2)
             d.x, d.y, d.z = cx, cy, cz
             d.bbox = [0, 0, 0, 0]
             array.detections.append(d)
         self.det_pub.publish(array)       # every frame, empty or not
+
+    def _maybe_miscolour(self, label):
+        """Occasionally report a red buoy as green, or the reverse.
+
+        WHY THE BENCH SHOULD LIE. Above Core tier the aircraft owns the colours
+        and the boat's camera only refines POSITION -- nav::fusePassage takes
+        the beacon from the plan and never from the tracker. That rule was
+        written, tested off-ROS, and never once exercised in SITL, because
+        synthetic detections always carried the true label: the fusion could
+        have been taking the camera's colour all along and every run would have
+        looked identical.
+
+        --miscolour 0.2 makes one detection in five disagree. The passage must
+        not change. If it does, the aircraft is not winning.
+
+        Only red and green are flipped. Miscolouring the ENTRY or EXIT beacon
+        would test a different thing -- those come straight from the plan and
+        never from a detection at all.
+        """
+        p = getattr(self.args, "miscolour", 0.0)
+        if p <= 0.0 or random.random() >= p:
+            return label
+        if label == "red_buoy":
+            return "green_buoy"
+        if label == "green_buoy":
+            return "red_buoy"
+        return label
 
     def _clusters(self):
         """What lidar_cluster_node would publish: base_link, every window."""
@@ -808,6 +869,11 @@ def main():
     ap.add_argument("--uav-endpoint", default="udpout:127.0.0.1:14555",
                     help="rxl_link_node's rxl_endpoint")
     ap.add_argument("--seed", type=int, default=1, help="RNG seed")
+    ap.add_argument("--miscolour", type=float, default=0.0, metavar="P",
+                    help="fraction of camera detections that report the WRONG "
+                         "red/green label, 0..1. Proves the aircraft's colour "
+                         "wins in fusePassage: the passage the boat plans must "
+                         "not change. Try 0.2.")
     sim = ap.add_argument_group("--sim-pose only")
     sim.add_argument("--radius", type=float, default=30.0,
                      help="circle radius around the buoy field [m]")
@@ -846,7 +912,7 @@ def main():
         gui = field_gui.FieldGui(
             node._gui_state, node._gui_set_field, args.gui_port,
             transmit=node._uav_transmit if args.uav else None,
-            set_gates=node._uav_set_gates if args.uav else None,
+            confirm=node._uav_confirm if args.uav else None,
             mission_send=node._mission_send, mission_cancel=node._mission_cancel,
             sitl_reset=node._return_to_start)
         gui.start()

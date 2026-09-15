@@ -49,7 +49,10 @@ FIELD = [
 ]
 # RED FIRST. The order is the whole meaning of a pair; reversing it drives the
 # boat down the wrong side of both buoys.
-GATES = [(1, 2), (3, 4), (5, 6)]
+# No gate list any more: the boat pairs the buoys and picks the order itself.
+# What this script still has to do is ANSWER the confirmation requests, and
+# auto_confirm below does that with nobody watching -- which is the point of
+# running it instead of the page.
 ENTRY_ID, EXIT_ID = 0, 7
 
 
@@ -95,9 +98,8 @@ def main():
         return 1
 
     field = list(FIELD)
-    link = uav_link.UavLink(cfg.endpoint,
+    link = uav_link.UavLink(cfg.endpoint, auto_confirm=True,
                             on_log=lambda line: print("  " + line))
-    link.set_gates(GATES)
 
     def plan_from(f):
         buoys = [(i,) + uav_link.offsets_to_latlon(e, n, anchor) + (c,)
@@ -107,8 +109,8 @@ def main():
         return buoys, entry, exit_
 
     link.send_plan(*plan_from(field))
-    print("bench UAV up: %d buoys, %d gates, anchored at %.7f %.7f"
-          % (len(field), len(GATES), anchor[0], anchor[1]))
+    print("bench UAV up: %d buoys, anchored at %.7f %.7f"
+          % (len(field), anchor[0], anchor[1]))
 
     t0 = time.monotonic()
     period = 1.0 / max(cfg.plan_hz, 0.01)
@@ -130,8 +132,7 @@ def main():
         if link.poll() == 0:
             time.sleep(0.02)
 
-    print("bench UAV done: served %d of %d gates"
-          % (link.status()["served"], len(GATES)))
+    print("bench UAV done: confirmed %d gate(s)" % link.status()["confirmed"])
     return 0
 
 

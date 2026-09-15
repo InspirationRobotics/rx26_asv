@@ -84,29 +84,42 @@ map looks perfect anyway. It proves plumbing, association, decay, fusion arbitra
 display — never the frame convention. That is bench work against real hardware, the way
 [docs/G2](../../docs/G2_lidar_orientation.md) did it for the LiDAR.
 
-## `bench_gate_pairs.py` — a gate pair means red-to-starboard either way round
+## `bench_gate_pairs.py` — the confirmation handshake
 
 ```bash
 python3 tools/bench/bench_gate_pairs.py     # no ROS, no node, ~1 s
 ```
 
-The boat gets a gate's crossing heading from `bearing(green → red) − 90`
-(`nav::gateWaypoints`). That is a pure function of the pair — it never looks at
-the boat, the entry or the exit — which is what lets it work with GPS yaw
-unresolved, and equally what makes an **inverted pair come out 180° wrong
-instead of failing**.
+**The aircraft no longer assigns gates.** It transmits ten buoys with their
+colours; the boat pairs them and picks the order itself (`nav::planPassage`,
+covered off-ROS by `crusader_bt/test/test_nav_math.cpp`). `RXL_NEXT_BUOY_SET`
+survives only as an acknowledgement, its two buoy-id fields sent as `NO_BUOY`.
 
-That happened on 2026-09-13 in SITL: the page authored pairs in click order, the
-operator clicked green-then-red, and the aircraft said "red 3, green 1" about a
-green 3 and a red 1. The boat crossed the first gate correctly, turned around,
-and drove back through it with RED TO PORT. Every line in every log was `[INFO]`.
+What this bench pins down is the operator protocol:
 
-So `UavLink` now re-derives which buoy is red from the transmitted plan, and
-this bench holds it to that. It also pins the two things the fix must **not**
-do: alter a pair that is not one red and one green (that is an operator mistake
-to show, not one to guess at), and rewind `_served` on the 0.2 Hz retransmit
-(which would answer every request with gate 1 and send the boat round in
-circles).
+- **Confirming is an operator action.** The whole point is that a human may be
+  about to change the field, so `poll()` must not answer on its own. Scripts opt
+  in with `auto_confirm=True`.
+- **A re-ask is answered immediately.** That is the lost-reply case, and making
+  it wait on the operator again turns every dropped packet into a 20-second
+  stall at a gate.
+- **The field goes out before the ack.** The boat treats the ack as permission
+  to drive on, so an ack that overtook the new positions would let it leave on
+  the old ones — the exact failure the confirmation exists to prevent.
+
+## Proving the aircraft's colour actually wins
+
+`nav::fusePassage` takes the beacon from the plan and never from the tracker.
+That rule was written, unit-tested, and **never once exercised in SITL**, because
+synthetic detections always carried the true label — the fusion could have been
+reading the camera's colour all along and every run would have looked the same.
+
+```bash
+python3 tools/bench/bench_world_model.py --gui --uav --miscolour 0.2
+```
+
+One camera detection in five now reports red as green or the reverse. The
+passage the boat plans must not change. If it does, the aircraft is not winning.
 
 ## The four throughput benches — where do the frames go?
 

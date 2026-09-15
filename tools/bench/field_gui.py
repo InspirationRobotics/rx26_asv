@@ -147,12 +147,13 @@ button.on{border-color:var(--accent);color:var(--accent);background:#4eafd216}
         <h2>Radio &mdash; you are the aircraft</h2>
         <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:9px">
           <button id="tx" class="go">Transmit passage</button>
-          <button id="gatemode">Author gates</button>
+          <button id="confirm">Confirm gate</button>
         </div>
-        <p class="hint" id="gatehint">Transmit sends the field as
-          RXL_SAFE_PASSAGE. Author gates, then the boat is answered
-          automatically as it asks.</p>
-        <table id="gtbl"></table>
+        <p class="hint" id="gatehint">Transmit sends the ten buoys as
+          RXL_SAFE_PASSAGE. The boat pairs them and picks the order itself.
+          When it is through a gate it asks to confirm &mdash; recolour or move
+          anything first, then hit Confirm to send the field as it now is.</p>
+        <p class="hint" id="askrow"></p>
         <div id="gatelog" class="log"></div>
       </div>
 
@@ -170,7 +171,7 @@ var extent = 24, drag = null, picked = -1;
 // The radio half. `mode` is 'place' or 'gate': in gate mode a click on a
 // placed buoy adds it to the pending pair rather than moving it, because the
 // gate order is authored by pointing at the same buoys already on the map.
-var mode = 'place', gates = [], pending = [], radio = null;
+var radio = null;
 var c = document.getElementById('c'), g = c.getContext('2d');
 
 function mpp(){ return extent / c.width; }              // metres per pixel
@@ -212,47 +213,18 @@ function paint(){
     }
   }
 
-  // Gate lines, under the buoys so a marker is never hidden by one.
-  for (var k=0;k<gates.length;k++){
-    var a = buoys[gates[k][0]], b2 = buoys[gates[k][1]];
-    if (!a || !b2) continue;
-    var pa = toPx(a.east, a.north), pb = toPx(b2.east, b2.north);
-    g.strokeStyle = '#4eafd299'; g.lineWidth = 2;
-    g.beginPath(); g.moveTo(pa[0],pa[1]); g.lineTo(pb[0],pb[1]); g.stroke();
-    g.fillStyle = '#4EAFD2'; g.font = '10px "IBM Plex Mono",monospace';
-    g.fillText(String(k+1), (pa[0]+pb[0])/2 + 4, (pa[1]+pb[1])/2 - 4);
-  }
   for (var j=0;j<buoys.length;j++){
     var q2 = toPx(buoys[j].east, buoys[j].north);
     g.fillStyle = colOf(buoys[j].label);
     g.beginPath(); g.arc(q2[0], q2[1], 8, 0, 7); g.fill();
     if (j === picked){ g.strokeStyle = '#fff'; g.lineWidth = 2;
       g.beginPath(); g.arc(q2[0], q2[1], 12, 0, 7); g.stroke(); }
-    if (pending.indexOf(j) >= 0){ g.strokeStyle = '#E0A245'; g.lineWidth = 3;
-      g.beginPath(); g.arc(q2[0], q2[1], 13, 0, 7); g.stroke(); }
     g.fillStyle = '#0C141C'; g.font = 'bold 10px "IBM Plex Mono",monospace';
     g.fillText(String(j), q2[0]-3, q2[1]+3.5);
   }
 }
 // PAL rows are [label, colour, short name, rule]. One scan, not one per
 // column: two copies of the same loop drift the moment a column is inserted.
-// A gate pair is a SET of two buoys. Which one is RED is a fact about the buoy
-// and the map already knows it, so click order is not allowed to mean anything.
-// Clicking green-then-red once told the boat "red 3, green 1" about a green 3
-// and a red 1; it crossed the gate, turned round and came back through with red
-// to port, and nothing anywhere logged an error. The aircraft re-checks this
-// against the transmitted plan too -- this copy is so the table on screen reads
-// correctly before you hit Transmit.
-function orderPair(a, b){
-  var la = buoys[a].label, lb = buoys[b].label;
-  if (la === 'green_buoy' && lb === 'red_buoy') return [b, a];
-  if (!(la === 'red_buoy' && lb === 'green_buoy')){
-    var na = palOf(la), nb = palOf(lb);
-    note('gate ' + (gates.length + 1) + ': ' + (na ? na[2] : la) + ' + ' +
-         (nb ? nb[2] : lb) + ' is not a red-green pair', 'warn');
-  }
-  return [a, b];
-}
 function palOf(l){ for (var i=0;i<PAL.length;i++) if (PAL[i][0]===l) return PAL[i]; return null; }
 function colOf(l){ var p = palOf(l); return p ? p[1] : '#888'; }
 function shortOf(l){ var p = palOf(l); return p ? p[2] : l; }
@@ -270,16 +242,6 @@ function evPx(ev){ var r = c.getBoundingClientRect();
 c.addEventListener('pointerdown', function(ev){
   if (!anchored) return;
   var p = evPx(ev), i = hit(p[0], p[1]);
-  if (mode === 'gate'){
-    // Click either buoy of the pair first; orderPair works out which is red.
-    if (i >= 0){
-      pending.push(i);
-      if (pending.length === 2){ gates.push(orderPair(pending[0], pending[1]));
-                                 pending = []; pushGates(); }
-      paint(); renderGates();
-    }
-    return;
-  }
   if (i >= 0){ picked = i; drag = i; }
   else { var m = toM(p[0], p[1]);
     buoys.push({label: PAL[sel][0], east: +m[0].toFixed(2), north: +m[1].toFixed(2)});
@@ -341,128 +303,27 @@ function flash(btn, text){
   var was = btn.textContent; btn.textContent = text;
   setTimeout(function(){ btn.textContent = was; }, 1800);
 }
-document.getElementById('gatemode').onclick = function(){
-  mode = (mode === 'gate') ? 'place' : 'gate';
-  pending = [];
-  this.className = (mode === 'gate') ? 'on' : '';
-  this.textContent = (mode === 'gate') ? 'Done authoring' : 'Author gates';
-  document.getElementById('gatehint').textContent = (mode === 'gate')
-    ? 'Click the two buoys of each gate, in the order the boat meets them. Either one first \u2014 red is read off the buoy, not the click.'
-    : 'Transmit sends the field as RXL_SAFE_PASSAGE. Author gates, then the boat is answered automatically as it asks.';
-  paint(); renderGates();
+document.getElementById('confirm').onclick = function(){
+  var b = this;
+  fetch('/confirm', {method:'POST'}).then(function(r){ return r.text(); })
+    .then(function(t){ flash(b, t); });
 };
-function pushGates(){
-  fetch('/gates', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({gates: gates})});
-}
-function renderGates(){
-  var t = document.getElementById('gtbl'), h = '';
-  for (var i=0;i<gates.length;i++){
-    var r = gates[i][0], gr = gates[i][1];
-    var served = radio && i < radio.served;
-    h += '<tr><td>' + (served ? '&check; ' : '') + 'gate ' + (i+1) + '</td>' +
-         '<td style="color:' + colOf('red_buoy') + '">red ' + r + '</td>' +
-         '<td style="color:' + colOf('green_buoy') + '">green ' + gr + '</td>' +
-         '<td class="n"><a href="#" data-i="' + i + '" class="rm">remove</a></td></tr>';
-  }
-  if (pending.length === 1){
-    h += '<tr class="pend"><td>next gate</td><td>red ' + pending[0] +
-         '</td><td>green &hellip;</td><td></td></tr>';
-  }
-  t.innerHTML = h;
-  t.querySelectorAll('.rm').forEach(function(e){
-    e.onclick = function(ev){ ev.preventDefault();
-      gates.splice(+e.dataset.i, 1); pushGates(); paint(); renderGates(); };
-  });
-  var hint = document.getElementById('gatehint');
-  if (radio && mode !== 'gate'){
-    hint.textContent = 'Transmitting on ' + radio.endpoint + ' — ' +
-      radio.sent + ' sends, ' + radio.served + ' of ' + gates.length +
-      ' gates answered.';
+function renderRadio(){
+  var ask = document.getElementById('askrow');
+  if (!radio){ ask.textContent = ''; return; }
+  if (radio.pending !== null && radio.pending !== undefined){
+    ask.innerHTML = '<b style="color:' + 'var(--warn)' + '">The boat is through ' +
+      'gate ' + radio.pending + ' and is waiting.</b> Change any colours you ' +
+      'want, then Confirm.';
+  } else {
+    ask.textContent = 'On ' + radio.endpoint + ' \u2014 ' + radio.sent +
+      ' transmissions, ' + radio.confirmed + ' gate(s) confirmed.' +
+      (radio.auto_confirm ? '  Auto-confirm is ON.' : '');
   }
   var lg = document.getElementById('gatelog');
-  if (radio && radio.log){
-    lg.innerHTML = radio.log.slice(-12).reverse()
-      .map(function(l){ return '<div>' + l + '</div>'; }).join('');
-  }
-}
-
-// OUTCOME_* from crusader_msgs/action/SafePassage. Spelled out rather than
-// shown as a number: "outcome 4" on a page tells an operator nothing, and the
-// difference between "the pilot took control" and "no entry buoy" is the whole
-// question when a run stops.
-var OUTCOME = ['completed', 'timed out', 'no entry buoy', 'cancelled',
-               'not autonomous - the pilot has it', 'fault'];
-
-document.getElementById('go').onclick = function(){
-  var b = this; b.disabled = true;
-  fetch('/goal', {method:'POST'}).then(function(r){
-    return r.text().then(function(t){ return [r.status, t]; });
-  }).then(function(rt){
-    b.disabled = false;
-    if (rt[0] !== 200) note(rt[1], 'bad');
-  });
-};
-document.getElementById('stop').onclick = function(){
-  fetch('/cancel', {method:'POST'});
-};
-document.getElementById('rst').onclick = function(){
-  fetch('/reset', {method:'POST'}).then(function(r){
-    return r.text().then(function(t){ return [r.status, t]; });
-  }).then(function(rt){ if (rt[0] !== 200) note(rt[1], 'bad'); });
-};
-function note(text, cls){
-  var d = document.getElementById('mdetail');
-  d.textContent = text; d.className = 'hint ' + (cls || '');
-}
-
-function renderReset(r){
-  var b = document.getElementById('rst');
-  if (!r) { b.hidden = true; return; }
-  b.hidden = false;
-  var busy = (r.state === 'running');
-  b.disabled = busy;
-  b.textContent = busy ? 'Returning\u2026' : 'Return to start';
-  if (r.state === 'running') note(r.detail, 'warn');
-  else if (r.state === 'failed') note('return failed: ' + r.detail, 'bad');
-  else if (r.state === 'done') note(r.detail, 'ok');
-}
-
-function renderMission(m){
-  if (!m) return;
-  var st = document.getElementById('mstate');
-  var go = document.getElementById('go'), stop = document.getElementById('stop');
-  var running = (m.state === 'active' || m.state === 'starting' ||
-                 m.state === 'cancelling');
-  go.hidden = running;
-  stop.hidden = !running;
-  document.getElementById('mbarwrap').hidden = !running;
-  if (running){
-    st.textContent = m.state === 'active'
-      ? (m.phase || 'running') + '  \u00b7  plan v' + m.plan_version +
-        '  \u00b7  ' + m.buoys_known + ' buoys'
-      : m.state;
-    st.className = 'hint warn';
-    document.getElementById('mbar').style.width =
-      Math.round((m.progress || 0) * 100) + '%';
-    if (!document.getElementById('mdetail').classList.contains('bad')) note('');
-  } else if (m.state === 'done'){
-    var okish = (m.outcome === 0);
-    st.textContent = okish ? 'completed' : 'stopped';
-    st.className = 'hint ' + (okish ? 'ok' : 'bad');
-    note((OUTCOME[m.outcome] || ('outcome ' + m.outcome)) +
-         (m.elapsed_s ? '  \u00b7  ' + m.elapsed_s.toFixed(1) + ' s' : '') +
-         (m.detail ? '  \u00b7  ' + m.detail : ''), okish ? 'ok' : 'bad');
-  } else {
-    st.textContent = 'idle';
-    st.className = 'hint';
-  }
-}
-
-function push(){
-  fetch('/field', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({buoys: buoys.map(function(b){
-      return {label:b.label, east:b.east, north:b.north}; })})});
+  if (lg && radio.log) lg.innerHTML = radio.log.map(function(l){
+    return '<div>' + l.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</div>';
+  }).join('');
 }
 function poll(){
   fetch('/state').then(function(r){ return r.json(); }).then(function(s){
@@ -485,17 +346,14 @@ function poll(){
     renderReset(s.reset);
     radio = s.radio || null;
     document.getElementById('radiocard').hidden = !radio;
-    if (radio && radio.gates && mode !== 'gate' && pending.length === 0){
-      gates = radio.gates;      // the server is authoritative while idle
-    }
-    renderGates();
+    renderRadio();
     paint(); render();
   }).catch(function(){
     document.getElementById('dot').className = 'dot';
     document.getElementById('conn').textContent = 'bench not reachable';
   });
 }
-palette(); paint(); render(); renderGates(); poll(); setInterval(poll, 500);
+palette(); paint(); render(); renderRadio(); poll(); setInterval(poll, 500);
 </script></body></html>
 """
 
@@ -559,19 +417,16 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, msg or "sent", "text/plain")
             return
 
-        if self.path.startswith("/gates"):
-            if not self.gui.set_gates:
+        if self.path.startswith("/confirm"):
+            if not self.gui.confirm:
                 self._send(409, "no radio: start with --uav", "text/plain")
                 return
-            n = int(self.headers.get("Content-Length") or 0)
             try:
-                body = json.loads(self.rfile.read(n) or b"{}")
-                gates = [(int(a), int(b)) for a, b in body.get("gates", [])]
-            except (ValueError, TypeError) as exc:
-                self._send(400, "bad gates: %s" % exc, "text/plain")
+                msg = self.gui.confirm()
+            except Exception as exc:                        # noqa: BLE001
+                self._send(500, "confirm failed: %s" % exc, "text/plain")
                 return
-            self.gui.set_gates(gates)
-            self._send(200, "ok", "text/plain")
+            self._send(200, msg or "confirmed", "text/plain")
             return
 
         if not self.path.startswith("/field"):
@@ -606,13 +461,13 @@ class FieldGui:
     """
 
     def __init__(self, get_state, set_field, port=DEFAULT_PORT,
-                 transmit=None, set_gates=None,
+                 transmit=None, confirm=None,
                  mission_send=None, mission_cancel=None, sitl_reset=None):
         self.get_state, self.set_field, self.port = get_state, set_field, port
         # The radio half, present only under --uav. When these are None the
         # page hides the Radio card entirely rather than offering a button that
         # would 409 -- a control that cannot work should not be on screen.
-        self.transmit, self.set_gates = transmit, set_gates
+        self.transmit, self.confirm = transmit, confirm
         # Starting and stopping a run from the page. A web UI you have to leave
         # for a terminal is not finished.
         self.mission_send, self.mission_cancel = mission_send, mission_cancel

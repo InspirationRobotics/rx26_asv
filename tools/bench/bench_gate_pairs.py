@@ -1,27 +1,32 @@
 #!/usr/bin/env python3
-"""bench_gate_pairs — a gate pair must mean red-to-starboard whichever way it was authored.
+"""bench_gate_pairs — the confirmation handshake, without ROS or a radio peer.
 
     python3 tools/bench/bench_gate_pairs.py
 
-No ROS, no node, no radio on the other end: this only exercises UavLink's own
-bookkeeping, so it runs anywhere in a second.
+Exercises UavLink's half of the protocol only; the boat's half -- pairing the
+buoys and ordering the gates -- is nav::planPassage and is covered off-ROS by
+crusader_bt/test/test_nav_math.cpp.
 
-WHAT IT EXISTS TO CATCH, and why nothing else caught it. The boat derives a
-gate's crossing heading from `bearing(green -> red) - 90` (nav::gateWaypoints).
-That is a pure function of the pair -- no boat heading, no entry, no exit --
-which is what makes it survive an unresolved GPS yaw, and equally what makes an
-INVERTED pair come out as a heading 180 degrees wrong rather than as an error.
+WHAT THE PROTOCOL IS NOW. The aircraft transmits ten buoys with their colours
+and nothing else. The boat pairs them, picks the order, drives a gate, and then
+asks "is the rest of the field still where you said it was?". The aircraft
+answers with the field as it stands plus an acknowledgement of that sequence
+number.
 
-2026-09-13, SITL: the page authored pairs in click order, the operator clicked
-green-then-red, and the aircraft said "red 3, green 1" about a green 3 and a
-red 1. The boat crossed the first gate correctly, turned around, and drove back
-through it with RED TO PORT. Nothing in any log was above [INFO].
+THE THREE RULES THAT ARE EASY TO BREAK, and why each is here:
 
-So the field here is the one that was on screen when that happened, and the
-headings are checked against the entry->exit course: a gate crossed more than
-90 degrees off the run of the passage is the signature of the bug.
+  * CONFIRMING IS AN OPERATOR ACTION. The whole point is that a human may be
+    about to change the field, so poll() must NOT answer on its own. Scripts
+    opt into auto_confirm.
+
+  * A RE-ASK IS ANSWERED IMMEDIATELY. That is the lost-reply case on a lossy
+    radio and it must not wait on the operator a second time, or every dropped
+    packet becomes a 20-second stall at a gate.
+
+  * THE FIELD GOES OUT BEFORE THE ACK. The boat treats the ack as permission to
+    drive on. An ack that overtook the new positions would let it leave on the
+    old ones -- which is exactly the failure the confirmation exists to prevent.
 """
-import math
 import os
 import sys
 
@@ -36,17 +41,15 @@ ENTRY = rxl_codec.BEACON_FLASHING_BLUE
 EXIT = rxl_codec.BEACON_STEADY_BLUE
 OFF = rxl_codec.BEACON_OFF
 
-# id, east, north, beacon -- the field that produced the reversal.
-FIELD = [(0, -31.66, 9.86, ENTRY), (1, -8.03, 11.40, RED), (2, -14.83, 33.18, RED),
-         (3, -16.53, 19.59, GREEN), (4, -23.78, 28.55, GREEN), (5, 6.02, 50.94, EXIT),
-         (6, -3.86, 47.70, OFF), (7, 6.02, 20.36, OFF), (8, -25.95, 43.06, OFF),
-         (9, -17.61, 12.95, OFF)]
-POS = {i: (e, n) for i, e, n, _c in FIELD}
-
-# Offsets straight into degrees. The link only re-reads the COLOURS, so the
-# conversion needs to be reversible, not accurate.
+# Two pairs and four unlit blacks: the mission as it stands.
+FIELD = [(0, 20.0, 0.0, ENTRY),
+         (1, 38.0, 6.0, RED), (2, 38.0, -6.0, GREEN),
+         (3, 45.0, 14.0, OFF), (4, 50.0, -16.0, OFF),
+         (5, 62.0, 7.0, RED), (6, 62.0, -5.0, GREEN),
+         (7, 72.0, 12.0, OFF), (8, 80.0, -9.0, OFF),
+         (9, 92.0, 0.0, EXIT)]
 DEG = 111320.0
-BUOYS = [(i, n / DEG, e / DEG, c) for i, e, n, c in FIELD]
+BUOYS = [(i, n / DEG, e / DEG, c) for i, n, e, c in FIELD]
 ANY_ENTRY, ANY_EXIT = (1.0, 103.0), (1.001, 103.001)
 
 # Nothing listens on this port and nothing needs to: a udpout socket never
@@ -54,22 +57,23 @@ ANY_ENTRY, ANY_EXIT = (1.0, 103.0), (1.001, 103.001)
 ENDPOINT = "udpout:127.0.0.1:14599"
 
 
-def crossing_heading(red_id, green_id):
-    """nav::gateWaypoints' heading, in degrees, 0..360."""
-    (re_, rn), (ge, gn) = POS[red_id], POS[green_id]
-    return (math.degrees(math.atan2(re_ - ge, rn - gn)) - 90.0) % 360.0
-
-
-def course():
-    (ee, en), (xe, xn) = POS[0], POS[5]
-    return math.degrees(math.atan2(xe - ee, xn - en)) % 360.0
-
-
-def link(plan=True):
-    lk = UavLink(endpoint=ENDPOINT)
+def link(auto=False, plan=True):
+    lk = UavLink(endpoint=ENDPOINT, auto_confirm=auto)
     if plan:
         lk.send_plan(BUOYS, ANY_ENTRY, ANY_EXIT, quiet=True)
     return lk
+
+
+def recoloured():
+    """The same ten buoys with the two gate-1 buoys swapped."""
+    out = []
+    for i, la, lo, c in BUOYS:
+        if i == 1:
+            c = GREEN
+        elif i == 2:
+            c = RED
+        out.append((i, la, lo, c))
+    return out
 
 
 def main():
@@ -81,103 +85,72 @@ def main():
         if not ok:
             fails.append(name)
 
-    print("entry -> exit course: %.1f deg\n" % course())
-
-    # ---------------------------------------------- the order it happened in
-    # Gates authored BEFORE Transmit, which is what the page encourages and is
-    # the case that needs the deferred check: at set_gates time there is no
-    # plan to read the colours from.
-    lk = link(plan=False)
-    lk.set_gates([(3, 1), (4, 2)])
-    check("gates before a plan are left alone", lk.status()["gates"] == [(3, 1), (4, 2)],
-          lk.status()["gates"])
-    lk.send_plan(BUOYS, ANY_ENTRY, ANY_EXIT, quiet=True)
-    check("transmitting the plan fixes them", lk.status()["gates"] == [(1, 3), (2, 4)],
-          lk.status()["gates"])
-
-    # ------------------------------------------------------ the other order
+    # ------------------------------------- confirming is an operator action
     lk = link()
-    lk.set_gates([(3, 1), (4, 2)])
-    check("gates after a plan are fixed at once", lk.status()["gates"] == [(1, 3), (2, 4)],
-          lk.status()["gates"])
+    lk._request(1)                                     # noqa: SLF001
+    st = lk.status()
+    check("a request is recorded as pending", st["pending"] == 1, st["pending"])
+    check("...and is NOT answered on its own", st["confirmed"] == 0, st["confirmed"])
+    sent_before = st["sent"]
 
-    # ---------------------------------------------------- already correct
-    lk = link()
-    lk.set_gates([(1, 3), (2, 4)])
-    check("a correct pair is untouched", lk.status()["gates"] == [(1, 3), (2, 4)],
-          lk.status()["gates"])
+    msg = lk.confirm()
+    st = lk.status()
+    check("confirm() answers it", st["confirmed"] == 1 and st["pending"] is None,
+          (st["confirmed"], st["pending"]))
+    check("...and retransmits the field with it", st["sent"] == sent_before + 1,
+          (sent_before, st["sent"]))
+    check("confirm() says which gate", "1" in msg, msg)
 
-    # ------------------------------------- what it must NOT silently repair
-    # Two reds is a mistake the operator has to see, not one to guess at:
-    # swapping it would be inventing a colour, dropping it would quietly
-    # shorten the passage.
-    lk = link()
-    lk.set_gates([(1, 2)])
-    check("two reds pass through unaltered", lk.status()["gates"] == [(1, 2)],
-          lk.status()["gates"])
-    check("...and are complained about",
-          any("not a red-green pair" in s for s in lk.status()["log"]))
+    check("confirming twice has nothing to answer",
+          "nothing" in lk.confirm().lower(), lk.confirm())
 
-    lk = link()
-    lk.set_gates([(3, 99)])
-    check("an unknown id passes through unaltered", lk.status()["gates"] == [(3, 99)],
-          lk.status()["gates"])
+    # ------------------------------------------- a re-ask must not wait again
+    lk._request(1)                                     # noqa: SLF001
+    st = lk.status()
+    check("a re-ask of a confirmed gate is answered at once",
+          st["pending"] is None, st["pending"])
+    check("...and does not double-count", st["confirmed"] == 1, st["confirmed"])
+    check("...and says so in the log",
+          any("re-asked" in s for s in st["log"]), st["log"][-2:])
 
-    # ---------------------------------- the retransmit must not rewind a run
-    # send_plan runs at 0.2 Hz for the whole passage and re-checks the pairs
-    # each time. If that reset what has been served, every retransmit would
-    # answer the next request with gate 1 and the boat would circle the field.
-    lk = link()
-    lk.set_gates([(3, 1), (4, 2)])
-    lk._answer(1)                                     # noqa: SLF001
-    lk._answer(2)                                     # noqa: SLF001
-    served = lk.status()["served"]
-    before = len(lk.status()["log"])
-    for _ in range(5):
-        lk.send_plan(BUOYS, ANY_ENTRY, ANY_EXIT, quiet=True)
-    check("a retransmit does not rewind what was served",
-          lk.status()["served"] == served, lk.status()["served"])
-    check("a retransmit says nothing once the pairs are right",
-          len(lk.status()["log"]) == before,
-          lk.status()["log"][before:])
+    # A NEW sequence number is a new question and must wait for the operator.
+    lk._request(2)                                     # noqa: SLF001
+    check("a new gate goes pending", lk.status()["pending"] == 2)
 
-    # ------------------------- a corrected pair withdraws its cached answer
-    # The idempotent re-ask is about a lost REPLY, not about frozen content. A
-    # Disruptive recolour can make the pair we already answered the wrong way
-    # round, and the boat re-asks that same seq after PlanChanged halts the leg.
+    # ------------------------------------------ the field changes on confirm
     lk = link()
-    lk.set_gates([(1, 3)])
-    lk._answer(1)                                     # noqa: SLF001
-    check("an answer is cached", lk.status()["served"] == 1)
-    recoloured = [(i, la, lo, (GREEN if c == RED else RED if c == GREEN else c))
-                  for i, la, lo, c in BUOYS]
-    lk.send_plan(recoloured, ANY_ENTRY, ANY_EXIT, quiet=True)
-    check("a recolour flips the pair", lk.status()["gates"] == [(3, 1)],
-          lk.status()["gates"])
-    check("...and withdraws the stale answer",
-          any("answer withdrawn" in s for s in lk.status()["log"]),
-          lk.status()["log"][-3:])
+    lk._request(1)                                     # noqa: SLF001
+    lk.confirm(recoloured(), ANY_ENTRY, ANY_EXIT)
+    plan = lk._plan[0]                                 # noqa: SLF001
+    colours = {i: c for i, _la, _lo, c in plan}
+    check("confirming with a new field transmits the new colours",
+          colours[1] == GREEN and colours[2] == RED,
+          (colours[1], colours[2]))
 
-    # And the opposite: a plain retransmission must withdraw nothing, or every
-    # re-ask on a lossy link would be answered afresh and could skip a gate.
-    lk = link()
-    lk.set_gates([(1, 3)])
-    lk._answer(1)                                     # noqa: SLF001
-    lk.send_plan(BUOYS, ANY_ENTRY, ANY_EXIT, quiet=True)
-    lk._answer(1)                                     # noqa: SLF001
-    check("a retransmit keeps the answer",
-          any("re-asked -> same answer" in s for s in lk.status()["log"]),
-          lk.status()["log"][-3:])
+    # ----------------------------------------------- auto_confirm, for scripts
+    lk = link(auto=True)
+    lk._request(1)                                     # noqa: SLF001
+    st = lk.status()
+    check("auto_confirm answers without an operator",
+          st["confirmed"] == 1 and st["pending"] is None,
+          (st["confirmed"], st["pending"]))
 
-    # --------------------------------- and the heading it all comes down to
+    # ------------------------------------------------------------- rewind
+    lk.rewind()
+    st = lk.status()
+    check("rewind forgets the confirmations", st["confirmed"] == 0)
     lk = link()
-    lk.set_gates([(3, 1), (4, 2)])
-    crs = course()
-    for n, (r, g) in enumerate(lk.status()["gates"], 1):
-        h = crossing_heading(r, g)
-        off = abs((h - crs + 180) % 360 - 180)
-        check("gate %d crosses %.0f deg, %.0f off the course" % (n, h, off), off <= 90,
-              "reversed" if off > 90 else "")
+    lk._request(1)                                     # noqa: SLF001
+    lk.confirm()
+    lk.rewind()
+    lk._request(1)                                     # noqa: SLF001
+    check("...so the same seq is a fresh question afterwards",
+          lk.status()["pending"] == 1, lk.status()["pending"])
+
+    # -------------------------------------- nothing assigns a gate any more
+    check("status carries no gate list", "gates" not in lk.status(),
+          sorted(lk.status()))
+    check("UavLink cannot assign gates", not hasattr(lk, "set_gates"))
 
     print("\n%s" % ("PASS" if not fails else "FAIL: %d of the above" % len(fails)))
     return 1 if fails else 0
