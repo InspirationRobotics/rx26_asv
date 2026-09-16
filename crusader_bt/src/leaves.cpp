@@ -905,7 +905,15 @@ class RequestConfirmation : public CrusaderSyncAction
 public:
   RequestConfirmation(const std::string & n, const BT::NodeConfig & c)
   : CrusaderSyncAction(n, c) {}
-  static BT::PortsList providedPorts() {return {};}
+  static BT::PortsList providedPorts()
+  {
+    // FOR THE LOG ONLY, and it earns its place: the sequence number no longer
+    // counts gates. The entry orbit asks first, so seq 1 is the entry and seq 2
+    // is gate 1, and a log line reading "gate 1" at the entry sends whoever is
+    // reading it looking for a gate the boat has not reached yet.
+    return {BT::InputPort<std::string>("what", "gate",
+      "what the boat just finished, for the log line")};
+  }
 
   BT::NodeStatus tick() override
   {
@@ -922,10 +930,11 @@ public:
       seq = ctx_->gate_seq;
     }
     if (ctx_->report_gate_reached) {ctx_->report_gate_reached(seq);}
+    const std::string what = getInput<std::string>("what").value_or("gate");
     RCLCPP_INFO(
-      log(), "gate %u: %s", static_cast<unsigned>(seq),
+      log(), "checkpoint %u (%s): %s", static_cast<unsigned>(seq), what.c_str(),
       retry ? "did not finish - asking the aircraft to confirm again"
-            : "cleared, asking the aircraft to confirm the field");
+            : "done, asking the aircraft to confirm the field");
     return BT::NodeStatus::SUCCESS;
   }
 };
@@ -1001,7 +1010,7 @@ public:
       std::lock_guard<std::mutex> lk(ctx_->mu);
       if (ctx_->have_confirmation) {
         RCLCPP_INFO(
-          log(), "gate %u confirmed by the aircraft",
+          log(), "checkpoint %u confirmed by the aircraft",
           static_cast<unsigned>(ctx_->gate_seq));
         return BT::NodeStatus::SUCCESS;
       }
@@ -1016,15 +1025,15 @@ public:
       last_ask_ = now;
       if (ctx_->report_gate_reached) {ctx_->report_gate_reached(seq);}
       RCLCPP_INFO(
-        log(), "gate %u: re-asking for confirmation (%.0fs)",
+        log(), "checkpoint %u: re-asking for confirmation (%.0fs)",
         static_cast<unsigned>(seq), waited);
     }
 
     if (waited >= getInput<double>("timeout_s").value_or(120.0)) {
       RCLCPP_WARN(
         log(),
-        "gate %u NOT confirmed after %.0fs - driving on with the last field the "
-        "aircraft sent. The next pair may have moved since.",
+        "checkpoint %u NOT confirmed after %.0fs - driving on with the last field "
+        "the aircraft sent. The passage may have moved since.",
         static_cast<unsigned>(seq), waited);
       return BT::NodeStatus::FAILURE;
     }

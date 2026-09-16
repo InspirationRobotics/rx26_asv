@@ -25,12 +25,18 @@
      boat must clear EVERY gate before the exit, and the exit buoy can sit well
      inside 8 m of the last one.
 
-  3. EVERY GATE ENDS IN A CONFIRMATION. Having crossed a pair, the boat asks the
+  3. THE ENTRY ORBIT AND EVERY GATE END IN A CONFIRMATION. Having crossed a pair
+     (or finished circling the entry), the boat asks the
      aircraft whether the rest of the field has moved, and waits. The aircraft
      answers by acking the sequence number and retransmitting all ten buoys,
      which arrives as a new plan, so PlanPassage re-runs against it on the very
      next tick. That is the whole re-tasking mechanism: there is no separate
      path for "the passage changed".
+
+     The sequence number counts CHECKPOINTS, not gates: seq 1 is the entry
+     orbit, seq 2 is gate 1. Nothing downstream ties seq to a gate index, which
+     is why adding the entry ask cost one XML line - cleared_gates is keyed on
+     buoy ids.
 
      AwaitConfirmation re-asks every retry_s and gives up at timeout_s. The
      ForceSuccess around it is what "gives up" means - the boat drives on with
@@ -73,6 +79,22 @@
         <!-- The entry buoy is known from the field the moment it arrives, so
              this drives straight at it instead of loitering to spot it. -->
         <CircleBuoy anchor="entry" radius="6.0" points="5" direction="cw"/>
+
+        <!-- CONFIRM BEFORE THE TRANSIT STARTS, not only after each gate.
+             Circling the entry is the last thing the boat does on a field
+             nobody has re-checked since the goal was accepted, and it is the
+             point at which the operator has had time to look at the passage and
+             decide it is right. Asking here means the first gate is driven
+             against a field confirmed seconds ago rather than minutes.
+
+             This is the same pair of leaves the gates use, so the sequence
+             number simply starts one earlier: seq 1 is the entry, seq 2 is
+             gate 1. Nothing downstream counts on seq matching a gate index -
+             cleared_gates is keyed on buoy ids, deliberately. -->
+        <RequestConfirmation what="entry orbit"/>
+        <ForceSuccess>
+          <AwaitConfirmation timeout_s="120.0" retry_s="3.0"/>
+        </ForceSuccess>
 
         <ForceSuccess>
           <KeepRunningUntilFailure name="transit">
@@ -137,7 +159,7 @@
                          buoys on a map before confirming - 20 s was not enough
                          for that, and the boat drove on twice in SITL with the
                          answer arriving a quarter of a second too late. -->
-                    <RequestConfirmation/>
+                    <RequestConfirmation what="gate"/>
                     <ForceSuccess>
                       <AwaitConfirmation timeout_s="120.0" retry_s="3.0"/>
                     </ForceSuccess>

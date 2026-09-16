@@ -152,8 +152,9 @@ button.on{border-color:var(--accent);color:var(--accent);background:#4eafd216}
         </div>
         <p class="hint" id="gatehint">Transmit sends the ten buoys as
           RXL_SAFE_PASSAGE. The boat pairs them and picks the order itself.
-          When it is through a gate it asks to confirm &mdash; recolour or move
-          anything first, then hit Confirm to send the field as it now is.</p>
+          It asks to confirm after circling the ENTRY and again after every
+          gate &mdash; recolour or move anything first, then hit Confirm to send
+          the field as it now is.</p>
         <p class="hint" id="askrow"></p>
         <div id="gatelog" class="log"></div>
       </div>
@@ -337,12 +338,12 @@ function renderRadio(){
   var ask = document.getElementById('askrow');
   if (!radio){ ask.textContent = ''; return; }
   if (radio.pending !== null && radio.pending !== undefined){
-    ask.innerHTML = '<b style="color:' + 'var(--warn)' + '">The boat is through ' +
-      'gate ' + radio.pending + ' and is waiting.</b> Change any colours you ' +
-      'want, then Confirm.';
+    ask.innerHTML = '<b style="color:' + 'var(--warn)' + '">The boat is at ' +
+      'checkpoint ' + radio.pending + ' and is waiting.</b> Change any colours ' +
+      'you want, then Confirm.';
   } else {
     ask.textContent = 'On ' + radio.endpoint + ' \u2014 ' + radio.sent +
-      ' transmissions, ' + radio.confirmed + ' gate(s) confirmed.' +
+      ' transmissions, ' + radio.confirmed + ' checkpoint(s) confirmed.' +
       (radio.auto_confirm ? '  Auto-confirm is ON.' : '');
   }
   var lg = document.getElementById('gatelog');

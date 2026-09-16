@@ -13,9 +13,17 @@ exactly one subtle rule in it (below) and it must not exist twice.
 THE HANDSHAKE, and the one rule that is easy to get wrong:
 
     here  -> RXL_SAFE_PASSAGE               ten buoys, positions and colours
-    boat  -> RXL_USV_REACHED_GATE(seq)      "through a gate -- still current?"
+    boat  -> RXL_USV_REACHED_GATE(seq)      "past a checkpoint -- still current?"
     here  -> RXL_SAFE_PASSAGE               the field again, as it is NOW
     here  -> RXL_NEXT_BUOY_SET(seq, -, -)   "confirmed, as of your gate seq"
+
+    SEQ COUNTS CHECKPOINTS, NOT GATES. The boat asks once after circling the
+    ENTRY buoy and once after each gate, so seq 1 is the entry and seq 2 is
+    gate 1. Nothing here can tell them apart -- the wire carries only a number --
+    which is why these log lines say "checkpoint" and leave naming it to the
+    boat, which knows. The message id still says GATE because it is on the air
+    between two vehicles and renaming it would break the one that was not
+    updated.
 
     THE AIRCRAFT NO LONGER ASSIGNS GATES. It transmits ten buoys with their
     colours; the boat pairs them and picks the order itself (nav::planPassage).
@@ -165,11 +173,11 @@ class UavLink:
         with self._lock:
             if seq in self._answered:
                 self._ack_locked(seq)
-                self._say("gate %d re-asked -> confirmed again" % seq)
+                self._say("checkpoint %d re-asked -> confirmed again" % seq)
                 return
             if self._pending != seq:
                 self._pending = seq
-                self._say("gate %d: the boat is asking for confirmation" % seq)
+                self._say("checkpoint %d: the boat is asking for confirmation" % seq)
             auto = self._auto_confirm
         if auto:
             self.confirm()
@@ -200,14 +208,14 @@ class UavLink:
 
         with self._lock:
             if self._pending != seq:            # a fresh request overtook us
-                return "gate %d was superseded" % seq
+                return "checkpoint %d was superseded" % seq
             self._ack_locked(seq)
             self._answered.add(seq)
             self._pending = None
             self._confirmed += 1
-            self._say("gate %d confirmed, field sent (%d buoys)"
+            self._say("checkpoint %d confirmed, field sent (%d buoys)"
                       % (seq, len(self._plan[0]) if self._plan else 0))
-        return "gate %d confirmed" % seq
+        return "checkpoint %d confirmed" % seq
 
     def rewind(self):
         """Forget which sequence numbers have been confirmed.
@@ -221,7 +229,7 @@ class UavLink:
             self._answered.clear()
             self._pending = None
             self._confirmed = 0
-            self._say("rewound: no gate is confirmed")
+            self._say("rewound: no checkpoint is confirmed")
 
     def _ack_locked(self, seq):
         """Put RXL_NEXT_BUOY_SET on the wire. Call with the lock held.

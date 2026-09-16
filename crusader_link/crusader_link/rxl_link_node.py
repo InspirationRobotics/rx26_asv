@@ -191,11 +191,12 @@ class RxlLinkNode(Node):
                  d["green_id"] != rxl_codec.NO_BUOY)
         if stale:
             self.get_logger().warning(
-                "gate %d confirmed, but the aircraft also sent a pair "
+                "checkpoint %d confirmed, but the aircraft also sent a pair "
                 "(red %d, green %d). The boat ignores it and plans its own."
                 % (m.gate_seq, m.red_id, m.green_id))
         else:
-            self.get_logger().info("gate %d: confirmed by the aircraft" % m.gate_seq)
+            self.get_logger().info(
+                "checkpoint %d: confirmed by the aircraft" % m.gate_seq)
 
     # ------------------------------------------------------------------ TX
 
@@ -233,7 +234,7 @@ class RxlLinkNode(Node):
                     rxl_codec.send_usv_reached_gate(self.conn, msg.data)
                 except Exception as exc:                 # noqa: BLE001
                     self.get_logger().error(
-                        "could not send gate %d: %s" % (msg.data, exc))
+                        "could not send checkpoint %d: %s" % (msg.data, exc))
                     return
         if reachable:
             self.get_logger().info("sent gate_reached(%d)" % msg.data)
