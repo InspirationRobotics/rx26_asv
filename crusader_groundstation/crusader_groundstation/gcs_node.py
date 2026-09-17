@@ -54,9 +54,10 @@ from collections import deque
 from rclpy.node import Node
 
 from rcl_interfaces.msg import Log
+from std_srvs.srv import Trigger
 
 from crusader_msgs.msg import (Attitude, Cluster3DArray, FcuStatus,
-                               LatLonHead, ObstacleDistance,
+                               LatLonHead, ObstacleDistance, RadioFrame,
                                TrackedTargetArray)
 
 from crusader_common import config as crsd_config
@@ -67,7 +68,7 @@ from crusader_common.stream_cache import StreamCache
 
 from crusader_groundstation import node_registry as reg
 from crusader_groundstation import bag_recorder, param_client, power_client
-from crusader_groundstation import proc_scan, system_info
+from crusader_groundstation import proc_scan, radio_core, system_info
 from crusader_groundstation.log_buffer import LogBuffer
 from crusader_groundstation.recorder import Recorder
 from crusader_groundstation.recorder import free_gb as recorder_free_gb
@@ -75,6 +76,11 @@ from crusader_groundstation.recorder import frame_rates
 from crusader_groundstation.gcs_page import render as render_page
 from crusader_groundstation.gcs_server import GcsServer
 from crusader_groundstation.process_manager import ProcessManager
+
+#: How long an HTTP action waits for rxl_link_node to answer send_test. Long
+#: enough for a busy executor, short enough that the operator gets an answer
+#: rather than a spinner.
+RADIO_TEST_TIMEOUT_S = 5.0
 
 PARAM_SPEC = {
     "port": dict(read_only=True, lo=1024, hi=65535,
@@ -182,6 +188,15 @@ class GroundStation(Node):
         # crosses the DDS domain and needs no privilege. See log_buffer.
         self.logs = LogBuffer(int(p["log_capacity"]))
         self.create_subscription(Log, "/rosout", self._on_rosout, 50)
+
+        # Every frame rxl_link_node put on the RFD900 mesh or heard on it, for
+        # the Radio tab. Kept here rather than in the page so a tab that is
+        # closed misses nothing: the counts and the rate estimates are the whole
+        # point, and they cannot be rebuilt from a scroll-back.
+        self._radio = radio_core.RadioLog()
+        self.create_subscription(RadioFrame, "/crsd/radio/traffic",
+                                 self._on_radio, 50)
+        self._radio_test = self.create_client(Trigger, "/crsd/radio/send_test")
 
         self.recorder = Recorder(p["record_dir"], p["record_min_free_gb"],
                                  logger=lambda m: self.get_logger().warn(m))
@@ -681,6 +696,13 @@ class GroundStation(Node):
         if path == "/logs/clear":
             self.logs.clear()
             return {"ok": True, "message": "log buffer cleared"}
+        if path == "/radio":
+            return self._radio_read(payload)
+        if path == "/radio/clear":
+            self._radio.clear()
+            return {"ok": True, "message": "radio log cleared"}
+        if path == "/radio/send_test":
+            return self._radio_send_test()
         if path == "/record/topics":
             return self._record_topics()
         if path == "/record/start":
@@ -705,6 +727,53 @@ class GroundStation(Node):
         records, newest, dropped = self.logs.read(since, level, node)
         return {"ok": True, "message": "", "records": records,
                 "newest": newest, "dropped": dropped}
+
+    def _on_radio(self, msg: RadioFrame):
+        """One frame off the mesh. The stamp is the LINK NODE's clock, not this
+        one's: both are this boat, so they share a time base."""
+        self._radio.add(msg.direction, msg.src_system, msg.src_component,
+                        msg.dst_system, msg.msg_name, msg.payload_type,
+                        msg.summary, msg.frame_bytes,
+                        stamp=msg.header.stamp.sec
+                        + msg.header.stamp.nanosec * 1e-9)
+
+    def _radio_read(self, payload):
+        """Incremental read of the radio record, plus the two summaries. Same
+        cursor contract as _logs, for the same reason."""
+        try:
+            since = int(payload.get("since", 0))
+            limit = min(int(payload.get("limit", 300)), 1000)
+        except (TypeError, ValueError):
+            return {"ok": False, "message": "since/limit must be integers"}
+        rows, newest, dropped = self._radio.read(since, limit)
+        return {"ok": True, "message": "", "rows": rows, "newest": newest,
+                "dropped": dropped, "systems": self._radio.systems(),
+                "streams": self._radio.streams()}
+
+    def _radio_send_test(self):
+        """Ask rxl_link_node to put one test frame on the air.
+
+        WAITING ON THE FUTURE HERE IS SAFE, AND ONLY HERE: this runs on the HTTP
+        server's thread, never inside a ROS callback, so the executor spinning in
+        the main thread is free to complete the call. Polling done() rather than
+        spin_until_future_complete for the same reason -- spinning from this
+        thread would fight the executor that already owns this node.
+        """
+        if not self._radio_test.service_is_ready():
+            return {"ok": False,
+                    "message": "rxl_link_node is not offering "
+                               "/crsd/radio/send_test — is it running?"}
+        fut = self._radio_test.call_async(Trigger.Request())
+        deadline = time.monotonic() + RADIO_TEST_TIMEOUT_S
+        while not fut.done() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not fut.done():
+            return {"ok": False,
+                    "message": "rxl_link_node did not answer within %.0fs; "
+                               "nothing has changed as far as this page knows"
+                               % RADIO_TEST_TIMEOUT_S}
+        res = fut.result()
+        return {"ok": bool(res.success), "message": res.message}
 
     def _param_call(self, payload, call):
         """(node, result, error) for one parameter endpoint. Two of three are set.

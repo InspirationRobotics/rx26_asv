@@ -23,6 +23,7 @@
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
   <depend>crusader_msgs</depend>
 
   <export>

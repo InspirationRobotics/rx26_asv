@@ -3,6 +3,15 @@
     crsd/passage_plan    crusader_msgs/PassagePlan   on arrival, ~0.2 Hz
     crsd/next_gate       crusader_msgs/GatePair      on arrival
     crsd/gate_reached    std_msgs/UInt8   (IN)  -> RXL_USV_REACHED_GATE on the air
+    crsd/radio/traffic   crusader_msgs/RadioFrame    every frame, either way
+    crsd/radio/send_test std_srvs/Trigger (IN)  -> one text TUNNEL on the air
+
+THE RADIO RECORD IS A RECORD. /crsd/radio/traffic carries every frame this node
+sent or heard, published after the fact for the ground station's Radio tab.
+Nothing subscribes to it to make a decision, and nothing may: it exists so an
+operator can see the link, including frames in formats this boat does not speak.
+The test frame is the same idea pointed the other way -- one known thing on the
+air, which neither vehicle acts on, to prove the path end to end.
 
 THIS IS NOT A SECOND AUTOPILOT GATEWAY. It speaks MAVLink, but to the RADIO,
 never to the Pixhawk: a different endpoint, a different dialect, and a message
@@ -28,10 +37,12 @@ import threading
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import UInt8
+from std_srvs.srv import Trigger
 
-from crusader_msgs.msg import GatePair, PassageBuoy, PassagePlan
+from crusader_msgs.msg import GatePair, PassageBuoy, PassagePlan, RadioFrame
 
 from crusader_link import rxl_codec
+from crusader_link import tunnel_link
 
 
 class RxlLinkNode(Node):
@@ -52,6 +63,16 @@ class RxlLinkNode(Node):
         self.declare_parameter("gate_topic", "crsd/next_gate")
         self.declare_parameter("gate_reached_topic", "crsd/gate_reached")
         self.declare_parameter("quiet_warn_s", 15.0)
+        # The radio record, and the test frame. uav_sysid is who the test frame
+        # is addressed to: the aircraft, whose autopilot is system 1 in the
+        # Fleet ICD. Its companion answers from 200 today, which is one of the
+        # two vehicles' several disagreements about ids -- the tab shows the id
+        # each frame actually carried rather than the one it should have.
+        self.declare_parameter("radio_traffic_topic", "crsd/radio/traffic")
+        self.declare_parameter("uav_sysid", 1)
+        # Only used when rxl_endpoint is a serial device (the FTDI cable to the
+        # RFD900). 115200 is what every radio in the mesh is configured for.
+        self.declare_parameter("rxl_baud", 115200)
 
         p = self.get_parameter
         endpoint = p("rxl_endpoint").value
@@ -60,6 +81,10 @@ class RxlLinkNode(Node):
         self.gate_pub = self.create_publisher(GatePair, p("gate_topic").value, 10)
         self.create_subscription(
             UInt8, p("gate_reached_topic").value, self._on_gate_reached, 10)
+        self.radio_pub = self.create_publisher(
+            RadioFrame, p("radio_traffic_topic").value, 50)
+        self.create_service(Trigger, "crsd/radio/send_test", self._send_test_cb)
+        self._test_n = 0
 
         # pymavlink connections are NOT thread-safe and this one is used from
         # two threads: the RX loop below, and the gate_reached callback on the
@@ -70,7 +95,8 @@ class RxlLinkNode(Node):
         self._last_rx = None
         self._warned_quiet = False
 
-        self.conn = rxl_codec.connect(endpoint, p("source_system").value)
+        self.conn = rxl_codec.connect(endpoint, p("source_system").value,
+                                      baud=p("rxl_baud").value)
         self._rx = threading.Thread(target=self._rx_loop, daemon=True)
         self._rx.start()
         self.create_timer(5.0, self._quiet_check)
@@ -98,6 +124,7 @@ class RxlLinkNode(Node):
                 if msg is None:
                     self._stop.wait(0.02)
                     continue
+                self._record(RadioFrame.DIR_RX, msg)
                 decoded = rxl_codec.decode(msg)
             except Exception as exc:                     # noqa: BLE001
                 # A radio delivers corruption as confidently as data. One bad
@@ -189,21 +216,94 @@ class RxlLinkNode(Node):
 
     def _on_gate_reached(self, msg: UInt8):
         """The boat cleared a gate. Tell the aircraft and ask for the next pair."""
+        sent = None
         with self._conn_lock:
             reachable = self._have_peer()
             if reachable:
                 try:
-                    rxl_codec.send_usv_reached_gate(self.conn, msg.data)
+                    sent = rxl_codec.send_usv_reached_gate(self.conn, msg.data)
                 except Exception as exc:                 # noqa: BLE001
                     self.get_logger().error(
                         "could not send gate %d: %s" % (msg.data, exc))
                     return
+        # Outside the lock: recording a frame must never delay the next one.
+        if sent is not None:
+            self._record(RadioFrame.DIR_TX, sent,
+                         dst=self.get_parameter("uav_sysid").value)
         if reachable:
             self.get_logger().info("sent gate_reached(%d)" % msg.data)
         else:
             self.get_logger().warn(
                 "gate_reached(%d) NOT sent: nothing has been received on this "
                 "link yet, so there is no address to reply to" % msg.data)
+
+    # ---------------------------------------------------- the radio, recorded
+
+    def _record(self, direction, msg, dst=None):
+        """Publish one RadioFrame for a frame that crossed the radio.
+
+        NEVER RAISES ON THE RX PATH. This is called from the receive loop, where
+        an exception would be reported as "dropped a frame" and blame the radio
+        for a bug in the record of it.
+
+        Our own frames are recorded as sent, not heard: on a mesh that echoes,
+        a transmission arriving back would otherwise show up twice and inflate
+        every count the tab draws.
+        """
+        try:
+            src = msg.get_srcSystem()
+            if direction == RadioFrame.DIR_RX and src == self.conn.mav.srcSystem:
+                return
+            name, ptype, summary = rxl_codec.describe(msg)
+            m = RadioFrame()
+            m.header.stamp = self.get_clock().now().to_msg()
+            m.direction = direction
+            m.src_system = int(src) & 0xFF
+            m.src_component = int(msg.get_srcComponent()) & 0xFF
+            if dst is None:
+                dst = getattr(msg, "target_system", 0)
+            m.dst_system = int(dst) & 0xFF
+            m.msg_name = name
+            m.payload_type = int(ptype) & 0xFFFF
+            m.summary = summary
+            m.frame_bytes = min(len(msg.get_msgbuf()), 0xFFFF)
+            self.radio_pub.publish(m)
+        except Exception as exc:                         # noqa: BLE001
+            self.get_logger().warn("could not record a frame: %s" % exc)
+
+    def _send_test_cb(self, request, response):
+        """Put one text TUNNEL on the air, addressed to the aircraft.
+
+        For the Radio tab's button. Neither vehicle acts on it: the point is a
+        known frame an operator can watch arrive, on Ekko's Radio tab, in QGC's
+        MAVLink Inspector, or with tools/rfd-tests/check_mesh.py on a laptop
+        radio. It is refused rather than faked when there is nowhere to send --
+        see _have_peer.
+        """
+        target = int(self.get_parameter("uav_sysid").value)
+        with self._conn_lock:
+            if not self._have_peer():
+                response.success = False
+                response.message = ("refused: nothing has been received on this "
+                                    "link yet, so there is no address to send to")
+                self.get_logger().warn(response.message)
+                return response
+            self._test_n += 1
+            text = "test %d from crusader" % self._test_n
+            try:
+                sent = rxl_codec.send_tunnel(self.conn, target,
+                                             tunnel_link.PAYLOAD_TEST,
+                                             tunnel_link.pack_test(text))
+            except Exception as exc:                     # noqa: BLE001
+                response.success = False
+                response.message = "could not send the test frame: %s" % exc
+                self.get_logger().error(response.message)
+                return response
+        self._record(RadioFrame.DIR_TX, sent, dst=target)
+        response.success = True
+        response.message = "sent %r to system %d" % (text, target)
+        self.get_logger().info(response.message)
+        return response
 
     # --------------------------------------------------------------- health
 

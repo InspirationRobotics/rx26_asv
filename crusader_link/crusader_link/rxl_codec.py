@@ -12,7 +12,12 @@ WHAT THE BOAT SPEAKS. Three messages, and only three:
     RXL_NEXT_BUOY_SET   42019  UAV -> USV   the next gate pair
     RXL_USV_REACHED_GATE 42018 USV -> UAV   the only thing the boat SENDS
 
-Everything else on the air is someone else's traffic and is ignored here.
+Everything else on the air is someone else's traffic and is ignored here --
+`decode` returns None for it and the boat acts on none of it. It is still
+DESCRIBED, by `describe` below, because the Radio tab has to show what is on the
+air whether or not this boat speaks it. Ekko's own code currently sends TUNNEL
+payloads instead of these three messages; crusader_link/tunnel_link.py reads
+those, and the tab lists anything else by its number.
 
 DECODE THROUGH THE GENERATED DIALECT, NEVER struct.unpack. MAVLink orders
 fields on the wire by descending type width, not by declaration order, and
@@ -24,6 +29,8 @@ knows the real layout.
 import os
 import sys
 import time
+
+from crusader_link import tunnel_link
 
 # The vendored dialect. Added to sys.path rather than imported as a submodule
 # because pymavlink's generated modules import each other by bare name.
@@ -63,7 +70,7 @@ def e7(deg):
     return int(round(deg * 1e7))
 
 
-def connect(spec, source_system, source_component=191):
+def connect(spec, source_system, source_component=191, baud=None):
     """A mavlink connection speaking the RobotX dialect.
 
     source_component 191 is MAV_COMP_ID_ONBOARD_COMPUTER: this traffic comes
@@ -90,8 +97,13 @@ def connect(spec, source_system, source_component=191):
     from pymavlink import mavutil
     import robotx as rxlink
 
+    # baud matters only for a serial device (the FTDI cable to the RFD900);
+    # mavutil ignores it for a udp endpoint, but passing None would override its
+    # default with nothing, so it is only passed when set.
+    extra = {} if baud is None else {"baud": int(baud)}
     conn = mavutil.mavlink_connection(
-        spec, source_system=source_system, source_component=source_component)
+        spec, source_system=source_system, source_component=source_component,
+        **extra)
     conn.mav = rxlink.MAVLink(
         conn, srcSystem=source_system, srcComponent=source_component)
     conn.mav.robust_parsing = True
@@ -153,15 +165,75 @@ def decode(msg):
 
 
 def send_usv_reached_gate(conn, gate_seq):
-    """USV -> UAV: gate cleared, send the next pair.
+    """USV -> UAV: gate cleared, send the next pair. Returns the sent message.
 
-    The ONLY thing the boat transmits on this link. gate_seq is what makes a
-    retransmission distinguishable from the next request: without it, a repeat
-    on a lossy radio and a genuine advance look identical, and the boat would
-    drive the wrong gate with nothing in any log looking wrong.
+    The only MISSION message the boat transmits on this link. gate_seq is what
+    makes a retransmission distinguishable from the next request: without it, a
+    repeat on a lossy radio and a genuine advance look identical, and the boat
+    would drive the wrong gate with nothing in any log looking wrong.
+
+    Encode-then-send rather than the one-call _send form so the caller still has
+    the packed message, which is what the Radio tab records: a frame that was
+    put on the air with no record of its size is a frame you cannot budget for.
     """
-    conn.mav.rxl_usv_reached_gate_send(
+    m = conn.mav.rxl_usv_reached_gate_encode(
         int(time.time() * 1e3) & 0xFFFFFFFF, int(gate_seq) & 0xFF)
+    conn.mav.send(m)
+    return m
+
+
+def send_tunnel(conn, target_system, payload_type, payload):
+    """Send one TUNNEL, and return the sent message.
+
+    Here rather than in tunnel_link because tunnel_link is pure bytes and knows
+    nothing about MAVLink. The boat sends TUNNEL only for the Radio tab's test
+    frame today; if the team settles on the aircraft's format, this is the call
+    the mission side would use too.
+    """
+    m = conn.mav.tunnel_encode(int(target_system), 0, int(payload_type),
+                               len(payload), tunnel_link.pad(payload))
+    conn.mav.send(m)
+    return m
+
+
+def describe(msg):
+    """(name, payload_type, one line) for ANY frame on the mesh, for the tab.
+
+    NEVER RAISES, for the reason tunnel_link.describe does not: a frame that
+    cannot be decoded is exactly the frame worth seeing.
+    """
+    t = msg.get_type()
+    try:
+        if t == "TUNNEL":
+            ptype = int(msg.payload_type)
+            name, summary = tunnel_link.describe(ptype, tunnel_link.body(msg))
+            return name, ptype, summary
+        d = decode(msg)
+        if d is None:
+            if t == "HEARTBEAT":
+                return t, 0, _heartbeat_type(msg)
+            return t, 0, ""
+        if d["msg"] == "SAFE_PASSAGE":
+            return d["msg"], 0, "%d buoys, entry %.7f %.7f, exit %.7f %.7f" % (
+                len(d["buoys"]), d["entry"][0], d["entry"][1],
+                d["exit"][0], d["exit"][1])
+        if d["msg"] == "NEXT_BUOY_SET":
+            if d["red_id"] == NO_BUOY and d["green_id"] == NO_BUOY:
+                return d["msg"], 0, "gate %d: PASSAGE COMPLETE" % d["gate_seq"]
+            return d["msg"], 0, "gate %d: red %d, green %d" % (
+                d["gate_seq"], d["red_id"], d["green_id"])
+        return d["msg"], 0, "gate %d" % d["gate_seq"]
+    except Exception as e:                       # noqa: BLE001 -- see docstring
+        return t, 0, "does not decode: %s" % e
+
+
+def _heartbeat_type(msg):
+    """SURFACE_BOAT, QUADROTOR, GCS... for a HEARTBEAT, or the number."""
+    import robotx as rxlink
+    try:
+        return rxlink.enums["MAV_TYPE"][msg.type].name[len("MAV_TYPE_"):]
+    except (KeyError, AttributeError):
+        return "type %d" % msg.type
 
 
 # ---------------------------------------------------------------- selftest
@@ -257,6 +329,34 @@ def selftest():
     # --- anything else is not ours ------------------------------------------
     m = rxlink.MAVLink_heartbeat_message(6, 8, 0, 0, 0, 3)
     chk("a HEARTBEAT is ignored", decode(roundtrip(m)) is None)
+
+    # --- describe: what the Radio tab shows, including formats we do not speak
+    m = rxlink.MAVLink_rxl_next_buoy_set_message(7, 3, [4, 9])
+    name, ptype, summary = describe(roundtrip(m))
+    chk("describe names a native message",
+        name == "NEXT_BUOY_SET" and ptype == 0)
+    chk("... and reads out the gate", "red 4" in summary and "green 9" in summary)
+
+    m = rxlink.MAVLink_rxl_usv_reached_gate_message(9, 42)
+    chk("describe reads our own reply back",
+        describe(roundtrip(m))[2] == "gate 42")
+
+    payload = tunnel_link.pack_test("test 1 from ekko")
+    m = rxlink.MAVLink_tunnel_message(2, 0, tunnel_link.PAYLOAD_TEST,
+                                      len(payload), tunnel_link.pad(payload))
+    name, ptype, summary = describe(roundtrip(m))
+    chk("describe decodes the aircraft's TUNNEL test frame",
+        name == "TEST" and ptype == tunnel_link.PAYLOAD_TEST
+        and summary == "test 1 from ekko")
+
+    m = rxlink.MAVLink_tunnel_message(2, 0, 0x8042, 4, tunnel_link.pad(b"\x01\x02\x03\x04"))
+    name, ptype, summary = describe(roundtrip(m))
+    chk("a TUNNEL type nobody speaks is named by its number, not dropped",
+        name == "TUNNEL_0x8042" and ptype == 0x8042)
+
+    m = rxlink.MAVLink_heartbeat_message(11, 8, 0, 0, 0, 3)
+    chk("describe names a heartbeat's vehicle type",
+        describe(roundtrip(m))[2] == "SURFACE_BOAT")
 
     print("\n%s" % ("PASS" if not fails else "FAIL: %d" % len(fails)))
     return 0 if not fails else 1

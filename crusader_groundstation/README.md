@@ -19,6 +19,7 @@ header and is not in `core.launch.py`.
 | Tuning | any running node's parameters, with its own descriptions and ranges | set a dynamic value live; revert one to the YAML |
 | Record | sessions on disk, sizes, live capture state, **live bag growth rate** | tick topics, **set camera and LiDAR fps for the session**, start/stop a session **with a rosbag**, download a `.tar.gz`, delete |
 | Logs | every node's `/rosout` output, filterable by level and node | clear the buffer |
+| Radio | every frame `rxl_link_node` put on the RFD900 mesh or heard on it, when each system was last heard, and an **estimate** of how fast the aircraft's periodic message is arriving — scored for BOTH formats, so a quiet link is distinguishable from one talking in the other one | filter; **send a test frame** (TUNNEL `0x80FE`, acted on by nobody); clear |
 | System | CPU, temperature, memory, disk, uptime | shut down / reboot the host |
 
 ## Day mode

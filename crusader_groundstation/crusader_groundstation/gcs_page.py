@@ -149,6 +149,7 @@ try{ if(localStorage.getItem('crsd-theme') === 'day')
   <button class="tab" data-t="tune">Tuning</button>
   <button class="tab" data-t="rec">Record</button>
   <button class="tab" data-t="logs">Logs</button>
+  <button class="tab" data-t="radio">Radio</button>
   <button class="tab" data-t="sys">System</button>
   <span id="link"><span class="pill" id="rtt">— ms</span>
    <span class="pill" id="armed">—</span>
@@ -179,6 +180,7 @@ try{ if(localStorage.getItem('crsd-theme') === 'day')
   <div class="pane" id="p-tune"></div>
   <div class="pane" id="p-rec"></div>
   <div class="pane" id="p-logs"></div>
+  <div class="pane" id="p-radio"></div>
   <div class="pane" id="p-sys"></div>
   <div id="banner"></div>
   <div id="toast"></div>
@@ -189,6 +191,8 @@ try{ if(localStorage.getItem('crsd-theme') === 'day')
 var POLL = __POLL_MS__;
 var S = null, tab = 'nodes', rtt = null, inflight = false;
 var logSeq = 0, logRows = [], logLevel = 20, logNode = '', logBusy = false;
+var radioSeq = 0, radioRows = [], radioBusy = false, radioStats = null;
+var radioDir = '', radioWho = '', radioHb = false;
 
 function el(id){ return document.getElementById(id); }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,
@@ -254,7 +258,7 @@ function setTheme(mode){
 
 function show(t){
   tab = t;
-  ['nodes','tel','cam','lidar','map','tune','rec','logs','sys'].forEach(function(p){
+  ['nodes','tel','cam','lidar','map','tune','rec','logs','radio','sys'].forEach(function(p){
     el('p-'+p).className = 'pane' + (p===t ? ' on' : ''); });
   document.querySelectorAll('#bar button.tab').forEach(function(b){
     b.className = 'tab' + (b.dataset.t===t ? ' on' : ''); });
@@ -263,6 +267,7 @@ function show(t){
      tab genuinely costs the Jetson nothing — but only if the img is gone, not
      merely hidden. A display:none <img> keeps its connection open. */
   if(t!=='logs') el('p-logs').innerHTML = '';   /* rebuild with fresh nodes */
+  if(t!=='radio') el('p-radio').innerHTML = '';  /* same: fresh system list */
   render();
   if(t==='map') resize();
   /* Values are re-read on every entry to the tab. A parameter panel that shows
@@ -900,6 +905,144 @@ function renderLogs(){
   pollLogs();
 }
 
+/* ---------------- tab: radio ----------------
+   What crossed the RFD900 mesh, as rxl_link_node saw it: what the boat put on
+   the air, and what it heard from anyone else.
+
+   THE COUNTS AND THE RATES ARE THE SERVER'S, not this page's. A tab that was
+   closed missed nothing, and a page reloaded mid-test does not restart the
+   estimate. Incremental like the Logs tab, for the same reason.
+
+   TWO RATES, ON PURPOSE. The aircraft may be sending BUOY_MAP (its own TUNNEL
+   format, 1 Hz) or SAFE_PASSAGE (the RXL design, 0.2 Hz). Scoring both is what
+   separates "the aircraft is quiet" from "the aircraft is talking in the other
+   format", which is not a distinction an operator should have to make by
+   reading raw frames. */
+function pollRadio(){
+  if(tab !== 'radio' || radioBusy) return;
+  radioBusy = true;
+  fetch('/radio', {method:'POST', headers:{'Content-Type':'application/json'},
+                   body: JSON.stringify({since:radioSeq, limit:400})})
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      radioBusy = false;
+      if(!j.rows) return;
+      radioSeq = j.newest; radioStats = j;
+      radioRows = radioRows.concat(j.rows).slice(-800);
+      paintRadio();
+    })
+    .catch(function(){ radioBusy = false; });
+}
+
+/* The system filter is rebuilt only when the set of systems changes: rebuilding
+   it every second would reset the operator's selection while they read. */
+function syncRadioWho(systems){
+  var sel = el('radiowho');
+  if(!sel) return;
+  var want = systems.map(function(s){ return s.name; });
+  if(sel._have && sel._have.join('\x1f') === want.join('\x1f')) return;
+  sel._have = want;
+  sel.innerHTML = '<option value="">all systems</option>'
+    + want.map(function(n){ return '<option>' + esc(n) + '</option>'; }).join('');
+  sel.value = radioWho;
+}
+
+function paintRadio(){
+  var body = el('radiobody');
+  if(!body || !radioStats) return;
+  var sys = radioStats.systems || [], streams = radioStats.streams || [];
+  syncRadioWho(sys);
+
+  function card(k, v, cls, note){
+    return '<div class="card"><div class="k">' + k + '</div>'
+         + '<div class="v' + (cls ? ' ' + cls : '') + '">' + v + '</div>'
+         + (note ? '<div class="meta">' + note + '</div>' : '') + '</div>';
+  }
+  var out = '<div class="grid">';
+  if(!sys.length) out += card('Nothing on the mesh yet', '&mdash;', 'stale',
+                              'no frame sent or heard since the link node started');
+  sys.forEach(function(v){
+    out += card(esc(v.name) + ' · ' + v.sys,
+                v.heard_s === null ? 'not heard' : ago(v.heard_s) + ' ago',
+                (v.heard_s === null || v.heard_s > 30) ? 'stale' : '',
+                v.rx + ' heard · ' + v.tx + ' sent'
+                + (v.last ? ' · last ' + esc(v.last) : ''));
+  });
+  out += '</div>';
+
+  out += '<h3>Aircraft, by format</h3><div class="hint">An <b>estimate</b>. '
+       + 'Neither format carries a sequence number, so a lost frame cannot be '
+       + 'counted — only a rate below the expected one can be seen.</div>'
+       + '<div class="grid">';
+  streams.forEach(function(s){
+    var v = s.rate_hz === null ? 'never heard'
+          : fmt(s.rate_hz, 2) + ' /s of ' + fmt(s.expected_hz, 1);
+    var cls = s.pct === null ? 'stale' : (s.pct >= 90 ? '' : 'stale');
+    var note = s.pct === null ? esc(s.who)
+             : fmt(s.pct, 0) + '% · longest silence '
+               + fmt(s.longest_gap_s, 1) + 's · ' + esc(s.who);
+    out += card(esc(s.name), v, cls, note);
+  });
+  out += '</div>';
+  el('radiosum').innerHTML = out;
+
+  var atBottom = body.scrollTop + body.clientHeight >= body.scrollHeight - 30;
+  var rows = radioRows.filter(function(r){
+    if(radioDir && r.dir !== radioDir) return false;
+    if(radioWho && r.who !== radioWho) return false;
+    if(!radioHb && r.name === 'HEARTBEAT') return false;
+    return true;
+  });
+  body.innerHTML = rows.map(function(r){
+    var d = new Date(r.t * 1000).toTimeString().slice(0, 8);
+    return '<div><span style="color:var(--muted)">' + d + '</span> '
+         + '<span style="color:' + (r.dir === 'TX' ? 'var(--vstrong)' : 'var(--ok)')
+         + '">' + (r.dir === 'TX' ? 'SENT →' : 'HEARD ←') + '</span> '
+         + '<span style="color:var(--accentline)">' + esc(r.who) + '</span> '
+         + '<span style="color:var(--muted)">' + r.src + ':' + r.comp + '→'
+         + r.dst + '</span> ' + esc(r.name)
+         + (r.summary ? '  ' + esc(r.summary) : '')
+         + ' <span style="color:var(--muted)">' + r.bytes + 'B</span></div>';
+  }).join('') || '<div style="color:var(--muted)">no frames match</div>';
+  if(atBottom) body.scrollTop = body.scrollHeight;
+  var d = el('radiodrop');
+  if(d) d.textContent = radioStats.dropped
+      ? (radioStats.dropped + ' frames dropped (buffer full)') : '';
+}
+
+function renderRadio(){
+  if(el('radiobody')) return;          /* built once, then painted in place */
+  el('p-radio').innerHTML =
+      '<div class="hint">Every frame <b>rxl_link_node</b> put on the RFD900 mesh '
+    + 'or heard on it — including formats this boat does not speak, which are '
+    + 'listed by their TUNNEL type number rather than hidden. The autopilot link '
+    + 'is not here: that is telemetry_bridge’s, on a different device.</div>'
+    + '<div style="display:flex;gap:6px;align-items:center;margin:8px 0;flex-wrap:wrap">'
+    + '<select id="radiodir"><option value="">sent and heard</option>'
+    + '<option value="TX">sent</option><option value="RX">heard</option></select>'
+    + '<select id="radiowho"><option value="">all systems</option></select>'
+    + '<label class="meta"><input type="checkbox" id="radiohb"> heartbeats</label>'
+    + '<button id="radiotest">Send test frame</button>'
+    + '<button id="radioclear">Clear</button>'
+    + '<span id="radiodrop" class="meta stale" style="margin-left:auto"></span></div>'
+    + '<div id="radiosum"></div>'
+    + '<pre id="radiobody" style="max-height:none;height:calc(100vh - 380px)"></pre>';
+  el('radiodir').value = radioDir;
+  el('radiohb').checked = radioHb;
+  el('radiodir').onchange = function(){ radioDir = this.value; paintRadio(); };
+  el('radiowho').onchange = function(){ radioWho = this.value; paintRadio(); };
+  el('radiohb').onchange = function(){ radioHb = this.checked; paintRadio(); };
+  /* The test frame is a TUNNEL neither vehicle acts on. The link node refuses
+     it when nothing has been heard yet, because there is no address to send to
+     then, and says so rather than pretending it went out. */
+  el('radiotest').onclick = function(){ post('/radio/send_test', {}); };
+  el('radioclear').onclick = function(){
+    post('/radio/clear', {}); radioRows = []; radioSeq = 0; radioStats = null;
+    el('radiobody').innerHTML = ''; };
+  paintRadio();
+  pollRadio();
+}
+
 /* ---------------- tab: tuning ----------------
    The knobs that matter are found on the water, and the alternative to this
    tab is an SSH session on the same laptop that is already showing the map.
@@ -1446,6 +1589,7 @@ function render(){
   if(tab==='tune') renderTune();
   if(tab==='rec') renderRec();
   if(tab==='logs') renderLogs();
+  if(tab==='radio') renderRadio();
   if(tab==='sys' && !document.activeElement.matches('#confirm')) renderSys();
   if(tab==='map') draw();
 
@@ -1498,6 +1642,7 @@ show('nodes');
 poll();
 setInterval(poll, POLL);
 setInterval(pollLogs, 700);
+setInterval(pollRadio, 1000);
 </script></body></html>"""
 
 

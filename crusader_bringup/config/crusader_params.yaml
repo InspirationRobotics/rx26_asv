@@ -998,6 +998,17 @@ rxl_link_node:
                                             #      stays free for ad-hoc tooling
                                             #      and SITL's rover MAVProxy
                                             #      fans out to 14552.
+    radio_traffic_topic: "crsd/radio/traffic"  # [RO] every frame the link node
+                                            #      sent or heard, for the ground
+                                            #      station's Radio tab. A RECORD:
+                                            #      nothing acts on this topic.
+    uav_sysid: 1                            # [RO] who the Radio tab's test frame
+                                            #      is addressed to. The aircraft's
+                                            #      autopilot is 1 in the Fleet ICD;
+                                            #      its companion answers from 200.
+    rxl_baud: 115200                        # [RO] only used when rxl_endpoint is
+                                            #      a serial device. Every radio in
+                                            #      the mesh runs SERIAL=115.
     source_system: 42                       # [RO] the boat's MAVLink system id on
                                             #      the MESH, not on the autopilot
                                             #      link. Must differ from the

@@ -21,6 +21,7 @@
   <!-- /rosout carries rcl_interfaces/msg/Log; the Logs tab reads it
        instead of journalctl, which a container cannot reach. -->
   <depend>rcl_interfaces</depend>
+  <depend>std_srvs</depend>
   <depend>crusader_msgs</depend>
   <depend>crusader_common</depend>
 
