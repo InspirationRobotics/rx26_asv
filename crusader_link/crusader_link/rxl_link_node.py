@@ -41,8 +41,26 @@ from std_srvs.srv import Trigger
 
 from crusader_msgs.msg import GatePair, PassageBuoy, PassagePlan, RadioFrame
 
+from crusader_common import config as crsd_config
+
 from crusader_link import rxl_codec
 from crusader_link import tunnel_link
+
+#: Fallbacks, used ONLY when crusader_params.yaml cannot be read at all (a
+#: workspace with crusader_link built but no crusader_bringup installed -- a
+#: bench, a test rig). The file is the source of truth everywhere else; these
+#: exist so the node still starts and says why, rather than dying on import.
+FALLBACKS = {
+    "rxl_endpoint": "udpin:127.0.0.1:14555",
+    "radio_traffic_topic": "crsd/radio/traffic",
+    "uav_sysid": 1,
+    "rxl_baud": 115200,
+    "source_system": 42,
+    "plan_topic": "crsd/passage_plan",
+    "gate_topic": "crsd/next_gate",
+    "gate_reached_topic": "crsd/gate_reached",
+    "quiet_warn_s": 15.0,
+}
 
 
 class RxlLinkNode(Node):
@@ -50,29 +68,20 @@ class RxlLinkNode(Node):
     def __init__(self):
         super().__init__("rxl_link_node")
 
-        # udpin: BIND and listen. Not "udp:", which pymavlink resolves to an
-        # outbound client that connects nowhere and silently receives nothing.
+        # DEFAULTS COME FROM crusader_params.yaml, not from this file. The
+        # endpoint and the boat's port map are explained there, at the value.
         #
-        # 14555 and the boat's port map: 14551 belongs to telemetry_bridge and
-        # is never to be taken -- a udpin bind STEALS datagrams and the
-        # displaced consumer sees silence, not an error. 14550 stays free for
-        # ad-hoc tooling, and SITL's rover MAVProxy fans out to 14552.
-        self.declare_parameter("rxl_endpoint", "udpin:127.0.0.1:14555")
-        self.declare_parameter("source_system", 42)
-        self.declare_parameter("plan_topic", "crsd/passage_plan")
-        self.declare_parameter("gate_topic", "crsd/next_gate")
-        self.declare_parameter("gate_reached_topic", "crsd/gate_reached")
-        self.declare_parameter("quiet_warn_s", 15.0)
-        # The radio record, and the test frame. uav_sysid is who the test frame
-        # is addressed to: the aircraft, whose autopilot is system 1 in the
-        # Fleet ICD. Its companion answers from 200 today, which is one of the
-        # two vehicles' several disagreements about ids -- the tab shows the id
-        # each frame actually carried rather than the one it should have.
-        self.declare_parameter("radio_traffic_topic", "crsd/radio/traffic")
-        self.declare_parameter("uav_sysid", 1)
-        # Only used when rxl_endpoint is a serial device (the FTDI cable to the
-        # RFD900). 115200 is what every radio in the mesh is configured for.
-        self.declare_parameter("rxl_baud", 115200)
+        # The ground station starts a node with a plain `ros2 run`, with no
+        # --params-file (see process_manager.command_for), so a value that lives
+        # only in the YAML never reaches a node started from the page -- it
+        # silently runs on its code defaults instead. Every other node avoids
+        # that by reading the same file for its declaration defaults; this one
+        # did not, which is how it could be pointed at a UDP socket in the YAML
+        # and still come up on 14555 when the page started it. A launch file
+        # passing parameters= still wins over these, as it should.
+        defaults = self._defaults()
+        for name, fallback in FALLBACKS.items():
+            self.declare_parameter(name, defaults.get(name, fallback))
 
         p = self.get_parameter
         endpoint = p("rxl_endpoint").value
@@ -106,6 +115,22 @@ class RxlLinkNode(Node):
             "RXL_USV_REACHED_GATE to whoever sent the last frame"
             % (endpoint, p("source_system").value,
                p("plan_topic").value, p("gate_topic").value))
+
+    def _defaults(self):
+        """crusader_params.yaml's values for this node, or {} with a loud say-so.
+
+        Not fatal: a bench workspace legitimately has no crusader_bringup, and a
+        link node that refuses to start there would take the bench with it. What
+        is NOT acceptable is running on unexplained defaults silently.
+        """
+        try:
+            return dict(crsd_config.node_params("rxl_link_node"))
+        except Exception as exc:                         # noqa: BLE001
+            self.get_logger().warn(
+                "crusader_params.yaml unreadable (%s) -- falling back to this "
+                "file's defaults, which may not be what this boat is wired for"
+                % exc)
+            return {}
 
     # ------------------------------------------------------------------ RX
 
@@ -190,29 +215,16 @@ class RxlLinkNode(Node):
     # ------------------------------------------------------------------ TX
 
     def _have_peer(self):
-        """Is there anywhere to send to yet?
+        """Is there anywhere to send to yet? See rxl_codec.has_peer.
 
-        Two cases, and getting this wrong costs the whole reverse leg:
-
-        * udpin: pymavlink builds a mavudp with udp_server True, whose write()
-          fans out to `clients` -- the set of addresses it has HEARD from.
-          `last_address` is never set on a server socket, so testing it means
-          the boat silently refuses to transmit for the entire mission. That is
-          exactly what happened on 2026-09-10 until bench_rxl_link caught it.
-        * anything else (udpout, a serial radio): `last_address`, or a
-          destination fixed at construction, so there is always a peer.
-
-        Before anything has arrived there is genuinely nowhere to reply, and
-        that is worth saying out loud rather than letting pymavlink swallow the
-        socket error -- at that point the boat has not heard a plan either, so
-        the tree should not have been transiting in the first place.
+        On a udpin socket, before anything has arrived, there is genuinely
+        nowhere to reply, and that is worth saying out loud rather than letting
+        pymavlink swallow the socket error -- at that point the boat has not
+        heard a plan either, so the tree should not have been transiting in the
+        first place. On a serial radio there is always somewhere to send, which
+        the old check here got wrong.
         """
-        conn = self.conn
-        if getattr(conn, "udp_server", False):
-            return bool(getattr(conn, "clients", None))
-        if getattr(conn, "last_address", None) is not None:
-            return True
-        return getattr(conn, "destination_addr", None) is not None
+        return rxl_codec.has_peer(self.conn)
 
     def _on_gate_reached(self, msg: UInt8):
         """The boat cleared a gate. Tell the aircraft and ask for the next pair."""

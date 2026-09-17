@@ -985,7 +985,25 @@ bt_runner_node:
 # carried a frame over a real radio yet — only UDP loopback against the bench.
 rxl_link_node:
   ros__parameters:
-    rxl_endpoint: "udpin:127.0.0.1:14555"   # [RO] BIND and listen. NOT "udp:",
+    rxl_endpoint: "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_BG00HRVO-if00-port0"
+                                            # [RO] THE RFD900, on its FTDI cable.
+                                            #      by-id, never /dev/ttyUSB0: the
+                                            #      number depends on plug order
+                                            #      and the Pixhawk is on the same
+                                            #      hub. The link node OWNS this
+                                            #      device; nothing else may open
+                                            #      it, including the test kit's
+                                            #      companion.py.
+                                            #      For SITL or the bench, override
+                                            #      it per run instead of editing
+                                            #      this line:
+                                            #        ros2 run crusader_link \
+                                            #          rxl_link_node --ros-args \
+                                            #          -p rxl_endpoint:=udpin:127.0.0.1:14555
+                                            #      That udpin form BINDS and
+                                            #      listens; "udp:" is an outbound
+                                            #      client that receives nothing,
+                                            #      silently. 14555 and not 14551:
                                             #      which pymavlink resolves to an
                                             #      outbound client that connects
                                             #      nowhere and receives nothing,

@@ -182,6 +182,32 @@ def send_usv_reached_gate(conn, gate_seq):
     return m
 
 
+def has_peer(conn):
+    """Is there anywhere to send on this connection yet?
+
+    THREE CASES, and the third is the one that cost an evening on 2026-09-17,
+    the first time the link node owned a real radio:
+
+    * udpin -> pymavlink builds a mavudp with udp_server True, whose write()
+      fans out to `clients`, the set of addresses it has HEARD from.
+      `last_address` is never set on a server socket, so testing that alone
+      means the boat silently refuses to transmit for a whole mission.
+    * udpout -> `last_address` or a `destination_addr` fixed at construction.
+    * A SERIAL RADIO (mavserial) has NEITHER attribute. The earlier check fell
+      through to False and refused every transmission with "nothing has been
+      received on this link yet" -- on a cable where there is always somewhere
+      to send. A serial port IS the peer: the radio is on the other end of it
+      whether or not anything has come back yet.
+    """
+    from pymavlink import mavutil
+    if getattr(conn, "udp_server", False):
+        return bool(getattr(conn, "clients", None))
+    if isinstance(conn, mavutil.mavudp):
+        return (getattr(conn, "last_address", None) is not None
+                or getattr(conn, "destination_addr", None) is not None)
+    return True
+
+
 def send_tunnel(conn, target_system, payload_type, payload):
     """Send one TUNNEL, and return the sent message.
 
@@ -357,6 +383,24 @@ def selftest():
     m = rxlink.MAVLink_heartbeat_message(11, 8, 0, 0, 0, 3)
     chk("describe names a heartbeat's vehicle type",
         describe(roundtrip(m))[2] == "SURFACE_BOAT")
+
+    # --- has_peer: the check that decides whether the boat transmits at all ---
+    class _FakeUdpIn:
+        udp_server = True
+        clients = []
+
+    class _FakeSerial:                    # mavserial has neither attribute
+        pass
+
+    from pymavlink import mavutil as _mavutil
+    udpin = _FakeUdpIn()
+    chk("a udpin with no client yet has no peer", not has_peer(udpin))
+    udpin.clients = [("127.0.0.1", 14555)]
+    chk("... and has one once something has been heard", has_peer(udpin))
+    chk("a serial radio always has a peer -- the cable is the peer",
+        has_peer(_FakeSerial()))
+    chk("isinstance, not duck typing, decides which rule applies",
+        not isinstance(_FakeSerial(), _mavutil.mavudp))
 
     print("\n%s" % ("PASS" if not fails else "FAIL: %d" % len(fails)))
     return 0 if not fails else 1
