@@ -35,6 +35,15 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", SYMLINK+="crsd-led", MODE="0660", GRO
 #     warn when it is absent.
 SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="crsd-telem", MODE="0660", GROUP="dialout"
 
+# --- RFD900ux mesh radio (the UAV link), on an FTDI FT232R cable. rxl_link_node's
+#     rxl_endpoint. Matched on VID/PID and NOT the cable's serial number, so any
+#     FT232R cable works and swapping one is not a config change. The price: this
+#     must stay the ONLY FT232R on the Jetson. A second one (a debug console, a
+#     spare radio) makes the symlink land on whichever enumerated last, and the
+#     link node goes quietly deaf; install_udev.sh cannot see that collision,
+#     because it is two devices wanting one name, not one device with two names.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", SYMLINK+="crsd-rfd", MODE="0660", GROUP="dialout"
+
 # --- OAK-D LR (Luxonis / Intel Movidius). THIS stack's device: crusader_perception
 #     opens it from inside `asv`, so without this rule the node fails at device
 #     open with a permission error rather than anything that names the cause.

@@ -981,16 +981,20 @@ bt_runner_node:
 # set a mode, or move the boat. telemetry_bridge stays the only path to the
 # autopilot and the two never share a socket.
 #
-# NOT in core.launch.py. It is only useful above Core tier, and nothing here has
-# carried a frame over a real radio yet — only UDP loopback against the bench.
+# In core.launch.py (respawning), so the Radio tab survives a reboot. Do not
+# also hand-start it: two processes on the radio's serial port each read half.
 rxl_link_node:
   ros__parameters:
-    rxl_endpoint: "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_BG00HRVO-if00-port0"
+    rxl_endpoint: "/dev/crsd-rfd"
                                             # [RO] THE RFD900, on its FTDI cable.
-                                            #      by-id, never /dev/ttyUSB0: the
-                                            #      number depends on plug order
-                                            #      and the Pixhawk is on the same
-                                            #      hub. The link node OWNS this
+                                            #      A udev symlink (tools/udev),
+                                            #      never /dev/ttyUSB0: the number
+                                            #      depends on plug order. Not
+                                            #      by-id either: that names ONE
+                                            #      cable's serial, and a swapped
+                                            #      cable left the node reading a
+                                            #      path that no longer existed.
+                                            #      The link node OWNS this
                                             #      device; nothing else may open
                                             #      it, including the test kit's
                                             #      companion.py.
@@ -1020,7 +1024,7 @@ rxl_link_node:
                                             #      sent or heard, for the ground
                                             #      station's Radio tab. A RECORD:
                                             #      nothing acts on this topic.
-    uav_sysid: 1                            # [RO] who the Radio tab's test frame
+    uav_sysid: 200                          # [RO] who the Radio tab's test frame
                                             #      is addressed to. The aircraft's
                                             #      autopilot is 1 in the Fleet ICD;
                                             #      its companion answers from 200.

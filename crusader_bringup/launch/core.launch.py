@@ -15,6 +15,9 @@ Starts (all reading config/crusader_params.yaml from THIS package's share dir):
                             which is what feeds the autopilot's own avoidance
   * lidar_view            — tools/lidar_view.py; plan + elevation MJPEG on :8081,
                             the ground station's LiDAR tab
+  * rxl_link_node         — crusader_link; owns the RFD900 (/dev/crsd-rfd) and
+                            feeds the ground station's Radio tab. Respawns, so
+                            a radio plugged in after boot is picked up
 
 A NOTE ON lidar_view, because the dependency runs the OTHER WAY round from how
 it reads. lidar_cluster_node does NOT need it: the cluster node subscribes to
@@ -125,4 +128,13 @@ def generate_launch_description():
         ExecuteProcess(
             cmd=["python3", os.path.join(tools_dir, "lidar_view.py")],
             output="screen"),
+        # The UAV link. Here because it was hand-started, and a reboot silently
+        # took the Radio tab with it. It exits at startup when /dev/crsd-rfd is
+        # absent (the serial open raises), so respawn rather than fail once:
+        # the radio can be plugged in after boot. Now that launch owns it, do
+        # not also start it from the Nodes tab or by hand -- two processes on
+        # one serial port each read half the bytes.
+        Node(package="crusader_link", executable="rxl_link_node",
+             output="screen", parameters=[params],
+             respawn=True, respawn_delay=5.0),
     ])
