@@ -521,7 +521,27 @@ class OakDetector(Node):
         still looked alive. Bounded, a backlog costs latency instead of control.
         """
         for _ in range(MAX_GROUPS_PER_TICK):
-            group = self.queue.tryGet()
+            try:
+                group = self.queue.tryGet()
+            except RuntimeError as e:
+                # X_LINK_ERROR here means the USB link to the camera fell over,
+                # and the node dies with it. Almost always BANDWIDTH: what
+                # crosses XLink is rgb_isp_denominator's frame plus the depth
+                # frame, every frame, and the product of size and fps has a
+                # ceiling well below what USB3 nominally offers. Raised as a
+                # sentence naming the two knobs, because the bare depthai
+                # message names neither and the failure arrives minutes after
+                # the change that caused it.
+                raise RuntimeError(
+                    f"{e} | "
+                    f"  The camera link dropped. This node was streaming "
+                    f"{self.width}x{self.height} colour at "
+                    f"{self.p['fps']:g} fps plus depth, which is roughly "
+                    f"{self._xlink_mb_s():.0f} MB/s over USB. "
+                    "  If that number is large, the fix is fewer bytes per "
+                    "second: raise rgb_isp_denominator (smaller frames) or "
+                    "lower fps (fewer of them). Both are in "
+                    "crusader_params.yaml under oak_detector.") from e
             if group is None:
                 return
 
@@ -914,6 +934,18 @@ class OakDetector(Node):
         cv2.putText(image, status, (6, 13), cv2.FONT_HERSHEY_SIMPLEX, 0.36,
                     (255, 255, 255), 1, cv2.LINE_AA)
         return image
+
+    def _xlink_mb_s(self):
+        """Roughly what this configuration puts on the USB link, MB/s.
+
+        The colour frame crosses as NV12 (1.5 bytes per pixel, not 3 — the
+        BGR conversion happens on this side, in getCvFrame), and depth as
+        16-bit. Approximate on purpose: it exists to tell 30 MB/s from 120
+        MB/s in an error message, not to be a budget.
+        """
+        depth_w, depth_h = oak_pipeline.output_size(self.p["isp_denominator"])
+        per_frame = self.width * self.height * 1.5 + depth_w * depth_h * 2
+        return per_frame * float(self.p["fps"]) / 1e6
 
     def _read_exposure(self, message):
         """Latch the frame's measured exposure, gain and colour temperature.

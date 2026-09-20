@@ -120,7 +120,7 @@ oakd_publisher:
     rgb_topic: "oak/rgb"                   # [RO] relative name; namespace/remap moves the pair
     depth_topic: "oak/depth"               # [RO] relative name; 16UC1 millimetres
     frame_id: "oak_rgb_camera_optical_frame"  # [RO] shared by both images (depth is aligned)
-    fps: 30.0                              # [RO] camera frame rate [Hz]
+    fps: 15.0                              # [RO] camera frame rate [Hz]
     isp_denominator: 3                     # [RO] 1/N of 1920x1200; 3 -> 640x400 (stereo-native)
     poll_period_s: 0.01                    # [RO] output-queue poll; keep well under 1/fps
     queue_size: 4                          # [RO] device output queue depth (non-blocking)
@@ -163,7 +163,7 @@ buoy_detector:
     publish_frames: false                  # [RO] BRING-UP ONLY: +38 MB/s at 30fps
     rgb_topic: "oak/rgb"                   # [RO] only used if publish_frames
     depth_topic: "oak/depth"               # [RO] only used if publish_frames
-    fps: 30.0                              # [RO] = oakd_publisher.fps
+    fps: 15.0                              # [RO] = oakd_publisher.fps
     isp_denominator: 3                     # [RO] = oakd_publisher.isp_denominator
     poll_period_s: 0.01                    # [RO] output-queue poll period [s]
     queue_size: 4                          # [RO] device output queue depth
@@ -817,7 +817,28 @@ oak_detector:
     # -- camera: fps and isp_denominator MUST equal the other OAK-D nodes.
     # subpixel / lr_check / sync_threshold_ms used to live here too and are now
     # constants in oak_pipeline.py — equal by construction, nothing to pin.
-    fps: 30.0                              # [RO] = oakd_publisher.fps
+    fps: 15.0                              # [RO] = oakd_publisher.fps.
+                                           #      15, NOT 30, and the reason is
+                                           #      the USB link rather than the
+                                           #      GPU. What crosses XLink is the
+                                           #      colour frame (NV12) plus depth,
+                                           #      EVERY frame, so the load is
+                                           #      size x rate:
+                                           #        640x400  @30 =  27 MB/s  ok
+                                           #        1920x1200@30 = 119 MB/s  DIES
+                                           #        1920x1200@15 =  60 MB/s
+                                           #      Measured 2026-09-20: at 30 fps
+                                           #      full res the node ran for ~50
+                                           #      health periods and then took
+                                           #      X_LINK_ERROR on the rgbd
+                                           #      stream and exited; 640x400 in
+                                           #      the same session, same cable,
+                                           #      took none. Full resolution is
+                                           #      worth more here than frames a
+                                           #      hull moving at a few m/s
+                                           #      cannot use -- the flash is 1s
+                                           #      on/off, so even 4 fps clears
+                                           #      Nyquist.
     rgb_isp_denominator: 1                 # [RO] 1/N for the COLOUR camera
                                            #      ALONE. 1 -> 1920x1200.
                                            #      Measured 2026-09-20: moving
