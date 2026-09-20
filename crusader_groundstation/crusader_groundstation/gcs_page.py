@@ -79,6 +79,20 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
  .pane{display:none;padding:12px 14px}
  .pane.on{display:block}
  #p-map.on,#p-cam.on,#p-lidar.on{padding:0;height:100%;display:flex}
+ /* The controls sit BESIDE the picture, not on another tab. The whole reason
+    the camera was four stops under for weeks is that nobody could see what a
+    setting did while they were setting it; a knob and its result on two
+    different screens is the same problem with extra steps. */
+ #camview{flex:1;min-width:0;display:flex}
+ #camtune{flex:0 0 340px;width:340px;overflow:auto;padding:10px 12px;
+          border-left:1px solid var(--line);background:var(--panel)}
+ #camtune .row{flex-wrap:wrap;gap:4px}
+ #camtune .nm{flex:0 0 130px;font-size:12px}
+ @media (max-width:820px){
+   #p-cam.on{flex-direction:column}
+   #camtune{flex:0 0 auto;width:auto;max-height:46%;
+            border-left:0;border-top:1px solid var(--line)}
+ }
  button{background:var(--btn);color:var(--fg);border:1px solid var(--btnline);
    border-radius:4px;padding:4px 12px;font:inherit;cursor:pointer}
  button:hover:not(:disabled){background:var(--btnhi)}
@@ -149,6 +163,7 @@ try{ if(localStorage.getItem('crsd-theme') === 'day')
   <button class="tab" data-t="tune">Tuning</button>
   <button class="tab" data-t="rec">Record</button>
   <button class="tab" data-t="logs">Logs</button>
+  <button class="tab" data-t="radio">Radio</button>
   <button class="tab" data-t="sys">System</button>
   <span id="link"><span class="pill" id="rtt">— ms</span>
    <span class="pill" id="armed">—</span>
@@ -179,6 +194,7 @@ try{ if(localStorage.getItem('crsd-theme') === 'day')
   <div class="pane" id="p-tune"></div>
   <div class="pane" id="p-rec"></div>
   <div class="pane" id="p-logs"></div>
+  <div class="pane" id="p-radio"></div>
   <div class="pane" id="p-sys"></div>
   <div id="banner"></div>
   <div id="toast"></div>
@@ -189,6 +205,8 @@ try{ if(localStorage.getItem('crsd-theme') === 'day')
 var POLL = __POLL_MS__;
 var S = null, tab = 'nodes', rtt = null, inflight = false;
 var logSeq = 0, logRows = [], logLevel = 20, logNode = '', logBusy = false;
+var radioSeq = 0, radioRows = [], radioBusy = false, radioStats = null;
+var radioDir = '', radioWho = '', radioHb = false;
 
 function el(id){ return document.getElementById(id); }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,
@@ -254,7 +272,7 @@ function setTheme(mode){
 
 function show(t){
   tab = t;
-  ['nodes','tel','cam','lidar','map','tune','rec','logs','sys'].forEach(function(p){
+  ['nodes','tel','cam','lidar','map','tune','rec','logs','radio','sys'].forEach(function(p){
     el('p-'+p).className = 'pane' + (p===t ? ' on' : ''); });
   document.querySelectorAll('#bar button.tab').forEach(function(b){
     b.className = 'tab' + (b.dataset.t===t ? ' on' : ''); });
@@ -263,6 +281,7 @@ function show(t){
      tab genuinely costs the Jetson nothing — but only if the img is gone, not
      merely hidden. A display:none <img> keeps its connection open. */
   if(t!=='logs') el('p-logs').innerHTML = '';   /* rebuild with fresh nodes */
+  if(t!=='radio') el('p-radio').innerHTML = '';  /* same: fresh system list */
   render();
   if(t==='map') resize();
   /* Values are re-read on every entry to the tab. A parameter panel that shows
@@ -413,14 +432,19 @@ function renderViewer(pane, cfg, tabName){
     return;
   }
   var live = streamOn[tabName] && !pageHidden;
+  /* The chosen view rides in the URL, so switching it reloads the iframe and
+     the old MJPEG connection closes with it -- the producer stops encoding the
+     view nobody is looking at any more. */
+  var view = viewChoice[tabName] || '';
   var url = (cfg && cfg.source && live)
-    ? location.protocol+'//'+location.hostname+':'+cfg.port+'/' : '';
+    ? location.protocol+'//'+location.hostname+':'+cfg.port+'/'
+      + (view ? '?view=' + encodeURIComponent(view) : '') : '';
   /* The guard keys on the whole rendered STATE, not just the url. There are
      four states now and three of them have no url — keying on the url alone
      left the tab showing "not running" with Start buttons after the node had
      started, because both states compared equal and the early return skipped
      the rebuild. */
-  var key = url || (cfg && cfg.source ? 'paused:' + cfg.source
+  var key = url || (cfg && cfg.source ? 'paused:' + cfg.source + ':' + view
                  : cfg && cfg.starting ? 'starting:' + cfg.starting_name
                  : 'idle');
   if(e.dataset.src === key) return;                  /* unchanged: leave it */
@@ -431,11 +455,21 @@ function renderViewer(pane, cfg, tabName){
        any non-root path, mjpeg_server routes /stream/<view>), and lidar_view's
        page carries its own plan/elevation tabs worth keeping. */
     e.innerHTML = '<div class="viewer" style="position:relative;padding:0">'
+      + viewPicker(cfg, tabName)
       + '<div style="position:absolute;top:8px;right:8px;z-index:5">'
       + '<button class="on" onclick="toggleStream(\''+tabName+'\')">'
       + '&#9632; stop stream</button></div>'
       + '<iframe src="'+url+'" style="width:100%;'
       + 'height:100%;border:0;background:var(--bg)"></iframe></div>';
+    /* Wired here rather than inline: the view name is data from the node, and
+       an onclick attribute would put it through a second layer of quoting for
+       nothing. */
+    e.querySelectorAll('button[data-view]').forEach(function(btn){
+      btn.onclick = function(){
+        var parts = btn.dataset.view.split('|');
+        setView(parts[0], parts[1]);
+      };
+    });
   } else if(cfg && cfg.source){
     /* Running and reachable, deliberately not being watched. This panel is the
        whole point of the feature, so it says what it is costing you to press
@@ -531,6 +565,30 @@ function power(verb){
    your clicks. The topic list is therefore painted only when it or the
    selection actually changes, and the status block — which is what needs to
    be live — is the only thing on the 5 Hz path. */
+/* Which view each viewer tab is showing, by tab name. Empty means "whatever
+   the producer serves by default", which is every viewer except the detector.
+   Per tab, not global: the camera and the LiDAR do not offer the same views. */
+var viewChoice = {};
+
+function setView(tabName, name){
+  viewChoice[tabName] = name;
+  paint();
+}
+
+/* Buttons only when there is something to choose. One view is not a choice,
+   and a picker with a single disabled button is furniture. */
+function viewPicker(cfg, tabName){
+  if(!cfg || !cfg.views || cfg.views.length < 2) return '';
+  var cur = viewChoice[tabName] || cfg.views[0].name;
+  return '<div style="position:absolute;top:8px;left:8px;z-index:2;display:flex;'
+       + 'gap:6px">'
+       + cfg.views.map(function(v){
+           return '<button data-view="' + esc(tabName) + '|' + esc(v.name) + '"'
+                + (v.name === cur ? ' class="go"' : '') + '>'
+                + esc(v.label) + '</button>'; }).join('')
+       + '</div>';
+}
+
 var recTopics = null, recSel = {}, recBusy = false, recErr = '';
 
 /* Capture rate, PER VIEWER and PER SESSION. Sent with Start; it is not a
@@ -900,6 +958,144 @@ function renderLogs(){
   pollLogs();
 }
 
+/* ---------------- tab: radio ----------------
+   What crossed the RFD900 mesh, as rxl_link_node saw it: what the boat put on
+   the air, and what it heard from anyone else.
+
+   THE COUNTS AND THE RATES ARE THE SERVER'S, not this page's. A tab that was
+   closed missed nothing, and a page reloaded mid-test does not restart the
+   estimate. Incremental like the Logs tab, for the same reason.
+
+   TWO RATES, ON PURPOSE. The aircraft may be sending BUOY_MAP (its own TUNNEL
+   format, 1 Hz) or SAFE_PASSAGE (the RXL design, 0.2 Hz). Scoring both is what
+   separates "the aircraft is quiet" from "the aircraft is talking in the other
+   format", which is not a distinction an operator should have to make by
+   reading raw frames. */
+function pollRadio(){
+  if(tab !== 'radio' || radioBusy) return;
+  radioBusy = true;
+  fetch('/radio', {method:'POST', headers:{'Content-Type':'application/json'},
+                   body: JSON.stringify({since:radioSeq, limit:400})})
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      radioBusy = false;
+      if(!j.rows) return;
+      radioSeq = j.newest; radioStats = j;
+      radioRows = radioRows.concat(j.rows).slice(-800);
+      paintRadio();
+    })
+    .catch(function(){ radioBusy = false; });
+}
+
+/* The system filter is rebuilt only when the set of systems changes: rebuilding
+   it every second would reset the operator's selection while they read. */
+function syncRadioWho(systems){
+  var sel = el('radiowho');
+  if(!sel) return;
+  var want = systems.map(function(s){ return s.name; });
+  if(sel._have && sel._have.join('\x1f') === want.join('\x1f')) return;
+  sel._have = want;
+  sel.innerHTML = '<option value="">all systems</option>'
+    + want.map(function(n){ return '<option>' + esc(n) + '</option>'; }).join('');
+  sel.value = radioWho;
+}
+
+function paintRadio(){
+  var body = el('radiobody');
+  if(!body || !radioStats) return;
+  var sys = radioStats.systems || [], streams = radioStats.streams || [];
+  syncRadioWho(sys);
+
+  function card(k, v, cls, note){
+    return '<div class="card"><div class="k">' + k + '</div>'
+         + '<div class="v' + (cls ? ' ' + cls : '') + '">' + v + '</div>'
+         + (note ? '<div class="meta">' + note + '</div>' : '') + '</div>';
+  }
+  var out = '<div class="grid">';
+  if(!sys.length) out += card('Nothing on the mesh yet', '&mdash;', 'stale',
+                              'no frame sent or heard since the link node started');
+  sys.forEach(function(v){
+    out += card(esc(v.name) + ' · ' + v.sys,
+                v.heard_s === null ? 'not heard' : ago(v.heard_s) + ' ago',
+                (v.heard_s === null || v.heard_s > 30) ? 'stale' : '',
+                v.rx + ' heard · ' + v.tx + ' sent'
+                + (v.last ? ' · last ' + esc(v.last) : ''));
+  });
+  out += '</div>';
+
+  out += '<h3>Aircraft, by format</h3><div class="hint">An <b>estimate</b>. '
+       + 'Neither format carries a sequence number, so a lost frame cannot be '
+       + 'counted — only a rate below the expected one can be seen.</div>'
+       + '<div class="grid">';
+  streams.forEach(function(s){
+    var v = s.rate_hz === null ? 'never heard'
+          : fmt(s.rate_hz, 2) + ' /s of ' + fmt(s.expected_hz, 1);
+    var cls = s.pct === null ? 'stale' : (s.pct >= 90 ? '' : 'stale');
+    var note = s.pct === null ? esc(s.who)
+             : fmt(s.pct, 0) + '% · longest silence '
+               + fmt(s.longest_gap_s, 1) + 's · ' + esc(s.who);
+    out += card(esc(s.name), v, cls, note);
+  });
+  out += '</div>';
+  el('radiosum').innerHTML = out;
+
+  var atBottom = body.scrollTop + body.clientHeight >= body.scrollHeight - 30;
+  var rows = radioRows.filter(function(r){
+    if(radioDir && r.dir !== radioDir) return false;
+    if(radioWho && r.who !== radioWho) return false;
+    if(!radioHb && r.name === 'HEARTBEAT') return false;
+    return true;
+  });
+  body.innerHTML = rows.map(function(r){
+    var d = new Date(r.t * 1000).toTimeString().slice(0, 8);
+    return '<div><span style="color:var(--muted)">' + d + '</span> '
+         + '<span style="color:' + (r.dir === 'TX' ? 'var(--vstrong)' : 'var(--ok)')
+         + '">' + (r.dir === 'TX' ? 'SENT →' : 'HEARD ←') + '</span> '
+         + '<span style="color:var(--accentline)">' + esc(r.who) + '</span> '
+         + '<span style="color:var(--muted)">' + r.src + ':' + r.comp + '→'
+         + r.dst + '</span> ' + esc(r.name)
+         + (r.summary ? '  ' + esc(r.summary) : '')
+         + ' <span style="color:var(--muted)">' + r.bytes + 'B</span></div>';
+  }).join('') || '<div style="color:var(--muted)">no frames match</div>';
+  if(atBottom) body.scrollTop = body.scrollHeight;
+  var d = el('radiodrop');
+  if(d) d.textContent = radioStats.dropped
+      ? (radioStats.dropped + ' frames dropped (buffer full)') : '';
+}
+
+function renderRadio(){
+  if(el('radiobody')) return;          /* built once, then painted in place */
+  el('p-radio').innerHTML =
+      '<div class="hint">Every frame <b>rxl_link_node</b> put on the RFD900 mesh '
+    + 'or heard on it — including formats this boat does not speak, which are '
+    + 'listed by their TUNNEL type number rather than hidden. The autopilot link '
+    + 'is not here: that is telemetry_bridge’s, on a different device.</div>'
+    + '<div style="display:flex;gap:6px;align-items:center;margin:8px 0;flex-wrap:wrap">'
+    + '<select id="radiodir"><option value="">sent and heard</option>'
+    + '<option value="TX">sent</option><option value="RX">heard</option></select>'
+    + '<select id="radiowho"><option value="">all systems</option></select>'
+    + '<label class="meta"><input type="checkbox" id="radiohb"> heartbeats</label>'
+    + '<button id="radiotest">Send test frame</button>'
+    + '<button id="radioclear">Clear</button>'
+    + '<span id="radiodrop" class="meta stale" style="margin-left:auto"></span></div>'
+    + '<div id="radiosum"></div>'
+    + '<pre id="radiobody" style="max-height:none;height:calc(100vh - 380px)"></pre>';
+  el('radiodir').value = radioDir;
+  el('radiohb').checked = radioHb;
+  el('radiodir').onchange = function(){ radioDir = this.value; paintRadio(); };
+  el('radiowho').onchange = function(){ radioWho = this.value; paintRadio(); };
+  el('radiohb').onchange = function(){ radioHb = this.checked; paintRadio(); };
+  /* The test frame is a TUNNEL neither vehicle acts on. The link node refuses
+     it when nothing has been heard yet, because there is no address to send to
+     then, and says so rather than pretending it went out. */
+  el('radiotest').onclick = function(){ post('/radio/send_test', {}); };
+  el('radioclear').onclick = function(){
+    post('/radio/clear', {}); radioRows = []; radioSeq = 0; radioStats = null;
+    el('radiobody').innerHTML = ''; };
+  paintRadio();
+  pollRadio();
+}
+
 /* ---------------- tab: tuning ----------------
    The knobs that matter are found on the water, and the alternative to this
    tab is an SSH session on the same laptop that is already showing the map.
@@ -959,42 +1155,65 @@ function tuneLoad(node){
 function tuneRowOf(name){
   return tuneRows.filter(function(p){ return p.name === name; })[0];
 }
-function tuneApply(name){
-  var p = tuneRowOf(name), box = el('tv_' + name), v;
-  if(!p || !box) return;
-  if(p.type === 'bool') v = box.checked;
-  else if(p.type === 'string') v = box.value;
-  else {
-    v = Number(box.value);
-    /* Caught here only to stop an empty box being sent as 0, which the node
-       would accept. The RANGE is deliberately not checked here: the node owns
-       that rule and refuses in its own words, and a second copy of the bounds
-       in this page is a copy that goes stale. */
-    if(box.value === '' || !isFinite(v)){ toast(name + ': not a number', true); return; }
+/* What a widget currently holds, or undefined if it holds nothing usable.
+   Separate from the posting so the Camera tab reads its own boxes with the
+   same rules — including the empty-box rule, which is the one worth having in
+   exactly one place. */
+function readControl(p, prefix){
+  var box = el(prefix + p.name);
+  if(!box) return undefined;
+  if(p.type === 'bool') return box.checked;
+  if(p.type === 'string') return box.value;
+  var v = Number(box.value);
+  /* Caught here only to stop an empty box being sent as 0, which the node
+     would accept. The RANGE is deliberately not checked here: the node owns
+     that rule and refuses in its own words, and a second copy of the bounds
+     in this page is a copy that goes stale. */
+  if(box.value === '' || !isFinite(v)){
+    toast(p.name + ': not a number', true);
+    return undefined;
   }
-  tunePost(name, v);
+  return v;
+}
+
+function tuneApply(name){
+  var p = tuneRowOf(name);
+  if(!p) return;
+  var v = readControl(p, 'tv_');
+  if(v !== undefined) tunePost(name, v);
 }
 function tuneRevert(name){
   var p = tuneRowOf(name);
   if(p) tunePost(name, p['default']);
 }
-function tunePost(name, v){
-  var body = {node: tuneNode, values: {}};
-  body.values[name] = v;
+/* THE one /params/set caller. A profile recall is this with several values in
+   it rather than one, which is why there is no /camera/profile/load endpoint:
+   the same path, the same per-value refusals, the same log lines per knob. */
+function paramPost(node, values, after){
   fetch('/params/set', {method:'POST', headers:{'Content-Type':'application/json'},
-                        body: JSON.stringify(body)})
+                        body: JSON.stringify({node: node, values: values})})
     .then(function(r){ return r.json(); })
     .then(function(j){
       toast(j.message || (j.ok ? 'applied' : 'refused'), !j.ok);
       /* Re-read rather than assume. A node may accept a set and clamp it, and
          the value worth showing is the one it is now running on. */
-      tuneLoad();
+      if(after) after();
     })
     .catch(function(err){ toast('request failed: ' + err, true); });
 }
 
-function tuneControl(p){
-  var id = 'tv_' + p.name;
+function tunePost(name, v){
+  var values = {};
+  values[name] = v;
+  paramPost(tuneNode, values, function(){ tuneLoad(); });
+}
+
+/* `prefix` namespaces the input ids. Both the Tuning tab and the Camera tab
+   render the same parameters, both panes stay in the DOM once visited, and
+   getElementById returns the FIRST match — so one prefix would mean the Camera
+   tab quietly reading and writing the Tuning tab's boxes. */
+function tuneControl(p, prefix){
+  var id = prefix + p.name;
   if(!p.editable)
     return '<span class="meta" style="min-width:120px;text-align:right">'
          + esc(tuneFmt(p.value)) + '</span>';
@@ -1002,6 +1221,17 @@ function tuneControl(p){
   if(p.type === 'bool')
     return '<input type="checkbox" id="' + esc(id) + '"'
          + (p.value ? ' checked' : '') + ' style="width:15px;height:15px">' + set;
+  /* A node that advertises its accepted values gets a dropdown, so a mode
+     name is picked rather than spelled. The list rides in the descriptor's
+     additional_constraints, which is the field ROS provides for it, so this
+     needs no per-node knowledge and a node that grows a mode offers it here
+     the moment it restarts. */
+  if(p.choices && p.choices.length)
+    return '<select id="' + esc(id) + '" style="width:180px">'
+         + p.choices.map(function(c){
+             return '<option' + (String(p.value) === c ? ' selected' : '')
+                  + '>' + esc(c) + '</option>'; }).join('')
+         + '</select>' + set;
   if(p.type === 'string')
     return '<input id="' + esc(id) + '" value="' + esc(p.value)
          + '" style="width:180px">' + set;
@@ -1012,7 +1242,7 @@ function tuneControl(p){
        + ' style="width:96px">' + set;
 }
 
-function tuneRow(p){
+function tuneRow(p, prefix){
   var note = esc(p.description || '');
   if(p.lo !== null && p.hi !== null)
     note += ' <span style="color:var(--muted)">[' + p.lo + ', ' + p.hi + ']</span>';
@@ -1031,7 +1261,7 @@ function tuneRow(p){
   return '<div class="row" style="flex-wrap:wrap">'
        + '<span class="nm" style="flex:0 0 200px">' + esc(p.name) + '</span>'
        + '<span class="meta" style="flex:1;min-width:190px">' + note + '</span>'
-       + mark + tuneControl(p) + '</div>';
+       + mark + tuneControl(p, prefix) + '</div>';
 }
 
 function paintTune(){
@@ -1064,13 +1294,15 @@ function paintTune(){
     + 'restart</b>. crusader_params.yaml is the source of truth; a row showing '
     + '<span style="color:var(--warn)">yaml &lt;value&gt;</span> is one to write '
     + 'back into it before the next run.</div>'
-    + (dyn.map(tuneRow).join('') || '<div class="hint">none</div>')
+    + (dyn.map(function(p){ return tuneRow(p, 'tv_'); }).join('')
+       || '<div class="hint">none</div>')
     + '<h3>Fixed at startup</h3>'
     + '<div class="hint">Structural: topic names, mounting geometry, freshness '
     + 'budgets. Change them in crusader_params.yaml and restart the node. Shown '
     + 'rather than hidden because a knob you cannot turn and one you cannot find '
     + 'are different problems.</div>'
-    + (fixed.map(tuneRow).join('') || '<div class="hint">none</div>');
+    + (fixed.map(function(p){ return tuneRow(p, 'tv_'); }).join('')
+       || '<div class="hint">none</div>');
 
   b.querySelectorAll('button[data-apply]').forEach(function(x){
     x.onclick = function(){ tuneApply(x.dataset.apply); }; });
@@ -1083,6 +1315,296 @@ function paintTune(){
     x.onkeydown = function(ev){
       if(ev.key === 'Enter'){ ev.preventDefault(); tuneApply(x.id.slice(3)); } };
   });
+}
+
+/* ---------------- the camera pane ----------------
+   Two fetches, both on demand and neither on the 5 Hz path:
+
+     /params/list on oak_detector   the live values, ranges, choices, and the
+                                    comparison against crusader_params.yaml
+     /camera/profile/list           the saved profiles, and the GROUPING ONLY
+
+   The split is deliberate and the node's docstring says why: ranges, choices
+   and editability describe the node that is actually running, so they come
+   from the node. Sending them twice is how the page ends up showing a bound
+   the node does not enforce.
+
+   Painted only when something changes. The pane holds number boxes an operator
+   is part-way through typing into, and a repaint under the cursor loses the
+   digits — the same trap the Record tab's topic list carries a comment about. */
+var CAM_NODE = '/oak_detector';
+var camRows = [], camProfiles = [], camStore = null, camGroups = [];
+var camErr = '', camProfErr = '', camBusy = false, camBuilt = false;
+
+function camLoadParams(){
+  if(camBusy) return;
+  camBusy = true;
+  fetch('/params/list', {method:'POST',
+                         headers:{'Content-Type':'application/json'},
+                         body: JSON.stringify({node: CAM_NODE})})
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      camBusy = false;
+      camErr = j.ok ? '' : (j.message || 'no answer');
+      camRows = j.ok ? (j.params || []) : [];
+      paintCam();
+    })
+    .catch(function(err){
+      camBusy = false; camErr = 'request failed: ' + err;
+      camRows = []; paintCam();
+    });
+}
+
+/* Every profile endpoint answers with the whole listing and the store status,
+   so every one of them refreshes the pane the same way and none of them has to
+   guess at what its own write did. */
+function camTakeProfiles(j){
+  if(j.profiles) camProfiles = j.profiles;
+  if(j.store) camStore = j.store;
+  if(j.controls) camGroups = j.controls;
+  camProfErr = j.controls_error || (j.store && j.store.error) || '';
+  paintCam();
+}
+
+function camLoadProfiles(){
+  fetch('/camera/profile/list', {method:'POST',
+                                 headers:{'Content-Type':'application/json'},
+                                 body:'{}'})
+    .then(function(r){ return r.json(); })
+    .then(camTakeProfiles)
+    .catch(function(err){ camProfErr = 'request failed: ' + err; paintCam(); });
+}
+
+function camRowOf(name){
+  return camRows.filter(function(p){ return p.name === name; })[0];
+}
+
+/* Straight off the node table the page already polls. Unknown until the first
+   snapshot lands, and treated as running then, so the pane does not flash
+   "not running" at every reload before it knows. */
+function camRunning(){
+  var items = (S.nodes && S.nodes.items) || [];
+  if(!items.length) return true;
+  var row = items.filter(function(n){
+    return '/' + n.name === CAM_NODE; })[0];
+  return row ? !!row.running : false;
+}
+
+/* Set, revert and Enter-in-a-box all arrive here. Written once because they
+   differ only in where the value came from, and three copies of "wrap it in an
+   object and re-read afterwards" is three places to forget the re-read. */
+function camSet(name, value){
+  var values = {};
+  values[name] = value;
+  paramPost(CAM_NODE, values, camLoadParams);
+}
+
+function camApplyOne(name){
+  var p = camRowOf(name);
+  if(!p) return;
+  var v = readControl(p, 'cv_');
+  if(v !== undefined) camSet(name, v);
+}
+
+function camApplyProfile(name){
+  var row = camProfiles.filter(function(x){ return x.name === name; })[0];
+  if(!row) return;
+  /* The whole block at once, not knob by knob. A profile is only reproducible
+     because it is complete: applied piecemeal, a refusal partway through
+     leaves the camera in a state that is neither the old profile nor the new
+     one, and nothing on screen would say so. */
+  paramPost(CAM_NODE, row.values, camLoadParams);
+}
+
+function camSaveProfile(){
+  var box = el('camsavename'), name = box ? box.value.trim() : '';
+  if(!name){ toast('name the profile first', true); return; }
+  if(camProfiles.some(function(x){ return x.name === name; })
+     && !confirm('Overwrite the profile "' + name + '"?')) return;
+  /* Only the NAME goes up. The node reads the live values itself, because what
+     this page is displaying may be a poll old, or another browser's set, or a
+     value the node clamped on the way in — and a profile is a claim about what
+     the camera was actually doing when the picture looked right. */
+  fetch('/camera/profile/save', {method:'POST',
+                                 headers:{'Content-Type':'application/json'},
+                                 body: JSON.stringify({name: name,
+                                                       node: CAM_NODE})})
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      toast(j.message || (j.ok ? 'saved' : 'refused'), !j.ok);
+      if(j.ok && box) box.value = '';
+      camTakeProfiles(j);
+    })
+    .catch(function(err){ toast('request failed: ' + err, true); });
+}
+
+function camDeleteProfile(name){
+  if(!confirm('Delete the profile "' + name + '"? This cannot be undone.')) return;
+  fetch('/camera/profile/delete', {method:'POST',
+                                   headers:{'Content-Type':'application/json'},
+                                   body: JSON.stringify({name: name})})
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      toast(j.message || (j.ok ? 'deleted' : 'refused'), !j.ok);
+      camTakeProfiles(j);
+    })
+    .catch(function(err){ toast('request failed: ' + err, true); });
+}
+
+function camProfileOrigin(origin){
+  /* stock = shipped and in git; saved = yours; override = yours, shadowing a
+     shipped name of the same name. Worth distinguishing, because "delete"
+     means "revert to the shipped block" for an override and "it is gone" for
+     a saved one. */
+  if(origin === 'stock')
+    return '<span class="meta">shipped</span>';
+  if(origin === 'override')
+    return '<span class="meta" style="color:var(--warn)">yours, over the '
+         + 'shipped one</span>';
+  return '<span class="meta" style="color:var(--ok)">yours</span>';
+}
+
+function paintCam(){
+  var b = el('camtune');
+  if(!b) return;
+  var out = '<h3>Profiles</h3>';
+
+  if(camProfErr) out += '<div class="hint stale">' + esc(camProfErr) + '</div>';
+  if(camStore && !camStore.writable)
+    out += '<div class="hint stale">' + esc(camStore.local_path)
+        +  ' is not writable \u2014 tuning still works, saving will not.</div>';
+
+  if(!camProfiles.length){
+    out += '<div class="hint">no profiles</div>';
+  } else {
+    camProfiles.forEach(function(row){
+      out += '<div class="row">'
+          +  '<span class="nm" style="flex:0 0 120px">' + esc(row.name) + '</span>'
+          +  '<span style="flex:1;min-width:80px">'
+          +  camProfileOrigin(row.origin) + '</span>'
+          +  '<button class="go" data-camuse="' + esc(row.name) + '">Apply</button>'
+          +  (row.origin === 'stock' ? ''
+              : '<button class="danger" data-camdel="' + esc(row.name)
+                + '">Delete</button>')
+          +  '</div>';
+    });
+  }
+  out += '<div class="row" style="margin-top:6px">'
+      +  '<input id="camsavename" placeholder="name this profile" '
+      +  'style="flex:1;min-width:120px">'
+      +  '<button id="camsave">Save live values</button></div>'
+      +  '<div class="hint">Saved from what the node reports, not from these '
+      +  'boxes. Applying one is an ordinary parameter set, so a value the node '
+      +  'refuses is refused in its own words.</div>';
+
+  out += '<h3>Controls</h3>';
+  /* "not in the ROS graph" is the node's honest answer and a useless one to
+     act on, and it arrives as an ERROR — so the actionable line was unreachable
+     in exactly the case it was written for. Decided from the node table this
+     page already polls rather than by matching on the message text, which
+     would be a copy of the node's wording kept here to go stale. */
+  if(!camRunning()){
+    out += '<div class="hint">oak_detector is not running \u2014 start it on '
+        +  'the Nodes tab, or with the Start button in the viewer beside this. '
+        +  'The profiles above are still readable; applying one needs the node.'
+        +  '</div>';
+  } else if(camErr){
+    out += '<div class="hint stale">' + esc(camErr) + '</div>';
+  } else if(!camRows.length){
+    out += '<div class="hint">'
+        +  (camBusy ? 'reading the camera\u2026'
+                    : 'oak_detector declares no parameters') + '</div>';
+  } else {
+    /* Grouped and ordered by the node's own table (oak_controls), never by a
+       list kept here: add a control there and it appears, in its group, with
+       no change to this page. Anything the table does not mention still gets
+       shown, under "other", so a knob can never go missing from this pane
+       just because the grouping did not know about it. */
+    var seen = {};
+    camGroups.forEach(function(g){
+      var rows = g.controls.map(camRowOf).filter(Boolean);
+      rows.forEach(function(p){ seen[p.name] = 1; });
+      if(!rows.length) return;
+      out += '<div class="hint" style="margin-top:8px;color:var(--strong)">'
+          +  esc(g.group) + '</div>'
+          +  rows.map(function(p){ return tuneRow(p, 'cv_'); }).join('');
+    });
+    /* The safety net is for a CAMERA control that outran the grouping, not for
+       ROS's own parameters: use_sim_time is declared by every node in the
+       graph, has nothing to do with the sensor, and sitting next to ISO in a
+       tuning column it reads as something worth trying. */
+    var rest = camRows.filter(function(p){
+      return p.editable && !seen[p.name] && p.name !== 'use_sim_time'; });
+    if(rest.length)
+      out += '<div class="hint" style="margin-top:8px;color:var(--strong)">'
+          +  'other</div>'
+          +  rest.map(function(p){ return tuneRow(p, 'cv_'); }).join('');
+  }
+
+  b.innerHTML = out;
+  b.querySelectorAll('button[data-camuse]').forEach(function(x){
+    x.onclick = function(){ camApplyProfile(x.dataset.camuse); }; });
+  b.querySelectorAll('button[data-camdel]').forEach(function(x){
+    x.onclick = function(){ camDeleteProfile(x.dataset.camdel); }; });
+  if(el('camsave')) el('camsave').onclick = camSaveProfile;
+  b.querySelectorAll('button[data-apply]').forEach(function(x){
+    x.onclick = function(){ camApplyOne(x.dataset.apply); }; });
+  b.querySelectorAll('button[data-revert]').forEach(function(x){
+    x.onclick = function(){
+      var p = camRowOf(x.dataset.revert);
+      if(p) camSet(p.name, p['default']);
+    }; });
+  /* Enter applies the row you are in \u2014 reaching for the mouse after every
+     number is the difference between sweeping a setting and giving up on it. */
+  b.querySelectorAll('input').forEach(function(x){
+    if(x.type === 'checkbox' || x.id === 'camsavename') return;
+    x.onkeydown = function(ev){
+      if(ev.key === 'Enter'){ ev.preventDefault(); camApplyOne(x.id.slice(3)); } };
+  });
+  if(el('camsavename'))
+    el('camsavename').onkeydown = function(ev){
+      if(ev.key === 'Enter'){ ev.preventDefault(); camSaveProfile(); } };
+}
+
+var camWasRunning = null, camNextTry = 0;
+var CAM_RETRY_MS = 2000;
+
+function renderCam(){
+  /* The pane is painted on CHANGE, not on the 5 Hz poll — so a node that
+     starts or stops has to nudge it, or you press Start in the viewer and the
+     column beside it goes on saying the camera is not running. Only the
+     transition repaints, so a half-typed number still survives the tick. */
+  var running = camRunning();
+  if(camBuilt && running !== camWasRunning){
+    camWasRunning = running;
+    if(running) camLoadParams(); else paintCam();
+  }
+  /* AND KEEP TRYING while it is up but has told us nothing. The two facts come
+     from different places and they do not arrive together: "running" is the
+     PROCESS TABLE (proc_scan), while /params/list needs the node to be in the
+     ROS GRAPH, which the node station rescans on its own timer. Start the
+     camera and for a few seconds it is a live process that the parameter
+     bridge has never heard of — so a single load on the transition lands on
+     "not in the ROS graph" and, because this pane only repaints on change,
+     that stale refusal would sit there until you changed tabs.
+
+     Only while the list is EMPTY, and no faster than CAM_RETRY_MS: once there
+     are rows this stops, so nothing is repainting under a value you are
+     typing. */
+  if(camBuilt && running && !camRows.length && !camBusy
+     && Date.now() >= camNextTry){
+    camNextTry = Date.now() + CAM_RETRY_MS;
+    camLoadParams();
+  }
+  if(!camBuilt){
+    camWasRunning = running;
+    el('p-cam').innerHTML = '<div id="camview"></div><aside id="camtune"></aside>';
+    camBuilt = true;
+    paintCam();
+    camLoadProfiles();
+    camLoadParams();
+  }
+  renderViewer('camview', S.tabs.camera, 'cam');
 }
 
 function tuneFillSelect(nodes){
@@ -1441,11 +1963,16 @@ function render(){
 
   if(tab==='nodes') renderNodes();
   if(tab==='tel') renderTel();
-  renderViewer('p-cam', S.tabs.camera, 'cam');
+  /* Only the VIEWER half is torn down when you leave: renderViewer clears the
+     element it is given, and handing it the whole pane would take the controls
+     and their half-typed values with it. */
+  if(tab === 'cam') renderCam();
+  else if(camBuilt) renderViewer('camview', S.tabs.camera, 'cam');
   renderViewer('p-lidar', S.tabs.lidar, 'lidar');
   if(tab==='tune') renderTune();
   if(tab==='rec') renderRec();
   if(tab==='logs') renderLogs();
+  if(tab==='radio') renderRadio();
   if(tab==='sys' && !document.activeElement.matches('#confirm')) renderSys();
   if(tab==='map') draw();
 
@@ -1498,6 +2025,7 @@ show('nodes');
 poll();
 setInterval(poll, POLL);
 setInterval(pollLogs, 700);
+setInterval(pollRadio, 1000);
 </script></body></html>"""
 
 

@@ -36,6 +36,8 @@ node and is the classic way to wedge a ROS web bridge.
 """
 import threading
 
+from crusader_common import param_utils
+
 # The four services every rclpy/rclcpp node exposes under its own name.
 _LIST = "list_parameters"
 _DESCRIBE = "describe_parameters"
@@ -265,6 +267,10 @@ class ParamBridge:
                 "reason": _not_editable_reason(desc),
                 "description": desc.description,
                 "lo": lo, "hi": hi,
+                # Straight off the descriptor, so a node that grows a new mode
+                # offers it in the dropdown the moment it is running — nothing
+                # in this package has to learn the list.
+                "choices": list(param_utils.choices_of(desc)),
             })
         return out
 

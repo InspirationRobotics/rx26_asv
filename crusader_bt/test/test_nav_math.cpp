@@ -301,6 +301,279 @@ int main()
       !gateFromIds(f, kNoBuoy, kNoBuoy, 6.0, 8.0).valid);
   }
 
+  // ----------------------------------------------------------------- fusion
+  {
+    // A plan the aircraft sent, and what the boat's own tracker made of the
+    // same water. The tracker is a metre or so off, has NOT seen the far buoy
+    // at all, and has invented a contact the plan knows nothing about.
+    std::vector<PlanBuoy> plan{
+      {0, {0, 20}, Beacon::FlashingBlue},
+      {1, {6, 38}, Beacon::FlashingRed},
+      {2, {-6, 38}, Beacon::FlashingGreen},
+      {9, {0, 92}, Beacon::SteadyBlue}};
+    std::vector<Buoy> tracked{
+      {100, {0.4, 20.3}, Beacon::FlashingBlue, false},
+      {101, {6.2, 37.6}, Beacon::FlashingGreen, false},   // WRONG colour
+      {102, {-5.7, 38.4}, Beacon::FlashingGreen, false},
+      {103, {30, 12}, Beacon::Off, false}};               // not in the plan
+
+    const Fused f = fusePassage(plan, tracked, 3.0);
+
+    chk("every plan buoy survives fusion", f.passage.size() == 4);
+    chk("an unmatched contact becomes an obstacle", f.obstacles.size() == 1);
+    chk("... and it is the one the plan never mentioned",
+      f.obstacles.size() == 1 && f.obstacles[0].id == 103);
+    chk("an obstacle carries NO beacon state",
+      f.obstacles.size() == 1 && f.obstacles[0].state == Beacon::Unknown);
+
+    const Buoy * red = findById(f.passage, 1);
+    chk("ids stay the UAV's, not the tracker's", red != nullptr);
+    // The whole point of "the UAV wins": the tracker called this one GREEN.
+    chk("THE UAV WINS on a colour disagreement",
+      red != nullptr && red->state == Beacon::FlashingRed);
+    chk("... and the tracker's better position is kept",
+      red != nullptr && std::fabs(red->p.x - 6.2) < 1e-9 &&
+      std::fabs(red->p.y - 37.6) < 1e-9);
+
+    const Buoy * far = findById(f.passage, 9);
+    chk("a buoy the tracker never saw keeps the plan's position",
+      far != nullptr && std::fabs(far->p.y - 92.0) < 1e-9);
+
+    // Association must be mutually exclusive. Two plan buoys 1 m apart with a
+    // single contact between them: per-buoy nearest would give BOTH the same
+    // point, the gate would have zero width, and gateWaypoints would refuse a
+    // gate that is really there.
+    std::vector<PlanBuoy> tight{
+      {1, {0.5, 0}, Beacon::FlashingRed},
+      {2, {-0.5, 0}, Beacon::FlashingGreen}};
+    std::vector<Buoy> one{{200, {0, 0}, Beacon::Unknown, false}};
+    const Fused g = fusePassage(tight, one, 5.0);
+    chk("one contact is claimed by exactly one plan buoy",
+      g.passage.size() == 2 &&
+      !(g.passage[0].p.x == g.passage[1].p.x &&
+        g.passage[0].p.y == g.passage[1].p.y));
+
+    // Degenerate inputs.
+    chk("a plan with no tracker at all still yields the passage",
+      fusePassage(plan, {}, 3.0).passage.size() == 4);
+    chk("... using the plan's own positions",
+      std::fabs(fusePassage(plan, {}, 3.0).passage[1].p.x - 6.0) < 1e-9);
+    chk("no plan means no passage, whatever the tracker saw",
+      fusePassage({}, tracked, 3.0).passage.empty());
+    chk("... and every contact is then an obstacle",
+      fusePassage({}, tracked, 3.0).obstacles.size() == 4);
+    chk("a zero radius associates nothing",
+      std::fabs(fusePassage(plan, tracked, 0.0).passage[0].p.y - 20.0) < 1e-9);
+  }
+
+  // --------------------------------------------------------- avoidObstacles
+  //
+  // Collision avoidance lives in the tree now, not in the autopilot: OA_TYPE is
+  // a black box that cannot be watched on the tree view or tested in a pool.
+  {
+    // Due north, 40 m. Port is WEST (-x), starboard is EAST (+x).
+    const Vec2 from{0, 0}, to{0, 40};
+    const double clear = 5.0, margin = 2.0;
+
+    chk("clear water returns the goal untouched",
+      !avoidObstacles(from, to, {}, clear, margin).detoured);
+
+    std::vector<Buoy> abeam{{7, {12, 20}, Beacon::Off, false}};
+    chk("something well off the track is not in the way",
+      !avoidObstacles(from, to, abeam, clear, margin).detoured);
+
+    std::vector<Buoy> behind{{7, {0, -10}, Beacon::Off, false}};
+    chk("something astern is never in the way",
+      !avoidObstacles(from, to, behind, clear, margin).detoured);
+
+    std::vector<Buoy> beyond{{7, {0, 60}, Beacon::Off, false}};
+    chk("something past the goal is not in the way either",
+      !avoidObstacles(from, to, beyond, clear, margin).detoured);
+
+    // Sitting to PORT of the track: pass it to starboard, so the detour goes
+    // east of it.
+    std::vector<Buoy> to_port{{7, {-2, 20}, Beacon::Off, false}};
+    Detour d = avoidObstacles(from, to, to_port, clear, margin);
+    chk("a blocker to port forces a detour", d.detoured && d.around_id == 7);
+    chk("...and the boat passes it to starboard", d.wp.x > -2.0);
+    chk_near("...by clearance + margin", d.wp.x - (-2.0), clear + margin, 1e-6);
+    chk_near("...abeam of the obstacle", d.wp.y, 20.0, 1e-6);
+    chk_near("...and reports how close the line came", d.miss_m, 2.0, 1e-6);
+
+    std::vector<Buoy> to_stbd{{7, {2, 20}, Beacon::Off, false}};
+    Detour e = avoidObstacles(from, to, to_stbd, clear, margin);
+    chk("a blocker to starboard is passed to port", e.detoured && e.wp.x < 2.0);
+
+    // Dead ahead has no favoured side. Break the tie to starboard: the
+    // give-way side, and what a human driver expects.
+    std::vector<Buoy> ahead{{7, {0, 20}, Beacon::Off, false}};
+    Detour f = avoidObstacles(from, to, ahead, clear, margin);
+    chk("dead ahead still forces a detour", f.detoured);
+    chk("...and the tie breaks to starboard", f.wp.x > 0.0);
+
+    // The FIRST blocker along the path, not the nearest to the boat. The one
+    // at 30 m is closer to the track, but the boat meets the 10 m one first.
+    std::vector<Buoy> two{
+      {8, {3.0, 30}, Beacon::Off, false},
+      {9, {-4.0, 10}, Beacon::Off, false}};
+    Detour g = avoidObstacles(from, to, two, clear, margin);
+    chk("the first blocker along the path wins", g.detoured && g.around_id == 9);
+
+    chk("a zero-length leg cannot be blocked",
+      !avoidObstacles(from, from, ahead, clear, margin).detoured);
+    chk("zero clearance disables avoidance",
+      !avoidObstacles(from, to, ahead, 0.0, margin).detoured);
+  }
+
+  // ------------------------------------------------------------ planPassage
+  //
+  // The boat does the path planning now: the aircraft sends ten buoys with
+  // colours and nothing about which pair is a gate or what order to drive them.
+  {
+    // A three-gate channel running due north from the entry, with the reds to
+    // the EAST so a northbound boat has them to starboard. Deliberately not
+    // symmetric: gate 2 is offset east, so ordering by distance-from-entry and
+    // ordering by projection-onto-the-axis disagree, and only the second is
+    // right.
+    const std::vector<Buoy> field{
+      {0, {0, 0}, Beacon::FlashingBlue, false},      // entry
+      {1, {5, 20}, Beacon::FlashingRed, false},      // gate A
+      {2, {-5, 20}, Beacon::FlashingGreen, false},
+      {3, {14, 40}, Beacon::FlashingRed, false},     // gate B, shoved east
+      {4, {4, 40}, Beacon::FlashingGreen, false},
+      {5, {5, 60}, Beacon::FlashingRed, false},      // gate C
+      {6, {-5, 60}, Beacon::FlashingGreen, false},
+      {7, {30, 10}, Beacon::Off, false},             // black, must be ignored
+      {8, {0, 80}, Beacon::SteadyBlue, false}};      // exit
+    const Vec2 entry{0, 0}, exitp{0, 80};
+
+    Passage pa = planPassage(field, entry, exitp);
+    chk("a field with an axis plans", pa.valid);
+    chk("three pairs make three gates", pa.gates.size() == 3);
+    chk("nothing is left unpaired", pa.unpaired.empty());
+    chk("gates come out entry-first", pa.gates.size() == 3 &&
+      pa.gates[0].red_id == 1 && pa.gates[1].red_id == 3 && pa.gates[2].red_id == 5);
+    chk("each gate pairs red with the green beside it", pa.gates.size() == 3 &&
+      pa.gates[0].green_id == 2 && pa.gates[1].green_id == 4 && pa.gates[2].green_id == 6);
+    chk("a black buoy is never a gate buoy", [&] {
+        for (const auto & g : pa.gates) {
+          if (g.red_id == 7 || g.green_id == 7) {return false;}
+        }
+        return true;
+      }());
+    chk_near("along_m is the projection, not the range", pa.gates[1].along_m, 40.0, 1e-6);
+
+    // Ordering must survive the field being handed over in any order at all --
+    // the aircraft's id order is not the course order and never was.
+    std::vector<Buoy> shuffled{field[8], field[5], field[2], field[7],
+      field[3], field[0], field[6], field[1], field[4]};
+    Passage sh = planPassage(shuffled, entry, exitp);
+    chk("input order does not change the plan", sh.gates.size() == 3 &&
+      sh.gates[0].red_id == 1 && sh.gates[1].red_id == 3 && sh.gates[2].red_id == 5);
+
+    // Driving the passage backwards is a different course, and the gate order
+    // must reverse with it.
+    Passage rev = planPassage(field, exitp, entry);
+    chk("reversing entry and exit reverses the order", rev.gates.size() == 3 &&
+      rev.gates[0].red_id == 5 && rev.gates[2].red_id == 1);
+  }
+
+  // Pairing must be GLOBAL, not nearest-from-each-red. Both reds here are
+  // closest to the same green; taking each red's nearest independently pairs
+  // one of them across the channel.
+  {
+    const std::vector<Buoy> greedy{
+      {1, {0, 0}, Beacon::FlashingRed, false},
+      {2, {0, 30}, Beacon::FlashingRed, false},
+      {3, {8, 4}, Beacon::FlashingGreen, false},     // nearest to BOTH reds
+      {4, {8, 30}, Beacon::FlashingGreen, false}};
+    Passage pa = planPassage(greedy, {0, -10}, {0, 50});
+    chk("the closest pair claims each other first", pa.gates.size() == 2 &&
+      pa.gates[0].red_id == 1 && pa.gates[0].green_id == 3);
+    chk("and the loser takes the green that is left", pa.gates.size() == 2 &&
+      pa.gates[1].red_id == 2 && pa.gates[1].green_id == 4);
+  }
+
+  // Width is a filter. A lone red on one side of the field and a lone green on
+  // the other are not a gate, however much they are each other's nearest.
+  {
+    const std::vector<Buoy> wide{
+      {1, {0, 20}, Beacon::FlashingRed, false},
+      {2, {60, 20}, Beacon::FlashingGreen, false}};
+    Passage pa = planPassage(wide, {0, 0}, {0, 40}, 20.0);
+    chk("a pair wider than max_width is not a gate", pa.valid && pa.gates.empty());
+    chk("... and both buoys are reported unpaired", pa.unpaired.size() == 2);
+    chk("an empty passage is still a valid answer", pa.valid);
+
+    const std::vector<Buoy> narrow{
+      {1, {0, 20}, Beacon::FlashingRed, false},
+      {2, {0.5, 20}, Beacon::FlashingGreen, false}};
+    chk("a pair narrower than min_width is not a gate either",
+      planPassage(narrow, {0, 0}, {0, 40}).gates.empty());
+  }
+
+  // Degenerate and lopsided fields.
+  {
+    chk("no axis means no plan",
+      !planPassage({}, {5, 5}, {5, 5}).valid);
+    chk("an empty field plans to zero gates",
+      planPassage({}, {0, 0}, {0, 50}).valid &&
+      planPassage({}, {0, 0}, {0, 50}).gates.empty());
+
+    const std::vector<Buoy> lop{
+      {1, {5, 20}, Beacon::FlashingRed, false},
+      {2, {-5, 20}, Beacon::FlashingGreen, false},
+      {3, {5, 40}, Beacon::FlashingRed, false}};      // no partner
+    Passage pa = planPassage(lop, {0, 0}, {0, 60});
+    chk("an odd red still yields the gate that does pair", pa.gates.size() == 1);
+    chk("... and the orphan is named", pa.unpaired.size() == 1 && pa.unpaired[0] == 3);
+  }
+
+  // ------------------------------------------------ gateCleared / nextGate
+  //
+  // Cleared gates are remembered BY BUOY IDS. A confirmation can bring new
+  // colours, the plan re-runs, and the order can change underneath the boat;
+  // counting "I have done two, start at index two" skips a gate never driven.
+  {
+    const std::vector<Buoy> field{
+      {1, {5, 20}, Beacon::FlashingRed, false},
+      {2, {-5, 20}, Beacon::FlashingGreen, false},
+      {3, {5, 40}, Beacon::FlashingRed, false},
+      {4, {-5, 40}, Beacon::FlashingGreen, false}};
+    Passage pa = planPassage(field, {0, 0}, {0, 60});
+    std::vector<std::pair<int, int>> cleared;
+
+    const PlannedGate * g = nextGate(pa, cleared);
+    chk("the first gate is the nearest to the entry", g != nullptr && g->red_id == 1);
+    cleared.push_back({g->red_id, g->green_id});
+
+    g = nextGate(pa, cleared);
+    chk("clearing one advances to the next", g != nullptr && g->red_id == 3);
+    cleared.push_back({g->red_id, g->green_id});
+    chk("clearing them all ends the passage", nextGate(pa, cleared) == nullptr);
+
+    chk("a cleared pair is recognised either way round",
+      gateCleared(cleared, 2, 1) && gateCleared(cleared, 1, 2));
+    chk("an undriven pair is not cleared", !gateCleared(cleared, 1, 4));
+
+    // The recolour case, which is the whole reason ids are the key: buoys 1
+    // and 2 swap colours, so the near gate is now (2, 1) rather than (1, 2).
+    // It is the same two buoys and must stay cleared.
+    std::vector<Buoy> recoloured = field;
+    recoloured[0].state = Beacon::FlashingGreen;
+    recoloured[1].state = Beacon::FlashingRed;
+    Passage after = planPassage(recoloured, {0, 0}, {0, 60});
+    chk("a recolour keeps the same two buoys as a gate", after.gates.size() == 2 &&
+      after.gates[0].red_id == 2 && after.gates[0].green_id == 1);
+    // Only the NEAR gate cleared, so there is still one to find. Clearing both
+    // would have proved nothing: nextGate returns null either way.
+    const std::vector<std::pair<int, int>> one{{1, 2}};
+    chk("the recoloured gate is still cleared, by its ids",
+      gateCleared(one, after.gates[0].red_id, after.gates[0].green_id));
+    chk("so the boat moves on to the gate it has not driven",
+      nextGate(after, one) != nullptr && nextGate(after, one)->red_id == 3);
+  }
+
   // ------------------------------------------------------------- findBeacon
   {
     std::vector<Buoy> f{

@@ -120,7 +120,7 @@ oakd_publisher:
     rgb_topic: "oak/rgb"                   # [RO] relative name; namespace/remap moves the pair
     depth_topic: "oak/depth"               # [RO] relative name; 16UC1 millimetres
     frame_id: "oak_rgb_camera_optical_frame"  # [RO] shared by both images (depth is aligned)
-    fps: 30.0                              # [RO] camera frame rate [Hz]
+    fps: 15.0                              # [RO] camera frame rate [Hz]
     isp_denominator: 3                     # [RO] 1/N of 1920x1200; 3 -> 640x400 (stereo-native)
     poll_period_s: 0.01                    # [RO] output-queue poll; keep well under 1/fps
     queue_size: 4                          # [RO] device output queue depth (non-blocking)
@@ -163,7 +163,7 @@ buoy_detector:
     publish_frames: false                  # [RO] BRING-UP ONLY: +38 MB/s at 30fps
     rgb_topic: "oak/rgb"                   # [RO] only used if publish_frames
     depth_topic: "oak/depth"               # [RO] only used if publish_frames
-    fps: 30.0                              # [RO] = oakd_publisher.fps
+    fps: 15.0                              # [RO] = oakd_publisher.fps
     isp_denominator: 3                     # [RO] = oakd_publisher.isp_denominator
     poll_period_s: 0.01                    # [RO] output-queue poll period [s]
     queue_size: 4                          # [RO] device output queue depth
@@ -564,9 +564,19 @@ ground_station:
                                            #      recordings to survive the
                                            #      container being recreated.
     record_telemetry_hz: 2.0               # [DYN] telemetry.jsonl sample rate
-    record_frame_hz: 1.0                   # [DYN] frames saved per second PER
-                                           #       viewer, pulled from the MJPEG
-                                           #       servers rather than re-encoded
+    record_frame_hz: 1.0                   # [DYN] DEFAULT frames saved per second
+                                           #       PER viewer, pulled from the
+                                           #       MJPEG servers rather than
+                                           #       re-encoded. The Record tab
+                                           #       sets camera and lidar
+                                           #       SEPARATELY for one session
+                                           #       without writing this back, so
+                                           #       an afternoon at full rate does
+                                           #       not become the boat's normal.
+                                           #       Range 0.05-60. The camera
+                                           #       pipeline runs at ~30 fps, so
+                                           #       30 saves every frame it sends
+                                           #       - about 1 MB/s, 3.6 GB/hour.
     record_min_free_gb: 2.0                # [DYN] refuse to start, and stop
                                            #       mid-run, below this. A full
                                            #       root filesystem takes down the
@@ -684,7 +694,15 @@ oak_detector:
     # Abstentions fall back to the detector's own class, so 'detector' is always
     # a safe thing to switch back to.
     shape_source: "geometry"               # [RO] "geometry" | "detector"
-    shape_min_radius: 6.0                  # [RO] marking radius [px] below
+    shape_min_radius: 18.0                 # [RO] marking radius [px] below
+                                           #      WAS 6.0, measured at 640x400.
+                                           #      SCALES WITH rgb_isp_denominator:
+                                           #      the same marking is 3x wider
+                                           #      at 1/1, so a 6 px floor would
+                                           #      stop refusing exactly the
+                                           #      marginal markings it exists to
+                                           #      refuse. Move this whenever
+                                           #      rgb_isp_denominator moves.
                                            #      which it refuses. Synthetic
                                            #      renders are unreliable under
                                            #      ~6 px and solid by ~10 —
@@ -799,16 +817,130 @@ oak_detector:
     # -- camera: fps and isp_denominator MUST equal the other OAK-D nodes.
     # subpixel / lr_check / sync_threshold_ms used to live here too and are now
     # constants in oak_pipeline.py — equal by construction, nothing to pin.
-    fps: 30.0                              # [RO] = oakd_publisher.fps
+    fps: 15.0                              # [RO] = oakd_publisher.fps.
+                                           #      15, NOT 30, and the reason is
+                                           #      the USB link rather than the
+                                           #      GPU. What crosses XLink is the
+                                           #      colour frame (NV12) plus depth,
+                                           #      EVERY frame, so the load is
+                                           #      size x rate:
+                                           #        640x400  @30 =  27 MB/s  ok
+                                           #        1920x1200@30 = 119 MB/s  DIES
+                                           #        1920x1200@15 =  60 MB/s
+                                           #      Measured 2026-09-20: at 30 fps
+                                           #      full res the node ran for ~50
+                                           #      health periods and then took
+                                           #      X_LINK_ERROR on the rgbd
+                                           #      stream and exited; 640x400 in
+                                           #      the same session, same cable,
+                                           #      took none. Full resolution is
+                                           #      worth more here than frames a
+                                           #      hull moving at a few m/s
+                                           #      cannot use -- the flash is 1s
+                                           #      on/off, so even 4 fps clears
+                                           #      Nyquist.
+    rgb_isp_denominator: 1                 # [RO] 1/N for the COLOUR camera
+                                           #      ALONE. 1 -> 1920x1200.
+                                           #      Measured 2026-09-20: moving
+                                           #      BOTH paths to 1/2 halved the
+                                           #      frame rate (27.8 -> 13.6 fps)
+                                           #      while inference barely moved
+                                           #      -- the cost was stereo and
+                                           #      USB, not the model. Past
+                                           #      1280px wide the stereo engine
+                                           #      drops EVERY frame, so a full
+                                           #      colour frame is unreachable
+                                           #      while the two share a scale.
+                                           #      The LED classifier cuts a
+                                           #      64x64 crop from the RAW frame,
+                                           #      so pixels kept here are pixels
+                                           #      that crop need not invent.
+                                           #      NOTE the detector engine is
+                                           #      fixed at 640x640, so this
+                                           #      helps the CLASSIFIER at once
+                                           #      and the DETECTOR only after a
+                                           #      re-export at a larger imgsz.
     isp_denominator: 3                     # [RO] 3 -> 640x400. Raise resolution
                                            #      (2 -> 960x600) if no_crop is
                                            #      high — moves all three nodes
-    ae_compensation: -3                    # [RO] EV steps, -9..9; negative is
-                                           #      darker. A TRAINING CONTRACT:
-                                           #      must match the exposure the
-                                           #      classifier's footage was shot
-                                           #      at. oak_record.py also
-                                           #      defaults to -3. 0 = off
+    # ---- camera profile: every one [DYN], tunable from the Tuning tab ----
+    # Ranges here are depthai's own (2.32), and are ENFORCED from the same
+    # table the node generates its parameter spec from -- see oak_controls.py.
+    #
+    # Why this is a tuning surface and not four settled numbers: measured on
+    # the boat at dusk facing a bright sky, the camera chose 2214 us at ISO
+    # 100 -- 1/15th of the shutter available and the gain range entirely
+    # unused -- because the default meters the WHOLE FRAME and the sky
+    # averaged out to something that looked correct. Median luma 12/255 with
+    # 38% of the frame crushed to black and 0.10% clipped. The right profile
+    # depends on the light, so it has to be findable without a rebuild.
+    ae_mode: "auto"                        # [DYN] auto | manual. manual pins
+                                           #       exposure_us + iso and makes
+                                           #       every ae_* setting inert.
+    exposure_us: 8000                      # [DYN] shutter when ae_mode=manual
+    iso: 400                               # [DYN] gain when ae_mode=manual,
+                                           #       100..1600 (100 is the floor)
+    ae_compensation: -3                    # [DYN] EV steps, -9..9; negative is
+                                           #       darker. A TRAINING CONTRACT:
+                                           #       should match the exposure the
+                                           #       classifier's footage was shot
+                                           #       at. oak_record.py defaults to
+                                           #       -3 too. Measured with the
+                                           #       band below: -3 -> median 35,
+                                           #       -1 -> 72, 0 -> 112 with only
+                                           #       0.6% crushed. Moving it means
+                                           #       retraining, or accepting the
+                                           #       classifier sees new colours.
+    ae_max_exposure_us: 8000               # [DYN] shutter cap; AE spends gain
+                                           #       past it. depthai prioritises
+                                           #       exposure over ISO up to frame
+                                           #       time, so uncapped it buys
+                                           #       brightness with smear -- and
+                                           #       a noisy sharp buoy detects
+                                           #       where a smeared one does not.
+                                           #       0 = uncapped.
+    ae_lock: false                         # [DYN] freeze AE where it is
+    ae_region_top: 0.35                    # [DYN] metering band, as fractions
+    ae_region_height: 0.45                 # [DYN] of frame height. WHERE the
+                                           #       meter looks, which outdoors
+                                           #       matters more than the bias:
+                                           #       0.35+0.45 is the horizon and
+                                           #       the near water. Measured, at
+                                           #       fixed -3: median 12 -> 41,
+                                           #       crushed 38% -> 16%. height 0
+                                           #       = whole frame. Fractions, not
+                                           #       pixels: the region is against
+                                           #       the SENSOR, before ISP scale,
+                                           #       so isp_denominator must not
+                                           #       enter the calculation.
+    awb_mode: "auto"                       # [DYN] auto | off | daylight |
+                                           #       cloudy_daylight | shade |
+                                           #       twilight | incandescent |
+                                           #       fluorescent | warm_fluorescent
+    wb_temperature_k: 5000                 # [DYN] 1000..12000, used only when
+                                           #       awb_mode is off. Water and
+                                           #       sky are both strongly blue,
+                                           #       which is what auto white
+                                           #       balance is worst at: it
+                                           #       corrects the blue away and
+                                           #       takes the buoys with it.
+    brightness: 0                          # [DYN] -10..10, post-ISP. Cannot
+                                           #       recover a crushed shadow --
+                                           #       fix exposure first.
+    contrast: 0                            # [DYN] -10..10
+    saturation: 0                          # [DYN] -10..10. Careful: the LED
+                                           #       classifier separates a lit
+                                           #       buoy from its hull ON
+                                           #       saturation, so this moves the
+                                           #       exact quantity it reads.
+    sharpness: 1                           # [DYN] 0..4, depthai default 1
+    luma_denoise: 1                        # [DYN] 0..4, worth raising once high
+    chroma_denoise: 1                      # [DYN] 0..4, ISO is in play
+    anti_banding: "auto"                   # [DYN] off | mains_50_hz |
+                                           #       mains_60_hz | auto. Mains
+                                           #       flicker only -- irrelevant
+                                           #       outdoors, matters under dock
+                                           #       lights.
     poll_period_s: 0.01                    # [RO] output-queue poll period [s]
     queue_size: 4                          # [RO] device output queue depth
     health_period_s: 5.0                   # [RO] rate/health log period [s]
@@ -952,6 +1084,23 @@ bt_runner_node:
                                             #      than this and the tree is told
                                             #      the pose is stale rather than
                                             #      acting on it.
+    plan_timeout_s: 15.0                    # [RO] the UAV plan arrives at ~0.2 Hz,
+                                            #      so it cannot share the 20 Hz
+                                            #      pose stream's timeout. Older
+                                            #      than this and the tree is told
+                                            #      the plan is stale, which halts
+                                            #      the mission: a dead radio must
+                                            #      STOP the boat, not leave it
+                                            #      driving a passage nobody can
+                                            #      still confirm.
+    assoc_radius_m: 5.0                     # [RO] how near a tracked contact has
+                                            #      to be to count as the same
+                                            #      object as a plan buoy. Too
+                                            #      large and two buoys claim one
+                                            #      contact; the fusion is global
+                                            #      greedy so it cannot double-
+                                            #      claim, but it CAN pair the
+                                            #      wrong two.
     publish_setpoints: false                # [RO] FALSE = this node CANNOT move
                                             #      the boat. Legs still poll for
                                             #      arrival, so a human can drive
@@ -981,11 +1130,33 @@ bt_runner_node:
 # set a mode, or move the boat. telemetry_bridge stays the only path to the
 # autopilot and the two never share a socket.
 #
-# NOT in core.launch.py. It is only useful above Core tier, and nothing here has
-# carried a frame over a real radio yet — only UDP loopback against the bench.
+# In core.launch.py (respawning), so the Radio tab survives a reboot. Do not
+# also hand-start it: two processes on the radio's serial port each read half.
 rxl_link_node:
   ros__parameters:
-    rxl_endpoint: "udpin:127.0.0.1:14555"   # [RO] BIND and listen. NOT "udp:",
+    rxl_endpoint: "/dev/crsd-rfd"
+                                            # [RO] THE RFD900, on its FTDI cable.
+                                            #      A udev symlink (tools/udev),
+                                            #      never /dev/ttyUSB0: the number
+                                            #      depends on plug order. Not
+                                            #      by-id either: that names ONE
+                                            #      cable's serial, and a swapped
+                                            #      cable left the node reading a
+                                            #      path that no longer existed.
+                                            #      The link node OWNS this
+                                            #      device; nothing else may open
+                                            #      it, including the test kit's
+                                            #      companion.py.
+                                            #      For SITL or the bench, override
+                                            #      it per run instead of editing
+                                            #      this line:
+                                            #        ros2 run crusader_link \
+                                            #          rxl_link_node --ros-args \
+                                            #          -p rxl_endpoint:=udpin:127.0.0.1:14555
+                                            #      That udpin form BINDS and
+                                            #      listens; "udp:" is an outbound
+                                            #      client that receives nothing,
+                                            #      silently. 14555 and not 14551:
                                             #      which pymavlink resolves to an
                                             #      outbound client that connects
                                             #      nowhere and receives nothing,
@@ -998,6 +1169,17 @@ rxl_link_node:
                                             #      stays free for ad-hoc tooling
                                             #      and SITL's rover MAVProxy
                                             #      fans out to 14552.
+    radio_traffic_topic: "crsd/radio/traffic"  # [RO] every frame the link node
+                                            #      sent or heard, for the ground
+                                            #      station's Radio tab. A RECORD:
+                                            #      nothing acts on this topic.
+    uav_sysid: 200                          # [RO] who the Radio tab's test frame
+                                            #      is addressed to. The aircraft's
+                                            #      autopilot is 1 in the Fleet ICD;
+                                            #      its companion answers from 200.
+    rxl_baud: 115200                        # [RO] only used when rxl_endpoint is
+                                            #      a serial device. Every radio in
+                                            #      the mesh runs SERIAL=115.
     source_system: 42                       # [RO] the boat's MAVLink system id on
                                             #      the MESH, not on the autopilot
                                             #      link. Must differ from the

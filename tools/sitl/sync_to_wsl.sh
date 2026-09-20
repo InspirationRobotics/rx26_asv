@@ -10,6 +10,13 @@
 # missing things -- crusader_params.yaml among them, which crashed target_tracker
 # with KeyError: 'use_lidar' and looked like a code bug. This walks everything.
 #
+# THE EXTENSION LIST BELOW IS THE SAME TRAP ONE LEVEL DOWN, and *.txt is what
+# went missing next: tools/sitl/rig_processes.txt holds the kill list the sim
+# rig reads, it never reached WSL, and nodes_down.sh cheerfully reported
+# "0 stopped, none left" with every node still running. '*.txt' now covers
+# CMakeLists.txt too. Before adding a file type here, check it is not bulk --
+# this copies whatever it matches on every bring-up.
+#
 #   bash sync_to_wsl.sh          # report differences, change nothing
 #   bash sync_to_wsl.sh sync     # copy Windows -> WSL
 MODE="${1:-report}"
@@ -24,7 +31,7 @@ mapfile -t FILES < <(
        -type f \( -name '*.py' -o -name '*.cpp' -o -name '*.hpp' -o -name '*.h' \
                   -o -name '*.xml' -o -name '*.yaml' -o -name '*.sh' \
                   -o -name '*.msg' -o -name '*.action' -o -name '*.srv' \
-                  -o -name 'CMakeLists.txt' -o -name '*.md' \
+                  -o -name '*.txt' -o -name '*.md' \
                   -o -name 'setup.cfg' -o -path '*/resource/*' \) -print \
   | sed 's|^\./||' | sort
 )

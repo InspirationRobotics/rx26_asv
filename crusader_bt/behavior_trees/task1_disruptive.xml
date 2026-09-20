@@ -1,0 +1,202 @@
+<?xml version="1.0"?>
+<!--
+  Task 1 Safe Passage, ADVANCED and DISRUPTIVE tier.
+
+  Alongside task1_safe_passage.xml, not replacing it: Core tier still has no
+  aircraft, and the runner picks the file by parameter so both stay loadable.
+
+  WHAT IS DIFFERENT FROM CORE, and why.
+
+  1. THE AIRCRAFT OWNS THE COLOURS. THE BOAT OWNS THE PLAN. handbook 3.3.2 says
+     that above Core the passage is only detectable from the air, so ENTRY, EXIT
+     and every beacon state come from the aircraft's ten-buoy field. But which
+     pair is a gate, and what order to drive them in, is worked out HERE, by
+     PlanPassage over the FUSED field (nav::planPassage over nav::fusePassage).
+     The aircraft used to assign one pair at a time; it no longer does.
+
+     Fusion is what makes the boat's own eyes worth having: the colour always
+     comes from the aircraft, the POSITION comes from the tracker whenever a
+     contact associates, because LiDAR range close in is far better than a
+     photogrammetric fix from 60 m up, and metres at a gate are what matter.
+
+  2. THE BOAT ENDS THE LOOP. It holds all ten buoys, so it can count its own
+     gates: PassageComplete is "every gate in my plan is in cleared_gates". Core
+     used `Inverter(NearExit radius=8)`, which is a guess and a wrong one - the
+     boat must clear EVERY gate before the exit, and the exit buoy can sit well
+     inside 8 m of the last one.
+
+  3. THE ENTRY ORBIT AND EVERY GATE END IN A CONFIRMATION. Having crossed a pair
+     (or finished circling the entry), the boat asks the
+     aircraft whether the rest of the field has moved, and waits. The aircraft
+     answers by acking the sequence number and retransmitting all ten buoys,
+     which arrives as a new plan, so PlanPassage re-runs against it on the very
+     next tick. That is the whole re-tasking mechanism: there is no separate
+     path for "the passage changed".
+
+     The sequence number counts CHECKPOINTS, not gates: seq 1 is the entry
+     orbit, seq 2 is gate 1. Nothing downstream ties seq to a gate index, which
+     is why adding the entry ask cost one XML line - cleared_gates is keyed on
+     buoy ids.
+
+     AwaitConfirmation re-asks every retry_s and gives up at timeout_s. The
+     ForceSuccess around it is what "gives up" means - the boat drives on with
+     the last field it was given rather than parking on the course forever. The
+     WARN it logs is how that stays visible.
+
+  4. A GATE IS REMEMBERED BY ITS TWO BUOYS, not by a counter. A confirmation can
+     recolour the field and change the order; "I have done two, start at index
+     two" then skips a gate that was never driven. MarkGateCleared records
+     (red_id, green_id) and SelectNextGate skips what is in that set.
+
+  5. A FAILED LEG RETRIES THE SAME GATE. MarkGateCleared is the last step of the
+     leg, so anything failing before it leaves the gate uncleared and
+     SelectNextGate hands back the same pair. The ForceSuccess around the leg is
+     what makes a failure a RESTART rather than the end of the transit.
+
+  THE GUARD BAND is re-ticked every tick and halts everything below it in one
+  tick. PassagePlanFresh is in it twice over: it is the handbook's "the UAV must
+  report before the USV may transit" gate, AND the dead-link stop.
+
+  TIMEOUT AND CANCEL live in bt_runner_node, not here.
+  OBSTACLE AVOIDANCE LIVES HERE NOW, not in the autopilot. ArduRover's OA_TYPE
+  is a black box that cannot be watched on the tree view or tested in a pool;
+  AvoidObstacles makes a detour an ordinary waypoint. It is local and reactive,
+  one blocker at a time, recomputed every tick, and is not a planner.
+-->
+<root BTCPP_format="4" main_tree_to_execute="SafePassageDisruptive">
+  <BehaviorTree ID="SafePassageDisruptive">
+    <ReactiveSequence name="guard_band">
+
+      <IsAutonomous/>
+      <PassagePlanFresh max_age_s="15.0"/>
+      <ResolveBuoyStates/>
+      <PublishSafePassageReport min_period_s="1.0"/>
+
+      <Sequence name="passage">
+
+        <SetTask token="TASK_SAFE_PASSAGE"/>
+
+        <!-- The entry buoy is known from the field the moment it arrives, so
+             this drives straight at it instead of loitering to spot it. -->
+        <CircleBuoy anchor="entry" radius="6.0" points="5" direction="cw"/>
+
+        <!-- CONFIRM BEFORE THE TRANSIT STARTS, not only after each gate.
+             Circling the entry is the last thing the boat does on a field
+             nobody has re-checked since the goal was accepted, and it is the
+             point at which the operator has had time to look at the passage and
+             decide it is right. Asking here means the first gate is driven
+             against a field confirmed seconds ago rather than minutes.
+
+             This is the same pair of leaves the gates use, so the sequence
+             number simply starts one earlier: seq 1 is the entry, seq 2 is
+             gate 1. Nothing downstream counts on seq matching a gate index -
+             cleared_gates is keyed on buoy ids, deliberately. -->
+        <RequestConfirmation what="entry orbit"/>
+        <ForceSuccess>
+          <AwaitConfirmation timeout_s="120.0" retry_s="3.0"/>
+        </ForceSuccess>
+
+        <ForceSuccess>
+          <KeepRunningUntilFailure name="transit">
+            <ReactiveSequence>
+
+              <!-- Re-planned at 10 Hz against the fused field, so a
+                   confirmation carrying new colours or new positions is
+                   picked up on the next tick with no special case. -->
+              <PlanPassage max_width="20.0" min_width="2.0"/>
+
+              <!-- One gate. Anything that fails inside restarts the leg. -->
+              <ForceSuccess>
+                <ReactiveSequence name="leg">
+                  <Inverter>
+                    <PlanChanged/>
+                  </Inverter>
+                  <Sequence>
+                    <SelectNextGate/>
+
+                    <!-- The run up to the gate is where the black buoys are,
+                         so it is the leg that gets avoidance. AvoidObstacles
+                         reads the LiDAR clusters by way of the tracker, plus
+                         every passage buoy that is not this gate's own pair.
+
+                         THE ReactiveSequence IS LOAD-BEARING. A plain Sequence
+                         ticks AvoidObstacles once and then leaves NavigateTo
+                         RUNNING for the rest of the leg, so the detour would be
+                         computed from the boat's position at the START of the
+                         run-in and never revised. Reactive re-ticks both every
+                         tick: the detour follows the boat, and NavigateTo
+                         re-sends the setpoint when it has moved far enough. -->
+                    <GateWaypoint point="approach" standoff="6.0" approach="8.0" out="{goal}"/>
+                    <ReactiveSequence name="run_in">
+                      <AvoidObstacles in="{goal}" out="{steer}" clearance="5.0" margin="2.0"/>
+                      <NavigateTo target="port" goal="{steer}" tolerance="3.0"/>
+                    </ReactiveSequence>
+
+                    <!-- The crossing itself is driven STRAIGHT, deliberately.
+                         It is about 14 m between two buoys the boat must pass
+                         on given sides, and a detour computed there could take
+                         it round the wrong side of one of them. Water inside a
+                         gate is the one place on this course meant to be clear. -->
+                    <GateWaypoint point="through" standoff="6.0" approach="8.0" out="{goal}"/>
+                    <NavigateTo target="port" goal="{goal}" tolerance="2.5"/>
+                    <MarkGateCleared/>
+
+                    <!-- "Is the next pair still where you said it was?" The
+                         ForceSuccess is the deliberate give-up: see note 3.
+
+                         TWO MINUTES, NOT TWENTY SECONDS, and the reason is that
+                         the guard band already covers the case this timeout
+                         looks like it is for. A dead radio is caught by
+                         PassagePlanFresh above, within max_age_s, which halts
+                         the whole mission rather than letting the boat drive an
+                         unconfirmed field. What is left for this timeout is the
+                         aircraft that is ALIVE and retransmitting but not
+                         answering, which is a fault in the aircraft and not
+                         something to give up on in a hurry.
+
+                         Ekko will answer in milliseconds. The long window is for
+                         the operator standing in for it, who is recolouring
+                         buoys on a map before confirming - 20 s was not enough
+                         for that, and the boat drove on twice in SITL with the
+                         answer arriving a quarter of a second too late. -->
+                    <RequestConfirmation what="gate"/>
+                    <ForceSuccess>
+                      <AwaitConfirmation timeout_s="120.0" retry_s="3.0"/>
+                    </ForceSuccess>
+                  </Sequence>
+                </ReactiveSequence>
+              </ForceSuccess>
+
+              <!-- FAILURE here ends the transit, and it is the only thing that
+                   should. The boat counts its own gates.
+
+                   IT IS AFTER THE LEG, AND THAT ORDER IS THE WHOLE POINT. A
+                   ReactiveSequence re-ticks every child above the running one on
+                   every tick, so with this ABOVE the leg it was re-evaluated
+                   while AwaitConfirmation was waiting. MarkGateCleared on the
+                   LAST gate makes it true, so one tick later the leg was halted
+                   and the transit ended - the boat asked the aircraft to confirm
+                   and left 100 ms later without waiting for the answer.
+
+                   Below the leg it is reached only BETWEEN legs, when the leg
+                   has actually finished, confirmation included. SITL 2026-09-15:
+                   a one-gate field asked once and went straight to RESULT, while
+                   gate 1 of a two-gate field re-asked at 3, 6, 9, 12, 15 and 18 s
+                   and timed out properly. Every gate except the last waited. -->
+              <Inverter>
+                <PassageComplete/>
+              </Inverter>
+
+            </ReactiveSequence>
+          </KeepRunningUntilFailure>
+        </ForceSuccess>
+
+        <!-- From the aircraft's field, not from perception. Fails only if the
+             aircraft never sent an exit at all. -->
+        <ExitResolved/>
+        <CircleBuoy anchor="exit" radius="6.0" points="5" direction="ccw"/>
+
+      </Sequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

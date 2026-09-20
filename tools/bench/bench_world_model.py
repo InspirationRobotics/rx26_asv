@@ -62,10 +62,14 @@ import threading
 import time
 
 import rclpy
+from rclpy.action import ActionClient
 from rclpy.node import Node
 
+from crusader_msgs.action import SafePassage
+
 from crusader_msgs.msg import (Attitude, Cluster3D, Cluster3DArray, Detection3D,
-                               Detection3DArray, FcuStatus, LatLonHead)
+                               Detection3DArray, FcuStatus, GuidedSetpoint,
+                               LatLonHead)
 
 from crusader_common import config as crsd_config
 from crusader_common import geo
@@ -76,6 +80,20 @@ from crusader_world_model import target_tracker_core as core
 # A sibling file, not a package: running this script puts tools/bench on
 # sys.path, which is the only reason a bare name works here.
 import field_gui                                       # noqa: E402
+import uav_link                                        # noqa: E402
+
+# label -> RXL beacon state, for the --uav radio path. The labels are the ones
+# field_gui's palette places and beaconFromLabel() parses; this is the third
+# consumer of the same five strings, so it is a lookup rather than a parse.
+BEACON_OF = {
+    "flashing_blue_buoy": 4,     # rxl_codec.BEACON_FLASHING_BLUE  (ENTRY)
+    "red_buoy": 2,               # BEACON_FLASHING_RED
+    "green_buoy": 3,             # BEACON_FLASHING_GREEN
+    "black_buoy": 1,             # BEACON_OFF
+    "steady_blue_buoy": 5,       # BEACON_STEADY_BLUE  (EXIT)
+}
+ENTRY_LABEL = "flashing_blue_buoy"
+EXIT_LABEL = "steady_blue_buoy"
 
 # Fallback origin for --sim-pose only: St Petersburg, FL — RoboNation's water.
 # In the default (real vessel) mode the origin is the boat's own first fix and
@@ -125,17 +143,22 @@ FIELDS = {
     # 92 m from the anchor to the EXIT buoy. The ENTRY sits at 20 m so it is
     # inside CAM_MAX_M at the moment the field anchors — the rest is discovered
     # on the way, which is the honest version of the problem.
+    # TWO red-green pairs, ten buoys. Ten because that is what
+    # RXL_SAFE_PASSAGE carries and what the aircraft really sends; two pairs
+    # because that is the passage. The four unlit blacks are not padding -- they
+    # are what proves the boat's pairing ignores everything that is not a
+    # beacon, and what the autopilot's avoidance has to deal with.
     "task1": [
         #  label                right  ahead
         ("flashing_blue_buoy",    0.0, 20.0),   # ENTRY — circle it CLOCKWISE
-        ("red_buoy",             +6.0, 38.0),
+        ("red_buoy",             +6.0, 38.0),   # gate 1
         ("green_buoy",           -6.0, 38.0),
         ("black_buoy",          +14.0, 45.0),   # unlit: obstacle, either side
-        ("red_buoy",             +7.0, 56.0),
-        ("green_buoy",           -5.0, 56.0),
-        ("black_buoy",          -16.0, 62.0),   # unlit: obstacle, either side
-        ("red_buoy",             +5.0, 74.0),
-        ("green_buoy",           -7.0, 74.0),
+        ("black_buoy",          -16.0, 50.0),
+        ("red_buoy",             +7.0, 62.0),   # gate 2
+        ("green_buoy",           -5.0, 62.0),
+        ("black_buoy",          +12.0, 72.0),
+        ("black_buoy",           -9.0, 80.0),
         ("steady_blue_buoy",      0.0, 92.0),   # EXIT — circle it ANTICLOCKWISE
     ],
 }
@@ -193,6 +216,41 @@ class WorldModelBench(Node):
         # caught halfway through an edit.
         self._field_lock = threading.Lock()
         self._nan_heading = 0       # fixes dropped for unresolved GPS yaw
+
+        # The radio, under --uav. This bench then plays BOTH halves of the
+        # world: the boat's own sensors (camera + LiDAR, as always) and the
+        # aircraft's transmissions. Running both at once is the honest
+        # Disruptive setup and is what exercises nav::fusePassage.
+        # The mission action, so the page can start and stop a run without
+        # anybody opening a terminal. This is a CLIENT of bt_runner_node's
+        # server; the bench never decides anything about the mission itself.
+        self.mission = {"state": "idle", "phase": "", "progress": 0.0,
+                        "outcome": None, "detail": "", "plan_version": 0,
+                        "buoys_known": 0, "elapsed_s": 0.0}
+        self._goal_handle = None
+        self.action = ActionClient(self, SafePassage, "/crsd/safe_passage")
+
+        # Putting the simulated boat back on the start line, so a second run
+        # does not mean restarting seven nodes.
+        self.reset = {"state": "idle", "detail": ""}
+        self._sp_pub = self.create_publisher(
+            GuidedSetpoint, "crsd/guided_setpoint", 10)
+
+        self.uav = None
+        if getattr(args, "uav", False):
+            self.uav = uav_link.UavLink(args.uav_endpoint)
+            # 20 Hz: the boat asks for a gate once per leg, so this only has to
+            # be faster than a person notices, not faster than the radio.
+            self.create_timer(0.05, lambda: self.uav.poll())
+            # AND RETRANSMIT, the way a real aircraft does. /crsd/passage_plan
+            # is not latched -- deliberately, because a latched topic would hand
+            # a late subscriber a stale plan stamped with the moment it arrived,
+            # which is exactly the frozen-world lie the staleness check exists to
+            # catch. So the aircraft repeats itself instead, and a bt_runner that
+            # starts after the operator clicked Transmit picks the passage up
+            # within one period. Clicking Transmit once and getting a tree that
+            # fails on its first tick is what this fixes.
+            self.create_timer(1.0 / 0.2, lambda: self.uav.resend())
         self._warned_no_pose = False
 
         # The TOPIC NAMES come from the same params file as the extrinsic, and
@@ -253,6 +311,209 @@ class WorldModelBench(Node):
         with self._field_lock:
             return list(self.field)
 
+    # --------------------------------------------------------- SITL reset
+
+    def _return_to_start(self):
+        """Drive the boat back to the anchor so the next run starts where the
+        last one did.
+
+        NOT a reboot. MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN was the obvious thing
+        and it does not work: tried 2026-09-13, the autopilot restarted and
+        re-armed but the simulated vehicle STAYED where it was -- reported "on
+        the start line" from 64 m up the field, which is worse than failing. A
+        genuine position reset means restarting the SITL process itself, and
+        that lives on the WSL host where this container cannot reach it
+        (tools/sitl/start_sitl.sh, by hand).
+
+        So this drives home under GUIDED instead, using the same setpoint path
+        the mission uses. Publishing on /crsd/guided_setpoint while bt_runner is
+        also publishing would make the boat argue with itself, which is why this
+        refuses to run while a mission is active.
+        """
+        if self.mission["state"] in ("active", "starting", "cancelling"):
+            raise RuntimeError("cancel the mission first")
+        if self.reset["state"] == "running":
+            raise RuntimeError("already on the way")
+        if self.origin is None:
+            raise RuntimeError("not anchored yet")
+        self.reset = {"state": "running", "detail": "driving back"}
+        threading.Thread(target=self._return_worker, daemon=True).start()
+        return "returning to the start line"
+
+    def _return_worker(self):
+        try:
+            lat, lon = self.origin          # the anchor IS the start line
+            deadline = time.monotonic() + 180.0
+            arrived_within = 3.0
+            while time.monotonic() < deadline:
+                sp = GuidedSetpoint()
+                sp.header.stamp = self.get_clock().now().to_msg()
+                sp.latitude, sp.longitude = lat, lon
+                sp.yaw = float("nan")       # position only, as the mission does
+                self._sp_pub.publish(sp)
+
+                now = time.monotonic()
+                v = self._pose.get(now) if self._pose else None
+                if v is None:
+                    self.reset["detail"] = "no fresh pose"
+                    time.sleep(0.5)
+                    continue
+                e, n = v[0], v[1]
+                d = math.hypot(e, n)
+                self.reset["detail"] = "%.0f m to run" % d
+                if d <= arrived_within:
+                    break
+                time.sleep(0.5)
+            else:
+                raise RuntimeError("did not get back within 180 s")
+
+            # Re-arm the AIRCRAFT too, or the next run's first request -- seq 1
+            # again -- is answered instantly from the cache as a lost-reply
+            # repeat, and the operator never gets to change the field first.
+            if self.uav is not None:
+                self.uav.rewind()
+
+            self.mission = {"state": "idle", "phase": "", "progress": 0.0,
+                            "outcome": None, "detail": "", "plan_version": 0,
+                            "buoys_known": 0, "elapsed_s": 0.0}
+            self.reset = {"state": "done", "detail": "on the start line"}
+        except Exception as exc:                           # noqa: BLE001
+            self.reset = {"state": "failed", "detail": str(exc)}
+            self.get_logger().error("return to start failed: %s" % exc)
+
+    # ------------------------------------------------------- the mission
+
+    def _mission_send(self, tier=2, timeout_s=400.0):
+        """Start a run. Called from the HTTP thread, so it never BLOCKS.
+
+        send_goal_async returns a future the executor resolves on its own
+        thread. Waiting on it here would deadlock the one spin that is supposed
+        to resolve it, and the page would hang instead of the mission starting.
+        """
+        if self._goal_handle is not None and self.mission["state"] == "active":
+            raise RuntimeError("a mission is already running")
+
+        # A NEW RUN MEANS THE AIRCRAFT FORGETS TOO. bt_runner resets gate_seq to
+        # 0 when it accepts a goal, so the next run asks about gate 1 again --
+        # and an aircraft still holding the last run's answer for seq 1 treats
+        # that as a lost-reply repeat and acks it instantly, from the cache,
+        # with whatever field it had. The operator never gets the pause the
+        # confirmation exists to give them.
+        #
+        # Seen in SITL 2026-09-14: a second run's gate 1 was "confirmed" 200 ms
+        # after it was asked, with nobody at the keyboard.
+        if self.uav is not None:
+            self.uav.rewind()
+        if not self.action.server_is_ready():
+            # One second, not forever: if bt_runner is not up, say so on the
+            # page rather than leaving a button that looks like it did nothing.
+            if not self.action.wait_for_server(timeout_sec=1.0):
+                raise RuntimeError(
+                    "no /crsd/safe_passage server -- is bt_runner_node running?")
+        goal = SafePassage.Goal()
+        goal.tier = int(tier)
+        goal.timeout_s = float(timeout_s)
+        self.mission = {"state": "starting", "phase": "", "progress": 0.0,
+                        "outcome": None, "detail": "", "plan_version": 0,
+                        "buoys_known": 0, "elapsed_s": 0.0}
+        fut = self.action.send_goal_async(goal, feedback_callback=self._on_fb)
+        fut.add_done_callback(self._on_accepted)
+        return "goal sent (tier %d)" % tier
+
+    def _on_accepted(self, fut):
+        gh = fut.result()
+        if not gh.accepted:
+            # bt_runner rejects a second goal rather than queueing it.
+            self.mission.update(state="done", outcome=-1,
+                                detail="goal REJECTED (one already running?)")
+            return
+        self._goal_handle = gh
+        self.mission["state"] = "active"
+        gh.get_result_async().add_done_callback(self._on_result)
+
+    def _on_fb(self, fb):
+        f = fb.feedback
+        self.mission.update(phase=f.phase, progress=float(f.progress),
+                            plan_version=int(f.plan_version),
+                            buoys_known=int(f.buoys_known))
+
+    def _on_result(self, fut):
+        r = fut.result().result
+        self.mission.update(state="done", outcome=int(r.outcome),
+                            detail=r.detail, elapsed_s=float(r.elapsed_s))
+        self._goal_handle = None
+
+    def _mission_cancel(self):
+        if self._goal_handle is None:
+            raise RuntimeError("nothing to cancel")
+        self._goal_handle.cancel_goal_async()
+        self.mission["state"] = "cancelling"
+        return "cancel sent"
+
+    # ---------------------------------------------- the radio, under --uav
+
+    def _plan_from_field(self):
+        """The current field as (buoys, entry, exit_) for the radio.
+
+        Shared by Transmit and Confirm, because those send the SAME thing --
+        the difference is only whether an acknowledgement follows. Two copies
+        of this drifted once already.
+
+        Buoy ids are the index in the field list, which is exactly the number
+        the page draws on each marker, so a colour changed on screen reaches
+        the boat against the id it already knows.
+        """
+        with self._field_lock:
+            field = list(self.field)
+            origin = self.origin
+        if origin is None:
+            raise RuntimeError("not anchored yet")
+        if not field:
+            raise RuntimeError("nothing placed")
+
+        buoys, entry, exit_ = [], None, None
+        for i, (label, e, nn) in enumerate(field):
+            lat, lon = geo.xy_to_latlon(e, nn, origin)
+            buoys.append((i, lat, lon, BEACON_OF.get(label, 0)))
+            if label == ENTRY_LABEL and entry is None:
+                entry = (lat, lon)
+            if label == EXIT_LABEL and exit_ is None:
+                exit_ = (lat, lon)
+
+        # A passage with no ENTRY or no EXIT is refused here rather than sent.
+        # The boat would accept it -- the fields are just numbers -- and then
+        # fail much later with "entry buoy not available", a long way from the
+        # thing that was actually wrong.
+        if entry is None or exit_ is None:
+            missing = []
+            if entry is None:
+                missing.append("ENTRY (flashing blue)")
+            if exit_ is None:
+                missing.append("EXIT (steady blue)")
+            raise RuntimeError("place an " + " and an ".join(missing) + " first")
+
+        return buoys, entry, exit_
+
+    def _uav_transmit(self):
+        """Send the current field as the passage. Called from the HTTP thread."""
+        if self.uav is None:
+            raise RuntimeError("no radio")
+        buoys, entry, exit_ = self._plan_from_field()
+        self.uav.send_plan(buoys, entry, exit_)
+        return "sent %d buoys" % len(buoys)
+
+    def _uav_confirm(self):
+        """Answer the boat's outstanding request with the field as it is NOW.
+
+        The field is re-read here rather than repeating what was last
+        transmitted, so "recolour a buoy, then confirm" carries the new colours
+        in the same breath. That is the whole operator gesture.
+        """
+        if self.uav is None:
+            raise RuntimeError("no radio: start with --uav")
+        buoys, entry, exit_ = self._plan_from_field()
+        return self.uav.confirm(buoys, entry, exit_)
+
     def _gui_set_field(self, buoys):
         """Replace the field. Called from the HTTP thread, never the executor."""
         with self._field_lock:
@@ -267,6 +528,8 @@ class WorldModelBench(Node):
         """
         if self.origin is None:
             return {"anchored": False, "boat": None, "buoys": [],
+                    "radio": self.uav.status() if self.uav is not None else None,
+                    "mission": dict(self.mission), "reset": dict(self.reset),
                     "nan_heading": self._nan_heading}
         now = time.monotonic()
         v = self._pose.get(now) if self._pose else None
@@ -281,7 +544,9 @@ class WorldModelBench(Node):
             lat, lon = geo.xy_to_latlon(e, n, self.origin)
             out.append({"label": label, "east": round(e, 2), "north": round(n, 2),
                         "lat": lat, "lon": lon})
-        return {"anchored": True, "origin": list(self.origin),
+        radio = self.uav.status() if self.uav is not None else None
+        return {"anchored": True, "origin": list(self.origin), "radio": radio,
+                "mission": dict(self.mission), "reset": dict(self.reset),
                 "anchor_heading_deg": round(math.degrees(self.anchor_heading), 1),
                 "boat": boat, "buoys": out, "nan_heading": self._nan_heading}
 
@@ -508,11 +773,39 @@ class WorldModelBench(Node):
             cx, cy, cz = core.body_to_camera(rr * math.cos(b), rr * math.sin(b),
                                              z, self.extrinsic)
             d = Detection3D()
-            d.label, d.confidence = label, round(random.uniform(0.62, 0.95), 2)
+            d.label = self._maybe_miscolour(label)
+            d.confidence = round(random.uniform(0.62, 0.95), 2)
             d.x, d.y, d.z = cx, cy, cz
             d.bbox = [0, 0, 0, 0]
             array.detections.append(d)
         self.det_pub.publish(array)       # every frame, empty or not
+
+    def _maybe_miscolour(self, label):
+        """Occasionally report a red buoy as green, or the reverse.
+
+        WHY THE BENCH SHOULD LIE. Above Core tier the aircraft owns the colours
+        and the boat's camera only refines POSITION -- nav::fusePassage takes
+        the beacon from the plan and never from the tracker. That rule was
+        written, tested off-ROS, and never once exercised in SITL, because
+        synthetic detections always carried the true label: the fusion could
+        have been taking the camera's colour all along and every run would have
+        looked identical.
+
+        --miscolour 0.2 makes one detection in five disagree. The passage must
+        not change. If it does, the aircraft is not winning.
+
+        Only red and green are flipped. Miscolouring the ENTRY or EXIT beacon
+        would test a different thing -- those come straight from the plan and
+        never from a detection at all.
+        """
+        p = getattr(self.args, "miscolour", 0.0)
+        if p <= 0.0 or random.random() >= p:
+            return label
+        if label == "red_buoy":
+            return "green_buoy"
+        if label == "green_buoy":
+            return "red_buoy"
+        return label
 
     def _clusters(self):
         """What lidar_cluster_node would publish: base_link, every window."""
@@ -568,7 +861,19 @@ def main():
     ap.add_argument("--gui-port", type=int, default=field_gui.DEFAULT_PORT,
                     help=f"port for --gui (default {field_gui.DEFAULT_PORT}; "
                          "8080/8081/8085/8090 are already taken on the boat)")
+    ap.add_argument("--uav", action="store_true",
+                    help="also play the AIRCRAFT: open the RXL radio and serve "
+                         "Transmit and the gate handshake from the page. Use "
+                         "with --gui; the field you place becomes the passage "
+                         "the boat is told about.")
+    ap.add_argument("--uav-endpoint", default="udpout:127.0.0.1:14555",
+                    help="rxl_link_node's rxl_endpoint")
     ap.add_argument("--seed", type=int, default=1, help="RNG seed")
+    ap.add_argument("--miscolour", type=float, default=0.0, metavar="P",
+                    help="fraction of camera detections that report the WRONG "
+                         "red/green label, 0..1. Proves the aircraft's colour "
+                         "wins in fusePassage: the passage the boat plans must "
+                         "not change. Try 0.2.")
     sim = ap.add_argument_group("--sim-pose only")
     sim.add_argument("--radius", type=float, default=30.0,
                      help="circle radius around the buoy field [m]")
@@ -604,8 +909,12 @@ def main():
     node = WorldModelBench(args)
     gui = None
     if args.gui:
-        gui = field_gui.FieldGui(node._gui_state, node._gui_set_field,
-                                 args.gui_port)
+        gui = field_gui.FieldGui(
+            node._gui_state, node._gui_set_field, args.gui_port,
+            transmit=node._uav_transmit if args.uav else None,
+            confirm=node._uav_confirm if args.uav else None,
+            mission_send=node._mission_send, mission_cancel=node._mission_cancel,
+            sitl_reset=node._return_to_start)
         gui.start()
         node.get_logger().info(
             f"field GUI on http://<this-host>:{args.gui_port} — the field "

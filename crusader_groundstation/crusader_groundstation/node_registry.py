@@ -33,6 +33,7 @@ GROUPS = (
     ("core", "Core", "Safety and telemetry. Protected: startable here, not stoppable."),
     ("perception", "Perception", "Sensors. The three OAK-D nodes contend for one camera."),
     ("world", "World model", "Fusion and tracking. Needs perception and pose."),
+    ("link", "UAV link", "The RFD900 mesh to the aircraft. One owner of the radio."),
     ("viewers", "Viewers", "Bench views served on their own ports."),
 )
 
@@ -65,6 +66,14 @@ class NodeSpec:
     # 404s on a name it does not have. lidar_view's views are plan/elev/both,
     # so the obvious guess of /stream/view records nothing from it, silently.
     stream_path: str = ""
+    # Views this producer offers, as (name, label). Empty means one unnamed
+    # view, which is every viewer that is not the detector.
+    views: tuple = ()
+    # What a RECORDING pulls, when that is not what the tab shows. The tab
+    # shows the annotated frame because that is what tells you the detector
+    # agreed with you; a recording wants the raw one, because a training set
+    # made of frames with boxes burned into them is a training set of boxes.
+    record_stream_path: str = ""
     note: str = ""
 
 
@@ -88,7 +97,9 @@ REGISTRY = (
              note="detections + annotated view; owns the OAK-D"),
     NodeSpec("oak_detector", "oak_detector", "crusader_perception",
              "oak_detector", "perception", exclusive="oakd", port=8080,
-             stream_path="/stream",
+             stream_path="/stream/annotated",
+             views=(("annotated", "Annotated"), ("raw", "Raw")),
+             record_stream_path="/stream/raw",
              note="shape + LED colour, two engines; owns the OAK-D"),
     NodeSpec("oakd_publisher", "oakd_publisher", "crusader_perception",
              "oakd_publisher", "perception", exclusive="oakd",
@@ -112,6 +123,12 @@ REGISTRY = (
              note="camera -> earth-anchored targets; use_lidar adds the LiDAR"),
 
     # ---- viewers: tools/ scripts, not ROS entry points ----
+    # ---- link: the RFD900 mesh. Not protected: it has not been on the water. ----
+    NodeSpec("rxl_link_node", "rxl_link_node", "crusader_link",
+             "rxl_link_node", "link", exclusive="rfd_radio",
+             note="owns the RFD900 and the Radio tab's record; talks to the "
+                  "aircraft, never to the Pixhawk"),
+
     NodeSpec("oak_view", "oak_view", "tools", "oak_view.py", "viewers",
              kind="script", exclusive="port8080", port=8080,
              stream_path="/stream/view",      # bare FrameBuffer -> named "view"

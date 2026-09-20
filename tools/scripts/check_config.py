@@ -229,8 +229,20 @@ def check_params_yaml():
     except KeyError as e:
         fail("mavlink udp ports", f"missing key {e}")
     else:
+        # A NON-UDP endpoint is the RFD900 on its FTDI cable: the link node
+        # owning the radio directly, which is the arrangement the mesh needs.
+        # There is no port to check then, and demanding one would fail a config
+        # that is right -- what matters is that it names a device at all.
+        net = str(rxl_ep).startswith(("udp:", "udpin:", "udpout:", "tcp:"))
         mav_p, rxl_p = _udp_port(mav_ep), _udp_port(rxl_ep)
-        if mav_p is None or rxl_p is None:
+        if not net and str(rxl_ep).startswith("/dev/"):
+            ok("mavlink udp ports", f"rxl_link on the radio at {rxl_ep}")
+        elif not net:
+            fail("mavlink udp ports",
+                 f"rxl_endpoint {rxl_ep!r} is neither a udp endpoint nor a "
+                 "/dev device; pymavlink would read it as a file name and the "
+                 "link would be silent rather than refused")
+        elif mav_p is None or rxl_p is None:
             fail("mavlink udp ports",
                  f"could not read a port from {mav_ep!r} / {rxl_ep!r}")
         elif mav_p == rxl_p:
@@ -295,6 +307,42 @@ def check_params_yaml():
                cfg["bt_runner_node"]["ros__parameters"]["task_token"])
     except KeyError as e:
         fail("task_token is a real RxTask", f"missing key {e}")
+
+    # The camera profile is generated from oak_controls, so the YAML and the
+    # table can drift in exactly two ways: a control with no value (the node
+    # then refuses to start, with "no declared posture"), or a value outside
+    # the range the node will enforce (it starts and then rejects the first
+    # thing you try to set). Both are cheap to catch here and expensive to
+    # catch on a dock.
+    # Imported off the SOURCE TREE, not off an installed workspace: this check
+    # has to work on the laptop, before anything is built, or it only ever runs
+    # after the mistake has already been deployed. oak_controls imports nothing
+    # but dataclasses precisely so this is possible.
+    try:
+        sys.path.insert(0, str(REPO / "crusader_perception"))
+        from crusader_perception import oak_controls
+    except Exception as e:
+        fail("oak camera profile", f"could not import oak_controls: {e}")
+    else:
+        node = cfg.get("oak_detector", {}).get("ros__parameters", {})
+        problems = []
+        for control in oak_controls.ALL:
+            if control.name not in node:
+                problems.append(f"{control.name} has no value in the YAML")
+                continue
+            value = node[control.name]
+            if control.choices and str(value).lower() not in control.choices:
+                problems.append(f"{control.name}={value!r} is not one of "
+                                + "/".join(control.choices))
+            if control.lo is not None and not (control.lo <= value <= control.hi):
+                problems.append(f"{control.name}={value} is outside "
+                                f"[{control.lo}, {control.hi}]")
+        extra = [c.name for c in oak_controls.ALL if c.name not in node]
+        if problems:
+            fail("oak camera profile", "; ".join(problems))
+        else:
+            ok("oak camera profile",
+               f"{len(oak_controls.ALL)} controls, every one valued and in range")
 
     # All three OAK-D nodes must describe the same camera (see CAMERA_NODES).
     # Compared against the first node in the list rather than pairwise, so the

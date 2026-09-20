@@ -88,8 +88,34 @@ class FrameBuffer:
         return self._closed
 
 
-def serve_mjpeg(port, quality, buffer, logger, title="crusader"):
+def normalize_views(views):
+    """A FrameBuffer or a {name: (buffer, label)} mapping -> the mapping.
+
+    A bare buffer is the old shape and stays the old shape: one unnamed view,
+    served on any path. Every existing caller passes one and is unchanged.
+    """
+    if isinstance(views, FrameBuffer):
+        return {"view": (views, "View")}
+    return dict(views)
+
+
+def serve_mjpeg(port, quality, views, logger, title="crusader"):
     """Start the viewer on `port`. -> the server, or None if it could not bind.
+
+    `views` is a FrameBuffer, or an ordered {name: (buffer, label)} mapping for
+    a producer that can show the same moment more than one way — the detector
+    offers its annotated frame and the raw one behind it, because "is the box
+    wrong or is the PICTURE wrong" is the question a bring-up viewer exists to
+    answer, and you cannot answer it from the annotated frame alone.
+
+    Streams live at `/stream/<name>`; `/` serves a page for whichever view the
+    `?view=` query names, defaulting to the first. An unknown name is a 404
+    that LISTS the names, because the alternative is a blank viewer and no clue
+    which of the two ends is wrong.
+
+    Each view counts its own subscribers, so a producer skips the work for a
+    view nobody is watching: opening the raw stream costs nothing until it is
+    opened, and costs nothing again the moment it is closed.
 
     Failure to bind is a WARNING, not a fatal error: this is a bring-up viewer
     and a busy port must not stop the boat from seeing buoys. The detections
@@ -97,24 +123,66 @@ def serve_mjpeg(port, quality, buffer, logger, title="crusader"):
     """
     import cv2
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, urlparse
+
+    views = normalize_views(views)
+    if not views:
+        logger.warn("MJPEG view disabled — no views given")
+        return None
+    default_view = next(iter(views))
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.0"
 
         def do_GET(self):
-            if self.path in ("/", "/index.html"):
-                return self._page()
-            return self._stream()
+            parsed = urlparse(self.path)
+            wanted = parse_qs(parsed.query).get("view", [None])[0]
+            if parsed.path in ("/", "/index.html"):
+                return self._page(wanted or default_view)
+            # /stream/<name>, and a bare /stream (or anything else) for the
+            # single-view callers that have always streamed from any path.
+            name = parsed.path.rsplit("/", 1)[-1]
+            if name not in views:
+                name = wanted if wanted in views else (
+                    default_view if len(views) == 1 or parsed.path == "/stream"
+                    else None)
+            if name is None:
+                body = ("unknown view. this server publishes: "
+                        + ", ".join(f"/stream/{n}" for n in views)).encode()
+                self.send_response(404)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            return self._stream(name)
 
-        def _page(self):
+        def _page(self, name):
             # no-store because this markup changes and a cached copy of the old
             # page is indistinguishable from a fix that did not work.
+            #
+            # The picker is rendered only when there is something to pick, so
+            # the single-view callers get exactly the page they had. It is
+            # here as well as in the ground station because this port is opened
+            # directly during bring-up, with no dashboard in front of it.
+            if len(views) > 1:
+                links = "".join(
+                    f"<a href='/?view={n}' style='color:#eee;padding:3px 9px;"
+                    f"margin-right:6px;border-radius:3px;text-decoration:none;"
+                    f"background:{'#2b6cb0' if n == name else '#333'}'>"
+                    f"{label}</a>"
+                    for n, (_buf, label) in views.items())
+                bar = ("<div style='position:absolute;top:8px;left:8px;z-index:1;"
+                       "font:13px system-ui,sans-serif'>" + links + "</div>")
+            else:
+                bar = ""
             body = (f"<html><head><title>{title}</title>"
                     "<meta name='viewport' content='width=device-width,"
                     "initial-scale=1'></head>"
                     "<body style='margin:0;height:100vh;overflow:hidden;"
                     "background:#111'>"
-                    "<img src='/stream' style='width:100%;height:100%;"
+                    + bar +
+                    f"<img src='/stream/{name}' style='width:100%;height:100%;"
                     "object-fit:contain;display:block'>"
                     "</body></html>").encode()
             self.send_response(200)
@@ -124,7 +192,8 @@ def serve_mjpeg(port, quality, buffer, logger, title="crusader"):
             self.end_headers()
             self.wfile.write(body)
 
-        def _stream(self):
+        def _stream(self, name):
+            buffer = views[name][0]
             self.send_response(200)
             self.send_header("Content-Type",
                              "multipart/x-mixed-replace; boundary=frame")
@@ -183,14 +252,19 @@ def serve_mjpeg(port, quality, buffer, logger, title="crusader"):
 def stop_mjpeg(server, buffer, logger, timeout=2.0):
     """Tear the viewer down without ever blocking on a connected browser.
 
-    `buffer.close()` FIRST: it wakes every handler and tells it to leave, so
+    `buffer` takes the same shapes serve_mjpeg does: one FrameBuffer, or the
+    mapping of named views.
+
+    Closing the buffers FIRST: it wakes every handler and tells it to leave, so
     `shutdown()` is not racing threads that are mid-write. Then the whole
     server teardown runs on a daemon thread with a deadline, because
     `serve_forever`'s poll interval and a socket in an odd state can each cost
     seconds and neither is worth a hung node.
     """
-    if buffer is not None:
-        buffer.close()
+    # Every view, not just the first: a buffer left open holds its handler
+    # threads in wait_for, and shutdown() would then race them mid-write.
+    for buf, _label in normalize_views(buffer or {}).values():
+        buf.close()
     if server is None:
         return True
 

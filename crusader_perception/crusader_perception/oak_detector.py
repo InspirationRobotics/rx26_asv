@@ -79,9 +79,9 @@ from std_msgs.msg import String
 from crusader_common import config as crsd_config
 from crusader_common.mjpeg_view import FrameBuffer, serve_mjpeg, stop_mjpeg
 from crusader_common.node_main import run_node
-from crusader_common.param_utils import declare_from_config
+from crusader_common.param_utils import declare_from_config, make_set_callback
 from crusader_msgs.msg import Detection3D, Detection3DArray
-from crusader_perception import oak_pipeline
+from crusader_perception import oak_controls, oak_pipeline
 from crusader_perception.oak_detector_core import (FlashTracker, LabelVoter,
                                                    ShapeVoter, TrackTable,
                                                    buoy_patch, led_patch,
@@ -229,11 +229,24 @@ PARAM_SPEC = {
     # -- camera; MUST match the other OAK-D nodes, see check_config.py --
     "fps": dict(read_only=True, lo=1.0, hi=60.0, description="camera frame rate [Hz]"),
     "isp_denominator": dict(read_only=True, lo=1, hi=8,
-                            description="ISP downscale 1/N of 1920x1200"),
-    "ae_compensation": dict(read_only=True, lo=-9, hi=9,
-                            description="auto-exposure bias, EV steps; negative "
-                                        "is darker. Must match the exposure the "
-                                        "classifier's footage was shot at"),
+                            description="ISP downscale 1/N of 1920x1200 for the "
+                                        "STEREO pair, and so the depth size"),
+    "rgb_isp_denominator": dict(read_only=True, lo=1, hi=8,
+                                description="ISP downscale 1/N for the COLOUR "
+                                            "camera. Lower = more pixels on a "
+                                            "buoy without paying for depth at "
+                                            "the same resolution"),
+    # -- camera profile: exposure, white balance, image --
+    # GENERATED, not written out here. oak_controls owns the table of what
+    # exists, what it accepts and what it does; spelling the same sixteen
+    # entries out a second time in this file is how a range in the Tuning tab
+    # ends up disagreeing with the range the device enforces.
+    #
+    # Every one is [DYN], by definition: a camera setting you cannot change
+    # while looking at the picture is a setting nobody ever tunes, which is how
+    # the boat ended up metering the whole frame at dusk and sitting four stops
+    # under with its entire gain range unused.
+    **oak_controls.param_spec(),
     "poll_period_s": dict(read_only=True, lo=0.001, hi=1.0,
                           description="output-queue poll period [s]"),
     "queue_size": dict(read_only=True, lo=1, hi=30,
@@ -248,6 +261,12 @@ PARAM_SPEC = {
     "stream_quality": dict(read_only=True, lo=10, hi=100,
                            description="JPEG quality for the MJPEG view"),
 }
+
+# Only the camera settings are dynamic. Everything else here is an engine path,
+# a topic name or a geometry constant, and changing one of those under a running
+# detector would mean reloading a TensorRT engine mid-frame.
+DYNAMIC_RANGES = {k: (v["lo"], v["hi"]) for k, v in PARAM_SPEC.items()
+                  if not v["read_only"] and "lo" in v}
 
 # Box colour by LED colour, in OpenCV's BGR order. Drawing only — nothing here
 # classifies. Getting red and green the right way round matters more than it
@@ -322,11 +341,26 @@ class OakDetector(Node):
                 self.get_logger().warn(f"flash debug log disabled: {e}")
 
         self.device = None
+        self.control = None          # set by _open_device; _apply tolerates None
         self.server = None
+        # TWO VIEWS of the same moment. The annotated one answers "did it see
+        # the buoy"; the raw one answers "was the PICTURE any good", which the
+        # annotated frame cannot, because the boxes are drawn over the evidence.
+        # The raw view is also what a RECORDING pulls: a training set made of
+        # frames with boxes burned into them is a training set of the boxes.
         self.buffer = FrameBuffer()
+        self.raw_buffer = FrameBuffer()
+        self.views = {"annotated": (self.buffer, "Annotated"),
+                      "raw": (self.raw_buffer, "Raw")}
         self.batched = True          # until the engine says otherwise
         self.fps = 0.0
         self.det_ms = self.cls_ms = self.shape_ms = 0.0
+        # Measured per frame, not derived from the parameters: the parameters
+        # say what was ASKED for, and the gap between the two is the whole
+        # content of "is this profile doing anything".
+        self.exposure_us = 0.0
+        self.iso = 0
+        self.colour_k = 0
         self.frames = 0
         self.detections = 0
         self.no_depth = 0
@@ -340,8 +374,11 @@ class OakDetector(Node):
         self._open_device()
         if p["stream_enable"]:
             self.server = serve_mjpeg(int(p["stream_port"]),
-                                      int(p["stream_quality"]), self.buffer,
+                                      int(p["stream_quality"]), self.views,
                                       self.get_logger(), title="oak_detector")
+
+        self.add_on_set_parameters_callback(
+            make_set_callback(self, DYNAMIC_RANGES, self._apply))
 
         self.create_timer(p["poll_period_s"], self._drain)
         self.create_timer(p["health_period_s"], self._health)
@@ -374,26 +411,105 @@ class OakDetector(Node):
                 "oak_pipeline targets v2. Pin depthai==2.x in the Dockerfile "
                 "and rebuild the image.")
 
+        profile = self._camera_profile()
         pipeline, self.width, self.height = oak_pipeline.build_rgbd(
             isp_denominator=self.p["isp_denominator"], fps=self.p["fps"],
-            ae_compensation=int(self.p["ae_compensation"]))
+            controls=profile,
+            rgb_isp_denominator=self.p["rgb_isp_denominator"])
 
         self.dai = dai
         self.device = dai.Device(pipeline)
         self.queue = self.device.getOutputQueue("rgbd", self.p["queue_size"],
                                                 blocking=False)
+        # Depth 1, blocking=False: only the NEWEST control matters. Somebody
+        # dragging a slider generates a burst, and a queue that backs them up
+        # would have the camera walk through every intermediate value after the
+        # hand stopped moving.
+        self.control = self.device.getInputQueue(
+            oak_pipeline.CONTROL_STREAM, maxSize=1, blocking=False)
         self.fx, self.fy, self.cx, self.cy = oak_pipeline.rgb_intrinsics(
             self.device, self.width, self.height)
 
         self.get_logger().info(
             f"OAK-D open: mxid={self.device.getMxId()}, "
             f"usb={self.device.getUsbSpeed().name}, {self.width}x{self.height}")
+        self._log_camera(profile)
         warning = oak_pipeline.usb_warning(self.device)
         if warning:
             self.get_logger().warn(warning)
         self.get_logger().info(
             f"publishing {self.p['detections_topic']} in frame "
             f"'{self.frame_id}' (x forward, y left, z up)")
+
+    def _camera_profile(self, values=None):
+        """The value of every camera control, as {name: value}.
+
+        One description, read by the pipeline build and by every later change.
+        Two copies is exactly how the runtime path ends up applying something
+        the pipeline was not built with — and that failure looks like a camera
+        whose behaviour depends on whether anybody touched a slider.
+
+        `values` defaults to the node's current parameters; _apply passes a
+        merged copy so a profile can be built and offered to the device before
+        anything is committed.
+        """
+        values = self.p if values is None else values
+        return {c.name: values[c.name] for c in oak_controls.ALL}
+
+    def _log_camera(self, profile):
+        """Say what the camera was told, in ONE format.
+
+        Startup and every later change go through here so a session's /rosout
+        carries one consistent record of the profile over time — which is the
+        only way to answer "what was this footage shot at" after the fact.
+        """
+        self.get_logger().info(f"camera: {oak_controls.summary(profile)}")
+
+    # ---------------- dynamic params ----------------
+    def _apply(self, changes):
+        """Push changed camera settings to the running device.
+
+        The profile is built from a MERGED COPY of the parameters and committed
+        to self.p only once the device has taken it. That ordering matters
+        twice over: several controls are read together (the metering band is
+        two parameters, manual exposure is two more), so a change to one has to
+        be combined with the current value of its partner; and self.p is what
+        the Tuning tab reads back, so committing before the device accepts
+        would show a value that is in force nowhere.
+
+        EVERY setting is re-sent on any change, not just the one that moved. A
+        CameraControl carries only what was set on it and the device keeps the
+        rest, so re-sending costs one message either way and means the camera's
+        state is the whole of what the parameters say, rather than a history of
+        which sliders somebody happened to touch.
+        """
+        # Validated BEFORE self.p moves: a rejected value must leave the node
+        # holding what it had, or a typo in a mode name would be reported as a
+        # refusal while the parameter quietly kept the bad string and the next
+        # unrelated change re-applied it.
+        error = oak_controls.validate(changes)
+        if error:
+            raise ValueError(error)
+
+        # Built from a MERGED COPY, and committed only once the device has
+        # taken it. Mutating self.p first and rolling back on failure is the
+        # same thing with a window in it where the parameters describe a camera
+        # that refused the settings — and self.p is what the Tuning tab reads
+        # back, so that window is one where the page shows a value that is not
+        # in force anywhere.
+        profile = self._camera_profile(dict(self.p, **changes))
+        if self.control is not None:
+            control = self.dai.CameraControl()
+            refused = oak_controls.apply(self.dai, control, profile)
+            if refused:
+                # Not fatal at run time: the camera is already open and
+                # producing frames, and taking it down over a setting it will
+                # not accept is a far worse outcome than the setting not
+                # applying.
+                raise RuntimeError("; ".join(refused))
+            self.control.send(control)
+        self.p.update(changes)
+        self._log_camera(profile)
 
     # ---------------- frame pump ----------------
     def _drain(self):
@@ -405,7 +521,27 @@ class OakDetector(Node):
         still looked alive. Bounded, a backlog costs latency instead of control.
         """
         for _ in range(MAX_GROUPS_PER_TICK):
-            group = self.queue.tryGet()
+            try:
+                group = self.queue.tryGet()
+            except RuntimeError as e:
+                # X_LINK_ERROR here means the USB link to the camera fell over,
+                # and the node dies with it. Almost always BANDWIDTH: what
+                # crosses XLink is rgb_isp_denominator's frame plus the depth
+                # frame, every frame, and the product of size and fps has a
+                # ceiling well below what USB3 nominally offers. Raised as a
+                # sentence naming the two knobs, because the bare depthai
+                # message names neither and the failure arrives minutes after
+                # the change that caused it.
+                raise RuntimeError(
+                    f"{e} | "
+                    f"  The camera link dropped. This node was streaming "
+                    f"{self.width}x{self.height} colour at "
+                    f"{self.p['fps']:g} fps plus depth, which is roughly "
+                    f"{self._xlink_mb_s():.0f} MB/s over USB. "
+                    "  If that number is large, the fix is fewer bytes per "
+                    "second: raise rgb_isp_denominator (smaller frames) or "
+                    "lower fps (fewer of them). Both are in "
+                    "crusader_params.yaml under oak_detector.") from e
             if group is None:
                 return
 
@@ -415,12 +551,26 @@ class OakDetector(Node):
             if rgb_message is None or depth_message is None:
                 continue
 
+            # What the camera actually DID, off the frame's own metadata.
+            # Without this every control on the Tuning tab is set blind: the
+            # whole reason "dark in strong light" took a probe to diagnose is
+            # that nobody could see the answer was 2214 us at ISO 100, with
+            # fifteen times the shutter and the entire gain range unused.
+            self._read_exposure(rgb_message)
+
             rgb_frame = rgb_message.getCvFrame()
             depth_frame = depth_message.getFrame()
-            if rgb_frame.shape[:2] != depth_frame.shape[:2]:
+            # The two are DELIBERATELY allowed to differ now: depth is
+            # emitted at the stereo scale and aligned into CAM_A's field of
+            # view, so the same scene maps between them by a plain ratio. What
+            # is still fatal is a frame that is not the size this node was
+            # BUILT for, because then the ratio is wrong and the result is a
+            # plausible range rather than an exception.
+            if rgb_frame.shape[1] != self.width:
                 self.get_logger().error(
-                    "RGB/depth size mismatch — depth lookups would read the "
-                    "wrong pixel; dropping frame", throttle_duration_sec=5.0)
+                    f"RGB frame is {rgb_frame.shape[1]}px wide, expected "
+                    f"{self.width} — depth lookups would read the wrong "
+                    "pixel; dropping frame", throttle_duration_sec=5.0)
                 continue
 
             self._run_pipeline(rgb_frame, depth_frame,
@@ -626,6 +776,11 @@ class OakDetector(Node):
 
         if self.buffer.viewers > 0:
             self.buffer.put(self._annotate(rgb_frame, drawn))
+        # No copy and no drawing: _annotate already works on a copy, so the
+        # frame handed out here is the one the engines saw, untouched. Gated
+        # the same way, so a view nobody is watching costs nothing at all.
+        if self.raw_buffer.viewers > 0:
+            self.raw_buffer.put(rgb_frame)
 
     def _classify(self, crops):
         """Colour probabilities for a list of crops, one vector each.
@@ -663,11 +818,16 @@ class OakDetector(Node):
         rejects the background pixels that inevitably fall inside a box.
         """
         x1, y1, x2, y2 = box
-        height, width = depth_frame.shape[:2]
-        x1 = max(0, min(width - 1, x1))
-        x2 = max(0, min(width - 1, x2))
-        y1 = max(0, min(height - 1, y1))
-        y2 = max(0, min(height - 1, y2))
+        # TWO COORDINATE SPACES, and the correctness of every range depends on
+        # not mixing them. The box, the sample the viewer draws over the RGB
+        # frame, and the bearing maths are all in RGB pixels, because that is
+        # the size the intrinsics were read at. ONLY the depth lookup moves
+        # into depth pixels. When the two scales are equal every ratio below is
+        # 1.0 and this is exactly the code that ran before.
+        x1 = max(0, min(self.width - 1, x1))
+        x2 = max(0, min(self.width - 1, x2))
+        y1 = max(0, min(self.height - 1, y1))
+        y2 = max(0, min(self.height - 1, y2))
         if x2 <= x1 or y2 <= y1:
             return None, None
 
@@ -676,8 +836,21 @@ class OakDetector(Node):
         half_w = max(HALF_W_LIMITS[0], min(HALF_W_LIMITS[1], (x2 - x1) // 8))
         half_h = max(HALF_H_LIMITS[0], min(HALF_H_LIMITS[1], (y2 - y1) // 6))
 
-        patch = depth_frame[max(0, v - half_h):min(height, v + half_h + 1),
-                            max(0, u - half_w):min(width, u + half_w + 1)]
+        # Depth is ALIGNED to CAM_A, so the two frames cover the same field of
+        # view and differ only in sampling density: a plain ratio is the whole
+        # of the correction, not an approximation.
+        height, width = depth_frame.shape[:2]
+        sx = width / float(self.width)
+        sy = height / float(self.height)
+        du, dv = int(u * sx), int(v * sy)
+        # At least one pixel after scaling down. A half-width that rounds to
+        # zero is an empty slice, which reads as "no depth here" for a buoy
+        # that was in fact ranged perfectly well.
+        dhw = max(1, int(half_w * sx))
+        dhh = max(1, int(half_h * sy))
+
+        patch = depth_frame[max(0, dv - dhh):min(height, dv + dhh + 1),
+                            max(0, du - dhw):min(width, du + dhw + 1)]
         valid = patch[(patch >= self.p["range_min_m"] * 1000.0)
                       & (patch <= self.p["range_max_m"] * 1000.0)]
         sample = (u, v, half_w, half_h, int(valid.size))
@@ -751,9 +924,44 @@ class OakDetector(Node):
                   f"no_depth={self.no_depth} no_crop={self.no_crop}  "
                   f"flash={'on' if self.flash_enable else 'OFF'}  "
                   f"{self.width}x{self.height}")
+        # A second line, not a longer first one: at 640 wide the status line is
+        # already close to running off the edge, and a readout you cannot read
+        # is not a readout.
+        measured = (f"MEASURED exp {self.exposure_us:.0f}us  ISO {self.iso}  "
+                    f"wb {self.colour_k}K   SET {oak_controls.summary(self.p)}")
+        cv2.putText(image, measured, (6, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.36,
+                    (255, 255, 255), 1, cv2.LINE_AA)
         cv2.putText(image, status, (6, 13), cv2.FONT_HERSHEY_SIMPLEX, 0.36,
                     (255, 255, 255), 1, cv2.LINE_AA)
         return image
+
+    def _xlink_mb_s(self):
+        """Roughly what this configuration puts on the USB link, MB/s.
+
+        The colour frame crosses as NV12 (1.5 bytes per pixel, not 3 — the
+        BGR conversion happens on this side, in getCvFrame), and depth as
+        16-bit. Approximate on purpose: it exists to tell 30 MB/s from 120
+        MB/s in an error message, not to be a budget.
+        """
+        depth_w, depth_h = oak_pipeline.output_size(self.p["isp_denominator"])
+        per_frame = self.width * self.height * 1.5 + depth_w * depth_h * 2
+        return per_frame * float(self.p["fps"]) / 1e6
+
+    def _read_exposure(self, message):
+        """Latch the frame's measured exposure, gain and colour temperature.
+
+        Wrapped because these are metadata a device or a depthai build may not
+        populate, and a missing readout must cost the readout, not the frame.
+        Left at the previous value rather than zeroed: this is a display, and a
+        zero would read as "the camera chose 0 us", which is a measurement, not
+        a gap.
+        """
+        try:
+            self.exposure_us = message.getExposureTime().total_seconds() * 1e6
+            self.iso = message.getSensitivity()
+            self.colour_k = message.getColorTemperature()
+        except Exception:
+            pass
 
     # ---------------- helpers ----------------
     def _ros_stamp(self, message):
@@ -767,6 +975,12 @@ class OakDetector(Node):
     def _health(self):
         now = time.monotonic()
         delivered = self.frames - self.last_health_frames
+        # Logged as well as drawn: /rosout is what the Logs tab and every
+        # recording capture, so the exposure a session was shot at survives
+        # into the session rather than living only on a screen nobody kept.
+        self.get_logger().info(
+            f"camera measured: exp {self.exposure_us:.0f}us ISO {self.iso} "
+            f"wb {self.colour_k}K | set: {oak_controls.summary(self.p)}")
         elapsed = max(now - self.last_health_time, 1e-6)
         self.last_health_frames = self.frames
         self.last_health_time = now
@@ -865,7 +1079,7 @@ class OakDetector(Node):
     def destroy_node(self):
         # Viewer first: a stream handler blocks waiting for the next frame, so
         # closing the camera first leaves it waiting for one that never comes.
-        stop_mjpeg(self.server, self.buffer, self.get_logger())
+        stop_mjpeg(self.server, self.views, self.get_logger())
         self.server = None
         if self._debug is not None:
             try:

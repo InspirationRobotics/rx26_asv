@@ -24,6 +24,7 @@ against re-deriving it elsewhere; a copy of that constant in JavaScript is
 exactly the drift it warns about, so the page is sent finished numbers.
 """
 import json
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -86,6 +87,17 @@ td.n{text-align:right;color:var(--dim)}
 .hint{color:var(--dim);font-size:12px}
 label{font-size:12.5px;color:var(--dim)}
 input[type=range]{width:110px;vertical-align:middle}
+button.go{border-color:var(--ok);color:var(--ok)}
+button.go:hover{background:#45bca022}
+button.on{border-color:var(--accent);color:var(--accent);background:#4eafd216}
+.log{margin-top:9px;max-height:150px;overflow-y:auto;
+  font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--dim)}
+.log div{padding:1px 0;border-bottom:1px solid #ffffff08}
+.pend{color:var(--warn)}
+.bar2{height:5px;background:#ffffff12;border-radius:3px;margin-top:10px;
+  overflow:hidden}
+.bar2>div{height:100%;width:0;background:var(--accent);transition:width .3s}
+.ok{color:var(--ok)} .bad{color:var(--fail)} .warn{color:var(--warn)}
 </style></head><body>
 <div class="wrap">
   <div>
@@ -121,6 +133,33 @@ input[type=range]{width:110px;vertical-align:middle}
         </div>
       </div>
       <div class="card">
+        <h2>Mission</h2>
+        <div style="display:flex;gap:7px;flex-wrap:wrap;align-items:center">
+          <button id="go" class="go">Send goal</button>
+          <button id="stop" class="danger" hidden>Cancel</button>
+          <button id="rst">Return to start</button>
+          <span id="mstate" class="hint">idle</span>
+        </div>
+        <div class="bar2" id="mbarwrap" hidden><div id="mbar"></div></div>
+        <p class="hint" id="mdetail"></p>
+      </div>
+
+      <div class="card" id="radiocard" hidden>
+        <h2>Radio &mdash; you are the aircraft</h2>
+        <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:9px">
+          <button id="tx" class="go">Transmit passage</button>
+          <button id="confirm">Confirm gate</button>
+        </div>
+        <p class="hint" id="gatehint">Transmit sends the ten buoys as
+          RXL_SAFE_PASSAGE. The boat pairs them and picks the order itself.
+          It asks to confirm after circling the ENTRY and again after every
+          gate &mdash; recolour or move anything first, then hit Confirm to send
+          the field as it now is.</p>
+        <p class="hint" id="askrow"></p>
+        <div id="gatelog" class="log"></div>
+      </div>
+
+      <div class="card">
         <h2>Anchor</h2>
         <div class="hint" id="anch">waiting for the first GPS fix&hellip;</div>
       </div>
@@ -131,6 +170,10 @@ input[type=range]{width:110px;vertical-align:middle}
 var PAL = __PALETTE__;
 var sel = 0, buoys = [], boat = null, anchored = false;
 var extent = 24, drag = null, picked = -1;
+// The radio half. `mode` is 'place' or 'gate': in gate mode a click on a
+// placed buoy adds it to the pending pair rather than moving it, because the
+// gate order is authored by pointing at the same buoys already on the map.
+var radio = null;
 var c = document.getElementById('c'), g = c.getContext('2d');
 
 function mpp(){ return extent / c.width; }              // metres per pixel
@@ -253,10 +296,117 @@ function palette(){
   d.querySelectorAll('.sw').forEach(function(e){
     e.onclick = function(){ sel = +e.dataset.i; palette(); }; });
 }
+document.getElementById('tx').onclick = function(){
+  fetch('/transmit', {method:'POST'}).then(function(r){ return r.text(); })
+    .then(function(t){ flash(this_tx, t); }.bind(null));
+};
+var this_tx = document.getElementById('tx');
+function flash(btn, text){
+  var was = btn.textContent; btn.textContent = text;
+  setTimeout(function(){ btn.textContent = was; }, 1800);
+}
+// RESTORED, same cause as push/note/renderMission above: the gate-authoring
+// removal sliced a whole region out, and these three went with it. They are
+// ASSIGNMENTS rather than declarations, so comparing "functions defined"
+// between the old and new file did not show them missing -- which is why the
+// first repair looked complete and Send goal, Cancel and Return to start were
+// all still dead. The buttons were in the markup the whole time, wired to
+// nothing, so clicking them did exactly nothing and logged nothing.
+document.getElementById('go').onclick = function(){
+  var b = this; b.disabled = true;
+  fetch('/goal', {method:'POST'}).then(function(r){
+    return r.text().then(function(t){ return [r.status, t]; });
+  }).then(function(rt){
+    b.disabled = false;
+    if (rt[0] !== 200) note(rt[1], 'bad');
+  });
+};
+document.getElementById('stop').onclick = function(){
+  fetch('/cancel', {method:'POST'});
+};
+document.getElementById('rst').onclick = function(){
+  fetch('/reset', {method:'POST'}).then(function(r){
+    return r.text().then(function(t){ return [r.status, t]; });
+  }).then(function(rt){ if (rt[0] !== 200) note(rt[1], 'bad'); });
+};
+document.getElementById('confirm').onclick = function(){
+  var b = this;
+  fetch('/confirm', {method:'POST'}).then(function(r){ return r.text(); })
+    .then(function(t){ flash(b, t); });
+};
+function renderRadio(){
+  var ask = document.getElementById('askrow');
+  if (!radio){ ask.textContent = ''; return; }
+  if (radio.pending !== null && radio.pending !== undefined){
+    ask.innerHTML = '<b style="color:' + 'var(--warn)' + '">The boat is at ' +
+      'checkpoint ' + radio.pending + ' and is waiting.</b> Change any colours ' +
+      'you want, then Confirm.';
+  } else {
+    ask.textContent = 'On ' + radio.endpoint + ' \u2014 ' + radio.sent +
+      ' transmissions, ' + radio.confirmed + ' checkpoint(s) confirmed.' +
+      (radio.auto_confirm ? '  Auto-confirm is ON.' : '');
+  }
+  var lg = document.getElementById('gatelog');
+  if (lg && radio.log) lg.innerHTML = radio.log.map(function(l){
+    return '<div>' + l.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</div>';
+  }).join('');
+}
+// RESTORED. These four went out with the gate-authoring code on 2026-09-14:
+// the edit sliced from the "Author gates" button to poll() and took
+// everything in between, not just the gate functions. poll() then threw a
+// ReferenceError on renderMission every cycle, and push() -- the ONLY thing
+// that POSTs the field -- was gone, so a placed buoy never reached the server
+// and the next poll overwrote it with the server's older list. It looked
+// exactly like "placing a buoy deletes the previous one".
 function push(){
   fetch('/field', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({buoys: buoys.map(function(b){
       return {label:b.label, east:b.east, north:b.north}; })})});
+}
+function note(text, cls){
+  var d = document.getElementById('mdetail');
+  d.textContent = text; d.className = 'hint ' + (cls || '');
+}
+function renderMission(m){
+  if (!m) return;
+  var st = document.getElementById('mstate');
+  var go = document.getElementById('go'), stop = document.getElementById('stop');
+  var running = (m.state === 'active' || m.state === 'starting' ||
+                 m.state === 'cancelling');
+  go.hidden = running;
+  stop.hidden = !running;
+  document.getElementById('mbarwrap').hidden = !running;
+  if (running){
+    st.textContent = m.state === 'active'
+      ? (m.phase || 'running') + '  \u00b7  plan v' + m.plan_version +
+        '  \u00b7  ' + m.buoys_known + ' buoys'
+      : m.state;
+    st.className = 'hint warn';
+    document.getElementById('mbar').style.width =
+      Math.round((m.progress || 0) * 100) + '%';
+    if (!document.getElementById('mdetail').classList.contains('bad')) note('');
+  } else if (m.state === 'done'){
+    var okish = (m.outcome === 0);
+    st.textContent = okish ? 'completed' : 'stopped';
+    st.className = 'hint ' + (okish ? 'ok' : 'bad');
+    note((OUTCOME[m.outcome] || ('outcome ' + m.outcome)) +
+         (m.elapsed_s ? '  \u00b7  ' + m.elapsed_s.toFixed(1) + ' s' : '') +
+         (m.detail ? '  \u00b7  ' + m.detail : ''), okish ? 'ok' : 'bad');
+  } else {
+    st.textContent = 'idle';
+    st.className = 'hint';
+  }
+}
+function renderReset(r){
+  var b = document.getElementById('rst');
+  if (!r) { b.hidden = true; return; }
+  b.hidden = false;
+  var busy = (r.state === 'running');
+  b.disabled = busy;
+  b.textContent = busy ? 'Returning\u2026' : 'Return to start';
+  if (r.state === 'running') note(r.detail, 'warn');
+  else if (r.state === 'failed') note('return failed: ' + r.detail, 'bad');
+  else if (r.state === 'done') note(r.detail, 'ok');
 }
 function poll(){
   fetch('/state').then(function(r){ return r.json(); }).then(function(s){
@@ -275,13 +425,18 @@ function poll(){
     // Only take the server's field while nothing is being dragged, or the buoy
     // under the pointer would jump back on every poll.
     if (drag === null && s.buoys) buoys = s.buoys;
+    renderMission(s.mission);
+    renderReset(s.reset);
+    radio = s.radio || null;
+    document.getElementById('radiocard').hidden = !radio;
+    renderRadio();
     paint(); render();
   }).catch(function(){
     document.getElementById('dot').className = 'dot';
     document.getElementById('conn').textContent = 'bench not reachable';
   });
 }
-palette(); paint(); render(); poll(); setInterval(poll, 500);
+palette(); paint(); render(); renderRadio(); poll(); setInterval(poll, 500);
 </script></body></html>
 """
 
@@ -307,6 +462,56 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(404, "no such path", "text/plain")
 
     def do_POST(self):
+        if self.path.startswith("/reset"):
+            if not self.gui.sitl_reset:
+                self._send(409, "no reset available", "text/plain")
+                return
+            try:
+                msg = self.gui.sitl_reset()
+            except Exception as exc:                       # noqa: BLE001
+                self._send(409, str(exc), "text/plain")
+                return
+            self._send(200, msg or "ok", "text/plain")
+            return
+
+        if self.path.startswith("/goal") or self.path.startswith("/cancel"):
+            fn = (self.gui.mission_send if self.path.startswith("/goal")
+                  else self.gui.mission_cancel)
+            if not fn:
+                self._send(409, "no mission client", "text/plain")
+                return
+            try:
+                msg = fn()
+            except Exception as exc:                       # noqa: BLE001
+                self._send(409, str(exc), "text/plain")
+                return
+            self._send(200, msg or "ok", "text/plain")
+            return
+
+        if self.path.startswith("/transmit"):
+            if not self.gui.transmit:
+                self._send(409, "no radio: start with --uav", "text/plain")
+                return
+            try:
+                msg = self.gui.transmit()
+            except Exception as exc:                       # noqa: BLE001
+                self._send(500, "transmit failed: %s" % exc, "text/plain")
+                return
+            self._send(200, msg or "sent", "text/plain")
+            return
+
+        if self.path.startswith("/confirm"):
+            if not self.gui.confirm:
+                self._send(409, "no radio: start with --uav", "text/plain")
+                return
+            try:
+                msg = self.gui.confirm()
+            except Exception as exc:                        # noqa: BLE001
+                self._send(500, "confirm failed: %s" % exc, "text/plain")
+                return
+            self._send(200, msg or "confirmed", "text/plain")
+            return
+
         if not self.path.startswith("/field"):
             self._send(404, "no such path", "text/plain")
             return
@@ -330,6 +535,37 @@ class _Handler(BaseHTTPRequestHandler):
         pass          # one line per 500 ms poll would bury the bench's own log
 
 
+def _check_page_is_wired():
+    """Every button in the markup must have a handler. Raises if one does not.
+
+    A DEAD BUTTON IS SILENT. It sits in the page looking enabled, clicking it
+    does nothing, and neither side logs a thing -- there is no error to go
+    looking for.
+
+    This exists because removing the gate-authoring UI on 2026-09-14 sliced a
+    whole region out of the script and took four functions and three button
+    handlers with it. The first repair restored the functions, because comparing
+    "functions defined" before and after showed those up; the handlers are
+    ASSIGNMENTS rather than declarations, so that comparison said nothing about
+    them, and Send goal, Cancel and Return to start stayed dead through a fix
+    that looked complete.
+
+    Checked in start() rather than in a test, so it fires wherever the bench is
+    actually run.
+    """
+    buttons = set(re.findall(r'<button id="([A-Za-z0-9_]+)"', PAGE))
+    wired = set(re.findall(
+        r"getElementById\('([A-Za-z0-9_]+)'\)\s*\.\s*(?:onclick|addEventListener)",
+        PAGE))
+    dead = sorted(buttons - wired)
+    if dead:
+        raise RuntimeError(
+            "field_gui: %d button(s) in the page are wired to nothing: %s. "
+            "A dead button clicks silently and reports no error, so this fails "
+            "at startup rather than becoming a surprise on the water."
+            % (len(dead), ", ".join(dead)))
+
+
 class FieldGui:
     """Serves the page and relays edits back to the bench.
 
@@ -338,11 +574,22 @@ class FieldGui:
     writes must be protected by the same lock the synthesis timer reads under.
     """
 
-    def __init__(self, get_state, set_field, port=DEFAULT_PORT):
+    def __init__(self, get_state, set_field, port=DEFAULT_PORT,
+                 transmit=None, confirm=None,
+                 mission_send=None, mission_cancel=None, sitl_reset=None):
         self.get_state, self.set_field, self.port = get_state, set_field, port
+        # The radio half, present only under --uav. When these are None the
+        # page hides the Radio card entirely rather than offering a button that
+        # would 409 -- a control that cannot work should not be on screen.
+        self.transmit, self.confirm = transmit, confirm
+        # Starting and stopping a run from the page. A web UI you have to leave
+        # for a terminal is not finished.
+        self.mission_send, self.mission_cancel = mission_send, mission_cancel
+        self.sitl_reset = sitl_reset
         self._srv = None
 
     def start(self):
+        _check_page_is_wired()
         _Handler.gui = self
         # Bound on all interfaces because the browser is on the laptop and the
         # bench runs on the Jetson — the same reason lidar_view and bt_view do.

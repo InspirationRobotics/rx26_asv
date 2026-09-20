@@ -73,6 +73,11 @@ RESOLUTIONS = {
     "720p": dai.ColorCameraProperties.SensorResolution.THE_720_P,
 }
 
+# Sensor pixels per --resolution. Needed because the AE metering region is
+# specified against the SENSOR, before ISP scaling, so --isp-scale must not
+# enter that calculation at all.
+SENSOR_SIZE = {"1200p": (1920, 1200), "800p": (1280, 800), "720p": (1280, 720)}
+
 CONTAINERS = {"MJPG": ".avi", "XVID": ".avi", "mp4v": ".mp4", "avc1": ".mp4"}
 
 _stop = False
@@ -122,6 +127,34 @@ def build_pipeline(args, cam_names):
                     args.ae_compensation)
             except Exception as e:
                 print(f"[record] warn: --ae-compensation unsupported here ({e})")
+
+        if args.ae_region_height:
+            # WHERE the meter looks. The deployed pipeline meters a band across
+            # the horizon rather than the whole frame, because a bright sky
+            # averages out to a number that looks correct and puts the buoys on
+            # the floor -- measured on the boat at dusk, the bottom third of the
+            # frame had a median of 4/255 with only 0.10% of the frame clipped.
+            # A DATASET SHOT WITH DIFFERENT METERING THAN INFERENCE IS THE
+            # TRAINING CONTRACT BROKEN IN THE OTHER DIRECTION, so these default
+            # to the same fractions as crusader_params.yaml.
+            #
+            # SENSOR pixels, before ISP scaling. Using the scaled size here
+            # would put the band in the sky and darken the very frames this run
+            # exists to collect.
+            #
+            # The rectangle maths is deliberately duplicated from
+            # crusader_perception.oak_pipeline.ae_region_rect, which is the
+            # definition of record: this script is standalone on purpose -- it
+            # is meant to be copied to a laptop next to the camera -- and an
+            # import of the ROS package would end that. Keep the two in step.
+            w, h = SENSOR_SIZE[args.resolution]
+            y = int(round(min(max(args.ae_region_top, 0.0), 1.0) * h))
+            rh = int(round(min(max(args.ae_region_height, 0.0), 1.0) * h))
+            rh = max(1, min(rh, h - y))
+            try:
+                cam.initialControl.setAutoExposureRegion(0, y, w, rh)
+            except Exception as e:
+                print(f"[record] warn: --ae-region unsupported here ({e})")
 
         if args.max_exposure_us:
             # Bounds auto-exposure so the dataset never contains frames blurrier
@@ -398,6 +431,13 @@ def parse_args():
                    choices=range(-9, 10), metavar="[-9..9]",
                    help="auto-exposure compensation in EV steps; negative is "
                         "darker/shorter shutter (default: -3, 0 disables)")
+    p.add_argument("--ae-region-top", type=float, default=0.35,
+                   help="top of the AE metering band, fraction of frame height "
+                        "(matches ground_station/oak_detector's ae_region_top)")
+    p.add_argument("--ae-region-height", type=float, default=0.45,
+                   help="height of the AE metering band, fraction of frame "
+                        "height; 0 meters the whole frame, which lets a bright "
+                        "sky darken the waterline")
     p.add_argument("--max-exposure-us", type=int, default=0,
                    help="cap auto-exposure, e.g. 8000 for 8 ms, to keep motion "
                         "blur out of the dataset (default: uncapped)")

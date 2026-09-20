@@ -22,9 +22,11 @@
 #define CRUSADER_BT__CONTEXT_HPP_
 
 #include <cmath>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "behaviortree_cpp/action_node.h"
@@ -55,11 +57,79 @@ struct Context
   bool pose_fresh = false;
   nav::Vec2 boat;
   double heading_deg = std::nan("");          ///< NaN when GPS yaw is unresolved
-  std::vector<nav::Buoy> buoys;
+  std::vector<nav::Buoy> buoys;               ///< FUSED: plan + tracker
   bool have_entry = false;
   bool have_exit = false;
   nav::Vec2 entry;
   nav::Vec2 exitp;                            ///< `exit` is a libc function
+
+  // ---- the UAV's passage plan, above Core tier ----
+  //
+  // `buoys` above is the FUSION of this and the tracker's targets, and the
+  // beacon state in it always came from here. See nav::fusePassage.
+  //
+  // entry/exitp come from the plan too, not from findBeacon over the boat's own
+  // targets: the EXIT sits 92 m out in a full-size field, far past the camera,
+  // and a transit that waits to SEE it never starts.
+  std::vector<nav::PlanBuoy> plan;
+  std::uint32_t plan_version = 0;             ///< bumps on every new plan
+  bool plan_fresh = false;                    ///< aged like pose_fresh
+  double plan_age_s = 0.0;                    ///< seconds since the last plan
+  std::vector<nav::Buoy> obstacles;           ///< tracked, but not in the plan
+
+  // ---- the passage the BOAT planned ----
+  //
+  // The aircraft sends ten buoys and their colours. Which pair is a gate, and
+  // what order to drive them in, is worked out here by nav::planPassage over
+  // `buoys` -- the FUSED field, so the aircraft's colours and the tracker's
+  // positions. Re-planned every tick, because a confirmation can bring new
+  // colours and the answer must follow them.
+  nav::Passage passage;
+
+  /// Gates already driven, as (red_id, green_id).
+  ///
+  /// BY BUOY IDS, NOT BY COUNT. A confirmation can recolour the field, the plan
+  /// re-runs, and the order can change underneath the boat; "I have done two,
+  /// start at index two" then skips a gate that was never driven. Ids survive
+  /// a reorder and survive the pair itself swapping colours.
+  std::vector<std::pair<int, int>> cleared_gates;
+
+  // ---- the confirmation handshake ----
+  //
+  // Having crossed a gate, the boat publishes gate_reached(gate_seq) and waits
+  // for an acknowledgement carrying the SAME seq before driving the next one.
+  // The question it is asking is "is the next pair still where you said it
+  // was" -- the aircraft answers by acking and retransmitting the whole field.
+  //
+  // Matching on the sequence is what makes a retransmission on a lossy radio
+  // distinguishable from the answer to the next request.
+  std::uint8_t gate_seq = 0;
+  int gate_red_id = -1;                       ///< the gate being driven now
+  int gate_green_id = -1;
+  bool have_confirmation = false;             ///< an ack for gate_seq arrived
+  /// Every gate in `passage` is in `cleared_gates`: go to the exit.
+  ///
+  /// THE BOAT DECIDES THIS NOW, from its own plan -- it holds the whole field,
+  /// so it can count. The aircraft used to end the transit with a 255/255
+  /// answer, which it can no longer do because it no longer assigns gates.
+  ///
+  /// Proximity to the exit is still not a substitute, for the reason it never
+  /// was: the boat must clear every gate first, and the exit buoy can sit well
+  /// inside any sane arrival radius of the last one.
+  bool passage_complete = false;
+  /// Did the boat finish the gate it last asked about?
+  ///
+  /// RequestConfirmation advances the sequence ONLY when this is set, so a leg
+  /// that failed re-asks under the SAME seq and the aircraft's idempotent
+  /// answer gives the same reply. Without it every failure inside the leg --
+  /// a confirmation timeout, an unusable pair, a PlanChanged re-task -- burns
+  /// a sequence number, and back when the sequence number chose the gate that
+  /// also SKIPPED one. SITL 2026-09-13.
+  ///
+  /// It is no longer what stops a gate being skipped -- cleared_gates is, and
+  /// it is keyed on the buoys rather than on a counter -- but it still keeps
+  /// the sequence numbering honest.
+  bool gate_cleared = false;
 
   /// Where the boat was when the goal was accepted. "Go home" in a mission
   /// means "back to where this attempt started", not the autopilot's HOME —
@@ -80,6 +150,9 @@ struct Context
   std::function<void(const std::string &)> set_task;
   std::function<void()> publish_report;
   std::function<void(int)> consume_buoy;      ///< mark a buoy dealt with
+  /// Tell the aircraft a gate is cleared and ask for the next pair. Publishes
+  /// std_msgs/UInt8 on crsd/gate_reached; rxl_link_node puts it on the air.
+  std::function<void(std::uint8_t)> report_gate_reached;
 };
 
 using ContextPtr = std::shared_ptr<Context>;

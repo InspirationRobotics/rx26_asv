@@ -40,7 +40,7 @@ import time
 # The session directory walk lives in recorder.py, which owns the session
 # directory. A second copy here would be a second answer to "how big is this
 # recording" — and the two would be compared against each other on screen.
-from crusader_groundstation.recorder import dir_size_bytes
+from crusader_groundstation.recorder import GrowthMeter, hours_left
 
 # Message types big enough that ticking one changes the nature of the session.
 # Matched on the type, never on the topic name: a second camera, a different
@@ -56,10 +56,6 @@ HEAVY_TYPES = (
 # Present in every ROS graph, rarely what anyone wanted, and /rosout is already
 # captured by the Logs tab's ring buffer. Offered but never preselected.
 NOISE_TOPICS = ("/parameter_events", "/rosout")
-
-# How long the growth-rate window is. Long enough that one sqlite flush does
-# not read as a rate spike, short enough to notice a point cloud being ticked.
-RATE_WINDOW_S = 20.0
 
 STOP_GRACE_S = 10.0        # rosbag2 flushing a large cache can take seconds
 
@@ -88,18 +84,6 @@ def describe_topics(pairs):
     return sorted(rows, key=lambda r: r["name"])
 
 
-def hours_left(free_bytes, rate_bytes_s):
-    """How long the disk lasts at the measured rate, or None.
-
-    None when the rate is not yet measurable — which is a blank, and a blank is
-    a fact. Returning a large number for "we have not measured anything yet"
-    would read as reassurance the data has not earned.
-    """
-    if not rate_bytes_s or rate_bytes_s <= 0 or free_bytes is None:
-        return None
-    return free_bytes / rate_bytes_s / 3600.0
-
-
 class BagRecorder:
     """One `ros2 bag record` child, its growth rate, and its exit status."""
 
@@ -111,8 +95,7 @@ class BagRecorder:
         self._started = 0.0
         self._stopped = None
         self._error = ""
-        self._samples = []           # [(monotonic, bytes)] over RATE_WINDOW_S
-        self._size = 0
+        self._meter = GrowthMeter()
         self._lock = threading.Lock()
 
     # ---- state ----
@@ -162,8 +145,7 @@ class BagRecorder:
             self._started = time.monotonic()
             self._stopped = None
             self._error = ""
-            self._samples = []
-            self._size = 0
+        self._meter.reset()
         threading.Thread(target=self._drain, args=(popen,), daemon=True).start()
         if self.log:
             self.log(f"bag recording {len(topics)} topic(s) into {bag_dir}")
@@ -252,46 +234,24 @@ class BagRecorder:
         """
         if not self.recording or not self._dir:
             return
-        now = time.monotonic()
-        size = dir_size_bytes(self._dir)
-        with self._lock:
-            self._size = size
-            self._samples.append((now, size))
-            cutoff = now - RATE_WINDOW_S
-            # Keep one sample older than the window so a rate is available from
-            # the first tick after it, rather than only once the window fills.
-            while len(self._samples) > 2 and self._samples[1][0] < cutoff:
-                self._samples.pop(0)
+        self._meter.sample(self._dir)
 
     def rate_bytes_s(self):
-        """Measured growth, or None until two samples exist far enough apart."""
-        with self._lock:
-            if len(self._samples) < 2:
-                return None
-            (t0, s0), (t1, s1) = self._samples[0], self._samples[-1]
-        if t1 - t0 < 1.0:
-            return None
-        return max(0.0, (s1 - s0) / (t1 - t0))
+        return self._meter.rate_bytes_s()
 
     def status(self, free_bytes=None):
         """What the Record tab renders. Blank rather than zero when unmeasured."""
-        rate = self.rate_bytes_s()
+        readout = self._meter.readout(free_bytes)
         with self._lock:
             recording = self._popen is not None and self._popen.poll() is None
-            return {
+            status = {
                 "recording": recording,
                 "topics": list(self._topics),
                 "dir": self._dir,
-                "size_mb": round(self._size / 1048576.0, 1),
-                "rate_mb_s": None if rate is None else round(rate / 1048576.0, 2),
-                "hours_left": (None if rate is None else
-                               _round1(hours_left(free_bytes, rate))),
                 "elapsed_s": (round(((self._stopped or time.monotonic())
                                      - self._started), 1)
                               if self._started else 0.0),
                 "error": self._error,
             }
-
-
-def _round1(v):
-    return None if v is None else round(v, 1)
+        status.update(readout)
+        return status

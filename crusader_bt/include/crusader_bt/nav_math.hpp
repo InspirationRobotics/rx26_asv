@@ -33,6 +33,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace crusader_bt
@@ -402,6 +404,323 @@ inline Gate gateFromIds(
   if (r == nullptr) {return {false, {}, {}, 0.0, "red buoy not known"};}
   if (g == nullptr) {return {false, {}, {}, 0.0, "green buoy not known"};}
   return gateWaypoints(r->p, g->p, standoff_m, approach_m, min_width_m);
+}
+
+// ------------------------------------------------------------------- fusion
+
+/// One buoy exactly as the UAV reported it, before anything local touches it.
+struct PlanBuoy
+{
+  int id = -1;                     ///< the UAV's index, 0..9. NOT a tracker id.
+  Vec2 p;
+  Beacon state = Beacon::Unknown;
+};
+
+struct Fused
+{
+  /// The passage, keyed by UAV id. Beacon state always came from the plan.
+  std::vector<Buoy> passage;
+  /// Tracked contacts no plan buoy claimed. Beacon is always Unknown, and
+  /// these can never become a gate candidate.
+  std::vector<Buoy> obstacles;
+};
+
+/// Merge what the aircraft says with what the boat can see.
+///
+/// THE RULE IS "THE UAV WINS", and it is narrower than it sounds:
+///
+///   * BEACON STATE always comes from the plan. Above Core tier the handbook
+///     says the passage is only detectable from the air, so the boat's own
+///     guess at a colour is not evidence, it is noise with an opinion.
+///   * POSITION comes from the TRACKER when a contact was associated, and from
+///     the plan otherwise. That is not a contradiction of the rule above: LiDAR
+///     range is excellent close in, which is exactly when metre accuracy at a
+///     gate decides whether the boat clears it. The UAV's position is better
+///     far out, when it does not matter yet.
+///   * THE ID stays the UAV's, because that is the key RXL_NEXT_BUOY_SET names
+///     a gate pair with. The tracker's own id is a different number space and
+///     the two must never be compared.
+///
+/// A tracked contact that matches nothing in the plan is NOT a passage buoy. It
+/// goes to `obstacles` with Beacon::Unknown so it can never be chosen as one
+/// half of a gate. The tree does no avoidance anyway -- that is the autopilot's
+/// OA params -- so these exist for the report and the log.
+///
+/// Association is GLOBAL greedy nearest-pair, not per-buoy nearest. Per-buoy
+/// lets one contact be claimed twice, which puts two gate buoys on the same
+/// point and makes the gate bearing meaningless. The field is at most ten
+/// buoys, so the cost of doing it properly is nothing.
+///
+/// `consumed` is NOT carried here. The caller owns it -- bt_runner_node keeps a
+/// set of consumed ids and re-applies it after every rebuild -- because this
+/// function is pure and gets called fresh on every tick.
+inline Fused fusePassage(
+  const std::vector<PlanBuoy> & plan, const std::vector<Buoy> & tracked,
+  double assoc_radius_m)
+{
+  Fused out;
+  std::vector<bool> claimed(tracked.size(), false);
+  std::vector<int> match(plan.size(), -1);
+
+  // Greedy: take the closest pair still available, repeat. At most
+  // min(|plan|, |tracked|) rounds over a ten-buoy field.
+  for (;;) {
+    double best = assoc_radius_m;
+    int bi = -1, bj = -1;
+    for (std::size_t i = 0; i < plan.size(); ++i) {
+      if (match[i] >= 0) {continue;}
+      for (std::size_t j = 0; j < tracked.size(); ++j) {
+        if (claimed[j]) {continue;}
+        const double r = norm(tracked[j].p - plan[i].p);
+        if (r <= best) {
+          best = r;
+          bi = static_cast<int>(i);
+          bj = static_cast<int>(j);
+        }
+      }
+    }
+    if (bi < 0) {break;}
+    match[bi] = bj;
+    claimed[bj] = true;
+  }
+
+  for (std::size_t i = 0; i < plan.size(); ++i) {
+    Buoy b;
+    b.id = plan[i].id;
+    b.state = plan[i].state;                       // the UAV wins, always
+    b.p = (match[i] >= 0) ? tracked[match[i]].p : plan[i].p;
+    out.passage.push_back(b);
+  }
+  for (std::size_t j = 0; j < tracked.size(); ++j) {
+    if (claimed[j]) {continue;}
+    Buoy o = tracked[j];
+    o.state = Beacon::Unknown;    // whatever the boat thought it saw, it is not
+    out.obstacles.push_back(o);   // part of the passage
+  }
+  return out;
+}
+
+/// Where to steer to get past whatever is in the way.
+struct Detour
+{
+  Vec2 wp;                     ///< steer HERE now; equals the goal when clear
+  bool detoured = false;
+  int around_id = kNoBuoy;     ///< which obstacle forced it
+  double miss_m = 0.0;         ///< how close the straight line came to it
+};
+
+/// Steer around the first obstacle on the way to `to`, if there is one.
+///
+/// WHY THIS IS HERE AND NOT IN THE AUTOPILOT. ArduRover's own avoidance
+/// (OA_TYPE, fed OBSTACLE_DISTANCE by proximity_bridge) is a black box from the
+/// boat's point of view: it cannot be watched on the tree view, it cannot be
+/// tested in a pool, and when it does something surprising there is nothing in
+/// any of our logs that says why. Doing it here means the detour is a waypoint
+/// like any other, visible in the same log line as every other waypoint.
+///
+/// IT IS LOCAL AND REACTIVE, NOT A PLANNER. One obstacle, one detour, recomputed
+/// every tick as the boat moves. That is deliberate: a global plan over a field
+/// that is re-transmitted every five seconds would be re-planned from scratch
+/// just as often, and the failure mode of a reactive rule (going the long way
+/// round) is much kinder than the failure mode of a stale global one.
+///
+/// It can therefore be fooled by a wall of obstacles, where each detour finds a
+/// new blocker. On this course - ten buoys in open water, four of them unlit -
+/// there is no such wall. Do not reach for this in a marina.
+///
+/// THE FIRST BLOCKER IS THE NEAREST ALONG THE PATH, not the nearest to the
+/// boat. An obstacle abeam is not in the way however close it is, and steering
+/// around it would be the boat flinching at something it was already passing.
+///
+/// Obstacles BEHIND the boat or BEYOND the goal are ignored: the segment is the
+/// path, not the infinite line. Without that the boat swerves around things it
+/// has already passed.
+inline Detour avoidObstacles(
+  Vec2 from, Vec2 to, const std::vector<Buoy> & obstacles,
+  double clearance_m, double margin_m)
+{
+  Detour out;
+  out.wp = to;
+
+  const Vec2 leg = to - from;
+  const double leg_len = norm(leg);
+  if (leg_len < 1e-6 || clearance_m <= 0.0) {return out;}
+  const Vec2 dir = leg * (1.0 / leg_len);
+
+  int worst = -1;
+  double worst_along = 0.0, worst_off = 0.0;
+  for (std::size_t i = 0; i < obstacles.size(); ++i) {
+    const Vec2 rel = obstacles[i].p - from;
+    const double along = dot(rel, dir);
+    if (along <= 0.0 || along >= leg_len) {continue;}   // behind, or past the goal
+    const double off = cross(dir, rel);                 // signed: + is to PORT
+    if (std::fabs(off) >= clearance_m) {continue;}
+    if (worst < 0 || along < worst_along) {
+      worst = static_cast<int>(i);
+      worst_along = along;
+      worst_off = off;
+    }
+  }
+  if (worst < 0) {return out;}
+
+  // Push perpendicular, AWAY from the side the obstacle sits on, so the boat
+  // passes on the side it was already favouring. An obstacle dead ahead
+  // (off == 0) has no favoured side; break that tie to starboard, which is the
+  // give-way side under the collision regulations and the one a human driver
+  // would expect.
+  const Vec2 port{-dir.y, dir.x};
+  const double side = (std::fabs(worst_off) < 1e-3) ? -1.0 : (worst_off > 0 ? -1.0 : 1.0);
+  const double push = clearance_m + margin_m;
+
+  out.wp = obstacles[worst].p + port * (side * push);
+  out.detoured = true;
+  out.around_id = obstacles[worst].id;
+  out.miss_m = std::fabs(worst_off);
+  return out;
+}
+
+/// One gate of the passage, as the BOAT worked it out.
+struct PlannedGate
+{
+  int red_id = kNoBuoy;
+  int green_id = kNoBuoy;
+  Vec2 mid;                        ///< midpoint of the pair
+  double along_m = 0.0;            ///< distance along entry -> exit, for ordering
+  double width_m = 0.0;            ///< how far apart the pair is
+};
+
+/// The whole passage, ordered entry to exit.
+struct Passage
+{
+  bool valid = false;              ///< false = cannot plan; `why` says what is missing
+  std::vector<PlannedGate> gates;  ///< in the order the boat should drive them
+  std::vector<int> unpaired;       ///< red or green buoys that found no partner
+  std::string why;
+};
+
+/// Pair the red and green buoys into gates and order them entry -> exit.
+///
+/// THE BOAT DOES THIS, NOT THE AIRCRAFT. The aircraft transmits ten buoys with
+/// their beacon states and nothing else; everything about which pair is a gate
+/// and what order to drive them in is decided here, from that field plus the
+/// entry and exit. That is the whole difference from the earlier protocol, in
+/// which the aircraft assigned one pair at a time.
+///
+/// PAIRING IS GLOBAL GREEDY NEAREST, the same shape as fusePassage: repeatedly
+/// take the closest red-green pair still unclaimed. Nearest-neighbour from each
+/// red independently is NOT the same thing and is wrong on a skewed field --
+/// two reds can both consider the same green their nearest, and whichever is
+/// processed first steals it, leaving the other paired across the channel.
+/// Global greedy cannot double-claim, and on a ten-buoy field the cost is
+/// nothing.
+///
+/// ORDERING IS BY PROJECTION ONTO entry -> exit, not by distance from the
+/// entry. Distance from the entry orders a curved channel wrongly: a gate set
+/// wide off the axis can be nearer the entry than one further down the course.
+/// The projection asks "how far down the passage is this", which is the
+/// question that matters.
+///
+/// WIDTH IS A FILTER, NOT A WARNING. A pair further apart than `max_width_m` is
+/// not a gate -- it is a red from one gate and a green from another, and
+/// driving between them crosses the channel diagonally. Those buoys go to
+/// `unpaired` so a caller can say so.
+///
+/// An empty `gates` with valid=true is a real answer: a field with an entry and
+/// an exit and no red-green pairs means drive straight to the exit.
+inline Passage planPassage(
+  const std::vector<Buoy> & buoys, Vec2 entry, Vec2 exitp,
+  double max_width_m = 20.0, double min_width_m = 2.0)
+{
+  Passage out;
+
+  if (norm(exitp - entry) < 1e-6) {
+    out.why = "entry and exit are the same point; no axis to order gates along";
+    return out;
+  }
+  const Vec2 axis = unit(exitp - entry);
+
+  std::vector<int> reds, greens;
+  for (std::size_t i = 0; i < buoys.size(); ++i) {
+    if (buoys[i].state == Beacon::FlashingRed) {reds.push_back(static_cast<int>(i));}
+    if (buoys[i].state == Beacon::FlashingGreen) {greens.push_back(static_cast<int>(i));}
+  }
+
+  std::vector<bool> red_used(reds.size(), false), green_used(greens.size(), false);
+  for (;;) {
+    double best = max_width_m;
+    int bi = -1, bj = -1;
+    for (std::size_t i = 0; i < reds.size(); ++i) {
+      if (red_used[i]) {continue;}
+      for (std::size_t j = 0; j < greens.size(); ++j) {
+        if (green_used[j]) {continue;}
+        const double w = norm(buoys[reds[i]].p - buoys[greens[j]].p);
+        if (w <= best && w >= min_width_m) {
+          best = w;
+          bi = static_cast<int>(i);
+          bj = static_cast<int>(j);
+        }
+      }
+    }
+    if (bi < 0) {break;}
+    red_used[bi] = true;
+    green_used[bj] = true;
+
+    const Buoy & r = buoys[reds[bi]];
+    const Buoy & g = buoys[greens[bj]];
+    PlannedGate gate;
+    gate.red_id = r.id;
+    gate.green_id = g.id;
+    gate.mid = (r.p + g.p) * 0.5;
+    gate.along_m = dot(gate.mid - entry, axis);
+    gate.width_m = best;
+    out.gates.push_back(gate);
+  }
+
+  for (std::size_t i = 0; i < reds.size(); ++i) {
+    if (!red_used[i]) {out.unpaired.push_back(buoys[reds[i]].id);}
+  }
+  for (std::size_t j = 0; j < greens.size(); ++j) {
+    if (!green_used[j]) {out.unpaired.push_back(buoys[greens[j]].id);}
+  }
+
+  std::sort(
+    out.gates.begin(), out.gates.end(),
+    [](const PlannedGate & a, const PlannedGate & b) {return a.along_m < b.along_m;});
+
+  out.valid = true;
+  if (out.gates.empty()) {
+    out.why = "no red-green pair within the gate width; driving straight to the exit";
+  }
+  return out;
+}
+
+/// Is this pair already in `cleared`? Order-insensitive on purpose.
+///
+/// A gate is remembered by the IDS OF ITS TWO BUOYS, not by its position in the
+/// sequence. A confirmation can bring new colours, planPassage re-runs, and the
+/// order can change underneath the boat -- counting "I have done three, start
+/// at index three" then skips a gate that was never driven.
+inline bool gateCleared(
+  const std::vector<std::pair<int, int>> & cleared, int red_id, int green_id)
+{
+  for (const auto & c : cleared) {
+    if ((c.first == red_id && c.second == green_id) ||
+      (c.first == green_id && c.second == red_id))
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+/// The first gate of `passage` the boat has not cleared, or nullptr when done.
+inline const PlannedGate * nextGate(
+  const Passage & passage, const std::vector<std::pair<int, int>> & cleared)
+{
+  for (const PlannedGate & g : passage.gates) {
+    if (!gateCleared(cleared, g.red_id, g.green_id)) {return &g;}
+  }
+  return nullptr;
 }
 
 /// The first buoy in `buoys` with the given beacon state, or nullptr.

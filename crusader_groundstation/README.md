@@ -13,12 +13,13 @@ header and is not in `core.launch.py`.
 |---|---|---|
 | Nodes | every node in the registry, running or not, from the ROS graph | start anything, stop what it started, run a profile |
 | Telemetry | lat/lon, speed, heading, roll/pitch/yaw, mode, armed | — |
-| Camera | whether `buoy_detector`/`oak_view` is up on :8080 | **show/stop the stream** (off by default), start whichever is missing |
+| Camera | whether `buoy_detector`/`oak_view` is up on :8080, **and the OAK-D's live settings beside the picture** | **show/stop the stream** (off by default), start whichever is missing, **tune any camera control, apply/save/delete a named profile** |
 | LiDAR | whether `lidar_view` is up on :8081 | **show/stop the stream**, start it |
 | Map | vessel, wake, `crsd/world_targets`, and optionally raw clusters and the PRX1 sectors | pan, zoom, follow, **bow-up**, **layer toggles**, clear trail |
 | Tuning | any running node's parameters, with its own descriptions and ranges | set a dynamic value live; revert one to the YAML |
 | Record | sessions on disk, sizes, live capture state, **live bag growth rate** | tick topics, **set camera and LiDAR fps for the session**, start/stop a session **with a rosbag**, download a `.tar.gz`, delete |
 | Logs | every node's `/rosout` output, filterable by level and node | clear the buffer |
+| Radio | every frame `rxl_link_node` put on the RFD900 mesh or heard on it, when each system was last heard, and an **estimate** of how fast the aircraft's periodic message is arriving — scored for BOTH formats, so a quiet link is distinguishable from one talking in the other one | filter; **send a test frame** (TUNNEL `0x80FE`, acted on by nobody); clear |
 | System | CPU, temperature, memory, disk, uptime | shut down / reboot the host |
 
 ## Day mode
@@ -154,6 +155,50 @@ the disk fills in under three hours. So the tab does not estimate — it measure
 directory as it grows and shows MB/s and hours-remaining at the current rate, and shows a
 blank until there are two samples far enough apart to divide. A reassuring number computed
 from no data is the thing this repo keeps designing out.
+
+## The camera controls sit beside the picture
+
+Not on the Tuning tab, and that placement is the point. The reason the OAK-D ran four
+stops under for weeks is that nobody could see what a setting did while they were
+setting it — the camera was choosing 2214 µs at ISO 100 with fifteen times the shutter
+available, and no screen said so. A knob and its result on two different tabs is that
+same problem with extra steps.
+
+So the Camera tab is the viewer plus a control column: every knob `oak_controls`
+declares, grouped and ordered by that table rather than by a list kept here. Add a
+control there and it appears here, in its group, with no change to this page. Anything
+the grouping does not mention is still shown, under **other** — a knob can go
+ungrouped, but it must never go missing.
+
+Ranges, choices, editability and the comparison against `crusader_params.yaml` all come
+from `/params/list`, which describes the node that is *actually running*. The profile
+endpoint sends the grouping and nothing else: sending a bound twice is how the page ends
+up showing one the node does not enforce.
+
+### Profiles
+
+Five conditions ship in `camera_profiles.yaml`; saved ones land in
+`camera_profiles.local.yaml`, which is gitignored and regenerated whole on every save. A
+row says which it is, because **delete** means "revert to the shipped block" for an
+override and "it is gone" for a saved one — and a shipped profile has no delete button
+at all.
+
+**Save sends only the name.** The node reads the live values itself, because what this
+page is displaying may be a poll old, another browser's set, or a value the node clamped
+on the way in — and a profile is a claim about what the camera was doing when the
+picture looked right.
+
+**Applying one is an ordinary `/params/set`** with the whole block. There is no
+`/camera/profile/load` endpoint on purpose: a second apply path is a second place for the
+rules to drift, and the operator would get a different sentence back depending on which
+button they pressed. The whole block goes at once, too — applied knob by knob, a refusal
+partway through leaves the camera in a state that is neither profile, with nothing on
+screen saying so.
+
+The input ids are namespaced (`cv_` here, `tv_` on the Tuning tab). Both panes render the
+same parameters, both stay in the DOM once visited, and `getElementById` returns the
+first match — one prefix would mean this tab quietly reading and writing the other's
+boxes.
 
 ## The Tuning tab
 
