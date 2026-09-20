@@ -18,6 +18,7 @@ The typed contracts between nodes. Four telemetry messages produced by
 | `Cluster3DArray` | `lidar_cluster_node` → fusion, world model | one accumulated window, **nearest first** so a consumer that truncates keeps the near ones. Same every-window-empty-or-not contract as `Detection3DArray` |
 | `TrackedTarget` | inside `TrackedTargetArray` | one object anchored to the **earth**, not to the boat: lat/lon, world x/y/z, majority-vote label, which sensors have contributed, and how much to believe it. `id` is never reused, so a stored reference cannot be silently re-pointed at a different buoy |
 | `TrackedTargetArray` | `target_tracker` → `map_server`, cognition | the world model's current picture, nearest first, carrying the world-frame origin its metres are relative to. Same every-update-empty-or-not contract. Boat state is deliberately **not** in it — subscribe to `/crsd/pose` and `/crsd/attitude`, so one stream's staleness cannot hide behind another's freshness |
+| `RadioFrame` | `rxl_link_node` → the ground station's Radio tab | one frame the boat put on the RFD900 mesh or heard on it, decoded into a readable line. **A record, nothing acts on it.** Field for field the same as rx26_uav's `uav_msgs/RadioFrame` |
 
 Every message carries a `std_msgs/Header`. **The stamp is the time the MAVLink frame was
 RECEIVED**, not the time it was republished — a consumer judging freshness needs the age

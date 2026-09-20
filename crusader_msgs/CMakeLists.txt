@@ -26,6 +26,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/PassageBuoy.msg"
   "msg/PassagePlan.msg"
   "msg/GatePair.msg"
+  "msg/RadioFrame.msg"
   # Actions. Same rule as above: a file not listed here is silently not
   # generated, and the import fails at node start, on the boat.
   "action/SafePassage.action"

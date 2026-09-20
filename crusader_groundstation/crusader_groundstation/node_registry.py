@@ -33,6 +33,7 @@ GROUPS = (
     ("core", "Core", "Safety and telemetry. Protected: startable here, not stoppable."),
     ("perception", "Perception", "Sensors. The three OAK-D nodes contend for one camera."),
     ("world", "World model", "Fusion and tracking. Needs perception and pose."),
+    ("link", "UAV link", "The RFD900 mesh to the aircraft. One owner of the radio."),
     ("viewers", "Viewers", "Bench views served on their own ports."),
 )
 
@@ -112,6 +113,12 @@ REGISTRY = (
              note="camera -> earth-anchored targets; use_lidar adds the LiDAR"),
 
     # ---- viewers: tools/ scripts, not ROS entry points ----
+    # ---- link: the RFD900 mesh. Not protected: it has not been on the water. ----
+    NodeSpec("rxl_link_node", "rxl_link_node", "crusader_link",
+             "rxl_link_node", "link", exclusive="rfd_radio",
+             note="owns the RFD900 and the Radio tab's record; talks to the "
+                  "aircraft, never to the Pixhawk"),
+
     NodeSpec("oak_view", "oak_view", "tools", "oak_view.py", "viewers",
              kind="script", exclusive="port8080", port=8080,
              stream_path="/stream/view",      # bare FrameBuffer -> named "view"

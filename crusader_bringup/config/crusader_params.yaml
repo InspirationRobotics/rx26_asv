@@ -1080,11 +1080,33 @@ bt_runner_node:
 # set a mode, or move the boat. telemetry_bridge stays the only path to the
 # autopilot and the two never share a socket.
 #
-# NOT in core.launch.py. It is only useful above Core tier, and nothing here has
-# carried a frame over a real radio yet — only UDP loopback against the bench.
+# In core.launch.py (respawning), so the Radio tab survives a reboot. Do not
+# also hand-start it: two processes on the radio's serial port each read half.
 rxl_link_node:
   ros__parameters:
-    rxl_endpoint: "udpin:127.0.0.1:14555"   # [RO] BIND and listen. NOT "udp:",
+    rxl_endpoint: "/dev/crsd-rfd"
+                                            # [RO] THE RFD900, on its FTDI cable.
+                                            #      A udev symlink (tools/udev),
+                                            #      never /dev/ttyUSB0: the number
+                                            #      depends on plug order. Not
+                                            #      by-id either: that names ONE
+                                            #      cable's serial, and a swapped
+                                            #      cable left the node reading a
+                                            #      path that no longer existed.
+                                            #      The link node OWNS this
+                                            #      device; nothing else may open
+                                            #      it, including the test kit's
+                                            #      companion.py.
+                                            #      For SITL or the bench, override
+                                            #      it per run instead of editing
+                                            #      this line:
+                                            #        ros2 run crusader_link \
+                                            #          rxl_link_node --ros-args \
+                                            #          -p rxl_endpoint:=udpin:127.0.0.1:14555
+                                            #      That udpin form BINDS and
+                                            #      listens; "udp:" is an outbound
+                                            #      client that receives nothing,
+                                            #      silently. 14555 and not 14551:
                                             #      which pymavlink resolves to an
                                             #      outbound client that connects
                                             #      nowhere and receives nothing,
@@ -1097,6 +1119,17 @@ rxl_link_node:
                                             #      stays free for ad-hoc tooling
                                             #      and SITL's rover MAVProxy
                                             #      fans out to 14552.
+    radio_traffic_topic: "crsd/radio/traffic"  # [RO] every frame the link node
+                                            #      sent or heard, for the ground
+                                            #      station's Radio tab. A RECORD:
+                                            #      nothing acts on this topic.
+    uav_sysid: 200                          # [RO] who the Radio tab's test frame
+                                            #      is addressed to. The aircraft's
+                                            #      autopilot is 1 in the Fleet ICD;
+                                            #      its companion answers from 200.
+    rxl_baud: 115200                        # [RO] only used when rxl_endpoint is
+                                            #      a serial device. Every radio in
+                                            #      the mesh runs SERIAL=115.
     source_system: 42                       # [RO] the boat's MAVLink system id on
                                             #      the MESH, not on the autopilot
                                             #      link. Must differ from the

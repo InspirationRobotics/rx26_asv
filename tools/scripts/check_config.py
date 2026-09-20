@@ -229,8 +229,20 @@ def check_params_yaml():
     except KeyError as e:
         fail("mavlink udp ports", f"missing key {e}")
     else:
+        # A NON-UDP endpoint is the RFD900 on its FTDI cable: the link node
+        # owning the radio directly, which is the arrangement the mesh needs.
+        # There is no port to check then, and demanding one would fail a config
+        # that is right -- what matters is that it names a device at all.
+        net = str(rxl_ep).startswith(("udp:", "udpin:", "udpout:", "tcp:"))
         mav_p, rxl_p = _udp_port(mav_ep), _udp_port(rxl_ep)
-        if mav_p is None or rxl_p is None:
+        if not net and str(rxl_ep).startswith("/dev/"):
+            ok("mavlink udp ports", f"rxl_link on the radio at {rxl_ep}")
+        elif not net:
+            fail("mavlink udp ports",
+                 f"rxl_endpoint {rxl_ep!r} is neither a udp endpoint nor a "
+                 "/dev device; pymavlink would read it as a file name and the "
+                 "link would be silent rather than refused")
+        elif mav_p is None or rxl_p is None:
             fail("mavlink udp ports",
                  f"could not read a port from {mav_ep!r} / {rxl_ep!r}")
         elif mav_p == rxl_p:
