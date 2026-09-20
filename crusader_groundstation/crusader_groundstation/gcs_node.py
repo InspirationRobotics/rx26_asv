@@ -67,8 +67,9 @@ from crusader_common.param_utils import declare_from_config, make_set_callback
 from crusader_common.stream_cache import StreamCache
 
 from crusader_groundstation import node_registry as reg
-from crusader_groundstation import bag_recorder, param_client, power_client
-from crusader_groundstation import proc_scan, radio_core, system_info
+from crusader_groundstation import bag_recorder, camera_profiles, param_client
+from crusader_groundstation import power_client, proc_scan, radio_core
+from crusader_groundstation import system_info
 from crusader_groundstation.log_buffer import LogBuffer
 from crusader_groundstation.recorder import Recorder
 from crusader_groundstation.recorder import free_gb as recorder_free_gb
@@ -703,6 +704,12 @@ class GroundStation(Node):
             return {"ok": True, "message": "radio log cleared"}
         if path == "/radio/send_test":
             return self._radio_send_test()
+        if path == "/camera/profile/list":
+            return self._camera_profiles()
+        if path == "/camera/profile/save":
+            return self._camera_profile_save(payload)
+        if path == "/camera/profile/delete":
+            return self._camera_profile_delete(payload)
         if path == "/record/topics":
             return self._record_topics()
         if path == "/record/start":
@@ -849,6 +856,74 @@ class GroundStation(Node):
                    else f"applied {', '.join(sorted(values))} on "
                         f"{name.lstrip('/')}")
         return {"ok": not bad, "message": message, "results": results}
+
+    def _camera_profiles(self):
+        """The stored profiles, plus which parameters count as camera controls.
+
+        THERE IS NO /camera/profile/load, on purpose. Recalling a profile is
+        `/params/set` with the stored mapping — the same path, the same per-value
+        refusals, the same two log lines per knob. A second apply path would be a
+        second place for the rules to drift, and the operator would get a
+        different sentence back depending on which button they pressed.
+
+        `controls` is the ORDER AND GROUPING ONLY. Ranges, choices, editability
+        and the YAML comparison all come from /params/list, which describes the
+        node that is actually running. Sending them twice is how the page ends up
+        showing a bound the node does not enforce.
+        """
+        names, err = _camera_control_groups()
+        return {"ok": True, "message": "", "profiles": camera_profiles.listing(),
+                "store": camera_profiles.status(), "controls": names,
+                "controls_error": err}
+
+    def _camera_profile_save(self, payload):
+        """Save the camera's LIVE values under a name.
+
+        The browser sends a name and a node, never values. It has just polled
+        /params/list, so it could send what it is displaying — but that is the
+        one thing worth not trusting here: a profile is a claim about what the
+        camera was doing when it looked right, and a set from another browser, or
+        a clamp the node applied on the way in, would be saved as though it had
+        never happened. Read here, from the node, at save time.
+        """
+        name = payload.get("name")
+        control_groups, err = _camera_control_groups()
+        if err:
+            return {"ok": False, "message": err}
+        node, params, call_err = self._param_call(
+            payload, lambda n: self.tuning.list(n, _yaml_defaults(n)))
+        if call_err:
+            return call_err
+
+        wanted = {c for group in control_groups for c in group["controls"]}
+        live = {p["name"]: p["value"] for p in params if p["name"] in wanted}
+        missing = sorted(wanted - set(live))
+        if missing:
+            # Not saved as a partial block. A profile with holes in it silently
+            # inherits whatever the previous profile left in those knobs, which
+            # is the one property camera_profiles.yaml is written to rule out.
+            return {"ok": False,
+                    "message": f"{node.lstrip('/')} has no "
+                               f"{', '.join(missing[:3])}"
+                               + (f" (+{len(missing) - 3} more)"
+                                  if len(missing) > 3 else "")
+                               + " — is it oak_detector?"}
+
+        ok, message = camera_profiles.save(name, live)
+        if ok:
+            self.get_logger().info(
+                f"camera profile {name!r} <- {node.lstrip('/')}: {message}")
+        return {"ok": ok, "message": message,
+                "profiles": camera_profiles.listing(),
+                "store": camera_profiles.status()}
+
+    def _camera_profile_delete(self, payload):
+        ok, message = camera_profiles.delete(payload.get("name"))
+        if ok:
+            self.get_logger().info(f"camera profile: {message}")
+        return {"ok": ok, "message": message,
+                "profiles": camera_profiles.listing(),
+                "store": camera_profiles.status()}
 
     def _record_topics(self):
         """Every topic in the graph, typed, for the Record tab's checkboxes.
@@ -1084,6 +1159,46 @@ def _yaml_defaults(node_name):
         return crsd_config.node_params(node_name.rstrip("/").split("/")[-1])
     except Exception:
         return {}
+
+
+def _camera_control_groups():
+    """oak_controls' table as [{group, controls:[name]}], or (None, why).
+
+    IMPORTED FROM crusader_perception RATHER THAN RESTATED. oak_controls exists
+    precisely so the name of a knob lives in one place; a list of seventeen
+    strings copied into the ground station would be the fourth copy its own
+    docstring warns about, and the failure is silent — add a control to the table
+    and the Camera tab quietly keeps showing sixteen.
+
+    Group order is first appearance in the table, and control order within a
+    group is table order, so the page has no ordering knowledge of its own
+    either.
+
+    AND IT IS IN TENSION WITH THIS PACKAGE'S OWN RULE, knowingly. package.xml
+    says the ground station names every other package's nodes while importing
+    none of them, which is what keeps it off the dependency graph of the code it
+    launches. This is the one import that crosses that line, so it is kept as
+    narrow as the rule allows: SOFT, so a missing crusader_perception is a tab
+    with nothing to tune rather than a ground station that will not start, and
+    NOT declared in package.xml, so crusader_perception does not become a build
+    dependency (which would drag depthai and TensorRT in behind it).
+
+    The proper fix is for oak_detector to advertise the set itself, as a
+    generated read-only parameter, which this would then read through
+    /params/list like any other value and the import would go away. That is a
+    change to a node in another package, so it is not made here.
+    """
+    try:
+        from crusader_perception import oak_controls
+    except Exception as e:
+        return None, f"camera controls unavailable: {e}"
+    groups, order = {}, []
+    for c in oak_controls.ALL:
+        if c.group not in groups:
+            groups[c.group] = []
+            order.append(c.group)
+        groups[c.group].append(c.name)
+    return [{"group": g, "controls": groups[g]} for g in order], ""
 
 
 def _round(v, n=2):

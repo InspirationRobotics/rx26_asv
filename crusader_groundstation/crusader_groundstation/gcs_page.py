@@ -79,6 +79,20 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
  .pane{display:none;padding:12px 14px}
  .pane.on{display:block}
  #p-map.on,#p-cam.on,#p-lidar.on{padding:0;height:100%;display:flex}
+ /* The controls sit BESIDE the picture, not on another tab. The whole reason
+    the camera was four stops under for weeks is that nobody could see what a
+    setting did while they were setting it; a knob and its result on two
+    different screens is the same problem with extra steps. */
+ #camview{flex:1;min-width:0;display:flex}
+ #camtune{flex:0 0 340px;width:340px;overflow:auto;padding:10px 12px;
+          border-left:1px solid var(--line);background:var(--panel)}
+ #camtune .row{flex-wrap:wrap;gap:4px}
+ #camtune .nm{flex:0 0 130px;font-size:12px}
+ @media (max-width:820px){
+   #p-cam.on{flex-direction:column}
+   #camtune{flex:0 0 auto;width:auto;max-height:46%;
+            border-left:0;border-top:1px solid var(--line)}
+ }
  button{background:var(--btn);color:var(--fg);border:1px solid var(--btnline);
    border-radius:4px;padding:4px 12px;font:inherit;cursor:pointer}
  button:hover:not(:disabled){background:var(--btnhi)}
@@ -1102,42 +1116,65 @@ function tuneLoad(node){
 function tuneRowOf(name){
   return tuneRows.filter(function(p){ return p.name === name; })[0];
 }
-function tuneApply(name){
-  var p = tuneRowOf(name), box = el('tv_' + name), v;
-  if(!p || !box) return;
-  if(p.type === 'bool') v = box.checked;
-  else if(p.type === 'string') v = box.value;
-  else {
-    v = Number(box.value);
-    /* Caught here only to stop an empty box being sent as 0, which the node
-       would accept. The RANGE is deliberately not checked here: the node owns
-       that rule and refuses in its own words, and a second copy of the bounds
-       in this page is a copy that goes stale. */
-    if(box.value === '' || !isFinite(v)){ toast(name + ': not a number', true); return; }
+/* What a widget currently holds, or undefined if it holds nothing usable.
+   Separate from the posting so the Camera tab reads its own boxes with the
+   same rules — including the empty-box rule, which is the one worth having in
+   exactly one place. */
+function readControl(p, prefix){
+  var box = el(prefix + p.name);
+  if(!box) return undefined;
+  if(p.type === 'bool') return box.checked;
+  if(p.type === 'string') return box.value;
+  var v = Number(box.value);
+  /* Caught here only to stop an empty box being sent as 0, which the node
+     would accept. The RANGE is deliberately not checked here: the node owns
+     that rule and refuses in its own words, and a second copy of the bounds
+     in this page is a copy that goes stale. */
+  if(box.value === '' || !isFinite(v)){
+    toast(p.name + ': not a number', true);
+    return undefined;
   }
-  tunePost(name, v);
+  return v;
+}
+
+function tuneApply(name){
+  var p = tuneRowOf(name);
+  if(!p) return;
+  var v = readControl(p, 'tv_');
+  if(v !== undefined) tunePost(name, v);
 }
 function tuneRevert(name){
   var p = tuneRowOf(name);
   if(p) tunePost(name, p['default']);
 }
-function tunePost(name, v){
-  var body = {node: tuneNode, values: {}};
-  body.values[name] = v;
+/* THE one /params/set caller. A profile recall is this with several values in
+   it rather than one, which is why there is no /camera/profile/load endpoint:
+   the same path, the same per-value refusals, the same log lines per knob. */
+function paramPost(node, values, after){
   fetch('/params/set', {method:'POST', headers:{'Content-Type':'application/json'},
-                        body: JSON.stringify(body)})
+                        body: JSON.stringify({node: node, values: values})})
     .then(function(r){ return r.json(); })
     .then(function(j){
       toast(j.message || (j.ok ? 'applied' : 'refused'), !j.ok);
       /* Re-read rather than assume. A node may accept a set and clamp it, and
          the value worth showing is the one it is now running on. */
-      tuneLoad();
+      if(after) after();
     })
     .catch(function(err){ toast('request failed: ' + err, true); });
 }
 
-function tuneControl(p){
-  var id = 'tv_' + p.name;
+function tunePost(name, v){
+  var values = {};
+  values[name] = v;
+  paramPost(tuneNode, values, function(){ tuneLoad(); });
+}
+
+/* `prefix` namespaces the input ids. Both the Tuning tab and the Camera tab
+   render the same parameters, both panes stay in the DOM once visited, and
+   getElementById returns the FIRST match — so one prefix would mean the Camera
+   tab quietly reading and writing the Tuning tab's boxes. */
+function tuneControl(p, prefix){
+  var id = prefix + p.name;
   if(!p.editable)
     return '<span class="meta" style="min-width:120px;text-align:right">'
          + esc(tuneFmt(p.value)) + '</span>';
@@ -1166,7 +1203,7 @@ function tuneControl(p){
        + ' style="width:96px">' + set;
 }
 
-function tuneRow(p){
+function tuneRow(p, prefix){
   var note = esc(p.description || '');
   if(p.lo !== null && p.hi !== null)
     note += ' <span style="color:var(--muted)">[' + p.lo + ', ' + p.hi + ']</span>';
@@ -1185,7 +1222,7 @@ function tuneRow(p){
   return '<div class="row" style="flex-wrap:wrap">'
        + '<span class="nm" style="flex:0 0 200px">' + esc(p.name) + '</span>'
        + '<span class="meta" style="flex:1;min-width:190px">' + note + '</span>'
-       + mark + tuneControl(p) + '</div>';
+       + mark + tuneControl(p, prefix) + '</div>';
 }
 
 function paintTune(){
@@ -1218,13 +1255,15 @@ function paintTune(){
     + 'restart</b>. crusader_params.yaml is the source of truth; a row showing '
     + '<span style="color:var(--warn)">yaml &lt;value&gt;</span> is one to write '
     + 'back into it before the next run.</div>'
-    + (dyn.map(tuneRow).join('') || '<div class="hint">none</div>')
+    + (dyn.map(function(p){ return tuneRow(p, 'tv_'); }).join('')
+       || '<div class="hint">none</div>')
     + '<h3>Fixed at startup</h3>'
     + '<div class="hint">Structural: topic names, mounting geometry, freshness '
     + 'budgets. Change them in crusader_params.yaml and restart the node. Shown '
     + 'rather than hidden because a knob you cannot turn and one you cannot find '
     + 'are different problems.</div>'
-    + (fixed.map(tuneRow).join('') || '<div class="hint">none</div>');
+    + (fixed.map(function(p){ return tuneRow(p, 'tv_'); }).join('')
+       || '<div class="hint">none</div>');
 
   b.querySelectorAll('button[data-apply]').forEach(function(x){
     x.onclick = function(){ tuneApply(x.dataset.apply); }; });
@@ -1237,6 +1276,241 @@ function paintTune(){
     x.onkeydown = function(ev){
       if(ev.key === 'Enter'){ ev.preventDefault(); tuneApply(x.id.slice(3)); } };
   });
+}
+
+/* ---------------- the camera pane ----------------
+   Two fetches, both on demand and neither on the 5 Hz path:
+
+     /params/list on oak_detector   the live values, ranges, choices, and the
+                                    comparison against crusader_params.yaml
+     /camera/profile/list           the saved profiles, and the GROUPING ONLY
+
+   The split is deliberate and the node's docstring says why: ranges, choices
+   and editability describe the node that is actually running, so they come
+   from the node. Sending them twice is how the page ends up showing a bound
+   the node does not enforce.
+
+   Painted only when something changes. The pane holds number boxes an operator
+   is part-way through typing into, and a repaint under the cursor loses the
+   digits — the same trap the Record tab's topic list carries a comment about. */
+var CAM_NODE = '/oak_detector';
+var camRows = [], camProfiles = [], camStore = null, camGroups = [];
+var camErr = '', camProfErr = '', camBusy = false, camBuilt = false;
+
+function camLoadParams(){
+  if(camBusy) return;
+  camBusy = true;
+  fetch('/params/list', {method:'POST',
+                         headers:{'Content-Type':'application/json'},
+                         body: JSON.stringify({node: CAM_NODE})})
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      camBusy = false;
+      camErr = j.ok ? '' : (j.message || 'no answer');
+      camRows = j.ok ? (j.params || []) : [];
+      paintCam();
+    })
+    .catch(function(err){
+      camBusy = false; camErr = 'request failed: ' + err;
+      camRows = []; paintCam();
+    });
+}
+
+/* Every profile endpoint answers with the whole listing and the store status,
+   so every one of them refreshes the pane the same way and none of them has to
+   guess at what its own write did. */
+function camTakeProfiles(j){
+  if(j.profiles) camProfiles = j.profiles;
+  if(j.store) camStore = j.store;
+  if(j.controls) camGroups = j.controls;
+  camProfErr = j.controls_error || (j.store && j.store.error) || '';
+  paintCam();
+}
+
+function camLoadProfiles(){
+  fetch('/camera/profile/list', {method:'POST',
+                                 headers:{'Content-Type':'application/json'},
+                                 body:'{}'})
+    .then(function(r){ return r.json(); })
+    .then(camTakeProfiles)
+    .catch(function(err){ camProfErr = 'request failed: ' + err; paintCam(); });
+}
+
+function camRowOf(name){
+  return camRows.filter(function(p){ return p.name === name; })[0];
+}
+
+/* Set, revert and Enter-in-a-box all arrive here. Written once because they
+   differ only in where the value came from, and three copies of "wrap it in an
+   object and re-read afterwards" is three places to forget the re-read. */
+function camSet(name, value){
+  var values = {};
+  values[name] = value;
+  paramPost(CAM_NODE, values, camLoadParams);
+}
+
+function camApplyOne(name){
+  var p = camRowOf(name);
+  if(!p) return;
+  var v = readControl(p, 'cv_');
+  if(v !== undefined) camSet(name, v);
+}
+
+function camApplyProfile(name){
+  var row = camProfiles.filter(function(x){ return x.name === name; })[0];
+  if(!row) return;
+  /* The whole block at once, not knob by knob. A profile is only reproducible
+     because it is complete: applied piecemeal, a refusal partway through
+     leaves the camera in a state that is neither the old profile nor the new
+     one, and nothing on screen would say so. */
+  paramPost(CAM_NODE, row.values, camLoadParams);
+}
+
+function camSaveProfile(){
+  var box = el('camsavename'), name = box ? box.value.trim() : '';
+  if(!name){ toast('name the profile first', true); return; }
+  if(camProfiles.some(function(x){ return x.name === name; })
+     && !confirm('Overwrite the profile "' + name + '"?')) return;
+  /* Only the NAME goes up. The node reads the live values itself, because what
+     this page is displaying may be a poll old, or another browser's set, or a
+     value the node clamped on the way in — and a profile is a claim about what
+     the camera was actually doing when the picture looked right. */
+  fetch('/camera/profile/save', {method:'POST',
+                                 headers:{'Content-Type':'application/json'},
+                                 body: JSON.stringify({name: name,
+                                                       node: CAM_NODE})})
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      toast(j.message || (j.ok ? 'saved' : 'refused'), !j.ok);
+      if(j.ok && box) box.value = '';
+      camTakeProfiles(j);
+    })
+    .catch(function(err){ toast('request failed: ' + err, true); });
+}
+
+function camDeleteProfile(name){
+  if(!confirm('Delete the profile "' + name + '"? This cannot be undone.')) return;
+  fetch('/camera/profile/delete', {method:'POST',
+                                   headers:{'Content-Type':'application/json'},
+                                   body: JSON.stringify({name: name})})
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      toast(j.message || (j.ok ? 'deleted' : 'refused'), !j.ok);
+      camTakeProfiles(j);
+    })
+    .catch(function(err){ toast('request failed: ' + err, true); });
+}
+
+function camProfileOrigin(origin){
+  /* stock = shipped and in git; saved = yours; override = yours, shadowing a
+     shipped name of the same name. Worth distinguishing, because "delete"
+     means "revert to the shipped block" for an override and "it is gone" for
+     a saved one. */
+  if(origin === 'stock')
+    return '<span class="meta">shipped</span>';
+  if(origin === 'override')
+    return '<span class="meta" style="color:var(--warn)">yours, over the '
+         + 'shipped one</span>';
+  return '<span class="meta" style="color:var(--ok)">yours</span>';
+}
+
+function paintCam(){
+  var b = el('camtune');
+  if(!b) return;
+  var out = '<h3>Profiles</h3>';
+
+  if(camProfErr) out += '<div class="hint stale">' + esc(camProfErr) + '</div>';
+  if(camStore && !camStore.writable)
+    out += '<div class="hint stale">' + esc(camStore.local_path)
+        +  ' is not writable \u2014 tuning still works, saving will not.</div>';
+
+  if(!camProfiles.length){
+    out += '<div class="hint">no profiles</div>';
+  } else {
+    camProfiles.forEach(function(row){
+      out += '<div class="row">'
+          +  '<span class="nm" style="flex:0 0 120px">' + esc(row.name) + '</span>'
+          +  '<span style="flex:1;min-width:80px">'
+          +  camProfileOrigin(row.origin) + '</span>'
+          +  '<button class="go" data-camuse="' + esc(row.name) + '">Apply</button>'
+          +  (row.origin === 'stock' ? ''
+              : '<button class="danger" data-camdel="' + esc(row.name)
+                + '">Delete</button>')
+          +  '</div>';
+    });
+  }
+  out += '<div class="row" style="margin-top:6px">'
+      +  '<input id="camsavename" placeholder="name this profile" '
+      +  'style="flex:1;min-width:120px">'
+      +  '<button id="camsave">Save live values</button></div>'
+      +  '<div class="hint">Saved from what the node reports, not from these '
+      +  'boxes. Applying one is an ordinary parameter set, so a value the node '
+      +  'refuses is refused in its own words.</div>';
+
+  out += '<h3>Controls</h3>';
+  if(camErr){
+    out += '<div class="hint stale">' + esc(camErr) + '</div>';
+  } else if(!camRows.length){
+    out += '<div class="hint">'
+        +  (camBusy ? 'reading the camera\u2026'
+                    : 'oak_detector is not running \u2014 start it on the Nodes '
+                      + 'tab, or use the Start button in the viewer') + '</div>';
+  } else {
+    /* Grouped and ordered by the node's own table (oak_controls), never by a
+       list kept here: add a control there and it appears, in its group, with
+       no change to this page. Anything the table does not mention still gets
+       shown, under "other", so a knob can never go missing from this pane
+       just because the grouping did not know about it. */
+    var seen = {};
+    camGroups.forEach(function(g){
+      var rows = g.controls.map(camRowOf).filter(Boolean);
+      rows.forEach(function(p){ seen[p.name] = 1; });
+      if(!rows.length) return;
+      out += '<div class="hint" style="margin-top:8px;color:var(--strong)">'
+          +  esc(g.group) + '</div>'
+          +  rows.map(function(p){ return tuneRow(p, 'cv_'); }).join('');
+    });
+    var rest = camRows.filter(function(p){ return p.editable && !seen[p.name]; });
+    if(rest.length)
+      out += '<div class="hint" style="margin-top:8px;color:var(--strong)">'
+          +  'other</div>'
+          +  rest.map(function(p){ return tuneRow(p, 'cv_'); }).join('');
+  }
+
+  b.innerHTML = out;
+  b.querySelectorAll('button[data-camuse]').forEach(function(x){
+    x.onclick = function(){ camApplyProfile(x.dataset.camuse); }; });
+  b.querySelectorAll('button[data-camdel]').forEach(function(x){
+    x.onclick = function(){ camDeleteProfile(x.dataset.camdel); }; });
+  if(el('camsave')) el('camsave').onclick = camSaveProfile;
+  b.querySelectorAll('button[data-apply]').forEach(function(x){
+    x.onclick = function(){ camApplyOne(x.dataset.apply); }; });
+  b.querySelectorAll('button[data-revert]').forEach(function(x){
+    x.onclick = function(){
+      var p = camRowOf(x.dataset.revert);
+      if(p) camSet(p.name, p['default']);
+    }; });
+  /* Enter applies the row you are in \u2014 reaching for the mouse after every
+     number is the difference between sweeping a setting and giving up on it. */
+  b.querySelectorAll('input').forEach(function(x){
+    if(x.type === 'checkbox' || x.id === 'camsavename') return;
+    x.onkeydown = function(ev){
+      if(ev.key === 'Enter'){ ev.preventDefault(); camApplyOne(x.id.slice(3)); } };
+  });
+  if(el('camsavename'))
+    el('camsavename').onkeydown = function(ev){
+      if(ev.key === 'Enter'){ ev.preventDefault(); camSaveProfile(); } };
+}
+
+function renderCam(){
+  if(!camBuilt){
+    el('p-cam').innerHTML = '<div id="camview"></div><aside id="camtune"></aside>';
+    camBuilt = true;
+    paintCam();
+    camLoadProfiles();
+    camLoadParams();
+  }
+  renderViewer('camview', S.tabs.camera, 'cam');
 }
 
 function tuneFillSelect(nodes){
@@ -1595,7 +1869,11 @@ function render(){
 
   if(tab==='nodes') renderNodes();
   if(tab==='tel') renderTel();
-  renderViewer('p-cam', S.tabs.camera, 'cam');
+  /* Only the VIEWER half is torn down when you leave: renderViewer clears the
+     element it is given, and handing it the whole pane would take the controls
+     and their half-typed values with it. */
+  if(tab === 'cam') renderCam();
+  else if(camBuilt) renderViewer('camview', S.tabs.camera, 'cam');
   renderViewer('p-lidar', S.tabs.lidar, 'lidar');
   if(tab==='tune') renderTune();
   if(tab==='rec') renderRec();

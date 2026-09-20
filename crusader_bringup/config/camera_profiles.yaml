@@ -1,0 +1,147 @@
+# camera_profiles.yaml — named OAK-D camera settings, one block per condition.
+#
+# WHY A SECOND FILE. crusader_params.yaml is the source of truth for how a node
+# STARTS, and the ground station deliberately cannot write it (see gcs_node's
+# header). A camera profile is the opposite kind of value: it changes several
+# times in an afternoon as the light moves, by an operator at a browser, and
+# losing one costs a re-tune rather than a rebuild. So profiles live here, the
+# ground station owns this file, and nothing in the launch path reads it.
+#
+# WHAT A PROFILE IS. Every one of oak_controls' knobs, with no gaps. A partial
+# profile is the trap oak_controls' own docstring warns about: recall it and the
+# settings it does not mention keep whatever the last profile left behind, so
+# "bright_noon" means something different depending on what you loaded before
+# it. Complete blocks are reproducible; partial ones are a guess.
+#
+# THESE NUMBERS ARE STARTING POINTS, NOT MEASUREMENTS. Only `as_shipped` is
+# real — it is copied from crusader_params.yaml, which is what the boat has
+# actually run. The other four are reasoned from the ranges and from what the
+# classifier reads, and have never been shot on the water. Tune one, save over
+# it from the Camera tab, and it stops being a guess.
+#
+# THE STANDING RULES, which every block below follows:
+#   ae_mode: manual        outdoors, because auto re-meters as the hull turns
+#                          into the sun and the beacon hues move with it
+#   awb_mode: off          for the same reason: auto white balance corrects the
+#                          blue of sky and water away, and takes the buoys'
+#                          colour with it
+#   saturation: 0          the LED classifier separates a lit buoy from its hull
+#                          on saturation, so this is the one knob that changes
+#                          the quantity the model reads. Left alone on purpose.
+#   anti_banding: off      outdoors. Only the shed profile sets it.
+
+profiles:
+
+  # Copied verbatim from crusader_params.yaml's oak_detector section. The one
+  # click back to what the boat boots with, after a tuning session went wrong.
+  as_shipped:
+    ae_mode: auto
+    exposure_us: 8000
+    iso: 400
+    ae_compensation: -3
+    ae_max_exposure_us: 8000
+    ae_lock: false
+    ae_region_top: 0.35
+    ae_region_height: 0.45
+    awb_mode: auto
+    wb_temperature_k: 5000
+    brightness: 0
+    contrast: 0
+    saturation: 0
+    sharpness: 1
+    luma_denoise: 1
+    chroma_denoise: 1
+    anti_banding: auto
+
+  # Equatorial midday, glare off the water. Light is the one thing not in short
+  # supply, so buy everything with shutter: 2 ms freezes the hull's motion and
+  # ISO sits on the sensor floor where the noise is.
+  bright_noon:
+    ae_mode: manual
+    exposure_us: 2000
+    iso: 100
+    ae_compensation: -3
+    ae_max_exposure_us: 8000
+    ae_lock: false
+    ae_region_top: 0.35
+    ae_region_height: 0.45
+    awb_mode: 'off'
+    wb_temperature_k: 5500
+    brightness: 0
+    contrast: 0
+    saturation: 0
+    sharpness: 1
+    luma_denoise: 1
+    chroma_denoise: 1
+    anti_banding: 'off'
+
+  # Flat grey light, no glare. Three stops down from noon, paid for with shutter
+  # first and gain second. Overcast sky is bluer than direct sun, hence 6500 K.
+  overcast:
+    ae_mode: manual
+    exposure_us: 6000
+    iso: 200
+    ae_compensation: -3
+    ae_max_exposure_us: 8000
+    ae_lock: false
+    ae_region_top: 0.35
+    ae_region_height: 0.45
+    awb_mode: 'off'
+    wb_temperature_k: 6500
+    brightness: 0
+    contrast: 0
+    saturation: 0
+    sharpness: 1
+    luma_denoise: 1
+    chroma_denoise: 1
+    anti_banding: 'off'
+
+  # Low ambient, and the subject is a LIT beacon. Auto exposure is actively
+  # wrong here: it meters the dark water, opens up, and clips the LED to white
+  # — which is the one pixel whose COLOUR the whole task turns on. So exposure
+  # is pinned deliberately short for the ambient level, and the noise that buys
+  # is spent on denoise rather than on a longer shutter.
+  # 8000 us is oak_record.py's own motion-blur cap; do not raise it to chase
+  # brightness, raise ISO.
+  dusk_beacons:
+    ae_mode: manual
+    exposure_us: 8000
+    iso: 800
+    ae_compensation: -3
+    ae_max_exposure_us: 8000
+    ae_lock: false
+    ae_region_top: 0.40
+    ae_region_height: 0.35
+    awb_mode: 'off'
+    wb_temperature_k: 4000
+    brightness: 0
+    contrast: 0
+    saturation: 0
+    sharpness: 1
+    luma_denoise: 2
+    chroma_denoise: 2
+    anti_banding: 'off'
+
+  # Bench work indoors, under mains lighting. The only profile where auto
+  # exposure is the right answer — the light is constant, so the meter is not
+  # chasing anything — and the only one where anti_banding earns its keep.
+  # Singapore mains is 50 Hz, as is most of the region; a US bench wants
+  # mains_60_hz instead.
+  shed_bench:
+    ae_mode: auto
+    exposure_us: 8000
+    iso: 400
+    ae_compensation: -1
+    ae_max_exposure_us: 8000
+    ae_lock: false
+    ae_region_top: 0.35
+    ae_region_height: 0.45
+    awb_mode: fluorescent
+    wb_temperature_k: 5000
+    brightness: 0
+    contrast: 0
+    saturation: 0
+    sharpness: 1
+    luma_denoise: 1
+    chroma_denoise: 1
+    anti_banding: mains_50_hz
