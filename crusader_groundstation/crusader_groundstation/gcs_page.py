@@ -1002,6 +1002,17 @@ function tuneControl(p){
   if(p.type === 'bool')
     return '<input type="checkbox" id="' + esc(id) + '"'
          + (p.value ? ' checked' : '') + ' style="width:15px;height:15px">' + set;
+  /* A node that advertises its accepted values gets a dropdown, so a mode
+     name is picked rather than spelled. The list rides in the descriptor's
+     additional_constraints, which is the field ROS provides for it, so this
+     needs no per-node knowledge and a node that grows a mode offers it here
+     the moment it restarts. */
+  if(p.choices && p.choices.length)
+    return '<select id="' + esc(id) + '" style="width:180px">'
+         + p.choices.map(function(c){
+             return '<option' + (String(p.value) === c ? ' selected' : '')
+                  + '>' + esc(c) + '</option>'; }).join('')
+         + '</select>' + set;
   if(p.type === 'string')
     return '<input id="' + esc(id) + '" value="' + esc(p.value)
          + '" style="width:180px">' + set;

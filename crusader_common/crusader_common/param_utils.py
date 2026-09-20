@@ -26,13 +26,43 @@ def check_range(name, value, ranges):
     return None
 
 
+# How an enum's accepted values are written into ParameterDescriptor's
+# additional_constraints, and read back out by the dashboard. A prefix rather
+# than a bare list because additional_constraints is free text that anything
+# may write, and a reader has to be able to tell "these are the only values"
+# from a sentence of prose that happens to contain commas.
+CHOICES_PREFIX = "one of: "
+
+
+def choices_of(descriptor):
+    """The accepted values a descriptor advertises, or () if it names none."""
+    text = (getattr(descriptor, "additional_constraints", "") or "").strip()
+    if not text.startswith(CHOICES_PREFIX):
+        return ()
+    return tuple(v.strip() for v in text[len(CHOICES_PREFIX):].split(",")
+                 if v.strip())
+
+
 def declare(node, name, default, *, read_only=False, lo=None, hi=None,
-            description=""):
+            description="", choices=()):
     """Declare one parameter with a full descriptor. Returns the resolved value
-    (YAML/launch override wins over `default`)."""
+    (YAML/launch override wins over `default`).
+
+    `choices` names the only acceptable values for a string parameter. It goes
+    into additional_constraints, which is the field ROS provides for exactly
+    this and which every parameter client already receives — so the dashboard
+    can offer a dropdown without a second channel carrying the same list, and
+    `ros2 param describe` prints it for someone working from a terminal.
+
+    It is NOT enforced here. rcl has no enum constraint, so the node's own
+    on-set callback is the thing that refuses a bad value; advertising the list
+    is what stops most of them being typed in the first place.
+    """
     from rcl_interfaces.msg import (FloatingPointRange, IntegerRange,
                                     ParameterDescriptor)
     d = ParameterDescriptor(description=description, read_only=read_only)
+    if choices:
+        d.additional_constraints = CHOICES_PREFIX + ", ".join(choices)
     if lo is not None and hi is not None:
         if isinstance(default, float):
             d.floating_point_range = [FloatingPointRange(

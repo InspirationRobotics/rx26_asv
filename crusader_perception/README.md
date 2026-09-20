@@ -161,6 +161,69 @@ All `[RO]` — structural. Change them in the YAML and restart; `ros2 param set`
 | `queue_size` | `4` | device queue depth, non-blocking |
 | `health_period_s` | `5.0` | warns when no frames arrived since the last check |
 
+## Tuning the camera
+
+Every OAK-D setting worth changing is a **live parameter** on `oak_detector`, so the
+whole profile is findable from the ground station's Tuning tab without a rebuild or a
+restart. The table lives in `oak_controls.py` and the node's parameter spec is
+*generated* from it, so the ranges the Tuning tab shows are the ranges the device
+enforces — there is no second list to keep in step.
+
+| group | controls |
+|---|---|
+| exposure | `ae_mode` (auto/manual), `exposure_us`, `iso`, `ae_compensation`, `ae_max_exposure_us`, `ae_lock`, `ae_region_top`, `ae_region_height` |
+| white balance | `awb_mode` (9 presets, or `off`), `wb_temperature_k` |
+| image | `brightness`, `contrast`, `saturation`, `sharpness`, `luma_denoise`, `chroma_denoise` |
+| flicker | `anti_banding` |
+
+Ranges are depthai's own, read off `CameraControl`'s docstrings rather than guessed.
+The three enums advertise their accepted values through `ParameterDescriptor.
+additional_constraints`, which is the field ROS provides for exactly that, so the
+dashboard renders a dropdown and `ros2 param describe` prints the list for anyone
+working from a terminal. `check_config.py` fails if a control has no YAML value or one
+outside its range — the first is the "no declared posture" startup death, the second
+starts fine and then refuses the first thing you set.
+
+### Why this is a tuning surface and not four settled numbers
+
+Measured on the boat at dusk, facing a bright sky: the camera chose **2214 µs at ISO
+100** — a fifteenth of the shutter available to it and the gain range entirely unused —
+and produced a frame with a **median luma of 12/255, 38% of pixels crushed to black and
+0.10% clipped**. It was not short of light. depthai's default meters the **whole frame**,
+the sky averaged out to something that looked correct, and the waterline went off the
+bottom.
+
+Metering a band across the horizon instead, at the same `ae_compensation`, moved the
+median from **12 to 41** and the crushed fraction from **38% to 16%** — measured A/B/A so
+the changing sky showed up as drift (it was +1.0) rather than as a result. Sweeping the
+bias from there: −1 gives 72, and **0 gives 112 with 0.6% crushed**, at which point the
+shutter reaches its cap and AE starts spending ISO, which is the cap doing its job.
+
+The right numbers depend on the light, which is the whole argument for making them
+tunable rather than choosing them here.
+
+### The two that are not simply preferences
+
+`ae_compensation` is a **training contract**: the LED classifier learned colours off
+footage shot at one bias, and `tools/oak_record.py` defaults to the same −3. Moving it
+means retraining, or accepting that the classifier sees colours it never saw.
+
+`ae_region_*` are **fractions of the sensor, not the output**. depthai 2.32 is explicit
+that the region "should be mapped to the configured sensor resolution, before ISP
+scaling". Passing the 640×400 output size puts the band at rows 140–320 of 1200 — the
+sky — so the meter brightens for the one part of the frame you were excluding and the
+picture gets *darker*. `tools/oak_record.py` carries a deliberate copy of that
+arithmetic, because it is standalone by design and an import of this package would end
+that; keep the two in step.
+
+### Seeing what the camera actually did
+
+The annotated view carries a second line — `MEASURED exp … ISO … wb …` beside the `SET`
+profile — read out of each frame's own metadata, and the same pair goes to `/rosout`
+every health tick so a recording carries the exposure it was shot at. Without it every
+control above is set blind, which is precisely why "dark in strong light" needed a probe
+to diagnose at all.
+
 ## The topic contract
 
 ```

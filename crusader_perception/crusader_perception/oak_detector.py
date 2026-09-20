@@ -79,9 +79,9 @@ from std_msgs.msg import String
 from crusader_common import config as crsd_config
 from crusader_common.mjpeg_view import FrameBuffer, serve_mjpeg, stop_mjpeg
 from crusader_common.node_main import run_node
-from crusader_common.param_utils import declare_from_config
+from crusader_common.param_utils import declare_from_config, make_set_callback
 from crusader_msgs.msg import Detection3D, Detection3DArray
-from crusader_perception import oak_pipeline
+from crusader_perception import oak_controls, oak_pipeline
 from crusader_perception.oak_detector_core import (FlashTracker, LabelVoter,
                                                    ShapeVoter, TrackTable,
                                                    buoy_patch, led_patch,
@@ -230,10 +230,17 @@ PARAM_SPEC = {
     "fps": dict(read_only=True, lo=1.0, hi=60.0, description="camera frame rate [Hz]"),
     "isp_denominator": dict(read_only=True, lo=1, hi=8,
                             description="ISP downscale 1/N of 1920x1200"),
-    "ae_compensation": dict(read_only=True, lo=-9, hi=9,
-                            description="auto-exposure bias, EV steps; negative "
-                                        "is darker. Must match the exposure the "
-                                        "classifier's footage was shot at"),
+    # -- camera profile: exposure, white balance, image --
+    # GENERATED, not written out here. oak_controls owns the table of what
+    # exists, what it accepts and what it does; spelling the same sixteen
+    # entries out a second time in this file is how a range in the Tuning tab
+    # ends up disagreeing with the range the device enforces.
+    #
+    # Every one is [DYN], by definition: a camera setting you cannot change
+    # while looking at the picture is a setting nobody ever tunes, which is how
+    # the boat ended up metering the whole frame at dusk and sitting four stops
+    # under with its entire gain range unused.
+    **oak_controls.param_spec(),
     "poll_period_s": dict(read_only=True, lo=0.001, hi=1.0,
                           description="output-queue poll period [s]"),
     "queue_size": dict(read_only=True, lo=1, hi=30,
@@ -248,6 +255,12 @@ PARAM_SPEC = {
     "stream_quality": dict(read_only=True, lo=10, hi=100,
                            description="JPEG quality for the MJPEG view"),
 }
+
+# Only the camera settings are dynamic. Everything else here is an engine path,
+# a topic name or a geometry constant, and changing one of those under a running
+# detector would mean reloading a TensorRT engine mid-frame.
+DYNAMIC_RANGES = {k: (v["lo"], v["hi"]) for k, v in PARAM_SPEC.items()
+                  if not v["read_only"] and "lo" in v}
 
 # Box colour by LED colour, in OpenCV's BGR order. Drawing only — nothing here
 # classifies. Getting red and green the right way round matters more than it
@@ -322,11 +335,18 @@ class OakDetector(Node):
                 self.get_logger().warn(f"flash debug log disabled: {e}")
 
         self.device = None
+        self.control = None          # set by _open_device; _apply tolerates None
         self.server = None
         self.buffer = FrameBuffer()
         self.batched = True          # until the engine says otherwise
         self.fps = 0.0
         self.det_ms = self.cls_ms = self.shape_ms = 0.0
+        # Measured per frame, not derived from the parameters: the parameters
+        # say what was ASKED for, and the gap between the two is the whole
+        # content of "is this profile doing anything".
+        self.exposure_us = 0.0
+        self.iso = 0
+        self.colour_k = 0
         self.frames = 0
         self.detections = 0
         self.no_depth = 0
@@ -342,6 +362,9 @@ class OakDetector(Node):
             self.server = serve_mjpeg(int(p["stream_port"]),
                                       int(p["stream_quality"]), self.buffer,
                                       self.get_logger(), title="oak_detector")
+
+        self.add_on_set_parameters_callback(
+            make_set_callback(self, DYNAMIC_RANGES, self._apply))
 
         self.create_timer(p["poll_period_s"], self._drain)
         self.create_timer(p["health_period_s"], self._health)
@@ -374,26 +397,104 @@ class OakDetector(Node):
                 "oak_pipeline targets v2. Pin depthai==2.x in the Dockerfile "
                 "and rebuild the image.")
 
+        profile = self._camera_profile()
         pipeline, self.width, self.height = oak_pipeline.build_rgbd(
             isp_denominator=self.p["isp_denominator"], fps=self.p["fps"],
-            ae_compensation=int(self.p["ae_compensation"]))
+            controls=profile)
 
         self.dai = dai
         self.device = dai.Device(pipeline)
         self.queue = self.device.getOutputQueue("rgbd", self.p["queue_size"],
                                                 blocking=False)
+        # Depth 1, blocking=False: only the NEWEST control matters. Somebody
+        # dragging a slider generates a burst, and a queue that backs them up
+        # would have the camera walk through every intermediate value after the
+        # hand stopped moving.
+        self.control = self.device.getInputQueue(
+            oak_pipeline.CONTROL_STREAM, maxSize=1, blocking=False)
         self.fx, self.fy, self.cx, self.cy = oak_pipeline.rgb_intrinsics(
             self.device, self.width, self.height)
 
         self.get_logger().info(
             f"OAK-D open: mxid={self.device.getMxId()}, "
             f"usb={self.device.getUsbSpeed().name}, {self.width}x{self.height}")
+        self._log_camera(profile)
         warning = oak_pipeline.usb_warning(self.device)
         if warning:
             self.get_logger().warn(warning)
         self.get_logger().info(
             f"publishing {self.p['detections_topic']} in frame "
             f"'{self.frame_id}' (x forward, y left, z up)")
+
+    def _camera_profile(self, values=None):
+        """The value of every camera control, as {name: value}.
+
+        One description, read by the pipeline build and by every later change.
+        Two copies is exactly how the runtime path ends up applying something
+        the pipeline was not built with — and that failure looks like a camera
+        whose behaviour depends on whether anybody touched a slider.
+
+        `values` defaults to the node's current parameters; _apply passes a
+        merged copy so a profile can be built and offered to the device before
+        anything is committed.
+        """
+        values = self.p if values is None else values
+        return {c.name: values[c.name] for c in oak_controls.ALL}
+
+    def _log_camera(self, profile):
+        """Say what the camera was told, in ONE format.
+
+        Startup and every later change go through here so a session's /rosout
+        carries one consistent record of the profile over time — which is the
+        only way to answer "what was this footage shot at" after the fact.
+        """
+        self.get_logger().info(f"camera: {oak_controls.summary(profile)}")
+
+    # ---------------- dynamic params ----------------
+    def _apply(self, changes):
+        """Push changed camera settings to the running device.
+
+        The profile is built from a MERGED COPY of the parameters and committed
+        to self.p only once the device has taken it. That ordering matters
+        twice over: several controls are read together (the metering band is
+        two parameters, manual exposure is two more), so a change to one has to
+        be combined with the current value of its partner; and self.p is what
+        the Tuning tab reads back, so committing before the device accepts
+        would show a value that is in force nowhere.
+
+        EVERY setting is re-sent on any change, not just the one that moved. A
+        CameraControl carries only what was set on it and the device keeps the
+        rest, so re-sending costs one message either way and means the camera's
+        state is the whole of what the parameters say, rather than a history of
+        which sliders somebody happened to touch.
+        """
+        # Validated BEFORE self.p moves: a rejected value must leave the node
+        # holding what it had, or a typo in a mode name would be reported as a
+        # refusal while the parameter quietly kept the bad string and the next
+        # unrelated change re-applied it.
+        error = oak_controls.validate(changes)
+        if error:
+            raise ValueError(error)
+
+        # Built from a MERGED COPY, and committed only once the device has
+        # taken it. Mutating self.p first and rolling back on failure is the
+        # same thing with a window in it where the parameters describe a camera
+        # that refused the settings — and self.p is what the Tuning tab reads
+        # back, so that window is one where the page shows a value that is not
+        # in force anywhere.
+        profile = self._camera_profile(dict(self.p, **changes))
+        if self.control is not None:
+            control = self.dai.CameraControl()
+            refused = oak_controls.apply(self.dai, control, profile)
+            if refused:
+                # Not fatal at run time: the camera is already open and
+                # producing frames, and taking it down over a setting it will
+                # not accept is a far worse outcome than the setting not
+                # applying.
+                raise RuntimeError("; ".join(refused))
+            self.control.send(control)
+        self.p.update(changes)
+        self._log_camera(profile)
 
     # ---------------- frame pump ----------------
     def _drain(self):
@@ -414,6 +515,13 @@ class OakDetector(Node):
             depth_message = messages.get("depth")
             if rgb_message is None or depth_message is None:
                 continue
+
+            # What the camera actually DID, off the frame's own metadata.
+            # Without this every control on the Tuning tab is set blind: the
+            # whole reason "dark in strong light" took a probe to diagnose is
+            # that nobody could see the answer was 2214 us at ISO 100, with
+            # fifteen times the shutter and the entire gain range unused.
+            self._read_exposure(rgb_message)
 
             rgb_frame = rgb_message.getCvFrame()
             depth_frame = depth_message.getFrame()
@@ -751,9 +859,32 @@ class OakDetector(Node):
                   f"no_depth={self.no_depth} no_crop={self.no_crop}  "
                   f"flash={'on' if self.flash_enable else 'OFF'}  "
                   f"{self.width}x{self.height}")
+        # A second line, not a longer first one: at 640 wide the status line is
+        # already close to running off the edge, and a readout you cannot read
+        # is not a readout.
+        measured = (f"MEASURED exp {self.exposure_us:.0f}us  ISO {self.iso}  "
+                    f"wb {self.colour_k}K   SET {oak_controls.summary(self.p)}")
+        cv2.putText(image, measured, (6, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.36,
+                    (255, 255, 255), 1, cv2.LINE_AA)
         cv2.putText(image, status, (6, 13), cv2.FONT_HERSHEY_SIMPLEX, 0.36,
                     (255, 255, 255), 1, cv2.LINE_AA)
         return image
+
+    def _read_exposure(self, message):
+        """Latch the frame's measured exposure, gain and colour temperature.
+
+        Wrapped because these are metadata a device or a depthai build may not
+        populate, and a missing readout must cost the readout, not the frame.
+        Left at the previous value rather than zeroed: this is a display, and a
+        zero would read as "the camera chose 0 us", which is a measurement, not
+        a gap.
+        """
+        try:
+            self.exposure_us = message.getExposureTime().total_seconds() * 1e6
+            self.iso = message.getSensitivity()
+            self.colour_k = message.getColorTemperature()
+        except Exception:
+            pass
 
     # ---------------- helpers ----------------
     def _ros_stamp(self, message):
@@ -767,6 +898,12 @@ class OakDetector(Node):
     def _health(self):
         now = time.monotonic()
         delivered = self.frames - self.last_health_frames
+        # Logged as well as drawn: /rosout is what the Logs tab and every
+        # recording capture, so the exposure a session was shot at survives
+        # into the session rather than living only on a screen nobody kept.
+        self.get_logger().info(
+            f"camera measured: exp {self.exposure_us:.0f}us ISO {self.iso} "
+            f"wb {self.colour_k}K | set: {oak_controls.summary(self.p)}")
         elapsed = max(now - self.last_health_time, 1e-6)
         self.last_health_frames = self.frames
         self.last_health_time = now

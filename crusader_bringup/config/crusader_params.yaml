@@ -813,12 +813,84 @@ oak_detector:
     isp_denominator: 3                     # [RO] 3 -> 640x400. Raise resolution
                                            #      (2 -> 960x600) if no_crop is
                                            #      high — moves all three nodes
-    ae_compensation: -3                    # [RO] EV steps, -9..9; negative is
-                                           #      darker. A TRAINING CONTRACT:
-                                           #      must match the exposure the
-                                           #      classifier's footage was shot
-                                           #      at. oak_record.py also
-                                           #      defaults to -3. 0 = off
+    # ---- camera profile: every one [DYN], tunable from the Tuning tab ----
+    # Ranges here are depthai's own (2.32), and are ENFORCED from the same
+    # table the node generates its parameter spec from -- see oak_controls.py.
+    #
+    # Why this is a tuning surface and not four settled numbers: measured on
+    # the boat at dusk facing a bright sky, the camera chose 2214 us at ISO
+    # 100 -- 1/15th of the shutter available and the gain range entirely
+    # unused -- because the default meters the WHOLE FRAME and the sky
+    # averaged out to something that looked correct. Median luma 12/255 with
+    # 38% of the frame crushed to black and 0.10% clipped. The right profile
+    # depends on the light, so it has to be findable without a rebuild.
+    ae_mode: "auto"                        # [DYN] auto | manual. manual pins
+                                           #       exposure_us + iso and makes
+                                           #       every ae_* setting inert.
+    exposure_us: 8000                      # [DYN] shutter when ae_mode=manual
+    iso: 400                               # [DYN] gain when ae_mode=manual,
+                                           #       100..1600 (100 is the floor)
+    ae_compensation: -3                    # [DYN] EV steps, -9..9; negative is
+                                           #       darker. A TRAINING CONTRACT:
+                                           #       should match the exposure the
+                                           #       classifier's footage was shot
+                                           #       at. oak_record.py defaults to
+                                           #       -3 too. Measured with the
+                                           #       band below: -3 -> median 35,
+                                           #       -1 -> 72, 0 -> 112 with only
+                                           #       0.6% crushed. Moving it means
+                                           #       retraining, or accepting the
+                                           #       classifier sees new colours.
+    ae_max_exposure_us: 8000               # [DYN] shutter cap; AE spends gain
+                                           #       past it. depthai prioritises
+                                           #       exposure over ISO up to frame
+                                           #       time, so uncapped it buys
+                                           #       brightness with smear -- and
+                                           #       a noisy sharp buoy detects
+                                           #       where a smeared one does not.
+                                           #       0 = uncapped.
+    ae_lock: false                         # [DYN] freeze AE where it is
+    ae_region_top: 0.35                    # [DYN] metering band, as fractions
+    ae_region_height: 0.45                 # [DYN] of frame height. WHERE the
+                                           #       meter looks, which outdoors
+                                           #       matters more than the bias:
+                                           #       0.35+0.45 is the horizon and
+                                           #       the near water. Measured, at
+                                           #       fixed -3: median 12 -> 41,
+                                           #       crushed 38% -> 16%. height 0
+                                           #       = whole frame. Fractions, not
+                                           #       pixels: the region is against
+                                           #       the SENSOR, before ISP scale,
+                                           #       so isp_denominator must not
+                                           #       enter the calculation.
+    awb_mode: "auto"                       # [DYN] auto | off | daylight |
+                                           #       cloudy_daylight | shade |
+                                           #       twilight | incandescent |
+                                           #       fluorescent | warm_fluorescent
+    wb_temperature_k: 5000                 # [DYN] 1000..12000, used only when
+                                           #       awb_mode is off. Water and
+                                           #       sky are both strongly blue,
+                                           #       which is what auto white
+                                           #       balance is worst at: it
+                                           #       corrects the blue away and
+                                           #       takes the buoys with it.
+    brightness: 0                          # [DYN] -10..10, post-ISP. Cannot
+                                           #       recover a crushed shadow --
+                                           #       fix exposure first.
+    contrast: 0                            # [DYN] -10..10
+    saturation: 0                          # [DYN] -10..10. Careful: the LED
+                                           #       classifier separates a lit
+                                           #       buoy from its hull ON
+                                           #       saturation, so this moves the
+                                           #       exact quantity it reads.
+    sharpness: 1                           # [DYN] 0..4, depthai default 1
+    luma_denoise: 1                        # [DYN] 0..4, worth raising once high
+    chroma_denoise: 1                      # [DYN] 0..4, ISO is in play
+    anti_banding: "auto"                   # [DYN] off | mains_50_hz |
+                                           #       mains_60_hz | auto. Mains
+                                           #       flicker only -- irrelevant
+                                           #       outdoors, matters under dock
+                                           #       lights.
     poll_period_s: 0.01                    # [RO] output-queue poll period [s]
     queue_size: 4                          # [RO] device output queue depth
     health_period_s: 5.0                   # [RO] rate/health log period [s]
