@@ -694,7 +694,15 @@ oak_detector:
     # Abstentions fall back to the detector's own class, so 'detector' is always
     # a safe thing to switch back to.
     shape_source: "geometry"               # [RO] "geometry" | "detector"
-    shape_min_radius: 6.0                  # [RO] marking radius [px] below
+    shape_min_radius: 18.0                 # [RO] marking radius [px] below
+                                           #      WAS 6.0, measured at 640x400.
+                                           #      SCALES WITH rgb_isp_denominator:
+                                           #      the same marking is 3x wider
+                                           #      at 1/1, so a 6 px floor would
+                                           #      stop refusing exactly the
+                                           #      marginal markings it exists to
+                                           #      refuse. Move this whenever
+                                           #      rgb_isp_denominator moves.
                                            #      which it refuses. Synthetic
                                            #      renders are unreliable under
                                            #      ~6 px and solid by ~10 —
@@ -810,7 +818,7 @@ oak_detector:
     # subpixel / lr_check / sync_threshold_ms used to live here too and are now
     # constants in oak_pipeline.py — equal by construction, nothing to pin.
     fps: 30.0                              # [RO] = oakd_publisher.fps
-    rgb_isp_denominator: 3                 # [RO] 1/N for the COLOUR camera
+    rgb_isp_denominator: 1                 # [RO] 1/N for the COLOUR camera
                                            #      ALONE. 1 -> 1920x1200.
                                            #      Measured 2026-09-20: moving
                                            #      BOTH paths to 1/2 halved the

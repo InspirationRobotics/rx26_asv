@@ -397,9 +397,14 @@ class GroundStation(Node):
             src, starting = reg.tab_source(names, running, self._serving)
             if src and not starting:
                 spec = reg.BY_NAME[src]
-                if spec.port and spec.stream_path:
-                    sources[key] = (f"http://127.0.0.1:{spec.port}"
-                                    f"{spec.stream_path}")
+                # The RAW path when the producer offers one. A session's frames
+                # are training material as often as they are a record of what
+                # the operator saw, and boxes burned into the pixels make them
+                # useless for the first without helping the second -- the boxes
+                # are in the bag, with timestamps, either way.
+                path = spec.record_stream_path or spec.stream_path
+                if spec.port and path:
+                    sources[key] = f"http://127.0.0.1:{spec.port}{path}"
         return sources
 
     # ---------- the snapshot ----------
@@ -461,6 +466,11 @@ class GroundStation(Node):
             "starting": starting,
             "starting_name": src if starting else None,
             "port": reg.BY_NAME[src].port if src else 0,
+            # The views this producer offers, so the tab can offer them too.
+            # Empty for every viewer but the detector, and the page renders no
+            # picker for an empty list rather than a picker with one choice.
+            "views": [{"name": n, "label": label}
+                      for n, label in (reg.BY_NAME[src].views if src else ())],
             "title": title, "hint": hint,
             "candidates": [{"name": n, "label": reg.BY_NAME[n].label}
                            for n in sources],

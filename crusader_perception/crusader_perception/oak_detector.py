@@ -343,7 +343,15 @@ class OakDetector(Node):
         self.device = None
         self.control = None          # set by _open_device; _apply tolerates None
         self.server = None
+        # TWO VIEWS of the same moment. The annotated one answers "did it see
+        # the buoy"; the raw one answers "was the PICTURE any good", which the
+        # annotated frame cannot, because the boxes are drawn over the evidence.
+        # The raw view is also what a RECORDING pulls: a training set made of
+        # frames with boxes burned into them is a training set of the boxes.
         self.buffer = FrameBuffer()
+        self.raw_buffer = FrameBuffer()
+        self.views = {"annotated": (self.buffer, "Annotated"),
+                      "raw": (self.raw_buffer, "Raw")}
         self.batched = True          # until the engine says otherwise
         self.fps = 0.0
         self.det_ms = self.cls_ms = self.shape_ms = 0.0
@@ -366,7 +374,7 @@ class OakDetector(Node):
         self._open_device()
         if p["stream_enable"]:
             self.server = serve_mjpeg(int(p["stream_port"]),
-                                      int(p["stream_quality"]), self.buffer,
+                                      int(p["stream_quality"]), self.views,
                                       self.get_logger(), title="oak_detector")
 
         self.add_on_set_parameters_callback(
@@ -748,6 +756,11 @@ class OakDetector(Node):
 
         if self.buffer.viewers > 0:
             self.buffer.put(self._annotate(rgb_frame, drawn))
+        # No copy and no drawing: _annotate already works on a copy, so the
+        # frame handed out here is the one the engines saw, untouched. Gated
+        # the same way, so a view nobody is watching costs nothing at all.
+        if self.raw_buffer.viewers > 0:
+            self.raw_buffer.put(rgb_frame)
 
     def _classify(self, crops):
         """Colour probabilities for a list of crops, one vector each.
@@ -1034,7 +1047,7 @@ class OakDetector(Node):
     def destroy_node(self):
         # Viewer first: a stream handler blocks waiting for the next frame, so
         # closing the camera first leaves it waiting for one that never comes.
-        stop_mjpeg(self.server, self.buffer, self.get_logger())
+        stop_mjpeg(self.server, self.views, self.get_logger())
         self.server = None
         if self._debug is not None:
             try:

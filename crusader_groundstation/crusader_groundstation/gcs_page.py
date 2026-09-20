@@ -432,14 +432,19 @@ function renderViewer(pane, cfg, tabName){
     return;
   }
   var live = streamOn[tabName] && !pageHidden;
+  /* The chosen view rides in the URL, so switching it reloads the iframe and
+     the old MJPEG connection closes with it -- the producer stops encoding the
+     view nobody is looking at any more. */
+  var view = viewChoice[tabName] || '';
   var url = (cfg && cfg.source && live)
-    ? location.protocol+'//'+location.hostname+':'+cfg.port+'/' : '';
+    ? location.protocol+'//'+location.hostname+':'+cfg.port+'/'
+      + (view ? '?view=' + encodeURIComponent(view) : '') : '';
   /* The guard keys on the whole rendered STATE, not just the url. There are
      four states now and three of them have no url — keying on the url alone
      left the tab showing "not running" with Start buttons after the node had
      started, because both states compared equal and the early return skipped
      the rebuild. */
-  var key = url || (cfg && cfg.source ? 'paused:' + cfg.source
+  var key = url || (cfg && cfg.source ? 'paused:' + cfg.source + ':' + view
                  : cfg && cfg.starting ? 'starting:' + cfg.starting_name
                  : 'idle');
   if(e.dataset.src === key) return;                  /* unchanged: leave it */
@@ -450,11 +455,21 @@ function renderViewer(pane, cfg, tabName){
        any non-root path, mjpeg_server routes /stream/<view>), and lidar_view's
        page carries its own plan/elevation tabs worth keeping. */
     e.innerHTML = '<div class="viewer" style="position:relative;padding:0">'
+      + viewPicker(cfg, tabName)
       + '<div style="position:absolute;top:8px;right:8px;z-index:5">'
       + '<button class="on" onclick="toggleStream(\''+tabName+'\')">'
       + '&#9632; stop stream</button></div>'
       + '<iframe src="'+url+'" style="width:100%;'
       + 'height:100%;border:0;background:var(--bg)"></iframe></div>';
+    /* Wired here rather than inline: the view name is data from the node, and
+       an onclick attribute would put it through a second layer of quoting for
+       nothing. */
+    e.querySelectorAll('button[data-view]').forEach(function(btn){
+      btn.onclick = function(){
+        var parts = btn.dataset.view.split('|');
+        setView(parts[0], parts[1]);
+      };
+    });
   } else if(cfg && cfg.source){
     /* Running and reachable, deliberately not being watched. This panel is the
        whole point of the feature, so it says what it is costing you to press
@@ -550,6 +565,30 @@ function power(verb){
    your clicks. The topic list is therefore painted only when it or the
    selection actually changes, and the status block — which is what needs to
    be live — is the only thing on the 5 Hz path. */
+/* Which view each viewer tab is showing, by tab name. Empty means "whatever
+   the producer serves by default", which is every viewer except the detector.
+   Per tab, not global: the camera and the LiDAR do not offer the same views. */
+var viewChoice = {};
+
+function setView(tabName, name){
+  viewChoice[tabName] = name;
+  paint();
+}
+
+/* Buttons only when there is something to choose. One view is not a choice,
+   and a picker with a single disabled button is furniture. */
+function viewPicker(cfg, tabName){
+  if(!cfg || !cfg.views || cfg.views.length < 2) return '';
+  var cur = viewChoice[tabName] || cfg.views[0].name;
+  return '<div style="position:absolute;top:8px;left:8px;z-index:2;display:flex;'
+       + 'gap:6px">'
+       + cfg.views.map(function(v){
+           return '<button data-view="' + esc(tabName) + '|' + esc(v.name) + '"'
+                + (v.name === cur ? ' class="go"' : '') + '>'
+                + esc(v.label) + '</button>'; }).join('')
+       + '</div>';
+}
+
 var recTopics = null, recSel = {}, recBusy = false, recErr = '';
 
 /* Capture rate, PER VIEWER and PER SESSION. Sent with Start; it is not a
