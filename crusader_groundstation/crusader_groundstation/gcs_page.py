@@ -1522,7 +1522,8 @@ function paintCam(){
       if(ev.key === 'Enter'){ ev.preventDefault(); camSaveProfile(); } };
 }
 
-var camWasRunning = null;
+var camWasRunning = null, camNextTry = 0;
+var CAM_RETRY_MS = 2000;
 
 function renderCam(){
   /* The pane is painted on CHANGE, not on the 5 Hz poll — so a node that
@@ -1533,6 +1534,23 @@ function renderCam(){
   if(camBuilt && running !== camWasRunning){
     camWasRunning = running;
     if(running) camLoadParams(); else paintCam();
+  }
+  /* AND KEEP TRYING while it is up but has told us nothing. The two facts come
+     from different places and they do not arrive together: "running" is the
+     PROCESS TABLE (proc_scan), while /params/list needs the node to be in the
+     ROS GRAPH, which the node station rescans on its own timer. Start the
+     camera and for a few seconds it is a live process that the parameter
+     bridge has never heard of — so a single load on the transition lands on
+     "not in the ROS graph" and, because this pane only repaints on change,
+     that stale refusal would sit there until you changed tabs.
+
+     Only while the list is EMPTY, and no faster than CAM_RETRY_MS: once there
+     are rows this stops, so nothing is repainting under a value you are
+     typing. */
+  if(camBuilt && running && !camRows.length && !camBusy
+     && Date.now() >= camNextTry){
+    camNextTry = Date.now() + CAM_RETRY_MS;
+    camLoadParams();
   }
   if(!camBuilt){
     camWasRunning = running;
