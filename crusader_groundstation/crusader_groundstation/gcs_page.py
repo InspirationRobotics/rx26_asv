@@ -1490,7 +1490,12 @@ function paintCam(){
           +  esc(g.group) + '</div>'
           +  rows.map(function(p){ return tuneRow(p, 'cv_'); }).join('');
     });
-    var rest = camRows.filter(function(p){ return p.editable && !seen[p.name]; });
+    /* The safety net is for a CAMERA control that outran the grouping, not for
+       ROS's own parameters: use_sim_time is declared by every node in the
+       graph, has nothing to do with the sensor, and sitting next to ISO in a
+       tuning column it reads as something worth trying. */
+    var rest = camRows.filter(function(p){
+      return p.editable && !seen[p.name] && p.name !== 'use_sim_time'; });
     if(rest.length)
       out += '<div class="hint" style="margin-top:8px;color:var(--strong)">'
           +  'other</div>'
