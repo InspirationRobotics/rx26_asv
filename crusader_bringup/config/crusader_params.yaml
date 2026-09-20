@@ -810,6 +810,27 @@ oak_detector:
     # subpixel / lr_check / sync_threshold_ms used to live here too and are now
     # constants in oak_pipeline.py — equal by construction, nothing to pin.
     fps: 30.0                              # [RO] = oakd_publisher.fps
+    rgb_isp_denominator: 3                 # [RO] 1/N for the COLOUR camera
+                                           #      ALONE. 1 -> 1920x1200.
+                                           #      Measured 2026-09-20: moving
+                                           #      BOTH paths to 1/2 halved the
+                                           #      frame rate (27.8 -> 13.6 fps)
+                                           #      while inference barely moved
+                                           #      -- the cost was stereo and
+                                           #      USB, not the model. Past
+                                           #      1280px wide the stereo engine
+                                           #      drops EVERY frame, so a full
+                                           #      colour frame is unreachable
+                                           #      while the two share a scale.
+                                           #      The LED classifier cuts a
+                                           #      64x64 crop from the RAW frame,
+                                           #      so pixels kept here are pixels
+                                           #      that crop need not invent.
+                                           #      NOTE the detector engine is
+                                           #      fixed at 640x640, so this
+                                           #      helps the CLASSIFIER at once
+                                           #      and the DETECTOR only after a
+                                           #      re-export at a larger imgsz.
     isp_denominator: 3                     # [RO] 3 -> 640x400. Raise resolution
                                            #      (2 -> 960x600) if no_crop is
                                            #      high — moves all three nodes

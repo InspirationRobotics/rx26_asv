@@ -229,7 +229,13 @@ PARAM_SPEC = {
     # -- camera; MUST match the other OAK-D nodes, see check_config.py --
     "fps": dict(read_only=True, lo=1.0, hi=60.0, description="camera frame rate [Hz]"),
     "isp_denominator": dict(read_only=True, lo=1, hi=8,
-                            description="ISP downscale 1/N of 1920x1200"),
+                            description="ISP downscale 1/N of 1920x1200 for the "
+                                        "STEREO pair, and so the depth size"),
+    "rgb_isp_denominator": dict(read_only=True, lo=1, hi=8,
+                                description="ISP downscale 1/N for the COLOUR "
+                                            "camera. Lower = more pixels on a "
+                                            "buoy without paying for depth at "
+                                            "the same resolution"),
     # -- camera profile: exposure, white balance, image --
     # GENERATED, not written out here. oak_controls owns the table of what
     # exists, what it accepts and what it does; spelling the same sixteen
@@ -400,7 +406,8 @@ class OakDetector(Node):
         profile = self._camera_profile()
         pipeline, self.width, self.height = oak_pipeline.build_rgbd(
             isp_denominator=self.p["isp_denominator"], fps=self.p["fps"],
-            controls=profile)
+            controls=profile,
+            rgb_isp_denominator=self.p["rgb_isp_denominator"])
 
         self.dai = dai
         self.device = dai.Device(pipeline)
@@ -525,10 +532,17 @@ class OakDetector(Node):
 
             rgb_frame = rgb_message.getCvFrame()
             depth_frame = depth_message.getFrame()
-            if rgb_frame.shape[:2] != depth_frame.shape[:2]:
+            # The two are DELIBERATELY allowed to differ now: depth is
+            # emitted at the stereo scale and aligned into CAM_A's field of
+            # view, so the same scene maps between them by a plain ratio. What
+            # is still fatal is a frame that is not the size this node was
+            # BUILT for, because then the ratio is wrong and the result is a
+            # plausible range rather than an exception.
+            if rgb_frame.shape[1] != self.width:
                 self.get_logger().error(
-                    "RGB/depth size mismatch — depth lookups would read the "
-                    "wrong pixel; dropping frame", throttle_duration_sec=5.0)
+                    f"RGB frame is {rgb_frame.shape[1]}px wide, expected "
+                    f"{self.width} — depth lookups would read the wrong "
+                    "pixel; dropping frame", throttle_duration_sec=5.0)
                 continue
 
             self._run_pipeline(rgb_frame, depth_frame,
@@ -771,11 +785,16 @@ class OakDetector(Node):
         rejects the background pixels that inevitably fall inside a box.
         """
         x1, y1, x2, y2 = box
-        height, width = depth_frame.shape[:2]
-        x1 = max(0, min(width - 1, x1))
-        x2 = max(0, min(width - 1, x2))
-        y1 = max(0, min(height - 1, y1))
-        y2 = max(0, min(height - 1, y2))
+        # TWO COORDINATE SPACES, and the correctness of every range depends on
+        # not mixing them. The box, the sample the viewer draws over the RGB
+        # frame, and the bearing maths are all in RGB pixels, because that is
+        # the size the intrinsics were read at. ONLY the depth lookup moves
+        # into depth pixels. When the two scales are equal every ratio below is
+        # 1.0 and this is exactly the code that ran before.
+        x1 = max(0, min(self.width - 1, x1))
+        x2 = max(0, min(self.width - 1, x2))
+        y1 = max(0, min(self.height - 1, y1))
+        y2 = max(0, min(self.height - 1, y2))
         if x2 <= x1 or y2 <= y1:
             return None, None
 
@@ -784,8 +803,21 @@ class OakDetector(Node):
         half_w = max(HALF_W_LIMITS[0], min(HALF_W_LIMITS[1], (x2 - x1) // 8))
         half_h = max(HALF_H_LIMITS[0], min(HALF_H_LIMITS[1], (y2 - y1) // 6))
 
-        patch = depth_frame[max(0, v - half_h):min(height, v + half_h + 1),
-                            max(0, u - half_w):min(width, u + half_w + 1)]
+        # Depth is ALIGNED to CAM_A, so the two frames cover the same field of
+        # view and differ only in sampling density: a plain ratio is the whole
+        # of the correction, not an approximation.
+        height, width = depth_frame.shape[:2]
+        sx = width / float(self.width)
+        sy = height / float(self.height)
+        du, dv = int(u * sx), int(v * sy)
+        # At least one pixel after scaling down. A half-width that rounds to
+        # zero is an empty slice, which reads as "no depth here" for a buoy
+        # that was in fact ranged perfectly well.
+        dhw = max(1, int(half_w * sx))
+        dhh = max(1, int(half_h * sy))
+
+        patch = depth_frame[max(0, dv - dhh):min(height, dv + dhh + 1),
+                            max(0, du - dhw):min(width, du + dhw + 1)]
         valid = patch[(patch >= self.p["range_min_m"] * 1000.0)
                       & (patch <= self.p["range_max_m"] * 1000.0)]
         sample = (u, v, half_w, half_h, int(valid.size))

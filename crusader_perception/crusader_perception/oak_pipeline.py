@@ -18,6 +18,16 @@ the boat. Only calling a function here needs the hardware SDK present.
 """
 from crusader_perception import oak_controls
 
+# The OAK-D's stereo engine refuses an input wider than this. Measured on the
+# boat 2026-09-20: at isp_denominator=1 the camera opens and reports 1920x1200,
+# then StereoDepth logs "Maximum supported input image width for stereo is
+# 1280. Skipping frame!" once per frame, forever. Depth never arrives, the Sync
+# node never matches a pair, and the detector receives NOTHING — a camera that
+# is plainly running and produces no detections at all. Checked up front here so
+# that failure is one sentence at startup instead of a per-frame device log
+# nobody reads.
+STEREO_MAX_WIDTH = 1280
+
 SENSOR_WIDTH = 1920
 SENSOR_HEIGHT = 1200
 
@@ -46,8 +56,9 @@ def output_size(isp_denominator):
     return SENSOR_WIDTH // isp_denominator, SENSOR_HEIGHT // isp_denominator
 
 
-def build_rgbd(isp_denominator, fps, controls=None):
-    """RGB + depth, aligned and paired on-device. Returns (pipeline, w, h).
+def build_rgbd(isp_denominator, fps, controls=None, rgb_isp_denominator=None):
+    """RGB + depth, aligned and paired on-device. Returns (pipeline, w, h)
+    where w, h are the RGB frame's size.
 
     The Sync node is the point of the whole arrangement: RGB and depth leave the
     device already matched to within sync_threshold_ms, so no consumer has to
@@ -69,18 +80,54 @@ def build_rgbd(isp_denominator, fps, controls=None):
     None leaves depthai's defaults untouched, which is what buoy_detector and
     oakd_publisher want: they hand out frames for a human to look at, and a
     profile tuned for a classifier is not a good view.
+
+    rgb_isp_denominator SCALES THE COLOUR CAMERA SEPARATELY FROM THE STEREO
+    PAIR, and defaults to isp_denominator so every existing caller is byte-for-
+    byte unchanged. It exists because the two paths want opposite things and
+    were being charged the same price:
+
+      * Measured on the boat, moving both from 1/3 to 1/2 (640x400 -> 960x600)
+        HALVED the frame rate, 27.8 -> 13.6 fps, while inference barely moved
+        (det 20-25ms -> 24-32ms). At 13.6 fps a frame takes 73 ms and only ~31
+        of those are the two engines. The rest is stereo and USB.
+      * So the resolution was expensive because of DEPTH — and depth gains
+        nothing useful from it. The buoy pixels do: the LED classifier cuts a
+        64x64 crop out of the raw frame, so every pixel the sensor keeps is a
+        pixel that crop does not have to invent.
+      * And beyond 1280 the stereo engine simply refuses (STEREO_MAX_WIDTH), so
+        a full-resolution COLOUR frame is not reachable at all while the two
+        share one scale.
+
+    The cost is that `depth[v, u]` stops being legal, which is the invariant
+    this module's header is written to protect. It is paid in the caller:
+    oak_detector scales detection boxes into depth space and keeps the bearing
+    maths on RGB coordinates with RGB intrinsics. Depth is still ALIGNED to
+    CAM_A, so both cover the same field of view and a plain ratio is the whole
+    of the correction.
     """
     from datetime import timedelta
 
     import depthai as dai
 
-    width, height = output_size(isp_denominator)
+    depth_width, depth_height = output_size(isp_denominator)
+    rgb_den = isp_denominator if rgb_isp_denominator is None \
+        else int(rgb_isp_denominator)
+    width, height = output_size(rgb_den)
+
+    if depth_width > STEREO_MAX_WIDTH:
+        raise ValueError(
+            f"isp_denominator={isp_denominator} puts the stereo pair at "
+            f"{depth_width}px wide; the OAK-D's stereo engine refuses anything "
+            f"over {STEREO_MAX_WIDTH} and drops EVERY frame, so the node would "
+            "run and publish nothing. Raise isp_denominator (it scales depth), "
+            "and use rgb_isp_denominator to get a bigger COLOUR frame.")
+
     pipeline = dai.Pipeline()
 
     rgb = pipeline.create(dai.node.ColorCamera)
     rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
     rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1200_P)
-    rgb.setIspScale(1, isp_denominator)
+    rgb.setIspScale(1, rgb_den)
     rgb.setInterleaved(False)
     rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
     rgb.setFps(fps)
@@ -121,7 +168,10 @@ def build_rgbd(isp_denominator, fps, controls=None):
     stereo.setLeftRightCheck(LR_CHECK)
     stereo.setSubpixel(SUBPIXEL)
     stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)      # depth in RGB pixels
-    stereo.setOutputSize(width, height)
+    # Depth is emitted at the STEREO size and aligned into CAM_A's field of
+    # view. Same view, fewer pixels — which is what makes the caller's ratio a
+    # correct mapping rather than an approximation.
+    stereo.setOutputSize(depth_width, depth_height)
     left.isp.link(stereo.left)
     right.isp.link(stereo.right)
 

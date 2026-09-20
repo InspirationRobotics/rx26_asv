@@ -72,6 +72,83 @@ def safe_session_dir(root, name):
 FALLBACK_FRAME_HZ = 1.0
 
 
+# How long the growth-rate window is. Long enough that one flush does not read
+# as a rate spike, short enough to notice a heavy stream being switched on.
+RATE_WINDOW_S = 20.0
+
+
+def hours_left(free_bytes, rate_bytes_s):
+    """How long the disk lasts at the measured rate, or None.
+
+    None when the rate is not yet measurable — which is a blank, and a blank is
+    a fact. Returning a large number for "we have not measured anything yet"
+    would read as reassurance the data has not earned.
+    """
+    if not rate_bytes_s or rate_bytes_s <= 0 or free_bytes is None:
+        return None
+    return free_bytes / rate_bytes_s / 3600.0
+
+
+class GrowthMeter:
+    """Bytes-per-second of a directory, MEASURED, with its own lock.
+
+    Shared by every child process that writes into a session, because the
+    question is identical for all of them and the answer must not depend on
+    which one is asking. An estimate from a table of typical message sizes
+    would be a guess wearing a measurement's clothes; the tree has a rule
+    about those.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._samples = []           # [(monotonic, bytes)] over RATE_WINDOW_S
+        self._size = 0
+
+    def reset(self):
+        with self._lock:
+            self._samples = []
+            self._size = 0
+
+    def sample(self, path):
+        """One reading of `path`. Called from the node's existing timer."""
+        now = time.monotonic()
+        size = dir_size_bytes(path)
+        with self._lock:
+            self._size = size
+            self._samples.append((now, size))
+            cutoff = now - RATE_WINDOW_S
+            # Keep one sample older than the window so a rate is available from
+            # the first tick after it, rather than only once the window fills.
+            while len(self._samples) > 2 and self._samples[1][0] < cutoff:
+                self._samples.pop(0)
+
+    @property
+    def size_bytes(self):
+        with self._lock:
+            return self._size
+
+    def rate_bytes_s(self):
+        """Measured growth, or None until two samples exist far enough apart."""
+        with self._lock:
+            if len(self._samples) < 2:
+                return None
+            (t0, s0), (t1, s1) = self._samples[0], self._samples[-1]
+        if t1 - t0 < 1.0:
+            return None
+        return max(0.0, (s1 - s0) / (t1 - t0))
+
+    def readout(self, free_bytes=None):
+        """{size_mb, rate_mb_s, hours_left} — blanks, never zeroes, when
+        nothing has been measured yet."""
+        rate = self.rate_bytes_s()
+        left = None if rate is None else hours_left(free_bytes, rate)
+        return {
+            "size_mb": round(self.size_bytes / 1048576.0, 1),
+            "rate_mb_s": None if rate is None else round(rate / 1048576.0, 2),
+            "hours_left": None if left is None else round(left, 1),
+        }
+
+
 def frame_rates(requested, keys, default, lo=None, hi=None):
     """Per-viewer capture rates as {key: hz}, from whatever the operator sent.
 
