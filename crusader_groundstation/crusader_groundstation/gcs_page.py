@@ -1340,6 +1340,17 @@ function camRowOf(name){
   return camRows.filter(function(p){ return p.name === name; })[0];
 }
 
+/* Straight off the node table the page already polls. Unknown until the first
+   snapshot lands, and treated as running then, so the pane does not flash
+   "not running" at every reload before it knows. */
+function camRunning(){
+  var items = (S.nodes && S.nodes.items) || [];
+  if(!items.length) return true;
+  var row = items.filter(function(n){
+    return '/' + n.name === CAM_NODE; })[0];
+  return row ? !!row.running : false;
+}
+
 /* Set, revert and Enter-in-a-box all arrive here. Written once because they
    differ only in where the value came from, and three copies of "wrap it in an
    object and re-read afterwards" is three places to forget the re-read. */
@@ -1448,13 +1459,22 @@ function paintCam(){
       +  'refuses is refused in its own words.</div>';
 
   out += '<h3>Controls</h3>';
-  if(camErr){
+  /* "not in the ROS graph" is the node's honest answer and a useless one to
+     act on, and it arrives as an ERROR — so the actionable line was unreachable
+     in exactly the case it was written for. Decided from the node table this
+     page already polls rather than by matching on the message text, which
+     would be a copy of the node's wording kept here to go stale. */
+  if(!camRunning()){
+    out += '<div class="hint">oak_detector is not running \u2014 start it on '
+        +  'the Nodes tab, or with the Start button in the viewer beside this. '
+        +  'The profiles above are still readable; applying one needs the node.'
+        +  '</div>';
+  } else if(camErr){
     out += '<div class="hint stale">' + esc(camErr) + '</div>';
   } else if(!camRows.length){
     out += '<div class="hint">'
         +  (camBusy ? 'reading the camera\u2026'
-                    : 'oak_detector is not running \u2014 start it on the Nodes '
-                      + 'tab, or use the Start button in the viewer') + '</div>';
+                    : 'oak_detector declares no parameters') + '</div>';
   } else {
     /* Grouped and ordered by the node's own table (oak_controls), never by a
        list kept here: add a control there and it appears, in its group, with
@@ -1502,8 +1522,20 @@ function paintCam(){
       if(ev.key === 'Enter'){ ev.preventDefault(); camSaveProfile(); } };
 }
 
+var camWasRunning = null;
+
 function renderCam(){
+  /* The pane is painted on CHANGE, not on the 5 Hz poll — so a node that
+     starts or stops has to nudge it, or you press Start in the viewer and the
+     column beside it goes on saying the camera is not running. Only the
+     transition repaints, so a half-typed number still survives the tick. */
+  var running = camRunning();
+  if(camBuilt && running !== camWasRunning){
+    camWasRunning = running;
+    if(running) camLoadParams(); else paintCam();
+  }
   if(!camBuilt){
+    camWasRunning = running;
     el('p-cam').innerHTML = '<div id="camview"></div><aside id="camtune"></aside>';
     camBuilt = true;
     paintCam();
