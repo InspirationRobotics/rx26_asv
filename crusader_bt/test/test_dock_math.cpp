@@ -64,6 +64,7 @@ static BaySighting see(
   s.has_normal = true;
   s.nx = nx;
   s.ny = ny;
+  s.d = off;
   s.range_m = sightingRange(true, nx, ny, off, s.bearing_deg, kNaN);
   s.indicator_present = ind != Colour::Unknown;
   s.indicator = ind;
@@ -115,6 +116,71 @@ int main()
     d = camDirToWorld(0.0, 90.0, 1.0, 0.0);
     chk_near("camera yawed to port looks west", d.x, -1.0, 1e-9);
   }
+  std::printf("a pitched camera\n");
+  {
+    // The easy ray: camera forward pitched DOWN 10 deg levels to cos(10) forward.
+    const Vec2 h = levelled(1.0, 0.0, 0.0, 10.0);
+    chk_near("forward, pitched down 10: cos10 of it is horizontal", h.x,
+      std::cos(10 * nav::kDeg), 1e-12);
+    // Camera-frame UP on a camera pitched down 10 deg leans FORWARD in the body.
+    chk("camera-frame up leans forward when pitched down", levelled(0.0, 0.0, 1.0, 10.0).x > 0.0);
+
+    // A face 5 m north, 2 m to port, 0.4 m above the camera; the camera
+    // pitched UP 20 deg (-20). Build the sighting as the CV would - bearing and
+    // plane in the tilted camera frame - and it must still land on the face.
+    Mount pm;
+    pm.pitch_deg = -20.0;
+    const Vec2 boat{0, 0};
+    const Vec2 cam = bodyToWorld(boat, 0.0, pm.x, pm.y);
+    const double bx = 5.0 - cam.y, by = 2.0, bz = 0.4;       // body frame, face centre
+    const double p = pm.pitch_deg * nav::kDeg;
+    const double cx = bx * std::cos(p) - bz * std::sin(p);    // body -> camera (tilted)
+    const double cz = bx * std::sin(p) + bz * std::cos(p);
+    const double cy = by;
+    // Plane x_body = bx, normal toward the camera (-1, 0, 0) in the body.
+    const double nx = -std::cos(p), nz = -std::sin(p), ny = 0.0;
+    const double d = -(nx * cx + ny * cy + nz * cz);
+    BaySighting s;
+    s.bearing_deg = std::atan2(cy, cx) / nav::kDeg;
+    s.range_m = sightingRange(true, nx, ny, d, s.bearing_deg, kNaN);
+    s.has_normal = true;
+    s.nx = nx;
+    s.ny = ny;
+    s.nz = nz;
+    s.d = d;
+    DockBook b;
+    b.prm.face_dz = 0.4;                // the course says where the face centre is
+    Frame f;
+    f.bays = {s};
+    b.ingest(f, boat, 0.0, pm);
+    chk("a pitched sighting places a track", b.tracks.size() == 1);
+    chk_near("... on the face plane, 5 m north", b.tracks[0].p.y, 5.0, 0.02);
+    chk_near("... and at the face, 2 m WEST (port)", b.tracks[0].p.x, -2.0, 0.08);
+    chk_near("its normal levels to due south", b.tracks[0].outward().y, -1.0, 1e-6);
+    // Ignore the pitch and the range comes out long by 1/cos(20): 6 %.
+    DockBook wrong;
+    wrong.ingest(f, boat, 0.0, Mount{});
+    chk("ignoring the pitch puts it >0.2 m too far", wrong.tracks[0].p.y > 5.2);
+    // Know the pitch but get the face's height 0.4 m wrong, and the point
+    // slides along the plane: 6 cm sideways here (tan(azimuth) * sin(pitch)
+    // per metre of height). Forgiving - the prior need not be precise - but
+    // not zero, which is why it is a parameter and not a constant.
+    DockBook flat;
+    flat.prm.face_dz = 0.0;
+    flat.ingest(f, boat, 0.0, pm);
+    const double slide = std::abs(flat.tracks[0].p.x + 2.0);
+    chk("a 0.4 m error in face height slides it 4-10 cm sideways", slide > 0.04 && slide < 0.10);
+    // And with a LEVEL camera the face height does not matter at all.
+    const Mount m0;
+    DockBook lv1, lv2;
+    lv2.prm.face_dz = 3.0;
+    Frame lf;
+    lf.bays = {see({0, 8}, 0.0, m0, {-2, 20}, {0, -1})};
+    lv1.ingest(lf, {0, 8}, 0.0, m0);
+    lv2.ingest(lf, {0, 8}, 0.0, m0);
+    chk_near("level camera: face height irrelevant", lv1.tracks[0].p.x, lv2.tracks[0].p.x, 1e-9);
+  }
+
   std::printf("range to the face plane\n");
   {
     // Face 8 m straight ahead, normal toward the camera (-x): -x + 8 = 0.
@@ -135,9 +201,10 @@ int main()
   // --------------------------------------------------------------- the book
   //
   // THE COURSE USED FROM HERE ON: three faces on the line y = 20, facing SOUTH
-  // (out = (0, -1)), 4 m apart. A boat south of them looking north sees bay 1
-  // on its LEFT, which is WEST: x = -4.
-  const Vec2 W{-4, 20}, C{0, 20}, E{4, 20};
+  // (out = (0, -1)), 2 m apart - the real dock's pitch: 1.5 m slips between
+  // 0.5 m fingers (RobotX 2026 Docking Bay Structure build guide). A boat
+  // south of them looking north sees bay 1 on its LEFT, which is WEST: x = -2.
+  const Vec2 W{-2, 20}, C{0, 20}, E{2, 20};
   const Vec2 south{0, -1};
   const Mount m;
   std::printf("the book\n");
@@ -149,7 +216,7 @@ int main()
       see({0, 8}, 0.0, m, E, south, Colour::Red)};
     const auto ids = b.ingest(f, {0, 8}, 0.0, m);
     chk("three sightings, three tracks", b.tracks.size() == 3);
-    chk_near("the west face lands at x=-4", b.find(ids[0])->p.x, -4.0, 1e-6);
+    chk_near("the west face lands at x=-2", b.find(ids[0])->p.x, -2.0, 1e-6);
     chk_near("... and y=20", b.find(ids[0])->p.y, 20.0, 1e-6);
     chk_near("outward normal is south", b.find(ids[1])->outward().y, -1.0, 1e-6);
 
@@ -157,9 +224,9 @@ int main()
     // CV bay_index would now call them 0 and 1. They must still land on the
     // tracks that are C and E.
     Frame g;
-    g.bays = {see({3, 12}, -15.0, m, C, south, Colour::Green),
-      see({3, 12}, -15.0, m, E, south, Colour::Red)};
-    const auto ids2 = b.ingest(g, {3, 12}, -15.0, m);
+    g.bays = {see({1, 14}, -15.0, m, C, south, Colour::Green),
+      see({1, 14}, -15.0, m, E, south, Colour::Red)};
+    const auto ids2 = b.ingest(g, {1, 14}, -15.0, m);
     chk("a partial view adds no tracks", b.tracks.size() == 3);
     chk("C from a new place joins C's track", ids2[0] == ids[1]);
     chk("E from a new place joins E's track", ids2[1] == ids[2]);
@@ -194,7 +261,7 @@ int main()
     t2.bays[0].truncated = false;
     tr.ingest(t2, {0, 8}, 0.0, m);
     Frame t3 = t1;
-    t3.bays[0].range_m += 0.8;          // biased, inside the gate
+    t3.bays[0].range_m += 0.5;          // biased, inside the 0.7 m gate
     tr.ingest(t3, {0, 8}, 0.0, m);
     chk("a truncated face votes", tr.tracks.size() == 1 && tr.tracks[0].red == 2);
     chk_near("but does not move the track", tr.tracks[0].p.y, 20.0, 1e-6);
@@ -223,12 +290,12 @@ int main()
     chk_near("left-to-right facing north is +east", L.right.x, 1.0, 1e-6);
     int w = -1, e = -1;
     for (const auto & t : b.tracks) {
-      if (t.p.x < -2) {w = t.id;}
-      if (t.p.x > 2) {e = t.id;}
+      if (t.p.x < -1) {w = t.id;}
+      if (t.p.x > 1) {e = t.id;}
     }
     chk("facing NORTH, the WEST bay is bay 1", L.numberOf(w) == 1);
     chk("facing NORTH, the EAST bay is bay 3", L.numberOf(e) == 3);
-    chk_near("the bay pitch is MEASURED: 4 m", bayPitch(b, L), 4.0, 1e-6);
+    chk_near("the bay pitch is MEASURED: 2 m", bayPitch(b, L), 2.0, 1e-6);
     chk("no layout, no pitch", std::isnan(bayPitch(b, DockLayout{})));
 
     // The mirror: the same three faces turned to face NORTH, seen by a boat to
@@ -244,8 +311,8 @@ int main()
     const DockLayout N = layout(n, 5);
     int nw = -1, ne = -1;
     for (const auto & t : n.tracks) {
-      if (t.p.x < -2) {nw = t.id;}
-      if (t.p.x > 2) {ne = t.id;}
+      if (t.p.x < -1) {nw = t.id;}
+      if (t.p.x > 1) {ne = t.id;}
     }
     chk("facing SOUTH, the EAST bay is bay 1", N.ok && N.numberOf(ne) == 1);
     chk("facing SOUTH, the WEST bay is bay 3", N.ok && N.numberOf(nw) == 3);
@@ -284,9 +351,9 @@ int main()
 
   std::printf("merging one bay seen twice\n");
   {
-    // A biased early sighting lands 1.6 m from the bay: outside the 1.5 m
-    // gate, so it starts its own track - and inside merge_m, so the book folds
-    // it straight back in. Without this the layout refused to number the dock
+    // A biased early sighting lands 1.0 m from the bay: outside the 0.7 m
+    // gate, so it starts its own track - and inside merge_m (1.2 m), so the
+    // book folds it straight back in. Without this the layout refused to number the dock
     // for 70 s in the sim.
     DockBook b;
     Frame good;
@@ -294,7 +361,7 @@ int main()
     for (int i = 0; i < 3; ++i) {b.ingest(good, {0, 8}, 0.0, m);}
     const int first = b.tracks[0].id;
     Frame biased;
-    biased.bays = {see({0, 8}, 0.0, m, {-4, 21.6}, south, Colour::Red)};
+    biased.bays = {see({0, 8}, 0.0, m, {-2, 21.0}, south, Colour::Red)};
     const auto ids = b.ingest(biased, {0, 8}, 0.0, m);
     chk("the biased sighting did start a track of its own", ids[0] != first);
     chk("and it was merged: one track", b.tracks.size() == 1);
@@ -303,13 +370,13 @@ int main()
     chk("the votes were summed", b.tracks[0].red == 4 && b.tracks[0].n == 4);
     chk("the position is the weighted mean, nearer the good ones",
       b.tracks[0].p.y > 20.0 && b.tracks[0].p.y < 20.5);
-    // Two real bays 4 m apart are never merged, whatever the gate.
+    // Two real bays 2 m apart are never merged, whatever the gate.
     DockBook two;
     two.prm.gate_m = 5.0;
     Frame f;
     f.bays = {see({0, 8}, 0.0, m, W, south), see({0, 8}, 0.0, m, C, south)};
     two.ingest(f, {0, 8}, 0.0, m);
-    chk("bays 4 m apart stay two", two.tracks.size() == 2);
+    chk("bays 2 m apart stay two", two.tracks.size() == 2);
   }
 
   // --------------------------------------------------------------- choice
@@ -400,20 +467,20 @@ int main()
     f.bays = {see({0, 8}, 0.0, m, W, south), see({0, 8}, 0.0, m, C, south),
       see({0, 8}, 0.0, m, E, south)};
     for (int i = 0; i < 6; ++i) {b.ingest(f, {0, 8}, 0.0, m);}
-    const Vantage v0 = vantage(b, false, {}, 0, 0, 10.0, 5);
+    const Vantage v0 = vantage(b, false, {}, 0, 0, 5.0, 5);
     chk("with bays seen, a look FROM the bays", v0.from_bays);
-    chk_near("attempt 0: 10 m in front of the centre (x)", v0.p.x, 0.0, 1e-6);
-    chk_near("attempt 0: on the WATER side, south (y)", v0.p.y, 10.0, 1e-6);
+    chk_near("attempt 0: 5 m in front of the centre (x)", v0.p.x, 0.0, 1e-6);
+    chk_near("attempt 0: on the WATER side, south (y)", v0.p.y, 15.0, 1e-6);
     chk_near("the lead is 3 m further out, so the last leg is driven NORTH at the dock",
-      v0.lead.y, 7.0, 1e-6);
+      v0.lead.y, 12.0, 1e-6);
     b.tracks[0].red = 20;
     b.tracks[2].red = 20;
-    const Vantage v1 = vantage(b, false, {}, 0, 1, 10.0, 5);
+    const Vantage v1 = vantage(b, false, {}, 0, 1, 5.0, 5);
     chk_near("attempt 1: head on to the least-read bay (x)", v1.p.x, 0.0, 1e-6);
-    chk_near("attempt 1: still 10 m out - never inside a slip (y)", v1.p.y, 10.0, 1e-6);
+    chk_near("attempt 1: still 5 m out - never inside a slip (y)", v1.p.y, 15.0, 1e-6);
     b.tracks[1].red = 30;
-    const Vantage v2 = vantage(b, false, {}, 0, 1, 10.0, 5);
-    chk_near("the least-read bay changes: head on to the west one", v2.p.x, -4.0, 1e-6);
+    const Vantage v2 = vantage(b, false, {}, 0, 1, 5.0, 5);
+    chk_near("the least-read bay changes: head on to the west one", v2.p.x, -2.0, 1e-6);
   }
 
   // --------------------------------------------------------------- berthing
@@ -423,42 +490,47 @@ int main()
     t.p = C;
     t.normal_sum = south;
     t.n_normal = 1;
-    const Berth b = berthFor(t, DockLayout{}, 7.0, 3.0);
+    // The real numbers: line up 3 m out (fingers 2 m + half a 1 m hull +
+    // margin), berth with the body origin 1.3 m out (stern inside the fingers),
+    // lead-in 2 m beyond the line-up point.
+    const Berth b = berthFor(t, DockLayout{}, 3.0, 1.3, 2.0);
     chk("a berth", b.ok);
-    chk_near("line up 7 m south of the face", b.predock.y, 13.0, 1e-9);
-    chk_near("berth 3 m south of the face", b.berth.y, 17.0, 1e-9);
-    chk_near("lead-in 4 m beyond the line-up point", b.lead.y, 9.0, 1e-9);
+    chk_near("line up 3 m south of the face", b.predock.y, 17.0, 1e-9);
+    chk_near("berth 1.3 m south of the face", b.berth.y, 18.7, 1e-9);
+    chk_near("lead-in 2 m beyond the line-up point", b.lead.y, 15.0, 1e-9);
     chk_near("all three on the centreline", b.lead.x + b.predock.x + b.berth.x, 0.0, 1e-9);
 
-    DockedCheck d = dockedIn(b, {0, 17}, 0.0, 3.0, 0.6, 0.5, 15.0);
+    DockedCheck d = dockedIn(b, {0, 18.7}, 0.0, 1.3, 0.25, 0.3, 15.0);
     chk("at the berth, bow north (into the bay): docked", d.docked);
-    d = dockedIn(b, {0, 17}, 180.0, 3.0, 0.6, 0.5, 15.0);
+    d = dockedIn(b, {0, 18.7}, 180.0, 1.3, 0.25, 0.3, 15.0);
     chk("at the berth but stern-first: NOT docked", !d.docked);
-    d = dockedIn(b, {0.8, 17}, 0.0, 3.0, 0.6, 0.5, 15.0);
-    chk("0.8 m off the centreline: not docked", !d.docked);
-    chk_near("... and it is to the RIGHT facing the bay (east)", d.lateral, 0.8, 1e-9);
-    d = dockedIn(b, {0, 14}, 0.0, 3.0, 0.6, 0.5, 15.0);
-    chk("3 m short: not docked", !d.docked);
-    d = dockedIn(b, {0, 17}, 10.0, 3.0, 0.6, 0.5, 15.0);
+    d = dockedIn(b, {0.4, 18.7}, 0.0, 1.3, 0.25, 0.3, 15.0);
+    chk("0.4 m off the centreline: not docked", !d.docked);
+    chk_near("... and it is to the RIGHT facing the bay (east)", d.lateral, 0.4, 1e-9);
+    d = dockedIn(b, {0, 17.7}, 0.0, 1.3, 0.25, 0.3, 15.0);
+    chk("1 m short: not docked", !d.docked);
+    d = dockedIn(b, {0, 18.7}, 10.0, 1.3, 0.25, 0.3, 15.0);
     chk_near("bow 10 deg east of straight in reads +10 (bow right)",
       d.heading_err_deg, 10.0, 1e-6);
     chk("and is inside a 15 deg tolerance", d.docked);
 
-    // The hull, not its middle: straight in, the corners reach half the beam.
+    // The hull, not its middle: straight in, the corners reach half the beam
+    // (the boat: ~1.0 x 0.6 m).
     chk_near("straight in: the corners reach half the beam",
-      hullHalfWidthUsed(b, {0, 17}, 0.0, 4.88, 2.44), 1.22, 1e-9);
-    // 0.5 m off and 15 deg skewed - inside DockedInBay's OLD tolerances - and
-    // the worst corner is 2.31 m out: over the finger of a 4 m slip.
-    const double reach = hullHalfWidthUsed(b, {0.5, 17}, 15.0, 4.88, 2.44);
-    chk_near("0.5 m off and 15 deg skewed reaches 2.31 m", reach, 2.309, 0.01);
-    chk("which does not fit a 4 m slip", reach > 2.0);
+      hullHalfWidthUsed(b, {0, 18.7}, 0.0, 1.0, 0.6), 0.3, 1e-9);
+    // 0.3 m off and 15 deg skewed: the worst corner is 0.72 m out. The slip
+    // edge is 0.75 m out (pitch 2 m, fingers 0.5 m) - it fits by 3 cm, which
+    // is not a margin; DockedInBay keeps half a finger plus 0.1 m clear.
+    const double reach = hullHalfWidthUsed(b, {0.3, 18.7}, 15.0, 1.0, 0.6);
+    chk_near("0.3 m off and 15 deg skewed reaches 0.72 m", reach, 0.719, 0.002);
+    chk("which is over DockedInBay's line (2/2 - 0.35)", reach > 2.0 / 2.0 - 0.35);
 
     // Lined up: the survey vantage in front of this bay, facing it.
-    chk("8 m out on the centreline facing in: lined up",
-      linedUp(b, {0, 12}, 0.0, 6.5, 0.8, 20.0));
-    chk("... but facing AWAY: not", !linedUp(b, {0, 12}, 180.0, 6.5, 0.8, 20.0));
-    chk("4 m to the side: not", !linedUp(b, {4, 12}, 0.0, 6.5, 0.8, 20.0));
-    chk("already inside the line-up point: not", !linedUp(b, {0, 15}, 0.0, 6.5, 0.8, 20.0));
+    chk("5 m out on the centreline facing in: lined up",
+      linedUp(b, {0, 15}, 0.0, 2.7, 0.4, 20.0));
+    chk("... but facing AWAY: not", !linedUp(b, {0, 15}, 180.0, 2.7, 0.4, 20.0));
+    chk("2 m to the side: not", !linedUp(b, {2, 15}, 0.0, 2.7, 0.4, 20.0));
+    chk("already inside the line-up point: not", !linedUp(b, {0, 17.5}, 0.0, 2.7, 0.4, 20.0));
   }
 
   // --------------------------------------------------------------- the code

@@ -202,7 +202,7 @@ def check_params_yaml():
     # own: if they differ, the two worlds disagree about where things are and
     # neither looks wrong on its own.
     try:
-        keys = ("cam_x", "cam_y", "cam_yaw_deg")
+        keys = ("cam_x", "cam_y", "cam_yaw_deg", "cam_pitch_deg")
         tt = cfg["target_tracker"]["ros__parameters"]
         bt = cfg["bt_runner_node"]["ros__parameters"]
         differing = {k: (tt[k], bt[k]) for k in keys if tt[k] != bt[k]}

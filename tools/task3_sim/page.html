@@ -105,7 +105,7 @@ canvas{display:block;width:100%}
         <label>Code colour 2 (circle)<select id="k-c2"><option>red</option><option>green</option><option>blue</option></select></label>
         <label>Dock faces (deg)<input id="k-facing_deg" type="number" step="15"></label>
         <label>Dock distance (m)<input id="k-dock_n" type="number" step="5"></label>
-        <label>Bay width (m, assumed)<input id="k-bay_width" type="number" step="0.25"></label>
+        <label>Camera pitch (deg, &minus; = up; boat: 0)<input id="k-cam_pitch_deg" type="number" step="5"></label>
         <label>WP_RADIUS (m; boat: 2.0)<input id="k-wp_radius" type="number" step="0.1"></label>
         <label>Strict judge<select id="k-strict_judge"><option value="true">on</option><option value="false">off</option></select></label>
         <div class="act">
@@ -170,7 +170,7 @@ $("b-reset").onclick = () => {
   const sc = {
     green_bay: +$("k-green_bay").value, target_window: +$("k-target_window").value,
     code: [$("k-c1").value, $("k-c2").value], facing_deg: +$("k-facing_deg").value,
-    dock_n: +$("k-dock_n").value, bay_width: +$("k-bay_width").value,
+    dock_n: +$("k-dock_n").value, cam_pitch_deg: +$("k-cam_pitch_deg").value,
     wp_radius: +$("k-wp_radius").value, strict_judge: $("k-strict_judge").value === "true",
     tier: +$("tier").value,
   };
@@ -188,7 +188,7 @@ function fillForm(sc) {
   $("k-green_bay").value = sc.green_bay; $("k-target_window").value = sc.target_window;
   $("k-c1").value = sc.code[0]; $("k-c2").value = sc.code[1];
   $("k-facing_deg").value = sc.facing_deg; $("k-dock_n").value = sc.dock_n;
-  $("k-bay_width").value = sc.bay_width; $("k-wp_radius").value = sc.wp_radius;
+  $("k-cam_pitch_deg").value = sc.cam_pitch_deg; $("k-wp_radius").value = sc.wp_radius;
   $("k-strict_judge").value = String(sc.strict_judge); $("tier").value = sc.tier;
   $("l-camera_ok").value = String(sc.camera_ok);
   $("l-miscolour").value = sc.miscolour; $("l-mis-v").textContent = sc.miscolour.toFixed(2);
@@ -215,8 +215,8 @@ function drawMap() {
   // Fit: the dock with 14 m of its water, and the boat. EASED toward that
   // rather than jumped, so it tightens smoothly onto the dock as the boat
   // closes - the berthing is the part worth seeing up close.
-  const far = [d.back[0], d.back[1], ...d.fingers.flat()].map(p => [p[0] + d.out[0] * 14, p[1] + d.out[1] * 14]);
-  const pts = [...d.fingers.flat(), ...far, [b.e - 3, b.n - 3], [b.e + 3, b.n + 3]];
+  const far = [...d.deck, ...d.fingers.flat()].map(p => [p[0] + d.out[0] * 8, p[1] + d.out[1] * 8]);
+  const pts = [...d.deck, ...d.fingers.flat(), ...far, [b.e - 2, b.n - 2], [b.e + 2, b.n + 2]];
   let [x0, y0, x1, y1] = [Infinity, Infinity, -Infinity, -Infinity];
   for (const [x, y] of pts) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
   const key = sc.seed + ":" + sc.facing_deg + ":" + sc.dock_n + ":" + sc.dock_e;
@@ -243,29 +243,32 @@ function drawMap() {
     g.strokeStyle = "#2f5a73"; g.lineWidth = 1.5; g.beginPath();
     w.trail.forEach(([e, n], i) => { const [x, y] = P(e, n); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.stroke();
   }
-  // dock: fingers and back wall
-  g.lineCap = "round"; g.strokeStyle = "#8a9aa8"; g.lineWidth = Math.max(3, 0.5 * s);
-  for (const [a, c] of [...d.fingers, d.back]) { g.beginPath(); g.moveTo(...P(...a)); g.lineTo(...P(...c)); g.stroke(); }
+  // dock: the main deck and the four fingers, 0.5 m dock cubes
+  g.fillStyle = "#6f604a"; g.strokeStyle = "#8a7a60"; g.lineWidth = 1;
+  for (const poly of [d.deck, ...d.fingers]) {
+    g.beginPath(); poly.forEach((q, i) => i ? g.lineTo(...P(...q)) : g.moveTo(...P(...q))); g.closePath(); g.fill(); g.stroke();
+  }
   // faces, indicators, windows, bay numbers
   const right = d.right, out = d.out;
   for (const k of ["1", "2", "3"]) {
     const f = d.faces[k];
-    const a = P(f[0] - right[0] * 0.6, f[1] - right[1] * 0.6), c = P(f[0] + right[0] * 0.6, f[1] + right[1] * 0.6);
-    g.strokeStyle = "#e8eef3"; g.lineWidth = Math.max(4, 0.35 * s); g.beginPath(); g.moveTo(...a); g.lineTo(...c); g.stroke();
+    const hw = d.face_w / 2;
+    const a = P(f[0] - right[0] * hw, f[1] - right[1] * hw), c = P(f[0] + right[0] * hw, f[1] + right[1] * hw);
+    g.strokeStyle = "#e8eef3"; g.lineWidth = Math.max(4, 0.12 * s); g.beginPath(); g.moveTo(...a); g.lineTo(...c); g.stroke();
     const ind = +k === d.green_bay ? COLOUR.green : COLOUR.red;
-    const ip = P(f[0] + out[0] * 0.5, f[1] + out[1] * 0.5);
-    g.fillStyle = ind; g.beginPath(); g.arc(ip[0], ip[1], Math.max(4, 0.28 * s), 0, 7); g.fill();
+    const ip = P(f[0] + out[0] * 0.15, f[1] + out[1] * 0.15);
+    g.fillStyle = ind; g.beginPath(); g.arc(ip[0], ip[1], Math.max(4, 0.1 * s), 0, 7); g.fill();
     // The bay NUMBER, at the mouth of the slip: 1 is on the left facing in.
-    const lp = P(f[0] + out[0] * (sc.bay_depth + 1.4), f[1] + out[1] * (sc.bay_depth + 1.4));
+    const lp = P(f[0] + out[0] * (d.finger_len + 0.7), f[1] + out[1] * (d.finger_len + 0.7));
     g.fillStyle = "#0c141c"; g.strokeStyle = "#8a9aa8"; g.lineWidth = 1.5;
     g.beginPath(); g.arc(lp[0], lp[1], 10, 0, 7); g.fill(); g.stroke();
     g.fillStyle = CSS("--ink"); g.font = "600 12px " + CSS("--mono"); g.textAlign = "center"; g.fillText(k, lp[0], lp[1] + 4);
     if (+k === d.green_bay) {
       for (const [idx, slot, p] of d.windows[k]) {
         const col = (w.lights.window === idx) ? COLOUR[w.lights.colour] : COLOUR.off;
-        const wp = P(p[0] - out[0] * 0.25, p[1] - out[1] * 0.25);
+        const wp = P(p[0] - out[0] * 0.12, p[1] - out[1] * 0.12);
         g.fillStyle = col; g.strokeStyle = "#000"; g.lineWidth = 1;
-        const r = Math.max(3.5, 0.2 * s); g.fillRect(wp[0] - r, wp[1] - r, 2 * r, 2 * r); g.strokeRect(wp[0] - r, wp[1] - r, 2 * r, 2 * r);
+        const r = Math.max(3.5, 0.11 * s); g.fillRect(wp[0] - r, wp[1] - r, 2 * r, 2 * r); g.strokeRect(wp[0] - r, wp[1] - r, 2 * r, 2 * r);
       }
     }
   }
@@ -286,8 +289,11 @@ function drawMap() {
       g.strokeStyle = chosen ? "#c8a2ff" : CSS("--accent"); g.lineWidth = chosen ? 3 : 2;
       g.beginPath(); g.arc(p[0], p[1], Math.max(9, 0.9 * s), 0, 7); g.stroke();
       const vcol = t.verdict === "G" ? COLOUR.green : t.verdict === "R" ? COLOUR.red : CSS("--dim");
-      const lp = [p[0] - out[0] * 0 + 12, p[1] - 14];
+      // Bays are only 2 m apart: stagger the labels so neighbours do not overlap.
       const lab = "#" + t.id + (t.number ? " · bay " + t.number : "") + "  R" + t.red + "/G" + t.green;
+      g.font = "11px " + CSS("--mono");
+      const lw = g.measureText(lab).width;
+      const lp = [p[0] - lw / 2, t.number % 2 === 1 ? p[1] - Math.max(12, 0.9 * s) - 6 : p[1] + Math.max(12, 0.9 * s) + 14];
       g.font = "11px " + CSS("--mono"); const tw = g.measureText(lab).width;
       g.fillStyle = "#0c141ccc"; g.fillRect(lp[0] - 3, lp[1] - 11, tw + 6, 15);
       g.fillStyle = vcol; g.fillText(lab, lp[0], lp[1]);
@@ -299,19 +305,20 @@ function drawMap() {
   // camera wedge
   const hf = 39.3, look = b.heading, cam = [b.e + hvec(look)[0] * 0.37, b.n + hvec(look)[1] * 0.37];
   g.fillStyle = S.world.scenario.camera_ok ? "#4eafd218" : "#e0736a18"; g.beginPath(); g.moveTo(...P(...cam));
-  for (let a = -hf; a <= hf; a += 4) { const v = hvec(look + a); g.lineTo(...P(cam[0] + v[0] * 12, cam[1] + v[1] * 12)); }
+  for (let a = -hf; a <= hf; a += 4) { const v = hvec(look + a); g.lineTo(...P(cam[0] + v[0] * 7, cam[1] + v[1] * 7)); }
   g.closePath(); g.fill();
   // hull
   const hull = b.corners.map(c => P(...c));
   g.fillStyle = w.contact ? "#e0736a88" : (w.truth_bay ? "#45bca066" : "#dfe8ef40");
   g.strokeStyle = w.contact ? CSS("--fail") : CSS("--ink"); g.lineWidth = 1.5;
   g.beginPath(); hull.forEach((p, i) => i ? g.lineTo(...p) : g.moveTo(...p)); g.closePath(); g.fill(); g.stroke();
-  const bow = P(b.e + hvec(b.heading)[0] * 2.44, b.n + hvec(b.heading)[1] * 2.44);
+  const bow = P(b.e + hvec(b.heading)[0] * 0.5, b.n + hvec(b.heading)[1] * 0.5);
   g.fillStyle = CSS("--ink"); g.beginPath(); g.arc(bow[0], bow[1], 3, 0, 7); g.fill();
   // water cannon
   if (w.cannon && w.cannon.fire) {
-    const f = hvec(b.heading), l = [-f[1], f[0]];
-    const tgt = [cam[0] + f[0] * w.cannon.x + l[0] * w.cannon.y, cam[1] + f[1] * w.cannon.x + l[1] * w.cannon.y];
+    const f = hvec(b.heading), l = [-f[1], f[0]], pr = sc.cam_pitch_deg * D;
+    const xb = w.cannon.x * Math.cos(pr) + w.cannon.z * Math.sin(pr);
+    const tgt = [cam[0] + f[0] * xb + l[0] * w.cannon.y, cam[1] + f[1] * xb + l[1] * w.cannon.y];
     g.strokeStyle = "#9fd8ff"; g.lineWidth = 3; if (w.spray_on === null) g.setLineDash([4, 4]);
     g.beginPath(); g.moveTo(...P(...cam)); g.lineTo(...P(...tgt)); g.stroke(); g.setLineDash([]);
   }
@@ -327,46 +334,57 @@ function drawMap() {
 // ---------------------------------------------------------------- the camera
 function drawCam() {
   const [g, W, H] = sizeCanvas($("cam"));
-  g.fillStyle = "#223040"; g.fillRect(0, 0, W, H * 0.46);
-  g.fillStyle = "#15303f"; g.fillRect(0, H * 0.46, W, H);
   const cam = S.camera, obs = S.obs, k = W / cam.w;
-  const sc = S.world.scenario;
+  const sc = S.world.scenario, pr = cam.pitch_deg * D;
+  // A body-frame point (forward, left, up from the camera) to pixels, through
+  // the pitch: + pitch aims DOWN, so level things sit above the image centre.
+  const px = (xb, yb, zb) => {
+    const xc = xb * Math.cos(pr) - zb * Math.sin(pr), zc = xb * Math.sin(pr) + zb * Math.cos(pr);
+    return xc <= 0.05 ? null : [(cam.w / 2 - cam.fx * yb / xc) * k, (cam.h / 2 - cam.fx * zc / xc) * k];
+  };
+  // sky above the horizon, water below: where the horizon falls depends on the pitch
+  const hz = (cam.h / 2 - cam.fx * Math.tan(pr)) * k;
+  g.fillStyle = "#223040"; g.fillRect(0, 0, W, Math.max(0, Math.min(H, hz)));
+  g.fillStyle = "#15303f"; g.fillRect(0, Math.max(0, Math.min(H, hz)), W, H);
   if (!sc.camera_ok || !obs) {
     g.fillStyle = CSS("--fail"); g.font = "600 14px " + CSS("--mono"); g.textAlign = "center";
     g.fillText(sc.camera_ok ? "no frame yet" : "CAMERA OFF — no DockObservation", W / 2, H / 2); g.textAlign = "left";
     $("cam-note").textContent = ""; return;
   }
-  const bays = [...obs.bays].sort((a, b) => b.bearing_deg - a.bearing_deg);
-  for (const b of bays) {
+  for (const b of [...obs.bays].sort((a, c) => c.bearing_deg - a.bearing_deg)) {
     let r = null;
     if (b.has_plane && b.plane_normal[0] !== null) { const t = b.bearing_deg * D, den = b.plane_normal[0] * Math.cos(t) + b.plane_normal[1] * Math.sin(t); if (Math.abs(den) > 0.05) r = -b.plane_offset / den; }
     if (!r || r <= 0) r = b.range_from_size_m;
     if (!r) continue;
-    const u = cam.w / 2 - cam.fx * Math.tan(b.bearing_deg * D);
-    const fw = cam.fx * cam.face_w / r, fh = cam.fx * cam.face_h / r;
-    const v = cam.h / 2 - cam.fx * (cam.face_z - cam.cam_z) / r;
-    const x = (u - fw / 2) * k, y = (v - fh / 2) * k;
-    g.fillStyle = "#e9eef2"; g.fillRect(x, y, fw * k, fh * k);
-    // windows by slot
+    const bb = b.bearing_deg * D, xb = r * Math.cos(bb) * Math.cos(pr), yb = r * Math.sin(bb);
+    const dz = cam.face_z - cam.cam_z;
+    const corner = (u, z) => px(xb, yb - u, dz + z);
+    const tl = corner(-cam.face_w / 2, cam.face_h / 2), br = corner(cam.face_w / 2, -cam.face_h / 2);
+    if (!tl || !br) continue;
+    g.fillStyle = "#e9eef2"; g.fillRect(tl[0], tl[1], br[0] - tl[0], br[1] - tl[1]);
     for (const w of b.windows) {
-      const slot = cam.slots[w.index]; if (!slot) continue;
-      const wx = u + cam.fx * slot[1] / r, wy = v - cam.fx * slot[2] / r, ws = cam.fx * cam.window_m / r;
-      g.fillStyle = "#111"; g.fillRect((wx - ws * 0.62) * k, (wy - ws * 0.62) * k, ws * 1.24 * k, ws * 1.24 * k);
-      g.fillStyle = COLOUR[CV[w.state]]; g.fillRect((wx - ws / 2) * k, (wy - ws / 2) * k, ws * k, ws * k);
+      const sl = cam.slots[w.index]; if (!sl) continue;
+      const a = corner(sl[1] - sl[3], sl[2] + sl[4]), c = corner(sl[1] + sl[3], sl[2] - sl[4]);
+      if (!a || !c) continue;
+      const bw = 0.025 * (c[0] - a[0]) / (2 * sl[3]);
+      g.fillStyle = "#111"; g.fillRect(a[0] - bw, a[1] - bw, c[0] - a[0] + 2 * bw, c[1] - a[1] + 2 * bw);
+      g.fillStyle = COLOUR[CV[w.state]]; g.fillRect(a[0], a[1], c[0] - a[0], c[1] - a[1]);
     }
-    // indicator at the base
-    const iw = fw * 0.5 * k, ih = Math.max(3, fh * 0.1 * k);
-    g.fillStyle = b.indicator_present ? COLOUR[CV[b.indicator_colour]] : "#3a4652";
-    g.fillRect(u * k - iw / 2, y + fh * k + 2, iw, ih);
-    g.fillStyle = "#0c141c"; g.font = "600 " + Math.max(10, Math.min(16, fh * k * 0.14)) + "px " + CSS("--mono"); g.textAlign = "center";
-    g.fillText("idx " + b.bay_index + (b.truncated ? " ✂" : ""), u * k, y + fh * k - 4);
+    const ia = corner(-0.08, cam.indicator_up + 0.08), ic = corner(0.08, cam.indicator_up - 0.08);
+    if (ia && ic) { g.fillStyle = b.indicator_present ? COLOUR[CV[b.indicator_colour]] : "#3a4652"; g.fillRect(ia[0], ia[1], ic[0] - ia[0], ic[1] - ia[1]); }
+    g.fillStyle = "#0c141c"; g.font = "600 11px " + CSS("--mono"); g.textAlign = "center";
+    g.fillText("idx " + b.bay_index + (b.truncated ? " ✂" : ""), (tl[0] + br[0]) / 2, Math.min(H - 30, br[1] - 4));
     g.textAlign = "left";
   }
-  g.fillStyle = CSS("--ink"); g.font = "12px " + CSS("--mono");
+  // The rows the CV masks as the boat's own hull: nothing up there is seen.
+  if (cam.band_rows > 0) {
+    g.fillStyle = "#0c141ce0"; g.fillRect(0, 0, W, cam.band_rows * k);
+    g.fillStyle = CSS("--dim"); g.font = "11px " + CSS("--mono"); g.fillText("hull band (" + cam.band_rows + " rows, masked)", 8, cam.band_rows * k - 6);
+  }
   const pat = obs.target_pattern ? obs.target_pattern + (obs.target_colours.length ? " [" + obs.target_colours.join(", ") + "]" : "") + " · window " + obs.target_window_index : "—";
   g.fillStyle = "#0c141cc0"; g.fillRect(6, H - 24, W - 12, 19);
-  g.fillStyle = CSS("--ink"); g.fillText("timing: " + pat + (obs.last_event ? "  · EVENT " + obs.last_event : ""), 12, H - 10);
-  $("cam-note").textContent = obs.bays.length + " bays · " + (obs.observed_fps || 0).toFixed(0) + " fps";
+  g.fillStyle = CSS("--ink"); g.font = "12px " + CSS("--mono"); g.fillText("timing: " + pat + (obs.last_event ? "  · EVENT " + obs.last_event : ""), 12, H - 10);
+  $("cam-note").textContent = obs.bays.length + " bays · " + (obs.observed_fps || 0).toFixed(0) + " fps · pitch " + cam.pitch_deg + "°";
 }
 
 // ---------------------------------------------------------------- panels
@@ -398,6 +416,7 @@ function panels() {
   const facts = [
     ["truth", "green bay " + sc.green_bay + " · fire window " + sc.target_window + " · code " + code],
     ["lights", w.lights.state + " · window " + w.lights.window + " " + w.lights.colour + (w.lights.state === "FIRE" ? " · sprayed " + w.lights.sprayed + "s/" + sc.extinguish_s + "s" : "")],
+    ["camera", "pitch " + sc.cam_pitch_deg + "° · fire window " + (w.target_visible_from_berth ? "IN VIEW from the berth" : "NOT in view from the berth - the fire cannot be seen")],
     ["belief", bk.choice ? (bk.choice.ok ? "safe bay " + bk.choice.bay : bk.choice.why) : "—"],
     ["committed", bk.chosen_bay ? "bay " + bk.chosen_bay + (bk.readiness_confirmed ? " · RoboCommand confirmed" : "") : "—"],
     ["timing", (bk.pattern || "—") + (bk.colours && bk.colours.length ? " [" + bk.colours.join(", ") + "]" : "") + (bk.request ? " → " + bk.request : "")],

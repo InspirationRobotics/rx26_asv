@@ -6,23 +6,29 @@ behaviour tree. test_world.py exercises it on its own.
 
 WHAT IS MODELLED, and how honestly:
 
-  the course     three bays in a row, numbered left to right FACING them
-                 (handbook 3.3.4), one GREEN indicator. Bay width and depth are
-                 ASSUMED (4.0 x 6.0 m) until the course drawings are out.
-  the boat       a WAM-V 16 (4.88 x 2.44 m) driven like ArduRover GUIDED on
-                 this hull: position setpoints only, it TURNS rather than
-                 strafes, WP_SPEED 1.0, ATC_ACCEL_MAX 1.0, and on arrival it
-                 loiters with LOIT_RADIUS 2.0 / LOIT_TYPE 0 - drift under 2 m
-                 is not corrected, and over it the boat drives forward OR in
-                 reverse back to the point. All from params/working_crusader.
-  the camera     an OAK-D LR on the bow (cam_x 0.37, 0.41 m above water),
-                 fx 1173 px at 1920x1200. It reports what the dock detector's
-                 DRAFT DockObservation carries, field for field, with the CV
-                 report's measured error rates: faces to ~9 m, indicators
-                 weakening past 6 m (92/125 at 6-10 m), colours that abstain
-                 but are never wrong (unless you turn on `miscolour`).
-                 target_pattern comes from the CV team's own timing stage
-                 (vendor/dock_sequence_core.py), run on these frames.
+  the course     the RobotX 2026 build guide ("Docking Bay Structure"):
+                 0.5 m dock cubes, three 1.5 m slips between 0.5 m fingers
+                 2.0 m long, a 1 m deep main deck, and on it a 1 m square face
+                 per bay with the two windows and the indicator where the
+                 front-panel drawing puts them. Numbered left to right FACING
+                 them (handbook 3.3.4); one GREEN indicator. The deck's height
+                 above the water (0.3 m) is ASSUMED.
+  the boat       ~1.0 x 0.6 m, driven like ArduRover GUIDED on this hull:
+                 position setpoints only, it TURNS rather than strafes,
+                 WP_SPEED 1.0, ATC_ACCEL_MAX 1.0, and on arrival it loiters
+                 with LOIT_RADIUS 2.0 / LOIT_TYPE 0 - drift under 2 m is not
+                 corrected, and over it the boat drives forward OR in reverse
+                 back to the point. params/working_crusader.params.
+  the camera     an OAK-D LR at the bow (cam_x 0.37, 0.41 m above water -
+                 Resources.md), fx 1173 px at 1920x1200, with the CV config's
+                 188-row hull band masked off the top, and a PITCH. It reports
+                 what the dock detector's DRAFT DockObservation carries, field
+                 for field, in the tilted camera frame, with the CV report's
+                 error rates: faces to ~9 m, indicators weakening past 6 m
+                 (92/125 at 6-10 m), colours that abstain but are never wrong
+                 (unless you turn on `miscolour`). A window it cannot see whole
+                 is not reported. target_pattern comes from the CV team's own
+                 timing stage (vendor/dock_sequence_core.py), on these frames.
   RoboCommand    lights the fire when the boat reports docking IN the green
                  bay, and only then (strict judge); checks every report.
   the lights     handbook: RED until hit, GREEN 5 s, off 1 s, then the tier's
@@ -142,18 +148,23 @@ class Scenario:
     # the dock: centre of the back wall, and the compass direction its faces
     # point OUT (180 = the bays open to the south)
     dock_e: float = 0.0
-    dock_n: float = 40.0
+    dock_n: float = 20.0
     facing_deg: float = 180.0
-    bay_width: float = 4.0                     # ASSUMED - course drawings
-    bay_depth: float = 6.0                     # ASSUMED - course drawings
+    # the dock, from the build guide: 0.5 m cubes; slips 3 cubes wide between
+    # fingers 1 cube wide and 4 long; a main deck 2 cubes deep behind the faces
+    slip_width: float = 1.5
+    finger_width: float = 0.5
+    finger_len: float = 2.0
+    deck_depth: float = 1.0
+    deck_z: float = 0.3                        # ASSUMED: dock-cube freeboard
     green_bay: int = 2                         # 1..3, left to right facing them
     # the goal's approach point, metres out in front of the dock centre. The
     # operator's rough "the dock is over there", on the water side and clear
     # of the fingers.
-    approach_m: float = 12.0
+    approach_m: float = 7.0
     # RoboCommand
     tier: int = 2                              # 0 Core, 1 Advanced, 2 Disruptive
-    target_window: int = 0                     # DockWindow.index that lights
+    target_window: int = 1                     # DockWindow.index that lights
     code: tuple = ("red", "blue")              # (resource tin, delivery circle)
     strict_judge: bool = True                  # light only if really docked there
     lose_docking_reports: int = 0              # RoboCommand never hears the first N
@@ -161,12 +172,18 @@ class Scenario:
     extinguish_s: float = 2.0                  # spray-on-target to put it out
     # sensing
     camera_ok: bool = True
+    # + = aimed DOWN (cam_pitch_deg). THE BOAT'S CAMERA IS LEVEL TODAY (0), and
+    # level it sees NEITHER window whole from a berth inside the slip; -25 is
+    # what that takes with the hull band. The default shows the tree working
+    # with the mount it needs; test_e2e level_camera pins today's failing.
+    cam_pitch_deg: float = -25.0
+    hull_band_rows: int = 188                  # CV config occluded_top_rows
     miscolour: float = 0.0                     # P(a lit colour read as another)
     unknown_rate: float = 0.03                 # P(the colour rule abstains)
     gps_sd_m: float = 0.02                     # RTK
     heading_sd_deg: float = 0.3
     # the autopilot
-    wp_radius: float = 0.3                     # the BOAT's WP_RADIUS is 2.0 - see Boat
+    wp_radius: float = 0.2                     # the BOAT's WP_RADIUS is 2.0 - see Boat
     loit_radius: float = 2.0                   # LOIT_RADIUS
     # disturbance
     current_mps: float = 0.0
@@ -182,82 +199,106 @@ class Scenario:
 
 # ------------------------------------------------------------------ the dock
 
-# The white structure, and its two windows as (right, up) offsets from the face
-# centre in metres. From the mock-up's slot template (firefighting-cv
-# data/window_template.json: UL and LR, face aspect 1.06). The rebuilt bay will
-# have its own; index 0 is the LEFT slot, as DockWindow.index defines it.
-FACE_W = 1.20
-FACE_H = 1.13
-FACE_Z = 0.90                  # face centre above the water
-INDICATOR_Z = 0.15
-WINDOW_SLOTS = (("UL", -0.221, +0.360), ("LR", +0.265, +0.047))
-WINDOW_M = 0.25
+# The structure on each bay, from the build guide's front-panel drawing (mm):
+# a 1000 x 1000 panel standing on the deck; the upper-left window opening
+# 210 x 290 with its bottom 605 up and its left 175 in; the lower-right one
+# ~230 x 310, bottom 355 up, left ~615 in; the indicator cut-out 160 mm square
+# at the bottom centre. As (slot, right, up, half-width, half-height) from the
+# face centre, m. Index 0 is the LEFT slot, as DockWindow.index defines it.
+FACE_W = 1.0
+FACE_H = 1.0
+WINDOW_SLOTS = (("UL", -0.220, +0.250, 0.105, 0.145),
+                ("LR", +0.230, +0.010, 0.115, 0.155))
+INDICATOR_UP = -0.420
+WINDOW_M = 0.25                # the handbook's nominal size, for range-from-size
+
+
+def convex_overlap(a, b):
+    """Do two convex polygons overlap? (Separating axis test.)"""
+    for poly in (a, b):
+        for i in range(len(poly)):
+            p1, p2 = poly[i], poly[(i + 1) % len(poly)]
+            axis = (p1[1] - p2[1], p2[0] - p1[0])
+            pa = [dot(axis, q) for q in a]
+            pb = [dot(axis, q) for q in b]
+            if max(pa) < min(pb) or max(pb) < min(pa):
+                return False
+    return True
 
 
 class Dock:
-    """Three bays, faces on the back wall, fingers between them."""
+    """Three slips between four solid fingers, a deck behind, faces on it."""
 
     def __init__(self, sc: Scenario):
         self.sc = sc
-        self.centre = (sc.dock_e, sc.dock_n)
+        self.centre = (sc.dock_e, sc.dock_n)      # the deck edge, mid-dock
         self.out = hvec(sc.facing_deg)
         # LEFT -> RIGHT for someone facing the bays, i.e. looking along -out.
         self.right = starboard(mul(self.out, -1.0))
-        w = sc.bay_width
-        self.faces = {}                        # bay number -> (e, n)
-        for i in (1, 2, 3):
-            self.faces[i] = add(self.centre, mul(self.right, (i - 2) * w))
-        self.fingers = []                      # segments, water side open
-        for k in range(4):
-            base = add(self.centre, mul(self.right, (k - 1.5) * w))
-            self.fingers.append((base, add(base, mul(self.out, sc.bay_depth))))
-        a = add(self.centre, mul(self.right, -1.5 * w))
-        b = add(self.centre, mul(self.right, 1.5 * w))
-        self.back = (a, b)
+        self.pitch = sc.slip_width + sc.finger_width
+        self.face_z = sc.deck_z + FACE_H / 2.0
+        self.faces = {i: self.at((i - 2) * self.pitch, 0.0) for i in (1, 2, 3)}
+        fw = sc.finger_width
+        self.finger_rects = [((k - 1.5) * self.pitch - fw / 2.0, (k - 1.5) * self.pitch + fw / 2.0,
+                              0.0, sc.finger_len) for k in range(4)]
+        self.deck_rect = (-1.5 * self.pitch - fw / 2.0, 1.5 * self.pitch + fw / 2.0,
+                          -sc.deck_depth, 0.0)
+
+    def at(self, u, v):
+        """World point of dock coordinates (u right, v out)."""
+        return add(add(self.centre, mul(self.right, u)), mul(self.out, v))
 
     def uv(self, p):
         """(u right, v out) of a world point, about the dock centre."""
         d = sub(p, self.centre)
         return dot(d, self.right), dot(d, self.out)
 
+    def poly(self, rect):
+        u0, u1, v0, v1 = rect
+        return [self.at(u0, v0), self.at(u1, v0), self.at(u1, v1), self.at(u0, v1)]
+
+    def slip(self, bay):
+        """(u0, u1) of a bay's slip: between its two fingers."""
+        c = (bay - 2) * self.pitch
+        return c - self.sc.slip_width / 2.0, c + self.sc.slip_width / 2.0
+
     def windows(self, bay):
-        """[(index, slot, (e, n, z))] for one bay's windows."""
+        """[(index, slot, (e, n, z), (half_w, half_h))] for one bay's windows."""
         f = self.faces[bay]
         out = []
-        for idx, (slot, r, u) in enumerate(WINDOW_SLOTS):
-            p = add(f, mul(self.right, r))
-            out.append((idx, slot, (p[0], p[1], FACE_Z + u)))
+        for idx, (slot, r, u, hw, hh) in enumerate(WINDOW_SLOTS):
+            q = add(f, mul(self.right, r))
+            out.append((idx, slot, (q[0], q[1], self.face_z + u), (hw, hh)))
         return out
+
+    def indicator(self, bay):
+        f = self.faces[bay]
+        return (f[0], f[1], self.face_z + INDICATOR_UP)
 
     def indicator_colour(self, bay):
         return GREEN if bay == self.sc.green_bay else RED
 
     def bay_of(self, corners):
-        """The bay a hull is FULLY inside, or 0. All four corners must be in
-        the slip: between its two fingers, in front of its face, and no
-        deeper out than the fingers reach."""
-        w = self.sc.bay_width
+        """The bay a hull is FULLY inside, or 0: every corner between that
+        slip's fingers, in front of its face, and no further out than the
+        fingers reach."""
         for i in (1, 2, 3):
-            lo, hi = (i - 2 - 0.5) * w, (i - 2 + 0.5) * w
-            if all(lo <= u <= hi and 0.0 <= v <= self.sc.bay_depth
+            lo, hi = self.slip(i)
+            if all(lo <= u <= hi and 0.0 <= v <= self.sc.finger_len
                    for u, v in (self.uv(c) for c in corners)):
                 return i
         return 0
 
     def contact(self, corners):
-        """Does the hull outline cross a finger or the back wall?"""
-        edges = list(zip(corners, corners[1:] + corners[:1]))
-        for s in self.fingers + [self.back]:
-            for a, b in edges:
-                if seg_intersect(a, b, s[0], s[1]):
-                    return True
-        return False
+        """Does the hull overlap a finger or the deck?"""
+        return any(convex_overlap(corners, self.poly(r))
+                   for r in self.finger_rects + [self.deck_rect])
 
 
 # ------------------------------------------------------------------ the boat
 
 class Boat:
-    """A WAM-V 16 under ArduRover GUIDED, as this boat is configured.
+    """The boat (~1.0 x 0.6 m) under ArduRover GUIDED, as it is configured.
 
     Position setpoints only (GuidedSetpoint.yaw is discarded upstream). It
     turns toward the point and drives forward; it does not strafe.
@@ -272,17 +313,17 @@ class Boat:
     boat returns to the loiter point forward OR ASTERN, whichever needs less
     turning (LOIT_TYPE 0).
     """
-    LENGTH = 4.88
-    BEAM = 2.44
-    CAM_X = 0.37               # target_tracker.cam_x
+    LENGTH = 1.0               # rough, from the team
+    BEAM = 0.6
+    CAM_X = 0.37               # target_tracker.cam_x - near the bow
     CAM_Z = 0.41               # above the waterline (0.65 datum - 0.24 draft)
     WP_SPEED = 1.0             # WP_SPEED, m/s
     ACCEL = 1.0                # ATC_ACCEL_MAX, m/s^2
     DECEL = 0.5                # the braking the speed profile plans with
-    RATE_MAX = 45.0            # deg/s actually achieved (ATC_STR_RAT_MAX is 90)
+    RATE_MAX = 60.0            # deg/s actually achieved (ATC_STR_RAT_MAX is 90)
     YAW_ACCEL = 90.0           # deg/s^2
 
-    def __init__(self, e, n, heading, wp_radius=0.3, loit_radius=2.0):
+    def __init__(self, e, n, heading, wp_radius=0.2, loit_radius=2.0):
         self.e, self.n, self.yaw = e, n, heading % 360.0
         self.v = 0.0           # forward speed, m/s (negative = astern)
         self.r = 0.0           # yaw rate, deg/s
@@ -331,7 +372,7 @@ class Boat:
             return dst
         u = mul(seg, 1.0 / length)
         s = clamp(dot(sub(self.p, o), u), 0.0, length)
-        look = max(1.5, 2.0 * abs(self.v))
+        look = max(1.0, 2.0 * abs(self.v))
         return add(o, mul(u, min(length, s + look)))
 
     def _arrive(self):
@@ -467,8 +508,9 @@ class Camera:
     W_PX, H_PX = 1920, 1200
     HFOV = 2.0 * math.degrees(math.atan(960.0 / 1173.0))      # ~78.6
     VFOV = 2.0 * math.degrees(math.atan(600.0 / 1173.0))      # ~54.2
-    STEREO_MIN_M = 0.62
+    STEREO_MIN_M = 0.31        # 640x400 stereo, extended disparity (CV spec)
     PLANE_MAX_M = 12.0
+    DOWN = math.degrees(math.atan(600.0 / 1173.0))   # below the axis
 
     def __init__(self, sc: Scenario, rnd: random.Random):
         self.sc = sc
@@ -501,6 +543,37 @@ class Camera:
             return self.rnd.choice([c for c in LIT if c != true_colour]), 0.7
         return true_colour, self.rnd.uniform(0.75, 0.97)
 
+    def up_deg(self):
+        """How far above its axis the camera sees, with the hull band masked."""
+        return math.degrees(math.atan((600.0 - self.sc.hull_band_rows) / self.FX))
+
+    def to_cam(self, cam, f, lft, pt):
+        """A world point (e, n, z) in the camera frame (x fwd, y left, z up),
+        pitch included: + pitch aims DOWN, so a point level with the camera
+        sits ABOVE its axis."""
+        d = (pt[0] - cam[0], pt[1] - cam[1])
+        xb, yb, zb = dot(d, f), dot(d, lft), pt[2] - cam[2]
+        pr = self.sc.cam_pitch_deg * DEG
+        return (xb * math.cos(pr) - zb * math.sin(pr), yb, xb * math.sin(pr) + zb * math.cos(pr))
+
+    def in_view(self, c):
+        """Is a camera-frame point inside the image (and not the hull band)?"""
+        if c[0] <= 0.05:
+            return False
+        az = math.degrees(math.atan2(c[1], c[0]))
+        el = math.degrees(math.atan2(c[2], c[0]))
+        return abs(az) <= self.HFOV / 2.0 and -self.DOWN <= el <= self.up_deg()
+
+    def window_visible(self, cam, f, lft, dock, centre, half):
+        """A window counts only if the whole opening is in the image."""
+        rgt = dock.right
+        for su in (-1, 1):
+            for sz in (-1, 1):
+                q = add((centre[0], centre[1]), mul(rgt, su * half[0]))
+                if not self.in_view(self.to_cam(cam, f, lft, (q[0], q[1], centre[2] + sz * half[1]))):
+                    return False
+        return True
+
     def frame(self, t, boat: Boat, dock: Dock, lights: Lights):
         cam, look = boat.camera()
         f = hvec(look)
@@ -510,45 +583,60 @@ class Camera:
         for bay in (1, 2, 3):
             face = dock.faces[bay]
             d = sub(face, (cam[0], cam[1]))
-            x, y = dot(d, f), dot(d, lft)
-            if x <= 0.3:
+            r = norm(d)
+            if dot(d, f) <= 0.3:
                 continue
-            r = math.hypot(x, y)
-            brg = math.degrees(math.atan2(y, x))
-            if abs(brg) > self.HFOV / 2.0:
+            c = self.to_cam(cam, f, lft, (face[0], face[1], dock.face_z))
+            if abs(math.degrees(math.atan2(c[1], c[0]))) > self.HFOV / 2.0:
+                continue
+            # some of the face must be in the image vertically
+            top = self.to_cam(cam, f, lft, (face[0], face[1], dock.face_z + FACE_H / 2.0))
+            bot = self.to_cam(cam, f, lft, (face[0], face[1], dock.face_z - FACE_H / 2.0))
+            if math.degrees(math.atan2(bot[2], bot[0])) > self.up_deg() or \
+                    math.degrees(math.atan2(top[2], top[0])) < -self.DOWN:
                 continue
             # the face must face the camera, and not too obliquely
             if dot(dock.out, mul(d, -1.0 / max(r, 1e-6))) < math.cos(75.0 * DEG):
                 continue
             if rnd.random() > self.p_face(r):
                 continue
-            half = math.degrees(math.atan2(FACE_W / 2.0, r))
-            truncated = abs(brg) + half > self.HFOV / 2.0
-            seen.append((bay, face, x, y, r, brg, truncated))
+            corners = [(face[0] + dock.right[0] * su * FACE_W / 2.0,
+                        face[1] + dock.right[1] * su * FACE_W / 2.0,
+                        dock.face_z + sz * FACE_H / 2.0) for su in (-1, 1) for sz in (-1, 1)]
+            truncated = not all(self.in_view(self.to_cam(cam, f, lft, q)) for q in corners)
+            seen.append((bay, face, r, c, truncated))
 
         # left to right in THIS frame: + bearing is left
-        seen.sort(key=lambda s: -s[5])
+        seen.sort(key=lambda s: -math.atan2(s[3][1], s[3][0]))
         bays = []
         tracked_states = None
-        n_out_cam = (dot(dock.out, f), dot(dock.out, lft))      # normal, camera frame
-        for idx, (bay, face, x, y, r, brg, truncated) in enumerate(seen):
-            b_n = brg + rnd.gauss(0.0, 0.2)
+        pr = self.sc.cam_pitch_deg * DEG
+        for idx, (bay, face, r, c, truncated) in enumerate(seen):
+            # the face centre, with range error along the line of sight
+            rc = math.sqrt(c[0] ** 2 + c[1] ** 2 + c[2] ** 2)
+            k = 1.0 + rnd.gauss(0.0, 0.01 + 0.004 * r * r) / rc
+            cn = (c[0] * k, c[1] * k, c[2] * k)
+            b_n = math.degrees(math.atan2(cn[1], cn[0])) + rnd.gauss(0.0, 0.2)
             has_plane = self.STEREO_MIN_M <= r <= self.PLANE_MAX_M
-            r_n = r + rnd.gauss(0.0, 0.01 + 0.004 * r * r)
+            # the face's normal, noisy in the horizontal, then into the tilted frame
             ang = rnd.gauss(0.0, 3.0) * DEG
-            nx = n_out_cam[0] * math.cos(ang) - n_out_cam[1] * math.sin(ang)
-            ny = n_out_cam[0] * math.sin(ang) + n_out_cam[1] * math.cos(ang)
-            px, py = r_n * math.cos(b_n * DEG), r_n * math.sin(b_n * DEG)
-            offset = -(nx * px + ny * py)
-            ind_present = rnd.random() < self.p_indicator(r)
+            ob = (dot(dock.out, f), dot(dock.out, lft))
+            nbx = ob[0] * math.cos(ang) - ob[1] * math.sin(ang)
+            nby = ob[0] * math.sin(ang) + ob[1] * math.cos(ang)
+            nc = (nbx * math.cos(pr), nby, nbx * math.sin(pr))
+            offset = -(nc[0] * cn[0] + nc[1] * cn[1] + nc[2] * cn[2])
+            ip = dock.indicator(bay)
+            ind_vis = self.in_view(self.to_cam(cam, f, lft, ip))
+            ind_present = ind_vis and rnd.random() < self.p_indicator(r)
             ind_col, ind_conf = self._read(dock.indicator_colour(bay)) if ind_present else (UNKNOWN, 0.0)
 
             windows = []
             states = {}
             lit_w, lit_c = lights.window_colour(t) if bay == self.sc.green_bay else (-1, OFF)
-            for w_idx, slot, (we, wn, wz) in dock.windows(bay):
-                wd = (we - cam[0], wn - cam[1])
-                wx, wy, wzc = dot(wd, f), dot(wd, lft), wz - cam[2]
+            for w_idx, slot, wc, half in dock.windows(bay):
+                if not self.window_visible(cam, f, lft, dock, wc, half):
+                    continue                  # not seen whole: not reported
+                wcam = self.to_cam(cam, f, lft, wc)
                 true_c = lit_c if w_idx == lit_w else OFF
                 st, conf = self._read(true_c)
                 states[w_idx] = NAME[st]
@@ -558,8 +646,8 @@ class Camera:
                     "lit_score": 0.4 if st in LIT else 0.02,
                     "detector_confidence": 0.9, "bbox": [0, 0, 0, 0],
                     "has_position": has_plane,
-                    "x": wx + rnd.gauss(0.0, 0.02), "y": wy + rnd.gauss(0.0, 0.02),
-                    "z": wzc + rnd.gauss(0.0, 0.02)})
+                    "x": wcam[0] + rnd.gauss(0.0, 0.02), "y": wcam[1] + rnd.gauss(0.0, 0.02),
+                    "z": wcam[2] + rnd.gauss(0.0, 0.02)})
             lit = [w["index"] for w in windows if w["state"] in LIT and w["state_confidence"] >= 0.5]
             h_px = self.FX * WINDOW_M / r
             bays.append({
@@ -569,12 +657,13 @@ class Camera:
                 "indicator_confidence": ind_conf, "indicator_bbox": [0, 0, 0, 0],
                 "windows": windows,
                 "lit_window_index": lit[0] if len(lit) == 1 else -1,
-                "lit_state": windows[lit[0]]["state"] if len(lit) == 1 else UNKNOWN,
+                "lit_state": next(w["state"] for w in windows if w["index"] == lit[0])
+                if len(lit) == 1 else UNKNOWN,
                 "has_plane": has_plane,
-                "plane_normal": [nx, ny, 0.0] if has_plane else [None, None, None],
+                "plane_normal": list(nc) if has_plane else [None, None, None],
                 "plane_offset": offset if has_plane else None,
                 "plane_rms_m": 0.01 if has_plane else None,
-                "range_from_size_m": r * (1.0 + rnd.gauss(0.0, 1.0 / h_px)),
+                "range_from_size_m": (rc * (1.0 + rnd.gauss(0.0, 1.0 / h_px))) if windows else None,
                 "bearing_deg": b_n,
                 "_truth_bay": bay})
             # The timing stage tracks the bay whose indicator reads GREEN, or
@@ -716,6 +805,7 @@ class World:
         self.trail = []
         self.last_obs = None               # the latest DockObservation, for the page
         self._pending_confirm = False
+        self._mount_sent = False
 
     # -------------------------------------------------------------- inputs
 
@@ -760,6 +850,13 @@ class World:
             self._pending_confirm = True
 
         out = []
+        if not self._mount_sent:
+            # bt_runner_node's cam_* and dock_face_dz_m parameters, which the
+            # runner cannot know: the scenario can change the camera's pitch.
+            self._mount_sent = True
+            out.append({"type": "mount", "x": Boat.CAM_X, "y": 0.0, "yaw_deg": 0.0,
+                        "pitch_deg": sc.cam_pitch_deg,
+                        "face_dz": self.dock.face_z - Boat.CAM_Z})
         if t >= self._next_pose:
             self._next_pose += 0.1
             lat, lon = to_latlon(self.boat.e + self.rnd.gauss(0, sc.gps_sd_m),
@@ -787,26 +884,44 @@ class World:
     def _spray_hits(self):
         """Which window the stream is landing on, or None.
 
-        The command's aim point is in camera_link; put it in the world with
-        the boat's TRUE pose and compare with the true window centres. Within
-        the window's half-size is a hit. The stream reaches 6 m.
+        The command's aim point is in camera_link (tilted by the pitch); put it
+        in the world with the boat's TRUE pose, and it is a hit when it lands
+        inside a window's opening on the face. The stream reaches 6 m.
         """
         c = self.cannon
         if not c.get("fire"):
             return None
         cam, look = self.boat.camera()
         f = hvec(look)
-        aim = add((cam[0], cam[1]), add(mul(f, c["x"]), mul(port(f), c["y"])))
-        aim_z = cam[2] + c["z"]
+        pr = self.sc.cam_pitch_deg * DEG
+        xb = c["x"] * math.cos(pr) + c["z"] * math.sin(pr)
+        zb = -c["x"] * math.sin(pr) + c["z"] * math.cos(pr)
+        aim = add((cam[0], cam[1]), add(mul(f, xb), mul(port(f), c["y"])))
+        aim_z = cam[2] + zb
         if norm(sub(aim, (cam[0], cam[1]))) > 6.0:
             return None
-        best = None
-        for bay in (1, 2, 3):
-            for idx, _slot, (we, wn, wz) in self.dock.windows(bay):
-                err = math.hypot(math.hypot(aim[0] - we, aim[1] - wn), aim_z - wz)
-                if err <= WINDOW_M / 2.0 and bay == self.sc.green_bay:
-                    best = idx
-        return best
+        bay = self.sc.green_bay
+        for idx, _slot, (we, wn, wz), (hw, hh) in self.dock.windows(bay):
+            d = sub(aim, (we, wn))
+            if abs(dot(d, self.dock.right)) <= hw and abs(aim_z - wz) <= hh and \
+                    abs(dot(d, self.dock.out)) <= 0.3:
+                return idx
+        return None
+
+    def target_visible_from_berth(self, berth_m=1.25):
+        """Could a boat berthed in the green bay (body origin berth_m out, bow
+        in) see the fire window whole? The tree cannot put out what it cannot
+        see, and this is the first thing to know about a scenario."""
+        b = self.dock
+        p = b.at((self.sc.green_bay - 2) * b.pitch, berth_m)
+        heading = (self.sc.facing_deg + 180.0) % 360.0
+        f = hvec(heading)
+        c = add(p, mul(f, Boat.CAM_X))
+        cam = (c[0], c[1], Boat.CAM_Z)
+        for idx, _s, wc, half in b.windows(self.sc.green_bay):
+            if idx == self.sc.target_window:
+                return self.camera.window_visible(cam, f, port(f), b, wc, half)
+        return False
 
     # -------------------------------------------------------------- outputs
 
@@ -833,9 +948,12 @@ class World:
                      "v": self.boat.v, "corners": self.boat.corners(),
                      "sp": self.boat.sp, "loitering": self.boat.loitering},
             "dock": {"faces": {str(k): v for k, v in d.faces.items()},
-                     "fingers": d.fingers, "back": d.back, "out": d.out,
-                     "right": d.right, "green_bay": sc.green_bay,
-                     "windows": {str(b): [(i, s, p) for i, s, p in d.windows(b)] for b in (1, 2, 3)}},
+                     "fingers": [d.poly(r) for r in d.finger_rects], "deck": d.poly(d.deck_rect),
+                     "out": d.out, "right": d.right, "green_bay": sc.green_bay,
+                     "finger_len": sc.finger_len, "face_w": FACE_W,
+                     "windows": {str(b): [(i, s, p) for i, s, p, _h in d.windows(b)]
+                                 for b in (1, 2, 3)}},
+            "target_visible_from_berth": self.target_visible_from_berth(),
             "lights": {"state": self.lights.state, "window": lw, "colour": NAME[lc],
                        "sprayed": round(self.lights.sprayed, 2)},
             "cannon": self.cannon, "spray_on": self.spray_on,

@@ -143,6 +143,9 @@ struct Context
   int tier = 0;                               ///< goal tier: 0 Core, 1 Adv, 2 Disr
   dock::DockBook dock;                        ///< the bays, world-anchored
   dock::Mount cam_mount;                      ///< camera_link in base_link
+  /// Face centre above the camera, m: places sightings from a PITCHED camera
+  /// (dock::faceInBody). Copied into the book's params at every ingest.
+  double dock_face_dz = 0.39;
   double dock_obs_age_s = 1e9;                ///< since the last DockObservation
   std::uint32_t dock_seq = 0;                 ///< bumps on every DockObservation
   double dock_t = 0.0;                        ///< that frame's stamp, seconds
@@ -227,6 +230,7 @@ using ContextPtr = std::shared_ptr<Context>;
 inline void ingestDockObservation(Context & c, const dock::Frame & f)
 {
   if (c.origin_set && c.pose_fresh && std::isfinite(c.heading_deg)) {
+    c.dock.prm.face_dz = c.dock_face_dz;
     c.dock.ingest(f, c.boat, c.heading_deg, c.cam_mount);
   }
   ++c.dock_seq;

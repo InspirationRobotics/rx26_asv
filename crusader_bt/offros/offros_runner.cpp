@@ -104,9 +104,12 @@ dock::Frame frameFromJson(const json & j)
     s.range_m = dock::sightingRange(
       has_plane, n[0], n[1], num(b, "plane_offset", dock::kNaN), s.bearing_deg,
       num(b, "range_from_size_m", dock::kNaN));
-    s.has_normal = has_plane && std::isfinite(n[0]) && std::isfinite(n[1]);
+    s.has_normal = has_plane && std::isfinite(n[0]) && std::isfinite(n[1]) &&
+      std::isfinite(n[2]);
     s.nx = n[0];
     s.ny = n[1];
+    s.nz = n[2];
+    s.d = num(b, "plane_offset", dock::kNaN);
     s.truncated = b.value("truncated", false);
     s.indicator_present = b.value("indicator_present", false);
     s.indicator = dock::colourFromCv(b.value("indicator_colour", 0));
@@ -180,6 +183,8 @@ public:
         onDock(j);
       } else if (type == "ocs_command") {
         onOcsCommand(j);
+      } else if (type == "mount") {
+        onMount(j);
       } else if (type == "goal") {
         std::lock_guard<std::mutex> lk(goal_mu_);
         if (busy_) {
@@ -266,6 +271,22 @@ private:
     ingestDockObservation(*ctx_, f);
     dock_t_ = Clock::now();
     have_dock_ = true;
+  }
+
+  /// The camera extrinsic and the face height: bt_runner_node's cam_x,
+  /// cam_y, cam_yaw_deg, cam_pitch_deg and dock_face_dz_m parameters. The sim
+  /// sends them, because its scenario can change the camera's pitch.
+  void onMount(const json & j)
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    ctx_->cam_mount.x = num(j, "x", ctx_->cam_mount.x);
+    ctx_->cam_mount.y = num(j, "y", ctx_->cam_mount.y);
+    ctx_->cam_mount.yaw_deg = num(j, "yaw_deg", ctx_->cam_mount.yaw_deg);
+    ctx_->cam_mount.pitch_deg = num(j, "pitch_deg", ctx_->cam_mount.pitch_deg);
+    ctx_->dock_face_dz = num(j, "face_dz", ctx_->dock_face_dz);
+    RCLCPP_INFO(node_.get_logger(), "camera mount: x %.2f y %.2f yaw %.1f pitch %.1f, face %+.2f m",
+      ctx_->cam_mount.x, ctx_->cam_mount.y, ctx_->cam_mount.yaw_deg, ctx_->cam_mount.pitch_deg,
+      ctx_->dock_face_dz);
   }
 
   /// /crsd/ocs_command: RoboCommand's RxCommand as JSON. Only the readiness

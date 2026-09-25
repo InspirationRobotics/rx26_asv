@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """test_e2e.py — the real tree against the simulated course, scenario by scenario.
 
-    python tools/task3_sim/test_e2e.py              # everything, ~5 min
+    python tools/task3_sim/test_e2e.py              # everything, ~6 min
     python tools/task3_sim/test_e2e.py bay1 core    # just these
 
 Each scenario is one `sim.py --headless` run in its own process, several at
@@ -32,29 +32,35 @@ SIM = os.path.join(HERE, "sim.py")
 #   "fail_fast"     the tree must fail, reporting nothing, within 10 s
 #   "no_fire"       docked and reported, but no fire report and no success
 SCENARIOS = {
-    "bay2":        ({"green_bay": 2, "tier": 2, "code": ["red", "blue"]}, "pass", 240),
-    "bay1":        ({"green_bay": 1, "tier": 2, "code": ["green", "green"], "target_window": 1}, "pass", 240),
-    "bay3":        ({"green_bay": 3, "tier": 2, "code": ["blue", "red"]}, "pass", 240),
-    "east_facing": ({"green_bay": 1, "tier": 2, "facing_deg": 90.0, "dock_e": -30.0, "dock_n": 20.0,
-                     "start_heading": 270.0, "code": ["blue", "green"]}, "pass", 260),
-    "north_facing": ({"green_bay": 3, "tier": 2, "facing_deg": 0.0, "dock_n": -40.0,
-                      "start_heading": 180.0, "code": ["green", "red"]}, "pass", 260),
-    "core":        ({"green_bay": 3, "tier": 0}, "pass", 200),
-    "advanced":    ({"green_bay": 2, "tier": 1, "code": ["red", "green"]}, "pass", 240),
+    # The default course: the build guide's dock 20 m ahead, bays opening south,
+    # the camera pitched up 25 deg (see world.Scenario.cam_pitch_deg).
+    "bay2":        ({"green_bay": 2, "tier": 2, "code": ["red", "blue"]}, "pass", 200),
+    "bay1":        ({"green_bay": 1, "tier": 2, "code": ["green", "green"], "target_window": 0}, "pass", 200),
+    "bay3":        ({"green_bay": 3, "tier": 2, "code": ["blue", "red"]}, "pass", 200),
+    "east_facing": ({"green_bay": 1, "tier": 2, "facing_deg": 90.0, "dock_e": -15.0, "dock_n": 10.0,
+                     "start_heading": 270.0, "code": ["blue", "green"]}, "pass", 240),
+    "north_facing": ({"green_bay": 3, "tier": 2, "facing_deg": 0.0, "dock_n": -20.0,
+                      "start_heading": 180.0, "code": ["green", "red"], "target_window": 0}, "pass", 220),
+    "core":        ({"green_bay": 3, "tier": 0}, "pass", 160),
+    "advanced":    ({"green_bay": 2, "tier": 1, "code": ["red", "green"]}, "pass", 200),
     "noisy":       ({"green_bay": 1, "tier": 2, "miscolour": 0.05, "unknown_rate": 0.15,
-                     "code": ["blue", "blue"], "seed": 7}, "pass", 280),
+                     "code": ["blue", "blue"], "seed": 7}, "pass", 240),
     # A 5 cm/s cross-current: the mission still works, but the berth cannot be
-    # held - LOIT_RADIUS 2 m, no strafing, 0.8 m of room. The known limit.
+    # held - LOIT_RADIUS 2 m, no strafing, 0.45 m of room. The known limit.
     "current":     ({"green_bay": 3, "tier": 2, "current_mps": 0.05, "current_to_deg": 90.0,
-                     "code": ["red", "red"]}, "pass_contact", 260),
+                     "code": ["red", "red"]}, "pass_contact", 240),
     # RoboCommand never hears the first docking report: the tree must re-send.
-    "lost_report": ({"green_bay": 1, "tier": 2, "lose_docking_reports": 1}, "resent", 260),
+    "lost_report": ({"green_bay": 1, "tier": 2, "lose_docking_reports": 1}, "resent", 240),
+    # THE CAMERA AS MOUNTED TODAY: level. It docks, reports, and never sees the
+    # fire - neither window is in view from the berth. Pinned, so a better
+    # mount shows up as this scenario changing.
+    "level_camera": ({"green_bay": 2, "tier": 2, "cam_pitch_deg": 0.0}, "no_fire", 200),
     # THE PRECONDITION: this boat's real WP_RADIUS parks it 2 m short.
-    "wp_radius_2": ({"green_bay": 2, "tier": 2, "wp_radius": 2.0}, "no_dock", 150),
+    "wp_radius_2": ({"green_bay": 2, "tier": 2, "wp_radius": 2.0}, "no_dock", 130),
     # A dead dock detector: the guard band must stop the run, not drive blind.
     "no_camera":   ({"green_bay": 2, "tier": 2, "camera_ok": False}, "fail_fast", 30),
     # Confirmed, but the fire never lights: fail, and never claim a fire out.
-    "no_fire":     ({"green_bay": 2, "tier": 2, "activation_delay_s": 1e6}, "no_fire", 200),
+    "no_fire":     ({"green_bay": 2, "tier": 2, "activation_delay_s": 1e6}, "no_fire", 180),
 }
 
 

@@ -17,25 +17,33 @@
     c1 is the tin, c2 the circle. Report ResourceDeliveryRequest and relay it
     to the UAV.
 
+  THE NUMBERS BELOW COME FROM TWO PLACES, and change when either does:
+
+    the dock   RobotX 2026 build guide ("Docking Bay Structure"): 0.5 m dock
+               cubes; three 1.5 m slips between 0.5 m fingers 2.0 m long, so
+               the bays are 2.0 m apart; each face a 1 m square at the back of
+               its slip, on the main deck.
+    the boat   ~1.0 m long, 0.6 m wide; camera 0.37 m ahead of the body origin
+               and 0.41 m above the water (Resources.md).
+
   1. BAYS ARE KNOWN BY WHERE THEY ARE. DockObservation's bay_index is "left to
      right in THIS frame", so a boat that sees two bays is told 0 and 1
      whichever two they are. The runner places every sighting in the world and
      folds it into a track (dock::DockBook); the bay NUMBER comes from sorting
      three confirmed tracks along the dock (dock::layout).
 
-  2. LOOK FROM WHERE ALL THREE FIT, AND NEVER FROM INSIDE A SLIP. 10 m out,
-     the OAK-D LR's ~79 deg covers ~16 m: the whole dock. Further looks are
-     head on to whichever bay has the fewest readings, from the same 10 m.
-     There is no closer look: with fingers ~6 m long, anything nearer is in a
-     slip, and moving between two such looks crosses a finger (two hull
-     contacts in the sim before this was fixed). So `standoff` is tied to the
-     course: finger length + half a hull (2.4 m) + margin. If nothing is seen
-     from the approach point at all, a ring search looks out from it in five
-     directions before giving up.
+  2. LOOK FROM WHERE ALL THREE FIT, AND NEVER FROM INSIDE A SLIP. 5 m out, the
+     outer faces sit ~22 deg off the bow - well inside the camera's ~39 - and
+     the indicators are inside the 6 m the CV reads them reliably at. The
+     fingers end 2 m out, so 5 m clears them with the whole hull. Further looks
+     are head on to whichever bay has the fewest readings, from the same 5 m.
+     If nothing is seen from the approach point at all, a ring search looks
+     out from it in five directions before giving up.
 
-     No strafing: GUIDED cannot strafe this hull - it turns instead - and
-     nothing here needs it to. Every look is reached via a lead point further
-     out, because the camera faces forward and GuidedSetpoint.yaw is
+     No strafing. It exists in MANUAL on this hull, but a tree driving MANUAL
+     means RC overrides from the companion, which are G1-gated (README safety
+     rule 3) - and nothing here needs it. Every look is reached via a lead point
+     further out, because the camera faces forward and GuidedSetpoint.yaw is
      discarded: the heading a boat stops with is the direction it arrived from.
 
   3. STRICT, THEN LENIENT. SafeBayKnown(need_others_red) wants GREEN + RED +
@@ -47,29 +55,35 @@
      legs. A run of REDs halts the leg and the retry starts the search again -
      where those recent reds now veto that bay.
 
-  5. ENTER STRAIGHT, FROM OUTSIDE. Lead-in (13 m), line-up (9 m) and berth
-     (3 m) sit on the bay's own centreline. The line-up point is OUTSIDE the
-     fingers for the same reason as the vantages: the boat must be straight
-     before its bow is between them. LinedUp skips the lead-in when the boat
-     is already there (it is, whenever the survey ended head on to this bay).
-     DockWaypoint recomputes the points every tick from the bay's CURRENT
-     estimate; NavigateTo re-sends only when that moves by resend_m.
+  5. ENTER STRAIGHT, FROM OUTSIDE. Lead-in (5 m), line-up (3 m) and berth
+     (1.25 m) sit on the bay's own centreline, measured face to body origin.
+     The line-up point is outside the fingers - 2.0 m of finger, half a hull,
+     margin - so the boat is straight before its bow is between them. The
+     berth leaves the stern inside the fingers (1.25 + 0.5 + along_tol <= 2.0)
+     and the bow clear of the face. LinedUp skips the lead-in when the boat is
+     already there (it is, whenever the survey ended head on to this bay).
 
-     PRECONDITION: WP_RADIUS well under the berth tolerance (0.4 m). ArduRover
-     calls a GUIDED destination reached inside WP_RADIUS and loiters where it
-     stopped; this boat's is 2.0 m, which parks it 2 m short of the berth and
-     leaves the enter leg waiting for an arrival that never comes. The sim
-     reproduces it (tools/task3_sim, WP_RADIUS on its page; test_e2e
-     wp_radius_2).
+     PRECONDITION: WP_RADIUS well under the berth tolerance (0.25 m); 0.2 m is
+     what the sim runs. ArduRover calls a GUIDED destination reached inside
+     WP_RADIUS and loiters where it stopped; this boat's is 2.0 m, which parks
+     it at the finger ends and leaves the enter leg waiting for an arrival that
+     never comes. tools/task3_sim reproduces it (test_e2e wp_radius_2).
 
      KNOWN LIMIT, NOT FIXED HERE: once berthed, GUIDED holds by loitering
-     (LOIT_RADIUS 2.0 m) and cannot strafe, and the slip leaves ~0.8 m either
-     side. A 5 cm/s cross-current puts the hull on a finger in ~15 s. Holding
-     in a slip needs the hull's lateral thrust, which GUIDED does not use.
+     (LOIT_RADIUS 2.0 m) and cannot strafe, and the slip leaves 0.45 m either
+     side. A 5 cm/s cross-current puts the hull on a finger in ~10 s.
 
   6. THE FIRE. AwaitFireTarget re-sends the docking report until RoboCommand
      confirms it (a lost report is a fire that never lights). SprayUntilHit aims
      every tick at the CV's aim point and switches the cannon OFF on every exit.
+
+     THE CAMERA MUST SEE THE UPPER WINDOW FROM THE BERTH, and level it cannot:
+     berthed, it is ~0.9 m from the face and 0.41 m up, and the upper window's
+     top is ~1.2 m up - 41 deg above level, against the ~19 deg the camera sees
+     above its axis once the CV's 188-row hull band is masked. It needs ~20 deg
+     of pitch-up (cam_pitch_deg ~ -20) or a higher mount. With it level, a fire
+     in the upper window is never seen and AwaitFireTarget times out. The sim
+     models this (test_e2e upper_window_level / upper_window_pitched).
 
   THE GUARD BAND is re-ticked every tick and halts everything below it.
   DockCameraAlive is in it because the dock detector publishes every frame,
@@ -102,21 +116,20 @@
               <SafeBayKnown need_others_red="true"/>
               <RetryUntilSuccessful num_attempts="4" name="looks">
                 <Sequence name="look">
-                  <PickVantage standoff="10.0" lead_m="3.0" out="{vantage}" lead="{lead}"/>
+                  <PickVantage standoff="5.0" lead_m="2.0" out="{vantage}" lead="{lead}"/>
                   <!-- Via the lead: the last leg is driven AT the dock, so the
                        boat stops facing it. -->
-                  <NavigateTo target="port" goal="{lead}" tolerance="2.0"/>
-                  <NavigateTo target="port" goal="{vantage}" tolerance="1.5"/>
+                  <NavigateTo target="port" goal="{lead}" tolerance="1.0"/>
+                  <NavigateTo target="port" goal="{vantage}" tolerance="1.0"/>
                   <!-- WATCH, then call the look a failure so the retry moves on.
                        Readings accumulate the whole time; SafeBayKnown above
                        ends this the moment they settle it.
 
-                       NOT HoldStation: that re-sends the CURRENT position, and
-                       the boat is still doing ~1 m/s when NavigateTo lets go at
-                       1.5 m. It overshoots the new point and turns round to go
-                       back to it - away from the dock it is meant to be
-                       watching. The vantage setpoint stands; the autopilot
-                       stops there and loiters, facing in. -->
+                       NOT HoldStation: that re-sends the CURRENT position while
+                       the boat is still moving, so it overshoots the new point
+                       and turns round to go back to it - away from the dock it
+                       is meant to be watching. The vantage setpoint stands; the
+                       autopilot stops there and loiters, facing in. -->
                   <ForceFailure>
                     <Sleep msec="12000"/>
                   </ForceFailure>
@@ -131,48 +144,49 @@
                  boat reaches it already heading in. Skipped when it is already
                  there - a lead-in behind the boat would turn it round twice. -->
             <Fallback name="lead_in">
-              <LinedUp min_along_m="8.5" lateral_tol="0.8" heading_tol_deg="20.0"/>
+              <LinedUp min_along_m="2.7" lateral_tol="0.4" heading_tol_deg="20.0"/>
               <ReactiveSequence name="to_lead">
                 <ChosenBaySafe min_ema="0.3"/>
-                <DockWaypoint point="lead" predock_m="9.0" berth_m="3.0" lead_m="4.0" out="{goal}"/>
-                <NavigateTo target="port" goal="{goal}" tolerance="1.5"/>
+                <DockWaypoint point="lead" predock_m="3.0" berth_m="1.25" lead_m="2.0" out="{goal}"/>
+                <NavigateTo target="port" goal="{goal}" tolerance="1.0"/>
               </ReactiveSequence>
             </Fallback>
             <ReactiveSequence name="line_up">
               <ChosenBaySafe min_ema="0.3"/>
-              <DockWaypoint point="predock" predock_m="9.0" berth_m="3.0" lead_m="4.0" out="{goal}"/>
-              <NavigateTo target="port" goal="{goal}" tolerance="0.5" resend_m="0.3"/>
+              <DockWaypoint point="predock" predock_m="3.0" berth_m="1.25" lead_m="2.0" out="{goal}"/>
+              <NavigateTo target="port" goal="{goal}" tolerance="0.4" resend_m="0.2"/>
             </ReactiveSequence>
 
           </Sequence>
         </RetryUntilSuccessful>
 
         <!-- IN THE SLIP FROM HERE ON, AND OUTSIDE THE RETRY ON PURPOSE. A retry
-             starts with a lead-in point 13 m out - BEHIND a boat that is in a
+             starts with a lead-in point 5 m out - BEHIND a boat that is in a
              slip - and GUIDED reaches a point behind by turning round, which
-             in a 4 m slip means hitting both fingers. There is no reverse on
+             in a 1.5 m slip means hitting the fingers. There is no reverse on
              the setpoint path. So a failure past this point fails the mission,
              loudly, for the operator to recover by hand. -->
 
-        <!-- berth_m is face to BODY ORIGIN: a WAM-V 16's bow is ~2.4 m
-             ahead of it, so 3.0 leaves ~0.5 m off the face. -->
+        <!-- berth_m is face to BODY ORIGIN: the bow is 0.5 m ahead of it, so
+             1.25 leaves ~0.75 m off the face and the stern ~0.25 m inside the
+             finger ends. -->
         <ReactiveSequence name="enter">
           <ChosenBaySafe min_ema="0.3"/>
-          <DockWaypoint point="berth" predock_m="9.0" berth_m="3.0" lead_m="4.0" out="{goal}"/>
-          <NavigateTo target="port" goal="{goal}" tolerance="0.4" resend_m="0.3"/>
+          <DockWaypoint point="berth" predock_m="3.0" berth_m="1.25" lead_m="2.0" out="{goal}"/>
+          <NavigateTo target="port" goal="{goal}" tolerance="0.25" resend_m="0.2"/>
         </ReactiveSequence>
 
         <!-- WAIT UNTIL DOCKED, up to 10 s: the boat arrives inside tolerance
              still settling, and one sample taken mid-swing is not the answer.
              Inverter / KeepRunningUntilFailure / Inverter is BT for "run until
              this condition holds". DockedInBay tests the whole HULL against
-             the slip width the boat measured, not just its middle. -->
+             the slip the boat measured, not just its middle. -->
         <Timeout msec="10000">
           <Inverter>
             <KeepRunningUntilFailure>
               <Inverter>
-                <DockedInBay along_tol="0.6" lateral_tol="0.5" heading_tol_deg="15.0"
-                             hull_length="4.88" hull_beam="2.44" finger_margin="0.2"/>
+                <DockedInBay along_tol="0.25" lateral_tol="0.3" heading_tol_deg="15.0"
+                             hull_length="1.0" hull_beam="0.6" finger_margin="0.35"/>
               </Inverter>
             </KeepRunningUntilFailure>
           </Inverter>

@@ -132,10 +132,11 @@ public:
 /// hull inside the slip.
 ///
 /// The hull test is what makes this honest. Centre-point tolerances alone
-/// passed a boat 0.5 m off and 15 deg skewed, whose corner was then 0.3 m over
-/// the finger of a 4 m slip: the tree reported "docked", a strict RoboCommand
-/// said otherwise, and the fire never lit (sim, 2026-09-24). The slip width is
-/// the bay pitch the boat MEASURED (dock::bayPitch), not a number in the tree.
+/// once passed a hull whose corner was over a finger: the tree reported
+/// "docked", a strict RoboCommand said otherwise, and the fire never lit (sim,
+/// 2026-09-24). The slip is taken from the bay pitch the boat MEASURED
+/// (dock::bayPitch) less half a finger (finger_margin), not a number typed in
+/// for a course nobody has measured.
 class DockedInBay : public CrusaderCondition
 {
 public:
@@ -144,23 +145,23 @@ public:
   static BT::PortsList providedPorts()
   {
     return {
-      BT::InputPort<double>("along_tol", 0.6, "metres either side of the berth depth"),
-      BT::InputPort<double>("lateral_tol", 0.5, "metres off the centreline"),
+      BT::InputPort<double>("along_tol", 0.25, "metres either side of the berth depth"),
+      BT::InputPort<double>("lateral_tol", 0.3, "metres off the centreline"),
       BT::InputPort<double>("heading_tol_deg", 15.0, "bow off straight-in"),
-      BT::InputPort<double>("hull_length", 4.88, "m, WAM-V 16"),
-      BT::InputPort<double>("hull_beam", 2.44, "m, WAM-V 16"),
-      BT::InputPort<double>("finger_margin", 0.2,
-        "m kept clear of the slip edge: half a finger's width plus slack")};
+      BT::InputPort<double>("hull_length", 1.0, "m, the boat (~1.0 x 0.6)"),
+      BT::InputPort<double>("hull_beam", 0.6, "m, the boat"),
+      BT::InputPort<double>("finger_margin", 0.35,
+        "m in from the bay pitch's edge: half a 0.5 m finger, plus 0.1 m clear")};
   }
 
   BT::NodeStatus tick() override
   {
-    const double at = getInput<double>("along_tol").value_or(0.6);
-    const double lt = getInput<double>("lateral_tol").value_or(0.5);
+    const double at = getInput<double>("along_tol").value_or(0.25);
+    const double lt = getInput<double>("lateral_tol").value_or(0.3);
     const double ht = getInput<double>("heading_tol_deg").value_or(15.0);
-    const double hl = getInput<double>("hull_length").value_or(4.88);
-    const double hb = getInput<double>("hull_beam").value_or(2.44);
-    const double fm = getInput<double>("finger_margin").value_or(0.2);
+    const double hl = getInput<double>("hull_length").value_or(1.0);
+    const double hb = getInput<double>("hull_beam").value_or(0.6);
+    const double fm = getInput<double>("finger_margin").value_or(0.35);
     std::lock_guard<std::mutex> lk(ctx_->mu);
     if (!ctx_->pose_fresh || !ctx_->berth.ok) {return BT::NodeStatus::FAILURE;}
     const dock::DockedCheck d = dock::dockedIn(
@@ -190,22 +191,22 @@ public:
   static BT::PortsList providedPorts()
   {
     return {
-      BT::InputPort<double>("min_along_m", 6.5, "at least this far out from the face"),
-      BT::InputPort<double>("lateral_tol", 0.8, "metres off the centreline"),
+      BT::InputPort<double>("min_along_m", 2.7, "at least this far out from the face"),
+      BT::InputPort<double>("lateral_tol", 0.4, "metres off the centreline"),
       BT::InputPort<double>("heading_tol_deg", 20.0, "bow off straight-in")};
   }
 
   BT::NodeStatus tick() override
   {
-    const double a = getInput<double>("min_along_m").value_or(6.5);
-    const double lt = getInput<double>("lateral_tol").value_or(0.8);
+    const double a = getInput<double>("min_along_m").value_or(2.7);
+    const double lt = getInput<double>("lateral_tol").value_or(0.4);
     const double ht = getInput<double>("heading_tol_deg").value_or(20.0);
     std::lock_guard<std::mutex> lk(ctx_->mu);
     const dock::BayTrack * t = ctx_->dock.find(ctx_->chosen_track);
     if (t == nullptr || !ctx_->pose_fresh) {return BT::NodeStatus::FAILURE;}
     // Only the face and its normal matter here; the distances are placeholders.
     const dock::Berth b = dock::berthFor(
-      *t, dock::layout(ctx_->dock, ctx_->dock_min_obs), 7.0, 3.0);
+      *t, dock::layout(ctx_->dock, ctx_->dock_min_obs), 3.0, 1.25);
     return dock::linedUp(b, ctx_->boat, ctx_->heading_deg, a, lt, ht) ?
            BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
   }
@@ -290,17 +291,17 @@ public:
   static BT::PortsList providedPorts()
   {
     return {
-      BT::InputPort<double>("standoff", 10.0,
+      BT::InputPort<double>("standoff", 5.0,
         "m in front of the faces; MUST clear the fingers: finger length + half a hull"),
-      BT::InputPort<double>("lead_m", 3.0, "drive here first, further out, to arrive facing in"),
+      BT::InputPort<double>("lead_m", 2.0, "drive here first, further out, to arrive facing in"),
       BT::OutputPort<Waypoint>("out", "where to look from"),
       BT::OutputPort<Waypoint>("lead", "where to drive first")};
   }
 
   BT::NodeStatus tick() override
   {
-    const double standoff = getInput<double>("standoff").value_or(10.0);
-    const double lead_m = getInput<double>("lead_m").value_or(3.0);
+    const double standoff = getInput<double>("standoff").value_or(5.0);
+    const double lead_m = getInput<double>("lead_m").value_or(2.0);
     Waypoint w, lead;
     int attempt = 0;
     {
@@ -383,19 +384,19 @@ public:
   {
     return {
       BT::InputPort<std::string>("point", "berth", "lead | predock | berth"),
-      BT::InputPort<double>("predock_m", 7.0, "line-up point, m out from the face"),
-      BT::InputPort<double>("berth_m", 3.0,
+      BT::InputPort<double>("predock_m", 3.0, "line-up point, m out from the face"),
+      BT::InputPort<double>("berth_m", 1.25,
         "face to BODY ORIGIN when docked: bow offset plus clearance"),
-      BT::InputPort<double>("lead_m", 4.0, "lead-in, m beyond the line-up point"),
+      BT::InputPort<double>("lead_m", 2.0, "lead-in, m beyond the line-up point"),
       BT::OutputPort<Waypoint>("out", "where the next action should drive")};
   }
 
   BT::NodeStatus tick() override
   {
     const std::string which = getInput<std::string>("point").value_or("berth");
-    const double pre = getInput<double>("predock_m").value_or(7.0);
-    const double bm = getInput<double>("berth_m").value_or(3.0);
-    const double lead = getInput<double>("lead_m").value_or(4.0);
+    const double pre = getInput<double>("predock_m").value_or(3.0);
+    const double bm = getInput<double>("berth_m").value_or(1.25);
+    const double lead = getInput<double>("lead_m").value_or(2.0);
     Waypoint w;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);

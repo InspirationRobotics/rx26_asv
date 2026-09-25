@@ -5,8 +5,9 @@
 
 A simulator that is wrong makes the tree look wrong (or, worse, right), so the
 world is held to the same standard as the tree: every piece a test, and the
-two that would mislead quietly - which bay is "1", and which colour the code
-starts with - against numbers worked out by hand.
+ones that would mislead quietly - which bay is "1", which colour the code
+starts with, what the camera can actually see from the berth - against
+numbers worked out by hand from the build guide.
 """
 import math
 import os
@@ -17,6 +18,11 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import world as W                                         # noqa: E402
+
+# The default course: dock centre (the deck edge, mid-dock) at (0, 20), bays
+# opening SOUTH, 2 m apart - bay 1 at x=-2, bay 2 at 0, bay 3 at +2. A berth
+# (body origin 1.25 m out, bow in) is at y = 18.75, heading north.
+BERTH_N = 20.0 - 1.25
 
 
 def range_to_plane(nx, ny, d, bearing_deg):
@@ -46,8 +52,20 @@ class Projection(unittest.TestCase):
         self.assertGreater(lat, o[0])
 
 
-class DockNumbering(unittest.TestCase):
-    """Bay 1 is on the LEFT for someone FACING the bays."""
+class DockGeometry(unittest.TestCase):
+    """The build guide's dock, and bay 1 on the LEFT for someone FACING it."""
+
+    def test_build_guide_dimensions(self):
+        d = W.Dock(W.Scenario())
+        self.assertAlmostEqual(d.pitch, 2.0)                       # 1.5 slip + 0.5 finger
+        self.assertAlmostEqual(d.faces[3][0] - d.faces[1][0], 4.0)
+        u0, u1, _v0, v1 = d.finger_rects[0]
+        self.assertAlmostEqual(u1 - u0, 0.5)
+        self.assertAlmostEqual(v1, 2.0)
+        lo, hi = d.slip(2)
+        self.assertAlmostEqual(hi - lo, 1.5)
+        u0, u1, _, _ = d.deck_rect
+        self.assertAlmostEqual(u1 - u0, 6.5)                        # 13 cubes
 
     def test_open_to_the_south(self):
         # Faces point south; you face them looking NORTH; your left is WEST.
@@ -59,19 +77,41 @@ class DockNumbering(unittest.TestCase):
         d = W.Dock(W.Scenario(facing_deg=0.0))
         self.assertGreater(d.faces[1][0], d.faces[3][0])
 
-    def test_window_zero_is_the_left_slot(self):
+    def test_windows_where_the_drawing_puts_them(self):
         d = W.Dock(W.Scenario(facing_deg=180.0))
-        (i0, s0, p0), (i1, s1, p1) = d.windows(2)
+        (i0, s0, p0, _h0), (i1, s1, p1, _h1) = d.windows(2)
         self.assertEqual((i0, s0, i1, s1), (0, "UL", 1, "LR"))
-        self.assertLess(p0[0], p1[0])                 # west of it, facing north
-        self.assertGreater(p0[2], p1[2])              # and higher
+        self.assertLess(p0[0], p1[0])                 # UL west of LR, facing north
+        # deck 0.3 + panel 0.605 + half of 0.29: the upper window's centre
+        self.assertAlmostEqual(p0[2], 0.3 + 0.605 + 0.145, places=2)
+        self.assertGreater(p0[2], p1[2])
+        self.assertAlmostEqual(d.indicator(2)[2], 0.3 + 0.08, places=2)
+
+    def test_berth_contact_and_bay_of(self):
+        d = W.Dock(W.Scenario())
+        b = W.Boat(0.0, BERTH_N, 0.0)                 # bay 2's berth, bow in
+        self.assertEqual(d.bay_of(b.corners()), 2)
+        self.assertFalse(d.contact(b.corners()))
+        # A 1 x 0.6 m hull can turn right round in a 1.5 m slip.
+        b.yaw = 90.0
+        self.assertEqual(d.bay_of(b.corners()), 2)
+        # 0.6 m off the centreline, a corner is 0.9 m out: in the finger.
+        b = W.Boat(0.6, BERTH_N, 0.0)
+        self.assertEqual(d.bay_of(b.corners()), 0)
+        self.assertTrue(d.contact(b.corners()))
+        # Nosed into the deck.
+        b = W.Boat(0.0, 20.0 - 0.3, 0.0)
+        self.assertTrue(d.contact(b.corners()))
+        self.assertEqual(d.bay_of(W.Boat(-2.0, BERTH_N, 0.0).corners()), 1)
+        # Stern out past the finger ends: not fully docked.
+        self.assertEqual(d.bay_of(W.Boat(0.0, 20.0 - 1.8, 0.0).corners()), 0)
 
 
 class BoatModel(unittest.TestCase):
     def test_reaches_a_point_with_a_small_wp_radius(self):
-        b = W.Boat(0, 0, 0, wp_radius=0.3)
+        b = W.Boat(0, 0, 0, wp_radius=0.2)
         run_to(b, (0.0, 20.0), 40)
-        self.assertLess(W.norm(W.sub(b.p, (0, 20))), 0.35)
+        self.assertLess(W.norm(W.sub(b.p, (0, 20))), 0.25)
         self.assertTrue(b.loitering)
 
     def test_wp_radius_two_parks_it_short(self):
@@ -171,14 +211,13 @@ class LightSequence(unittest.TestCase):
 
 class CameraModel(unittest.TestCase):
     def setUp(self):
-        self.sc = W.Scenario(facing_deg=180.0, dock_e=0.0, dock_n=40.0, green_bay=3,
-                             unknown_rate=0.0, miscolour=0.0)
+        self.sc = W.Scenario(green_bay=3, unknown_rate=0.0, miscolour=0.0, cam_pitch_deg=0.0)
         self.dock = W.Dock(self.sc)
         self.lights = W.Lights(self.sc)
 
     def test_left_to_right_and_plane_range(self):
         cam = W.Camera(self.sc, random.Random(3))
-        boat = W.Boat(0.0, 31.63, 0.0)               # camera 8 m from the faces
+        boat = W.Boat(0.0, 20.0 - 5.37, 0.0)        # camera 5 m from the faces
         obs = cam.frame(0.0, boat, self.dock, self.lights)
         self.assertEqual(len(obs["bays"]), 3)
         truth = [b["_truth_bay"] for b in obs["bays"]]
@@ -188,15 +227,11 @@ class CameraModel(unittest.TestCase):
             r = range_to_plane(b["plane_normal"][0], b["plane_normal"][1],
                                b["plane_offset"], b["bearing_deg"])
             face = self.dock.faces[b["_truth_bay"]]
-            true_r = W.norm(W.sub(face, (0.0, 32.0)))
-            self.assertAlmostEqual(r, true_r, delta=0.8)
+            self.assertAlmostEqual(r, W.norm(W.sub(face, (0.0, 15.0))), delta=0.3)
 
     def test_indicator_colours(self):
         cam = W.Camera(self.sc, random.Random(4))
-        # 7 m out. NOT 5: from 5 m in front of the middle bay the side bays sit
-        # at +-41 deg, just outside the +-39 deg half-FOV. That is why the tree
-        # looks at the whole dock from 8 m and saves 5 m for single bays.
-        boat = W.Boat(0.0, 33.0, 0.0)
+        boat = W.Boat(0.0, 13.0, 0.0)                 # 7 m out
         got = {1: set(), 2: set(), 3: set()}
         for i in range(30):
             for b in cam.frame(i / 15.0, boat, self.dock, self.lights)["bays"]:
@@ -207,17 +242,45 @@ class CameraModel(unittest.TestCase):
 
     def test_nothing_behind_or_beyond(self):
         cam = W.Camera(self.sc, random.Random(5))
-        self.assertEqual(cam.frame(0, W.Boat(0.0, 31.6, 180.0), self.dock, self.lights)["bays"], [])
-        self.assertEqual(cam.frame(0, W.Boat(0.0, 0.0, 0.0), self.dock, self.lights)["bays"], [])
+        self.assertEqual(cam.frame(0, W.Boat(0.0, 13.0, 180.0), self.dock, self.lights)["bays"], [])
+        self.assertEqual(cam.frame(0, W.Boat(0.0, -10.0, 0.0), self.dock, self.lights)["bays"], [])
+
+    def test_what_a_level_camera_sees_from_the_berth(self):
+        """THE finding: level at 0.41 m with the hull band masked, from the
+        berth the camera sees NEITHER window whole. -25 deg of pitch sees both."""
+        for win in (0, 1):
+            level = W.World(W.Scenario(target_window=win, cam_pitch_deg=0.0))
+            up = W.World(W.Scenario(target_window=win, cam_pitch_deg=-25.0))
+            self.assertFalse(level.target_visible_from_berth(), "level, window %d" % win)
+            self.assertTrue(up.target_visible_from_berth(), "pitched up, window %d" % win)
+        # Without the hull band the lower window is still out of view level.
+        self.assertFalse(W.World(W.Scenario(target_window=1, cam_pitch_deg=0.0,
+                                            hull_band_rows=0)).target_visible_from_berth())
+
+    def test_pitched_frames_still_place_the_face(self):
+        """A pitched camera reports in its tilted frame; levelling it with the
+        pitch (as dock_math does) must give the true horizontal range."""
+        sc = W.Scenario(unknown_rate=0.0, cam_pitch_deg=-25.0)
+        dock, lights = W.Dock(sc), W.Lights(sc)
+        cam = W.Camera(sc, random.Random(7))
+        boat = W.Boat(0.0, 15.0, 0.0)                 # dead ahead of bay 2
+        b = next(x for x in cam.frame(0.0, boat, dock, lights)["bays"] if x["_truth_bay"] == 2)
+        n = b["plane_normal"]
+        # Tilted UP, the camera's own up axis leans back toward the boat - and
+        # so does the face normal, so its camera-frame z is +sin(25): the
+        # same sign test_dock_math builds its pitched sighting with.
+        self.assertAlmostEqual(n[2], math.sin(math.radians(25.0)), delta=0.1)
+        t = range_to_plane(n[0], n[1], b["plane_offset"], b["bearing_deg"])
+        horiz = t * math.cos(math.radians(-25.0))     # levelled, at bearing ~0
+        self.assertAlmostEqual(horiz, 20.0 - 15.0 - 0.37, delta=0.25)
 
     def test_the_timing_layer_names_the_code_in_order(self):
         """c1 must be the colour AFTER the 2 s off - the handbook's first colour."""
-        sc = W.Scenario(facing_deg=180.0, dock_n=40.0, green_bay=2, tier=2,
-                        code=("red", "blue"), target_window=0, unknown_rate=0.02,
-                        activation_delay_s=0.0, extinguish_s=0.5)
+        sc = W.Scenario(green_bay=2, tier=2, code=("red", "blue"), target_window=0,
+                        unknown_rate=0.02, activation_delay_s=0.0, extinguish_s=0.5)
         dock, lights = W.Dock(sc), W.Lights(sc)
         cam = W.Camera(sc, random.Random(6))
-        boat = W.Boat(0.0, 37.0, 0.0)                # in the berth, facing in
+        boat = W.Boat(0.0, BERTH_N, 0.0)              # in the berth, facing in
         lights.activate(0.0)
         t, found, code_start = 0.0, None, None
         while t < 40.0 and found is None:
@@ -236,18 +299,6 @@ class CameraModel(unittest.TestCase):
 
 
 class Judging(unittest.TestCase):
-    def test_berth_and_bay_of(self):
-        sc = W.Scenario(facing_deg=180.0, dock_n=40.0, green_bay=2)
-        d = W.Dock(sc)
-        b = W.Boat(0.0, 37.0, 0.0)                    # bay 2's berth, bow in
-        self.assertEqual(d.bay_of(b.corners()), 2)
-        self.assertFalse(d.contact(b.corners()))
-        b.yaw = 30.0                                  # skewed: corners out
-        self.assertEqual(d.bay_of(b.corners()), 0)
-        self.assertTrue(d.contact(b.corners()))
-        b = W.Boat(-4.0, 37.0, 0.0)                   # bay 1, west
-        self.assertEqual(d.bay_of(b.corners()), 1)
-
     def test_docking_report_is_checked_against_the_truth(self):
         sc = W.Scenario(green_bay=2)
         j, L = W.Judge(sc), W.Lights(sc)
@@ -272,16 +323,17 @@ class Judging(unittest.TestCase):
         self.assertFalse(j2.request["ok"], "the reversed order is wrong")
 
     def test_spray_lands_on_the_window_it_is_aimed_at(self):
-        sc = W.Scenario(facing_deg=180.0, dock_n=40.0, green_bay=2)
+        sc = W.Scenario(green_bay=2, cam_pitch_deg=-25.0)
         w = W.World(sc)
-        w.boat = W.Boat(0.0, 37.0, 0.0)
-        (cam, look) = w.boat.camera()
+        w.boat = W.Boat(0.0, BERTH_N, 0.0)
+        cam, look = w.boat.camera()
         f, l = W.hvec(look), W.port(W.hvec(look))
-        for idx, _slot, (we, wn, wz) in w.dock.windows(2):
-            d = (we - cam[0], wn - cam[1])
-            w.on_cannon({"fire": True, "x": W.dot(d, f), "y": W.dot(d, l), "z": wz - cam[2]})
+        for idx, _slot, wc, _half in w.dock.windows(2):
+            c = w.camera.to_cam(cam, f, l, wc)        # the tilted camera frame
+            w.on_cannon({"fire": True, "x": c[0], "y": c[1], "z": c[2]})
             self.assertEqual(w._spray_hits(), idx)
-        w.on_cannon({"fire": True, "x": 2.6, "y": 1.0, "z": 0.0})
+        c = w.camera.to_cam(cam, f, l, (0.0, 20.0, 0.8))   # the face, between windows
+        w.on_cannon({"fire": True, "x": c[0], "y": c[1], "z": c[2]})
         self.assertIsNone(w._spray_hits())
         w.on_cannon({"fire": False, "x": 0, "y": 0, "z": 0})
         self.assertIsNone(w._spray_hits())

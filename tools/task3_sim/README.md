@@ -57,16 +57,17 @@ competition day. 8088 is clear of 8085 (bt_view), 8086 (Task 1 aircraft), 8087 (
   and the timing layer's verdict.
 - **RoboCommand & UAV** — every report, marked against the truth.
 - **Behaviour tree** — live, like `tools/bt_view.py`.
-- **Scenario** — green bay, fire window, code colours, dock orientation, bay width, WP_RADIUS;
-  live: camera off, mis-colour rate, a cross-current, the pilot taking MANUAL.
+- **Scenario** — green bay, fire window, code colours, dock orientation, **camera pitch**,
+  WP_RADIUS; live: camera off, mis-colour rate, a cross-current, the pilot taking MANUAL. The
+  facts panel says whether the fire window is even in view from the berth.
 
 ## Tests
 
 | | What | Time |
 |---|---|---|
-| `build.py test` | `test_nav_math` (140) and `test_dock_math` (121), stdlib only | 2 s |
-| `test_world.py` | the simulated world on its own: projection, numbering, boat, lights, camera, judge | < 1 s |
-| `test_e2e.py` | the real tree against 13 scenarios, 6 at a time, **real time** | ~5 min |
+| `build.py test` | `test_nav_math` (140) and `test_dock_math` (136), stdlib only | 2 s |
+| `test_world.py` | the simulated world on its own: build-guide geometry, numbering, boat, lights, camera view, judge | < 1 s |
+| `test_e2e.py` | the real tree against 14 scenarios, 6 at a time, **real time** | ~6 min |
 
 Every e2e scenario states what *should* happen, failures included:
 
@@ -78,38 +79,55 @@ Every e2e scenario states what *should* happen, failures included:
 | `noisy` | pass | 5 % wrong colours + 15 % abstentions do not move the vote |
 | `lost_report` | pass, report re-sent | RoboCommand missing the docking report is recovered |
 | `current` | pass **with contact** | the known limit below, pinned |
+| `level_camera` | docks, **never sees the fire** | the camera as mounted today, pinned |
 | `wp_radius_2` | **no docking** | the precondition below is real |
 | `no_camera` | fails **in < 10 s** | a dead dock detector stops the run |
 | `no_fire` | fails, **no fire report** | a fire that never lights is never claimed out |
 
+## The course and the boat
+
+From the RobotX 2026 build guide (*Docking Bay Structure*): 0.5 m dock cubes; three **1.5 m**
+slips between **0.5 m** fingers **2.0 m** long, so the bays are **2.0 m** apart; a 1 m square face
+at the back of each slip with the two windows and the indicator where the front-panel drawing
+puts them. The boat is ~1.0 × 0.6 m with the camera 0.37 m ahead of centre and 0.41 m above the
+water. **Assumed:** the deck's height above the water (0.3 m).
+
 ## What the sim found (and the tree now handles)
 
-1. **The first vantage and every "close look" were inside a slip.** With fingers ~6 m long,
-   5 m from the face is between them; moving between two such looks crossed a finger. Every look
-   is now from outside the fingers (10 m), and the line-up point too (9 m).
-2. **The docked check was looser than the slip.** 0.5 m off and 15° skewed passed it, with a
-   corner 0.3 m over the finger. `DockedInBay` now tests the whole hull against the slip width
-   the boat *measured* from its own bay tracks.
+1. **Vantages inside a slip.** A "close look" nearer than the finger ends is between the
+   fingers, and moving between two crossed one. Every look is outside them (5 m), and the line-up
+   point too (3 m).
+2. **The docked check was looser than the slip.** A centre-point test passed a hull with a
+   corner over a finger. `DockedInBay` now tests the whole hull against the slip the boat
+   *measured* from its own bay tracks.
 3. **A lead-in point behind the boat turned it round twice.** `LinedUp` skips it.
 4. **`HoldStation` at a vantage overshot and turned the boat away from the dock** (it re-sends
    the current position while the boat is still moving). The survey waits with `Sleep` instead.
+5. **One bay tracked as two** stalled the numbering for 70 s. Tracks closer than a bay pitch now
+   merge, and ids stay resolvable.
+6. **A pitched camera placed bays wrongly** - 6 % long, and tens of cm sideways off-axis.
+   `dock::faceInBody` undoes the pitch exactly.
 
 ## What it found that is NOT fixed (needs the boat, or a decision)
 
+- **The camera, level, cannot see either window from the berth.** 0.41 m up and ~0.9 m from
+  the face, with the CV's 188-row hull band masked, it sees 19° above its axis; the windows' tops
+  are 32° and 41° up. It needs ~25° of pitch-up (or a higher mount). The sim defaults to -25 so
+  the tree can be seen working; `level_camera` pins today's mount failing.
 - **`WP_RADIUS` is 2.0 m on the boat.** ArduRover calls a GUIDED destination reached inside it
-  and loiters where it stopped, 2 m short of the berth. Docking needs ~0.3 m (a param change), or
-  a docking mode of its own. `wp_radius_2` reproduces it.
+  and loiters where it stopped - at the finger ends, for this berth. Docking needs ~0.2 m (a param
+  change), or a docking mode of its own. `wp_radius_2` reproduces it.
 - **The berth cannot be held against a cross-current.** GUIDED loiters with `LOIT_RADIUS` 2.0 m
-  and does not strafe on this frame; the slip leaves ~0.8 m either side. 5 cm/s puts the hull on a
-  finger in ~15 s. Holding in a slip needs the hull's lateral thrust, which GUIDED does not use.
+  and does not strafe on this frame; the slip leaves 0.45 m either side. 5 cm/s puts the hull on
+  a finger in ~10 s. Holding in a slip needs the hull's lateral thrust, which GUIDED does not use.
 - **No undocking.** Leaving the slip is stern-first, and the setpoint path is position-only.
 
 ## What it is not
 
 Not hydrodynamics, not a camera image, not the water stream's flight, not wind or waves. The
-fingers do not stop the hull — contact is *recorded*. Bay width and depth are **assumed**
-(4.0 × 6.0 m) until the course drawings are out; every standoff in the tree depends on the
-depth, so check them when they are.
+fingers do not stop the hull — contact is *recorded*. The boat's dimensions are rough, and the
+deck's freeboard is assumed; the window heights, and so the pitch the camera needs, follow from
+it.
 
 ## Files
 

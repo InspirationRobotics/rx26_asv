@@ -153,7 +153,26 @@ struct Mount
   double x = 0.37;         ///< m forward of the body origin
   double y = 0.0;          ///< m to PORT
   double yaw_deg = 0.0;    ///< + = aimed to PORT
+  /// + = aimed DOWN, as target_tracker's cam_pitch_deg. NOT decoration for
+  /// Task 3: from inside a 2 m slip a level camera 0.41 m up cannot see the
+  /// upper window (docs/T3_coordinated_logistics.md), so the mount may well
+  /// end up pitched UP - negative here - and every range and normal the CV
+  /// reports is then in a tilted frame.
+  double pitch_deg = 0.0;
 };
+
+/// A vector in the CAMERA frame, levelled: its (forward, left) components in
+/// the body's horizontal plane. Undoes the mount pitch, which the CV's
+/// camera-frame bearings and plane normals still carry.
+///
+/// Rotation about +y (left): camera forward (1, 0, 0) pitched down by p is
+/// (cos p, 0, -sin p) in the body - target_tracker's convention, checked in
+/// test_dock_math against the same easy ray.
+inline Vec2 levelled(double cx, double cy, double cz, double pitch_deg)
+{
+  const double p = pitch_deg * nav::kDeg;
+  return {cx * std::cos(p) + cz * std::sin(p), cy};
+}
 
 /// A point in the body frame (x forward, y left) in the world.
 inline Vec2 bodyToWorld(Vec2 boat, double heading_deg, double bx, double by)
@@ -209,6 +228,8 @@ struct BaySighting
   double range_m = kNaN;         ///< plane range, else size range, else NaN
   bool has_normal = false;       ///< plane normal below is valid
   double nx = 0.0, ny = 0.0;     ///< plane normal, camera frame, toward the camera
+  double nz = 0.0;               ///< ... and its up component (matters when pitched)
+  double d = kNaN;               ///< plane offset: n.p + d = 0, camera frame
   bool truncated = false;        ///< cut by the image edge: centre is biased
   bool indicator_present = false;
   Colour indicator = Colour::Unknown;
@@ -216,6 +237,45 @@ struct BaySighting
   std::vector<WindowSighting> windows;
   int lit_window_index = -1;
 };
+
+/// Where a face is, HORIZONTALLY, in the body frame (forward, left), from its
+/// plane - exactly, even with the camera pitched.
+///
+/// The CV's bearing is the face centre's azimuth in the CAMERA frame. With a
+/// level camera that is also its azimuth in the body, at any height. With a
+/// pitched one it is not: the horizontal camera ray at that azimuth meets the
+/// face plane BESIDE the face's centreline - 0.2 m off for a face 2 m to the
+/// side at 5 m under 20 deg of pitch (test_dock_math). So take the point on
+/// the plane at that camera azimuth AND at the face centre's height above the
+/// camera, `face_dz` (a property of the course: the build guide puts the face
+/// centre ~0.8 m above the water). At zero pitch the answer does not depend
+/// on `face_dz` at all.
+///
+/// The ray is r = (cos b, sin b, w) in the camera frame; its body height per
+/// unit t is (-cos b sin p + w cos p), and t = -d / (n . r). Setting the height
+/// to face_dz is linear in w. False when the plane is edge-on or behind.
+inline bool faceInBody(
+  double bearing_deg, double nx, double ny, double nz, double d, double pitch_deg,
+  double face_dz, Vec2 & out)
+{
+  if (!std::isfinite(nx) || !std::isfinite(ny) || !std::isfinite(nz) ||
+    !std::isfinite(d) || !std::isfinite(bearing_deg))
+  {
+    return false;
+  }
+  const double b = bearing_deg * nav::kDeg, p = pitch_deg * nav::kDeg;
+  const double cb = std::cos(b), sb = std::sin(b), cp = std::cos(p), sp = std::sin(p);
+  const double a = nx * cb + ny * sb;
+  const double den = -(d * cp + face_dz * nz);
+  if (std::abs(den) < 1e-9) {return false;}
+  const double w = (face_dz * a - d * cb * sp) / den;
+  const double nr = a + nz * w;
+  if (std::abs(nr) < 0.05) {return false;}          // within ~3 deg of edge-on
+  const double t = -d / nr;
+  if (t <= 0.0) {return false;}
+  out = Vec2{t * (cb * cp + w * sp), t * sb};
+  return true;
+}
 
 /// DockBay's two ranges -> the one to use. The plane is preferred: it is
 /// stereo, and it is what the CV fits RANSAC to. The window-size range is the
@@ -252,14 +312,19 @@ struct BookParams
 {
   /// Association radius, m. MUST be under half the bay spacing, or two bays
   /// merge into one track and the dock looks two bays wide.
-  double gate_m = 1.5;
+  /// The real dock's bays are 2.0 m apart (1.5 m slips, 0.5 m fingers).
+  double gate_m = 0.7;
   /// Two TRACKS closer than this are one bay seen twice, and are merged. The
   /// same number as layout()'s min_spacing_m: anything it would refuse as "too
   /// close to be two bays" is folded together here instead of stalling the
-  /// survey. A biased early sighting 1.6 m off - outside the gate, inside
-  /// this - did exactly that for 70 s in the sim (2026-09-24).
-  double merge_m = 1.8;
+  /// survey. A biased early sighting outside the gate but inside this did
+  /// exactly that for 70 s in the sim (2026-09-24). Under the 2 m pitch.
+  double merge_m = 1.2;
   int max_tracks = 6;           ///< room for a false positive or two
+  /// Face centre above the CAMERA, m, for placing sightings from a pitched
+  /// camera (faceInBody). Build guide: face centre ~0.8 m above the water;
+  /// the camera is 0.41 m up. Irrelevant while the camera is level.
+  double face_dz = 0.39;
   double max_range_m = 14.0;    ///< beyond this a sighting places nothing
   double min_ind_conf = 0.5;    ///< indicator readings below are not votes
   double ema_alpha = 0.15;      ///< weight of one reading in green_ema
@@ -355,9 +420,20 @@ struct DockBook
       const auto & s = f.bays[i];
       if (!std::isfinite(s.range_m) || !std::isfinite(s.bearing_deg)) {continue;}
       if (s.range_m <= 0.0 || s.range_m > prm.max_range_m) {continue;}
-      const double b = s.bearing_deg * nav::kDeg;
-      const Vec2 dir = camDirToWorld(heading_deg, m.yaw_deg, std::cos(b), std::sin(b));
-      placed.push_back({i, cam + dir * s.range_m, s.range_m});
+      // With the face plane: the exact point (faceInBody). Without it - the
+      // window-size range, below the stereo minimum - the range is along the
+      // camera-frame ray at the bearing, which a pitched camera tilts out of
+      // the horizontal: level it and scale.
+      Vec2 fb;
+      if (!(s.has_normal &&
+        faceInBody(s.bearing_deg, s.nx, s.ny, s.nz, s.d, m.pitch_deg, prm.face_dz, fb)))
+      {
+        const double b = s.bearing_deg * nav::kDeg;
+        fb = levelled(std::cos(b), std::sin(b), 0.0, m.pitch_deg) * s.range_m;
+      }
+      const double hr = nav::norm(fb);
+      const Vec2 dir = camDirToWorld(heading_deg, m.yaw_deg, fb.x, fb.y);
+      placed.push_back({i, cam + dir * hr, hr});
     }
 
     // Every (sighting, track) pair inside the gate, nearest first.
@@ -453,7 +529,8 @@ private:
       t.p = (t.w > 0.0) ? (t.p * t.w + q * wi) * (1.0 / (t.w + wi)) : q;
       t.w += wi;
       if (s.has_normal) {
-        const Vec2 nw = camDirToWorld(heading_deg, m.yaw_deg, s.nx, s.ny);
+        const Vec2 nh = levelled(s.nx, s.ny, s.nz, m.pitch_deg);
+        const Vec2 nw = camDirToWorld(heading_deg, m.yaw_deg, nh.x, nh.y);
         t.normal_sum = t.normal_sum + nw;
         ++t.n_normal;
       }
@@ -514,8 +591,8 @@ struct DockLayout
 /// tracks are confirmed; the faces do not sit on one line; or two are closer
 /// than `min_spacing_m` (one bay seen twice).
 inline DockLayout layout(
-  const DockBook & b, int min_obs = 5, int bays = 3, double min_spacing_m = 1.8,
-  double max_setback_m = 2.0)
+  const DockBook & b, int min_obs = 5, int bays = 3, double min_spacing_m = 1.2,
+  double max_setback_m = 1.0)
 {
   DockLayout L;
   std::vector<const BayTrack *> c;
@@ -684,12 +761,13 @@ struct Vantage
 /// (Vantage::from_bays says which this one is), so a look spent getting the
 /// dock into view does not use up the whole-dock view.
 ///
-/// EVERY VANTAGE IS OUTSIDE THE SLIPS. There is no "close look" at an
-/// indicator from 5 m: with fingers ~6 m long, 5 m from the face is INSIDE a
-/// slip, and moving between two such looks crosses a finger. Seen in the sim,
-/// 2026-09-24 (two hull contacts). `standoff` must be at least the finger
-/// length plus half a hull; the tree uses 10 m. Head-on from there is the
-/// closest look there is without entering a bay.
+/// EVERY VANTAGE IS OUTSIDE THE SLIPS. A "close look" nearer than the finger
+/// ends is a look from inside a slip, and moving between two such looks
+/// crosses a finger (two hull contacts in the sim, 2026-09-24, before this).
+/// `standoff` must be at least the finger length (2.0 m, build guide) plus
+/// half a hull plus margin; the tree uses 5 m, which also keeps all three
+/// faces in view and the indicators inside the 6 m the CV reads them well at.
+/// Head-on from there is the closest look there is without entering a bay.
 ///
 /// "In front" is along the bays' outward normal, so every vantage is on the
 /// water side of the dock and faces it. With nothing seen there is no normal,
@@ -853,9 +931,9 @@ inline double bayPitch(const DockBook & b, const DockLayout & L)
 }
 
 /// Worst hull corner's distance off the bay's centreline, m: how far the hull
-/// really reaches sideways, which a centre-point test does not see. A 4.9 m
-/// hull 10 deg off straight swings its corners 0.4 m further out than its
-/// middle.
+/// really reaches sideways, which a centre-point test does not see. A 1 m hull
+/// 15 deg off straight swings its corners 0.13 m further out than its middle -
+/// a quarter of the 0.45 m a 0.6 m beam has either side in a 1.5 m slip.
 inline double hullHalfWidthUsed(
   const Berth & b, Vec2 boat, double heading_deg, double hull_length, double hull_beam)
 {

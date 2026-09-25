@@ -182,6 +182,8 @@ public:
     ctx_->cam_mount.x = declare_parameter<double>("cam_x", 0.37);
     ctx_->cam_mount.y = declare_parameter<double>("cam_y", 0.0);
     ctx_->cam_mount.yaw_deg = declare_parameter<double>("cam_yaw_deg", 0.0);
+    ctx_->cam_mount.pitch_deg = declare_parameter<double>("cam_pitch_deg", 0.0);
+    ctx_->dock_face_dz = declare_parameter<double>("dock_face_dz_m", 0.39);
     dock_topic_ = declare_parameter<std::string>("dock_topic", "dock/observations");
 
     // Latched: a subscriber that starts mid-mission must learn the current
@@ -532,9 +534,11 @@ private:
         b.has_plane, b.plane_normal[0], b.plane_normal[1], b.plane_offset, b.bearing_deg,
         b.range_from_size_m);
       s.has_normal = b.has_plane && std::isfinite(b.plane_normal[0]) &&
-        std::isfinite(b.plane_normal[1]);
+        std::isfinite(b.plane_normal[1]) && std::isfinite(b.plane_normal[2]);
       s.nx = b.plane_normal[0];
       s.ny = b.plane_normal[1];
+      s.nz = b.plane_normal[2];
+      s.d = b.plane_offset;
       s.truncated = b.truncated;
       s.indicator_present = b.indicator_present;
       s.indicator = dock::colourFromCv(b.indicator_colour);

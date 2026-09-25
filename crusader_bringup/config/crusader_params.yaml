@@ -1128,6 +1128,15 @@ bt_runner_node:
     cam_x: 0.37                             # [RO] = target_tracker.cam_x
     cam_y: 0.0                              # [RO] = target_tracker.cam_y
     cam_yaw_deg: 0.0                        # [RO] = target_tracker.cam_yaw_deg
+    cam_pitch_deg: 0.0                      # [RO] = target_tracker.cam_pitch_deg,
+                                            #      + = aimed DOWN. Task 3 may need
+                                            #      it NEGATIVE: level, from inside
+                                            #      a slip the camera cannot see the
+                                            #      upper window (docs/T3_...md)
+    dock_face_dz_m: 0.39                    # [RO] face centre above the camera,
+                                            #      for a pitched camera only. Build
+                                            #      guide: ~0.8 m above water; the
+                                            #      camera is 0.41 m up
     dock_topic: "dock/observations"         # [RO] DockObservation, from the
                                             #      dock detector (firefighting-cv
                                             #      specs: observations_topic)

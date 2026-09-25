@@ -78,7 +78,7 @@ behavior_trees/task3_disruptive.xml     find the GREEN bay, dock, fire, decode
 src/task3_leaves.cpp                    15 leaves: read the Context, call dock_math
 include/crusader_bt/dock_math.hpp       ALL of it: placing, the bay book, numbering,
                                         choice, berthing, the code, report JSON
-test/test_dock_math.cpp                 121 checks, stdlib only, ~1 s
+test/test_dock_math.cpp                 136 checks, stdlib only, ~1 s
 ```
 
 **Bays are known by where they are, not by `bay_index`.** The dock detector's
@@ -118,10 +118,13 @@ them through `offros/offros_runner.cpp` — `bt_runner_node`'s loop with JSON li
 for topics, and a four-symbol `rclcpp` logging shim (`offros/shim`) so
 `leaves.cpp` compiles unchanged. `offros/` is not in `CMakeLists.txt`.
 
-Preconditions and limits the sim found are in the XML's header and in
-`tools/task3_sim/README.md`; the two that need the boat are `WP_RADIUS` (2.0 m
-parks it 2 m short of the berth) and holding a slip against a cross-current
-(GUIDED loiters with `LOIT_RADIUS` 2 m and does not strafe).
+The numbers in the tree come from the RobotX 2026 build guide's dock (1.5 m
+slips between 2 m fingers, bays 2 m apart) and the boat (~1.0 × 0.6 m); the XML
+header says which is which. Preconditions and limits the sim found are there and
+in `tools/task3_sim/README.md`. Three need the boat: the camera, level, cannot
+see either window from the berth (`cam_pitch_deg` ≈ -25, which the math
+handles); `WP_RADIUS` 2.0 m parks the boat at the finger ends; and GUIDED cannot
+hold a slip against a cross-current (`LOIT_RADIUS` 2 m, no strafing).
 
 ## Subtrees need `_autoremap="true"`
 
