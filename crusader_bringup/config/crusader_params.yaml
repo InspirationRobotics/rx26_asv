@@ -1121,6 +1121,16 @@ bt_runner_node:
                                             #      what the boat obeys, shows on
                                             #      the mast and reports to
                                             #      RoboCommand stay one fact.
+    # -- Task 3 (behavior_trees/task3_disruptive.xml) --
+    # The runner places every docking-bay sighting in the world with these.
+    # They MUST equal target_tracker's (check_config enforces it): one camera
+    # placed twice is two worlds that disagree about where things are.
+    cam_x: 0.37                             # [RO] = target_tracker.cam_x
+    cam_y: 0.0                              # [RO] = target_tracker.cam_y
+    cam_yaw_deg: 0.0                        # [RO] = target_tracker.cam_yaw_deg
+    dock_topic: "dock/observations"         # [RO] DockObservation, from the
+                                            #      dock detector (firefighting-cv
+                                            #      specs: observations_topic)
 
 # ---------------------------------------------------------------------------
 # rxl_link_node — the boat's end of the UAV link.

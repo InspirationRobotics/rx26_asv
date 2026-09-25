@@ -6,11 +6,27 @@
 //   in:  /crsd/fcu_status    (FcuStatus)          mode + armed — THE autonomy latch
 //        /crsd/pose          (LatLonHead)         position and GPS-yaw heading
 //        /crsd/world_targets (TrackedTargetArray) the buoy field
+//        dock/observations   (DockObservation)    Task 3: the bays, every frame
+//        /crsd/ocs_command   (String, JSON)       Task 3: RoboCommand's readiness
 //   out: /crsd/guided_setpoint    (GuidedSetpoint) ONLY when publish_setpoints
 //        /crsd/current_task       (String, latched)
 //        /crsd/autonomy_active    (Bool)   turns the mast light GREEN
 //        /crsd/avoidance_enable   (Bool, latched)
 //        /crsd/safe_passage_report (String, JSON)
+//        /crsd/docking_report, /crsd/firefighting_report,
+//        /crsd/resource_delivery_request (String, JSON)  Task 3, for the OCS
+//        /crsd/uav_resource_request (String, JSON)       Task 3, for the radio
+//        /crsd/water_cannon       (String, JSON)          Task 3, the pump
+//
+// NOTE: the Task 3 plumbing here (onDock, onOcsCommand, the five publishers)
+// has NOT been built against real ROS. It was written on a laptop with no ROS
+// and checked there only with g++ -fsyntax-only against a MOCK of the rclcpp
+// API this file uses and structs generated rosidl-style from crusader_msgs
+// (the unmodified task1-disruptive version of this file passed the same check,
+// which is what the mock was calibrated against). Everything it feeds is
+// compiled and exercised off-ROS by crusader_bt/offros/, whose frameFromJson()
+// is this file's onDock() field for field. First colcon build: read the errors
+// here before anywhere else.
 //
 // WHY THE COARSE ACTION SURVIVES the move to a behaviour tree. It is exactly
 // Nav2's shape: bt_navigator exposes ONE NavigateToPose action and runs a tree
@@ -67,6 +83,7 @@
 #include "std_msgs/msg/u_int8.hpp"
 
 #include "crusader_msgs/action/safe_passage.hpp"
+#include "crusader_msgs/msg/dock_observation.hpp"
 #include "crusader_msgs/msg/fcu_status.hpp"
 #include "crusader_msgs/msg/gate_pair.hpp"
 #include "crusader_msgs/msg/guided_setpoint.hpp"
@@ -75,6 +92,7 @@
 #include "crusader_msgs/msg/tracked_target_array.hpp"
 
 #include "crusader_bt/context.hpp"
+#include "crusader_bt/dock_math.hpp"
 #include "crusader_bt/nav_math.hpp"
 
 namespace crusader_bt
@@ -158,6 +176,14 @@ public:
     ctx_->node = this;
     ctx_->publish_setpoints = declare_parameter<bool>("publish_setpoints", false);
 
+    // Task 3. THE CAMERA EXTRINSIC MUST EQUAL target_tracker's cam_x / cam_y /
+    // cam_yaw_deg: two nodes placing one camera in two places put the bays and
+    // the buoys in two different worlds, and neither looks wrong on its own.
+    ctx_->cam_mount.x = declare_parameter<double>("cam_x", 0.37);
+    ctx_->cam_mount.y = declare_parameter<double>("cam_y", 0.0);
+    ctx_->cam_mount.yaw_deg = declare_parameter<double>("cam_yaw_deg", 0.0);
+    dock_topic_ = declare_parameter<std::string>("dock_topic", "dock/observations");
+
     // Latched: a subscriber that starts mid-mission must learn the current
     // value rather than sit on a default. avoidance_enable especially —
     // proximity_bridge coming up late and defaulting to off would silently
@@ -173,6 +199,14 @@ public:
     // The live tree picture, for anything that wants to draw it — a terminal,
     // the ground station, a recording. Plain text, no escapes.
     bt_status_pub_ = create_publisher<std_msgs::msg::String>("/crsd/bt_status", 10);
+    // Task 3. The three reports are JSON for the OCS to relay, like
+    // safe_passage_report; the field names are rx_reports.proto's.
+    docking_pub_ = create_publisher<std_msgs::msg::String>("/crsd/docking_report", 10);
+    firefighting_pub_ = create_publisher<std_msgs::msg::String>("/crsd/firefighting_report", 10);
+    request_pub_ = create_publisher<std_msgs::msg::String>(
+      "/crsd/resource_delivery_request", 10);
+    uav_request_pub_ = create_publisher<std_msgs::msg::String>("/crsd/uav_resource_request", 10);
+    cannon_pub_ = create_publisher<std_msgs::msg::String>("/crsd/water_cannon", 10);
 
     status_sub_ = create_subscription<crusader_msgs::msg::FcuStatus>(
       "/crsd/fcu_status", 10,
@@ -187,6 +221,12 @@ public:
     targets_sub_ = create_subscription<crusader_msgs::msg::TrackedTargetArray>(
       "/crsd/world_targets", 10,
       [this](crusader_msgs::msg::TrackedTargetArray::SharedPtr m) {onTargets(m);});
+    dock_sub_ = create_subscription<crusader_msgs::msg::DockObservation>(
+      dock_topic_, 10,
+      [this](crusader_msgs::msg::DockObservation::SharedPtr m) {onDock(m);});
+    ocs_sub_ = create_subscription<std_msgs::msg::String>(
+      "/crsd/ocs_command", 10,
+      [this](std_msgs::msg::String::SharedPtr m) {onOcsCommand(m);});
 
     wireContext();
     publishTask(kTaskNone);
@@ -445,6 +485,99 @@ private:
         m.data = seq;
         gate_reached_pub_->publish(m);
       };
+    // Task 3. The JSON is built by dock_math, so the off-ROS sim runner sends
+    // byte-identical text and test_dock_math pins the field names.
+    ctx_->report_docking = [this](int bay) {
+        publishJson(docking_pub_, dock::dockingReportJson(bay));
+      };
+    ctx_->report_firefighting = [this](int w) {
+        publishJson(firefighting_pub_, dock::firefightingReportJson(w));
+      };
+    ctx_->report_request = [this](const dock::Request & r) {
+        publishJson(request_pub_, dock::resourceRequestJson(r));
+      };
+    ctx_->relay_request = [this](const dock::Request & r) {
+        publishJson(uav_request_pub_, dock::uavRequestJson(r, ++uav_seq_));
+      };
+    ctx_->cannon = [this](bool fire, double x, double y, double z) {
+        publishJson(cannon_pub_, dock::cannonJson(fire, x, y, z));
+      };
+  }
+
+  static void publishJson(
+    const rclcpp::Publisher<std_msgs::msg::String>::SharedPtr & pub, const std::string & s)
+  {
+    std_msgs::msg::String m;
+    m.data = s;
+    pub->publish(m);
+  }
+
+  // ------------------------------------------------------------------ Task 3
+
+  /// DockObservation -> dock::Frame -> ingestDockObservation().
+  ///
+  /// Field copies only. The twin of offros_runner.cpp's frameFromJson(), which
+  /// the sim exercises: change one, change both. Which range to believe is
+  /// dock::sightingRange's decision, not this function's.
+  void onDock(const crusader_msgs::msg::DockObservation::SharedPtr m)
+  {
+    dock::Frame f;
+    // The CAMERA instant, not now(): the timing layer's 1 s flashes and the
+    // tree's hold times are measured on these stamps.
+    f.t = rclcpp::Time(m->header.stamp).seconds();
+    for (const auto & b : m->bays) {
+      dock::BaySighting s;
+      s.bearing_deg = b.bearing_deg;
+      s.range_m = dock::sightingRange(
+        b.has_plane, b.plane_normal[0], b.plane_normal[1], b.plane_offset, b.bearing_deg,
+        b.range_from_size_m);
+      s.has_normal = b.has_plane && std::isfinite(b.plane_normal[0]) &&
+        std::isfinite(b.plane_normal[1]);
+      s.nx = b.plane_normal[0];
+      s.ny = b.plane_normal[1];
+      s.truncated = b.truncated;
+      s.indicator_present = b.indicator_present;
+      s.indicator = dock::colourFromCv(b.indicator_colour);
+      s.indicator_conf = b.indicator_confidence;
+      s.lit_window_index = b.lit_window_index;
+      for (const auto & w : b.windows) {
+        dock::WindowSighting ws;
+        ws.index = w.index;
+        ws.state = dock::colourFromCv(w.state);
+        ws.conf = w.state_confidence;
+        ws.has_position = w.has_position;
+        ws.x = w.x;
+        ws.y = w.y;
+        ws.z = w.z;
+        s.windows.push_back(ws);
+      }
+      f.bays.push_back(s);
+    }
+    f.target_pattern = m->target_pattern;
+    for (const auto & c : m->target_colours) {f.target_colours.push_back(dock::colourFromName(c));}
+    f.target_window_index = m->target_window_index;
+    f.last_event = m->last_event;
+    f.observed_fps = m->observed_fps;
+
+    const rclcpp::Time t = now();
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    // Freshness at THIS instant: ingest places bays only on a fresh pose.
+    ctx_->pose_fresh = ctx_->origin_set && (t - pose_t_).seconds() < stream_timeout_s_;
+    ingestDockObservation(*ctx_, f);
+    dock_t_ = t;
+    have_dock_ = true;
+  }
+
+  /// ocs_client republishes RoboCommand's commands here as JSON and acts on
+  /// none of them. The one Task 3 cares about is the ReadinessConfirm that
+  /// answers the docking report; a key test is enough for one key and keeps a
+  /// JSON library out of this node.
+  void onOcsCommand(const std_msgs::msg::String::SharedPtr m)
+  {
+    if (m->data.find("\"readiness_confirm\"") == std::string::npos) {return;}
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    ctx_->readiness_confirmed = true;
+    RCLCPP_INFO(get_logger(), "RoboCommand confirmed the docking report");
   }
 
   void publishTask(const std::string & token)
@@ -548,6 +681,9 @@ private:
     if (have_status_ && (t - status_t_).seconds() >= stream_timeout_s_) {
       ctx_->autonomous = false;        // a dead HEARTBEAT is not permission
     }
+    // The dock detector publishes every frame, bays or not, so its silence is
+    // a dead node. DockCameraAlive reads the age; the tree picks the limit.
+    ctx_->dock_obs_age_s = have_dock_ ? (t - dock_t_).seconds() : 1e9;
   }
 
   // ---------------------------------------------------------------- execute
@@ -601,6 +737,10 @@ private:
       ctx_->gate_green_id = -1;
       ctx_->cleared_gates.clear();
       ctx_->passage = nav::Passage{};
+      // Task 3's per-mission state, for the same reason: a second attempt must
+      // not inherit the first one's bays, votes or committed bay.
+      ctx_->tier = goal->tier;
+      resetTask3(*ctx_);
       // "Home" is where THIS attempt started, captured once. Not the autopilot's
       // HOME, which is wherever it was armed and is usually somewhere else after
       // the boat has been driven out manually.
@@ -746,7 +886,9 @@ private:
 
     // Every exit path, including the exception one. Leaving current_task set
     // tells the OCS the attempt is still running on behalf of a mission that
-    // has stopped.
+    // has stopped. And the pump OFF: SprayUntilHit switches it off when it is
+    // halted, but a tree that throws never halts its leaves.
+    if (ctx_->cannon) {ctx_->cannon(false, 0.0, 0.0, 0.0);}
     publishTask(kTaskNone);
     publishAvoidance(true);
     std_msgs::msg::Bool off;
@@ -761,7 +903,9 @@ private:
     double elapsed, double timeout_s)
   {
     std::lock_guard<std::mutex> lk(ctx_->mu);
-    fb->phase = ctx_->have_exit ? "TRANSIT" : (ctx_->have_entry ? "ENTRY" : "APPROACH");
+    // A Task 3 tree names its own phase; a Task 1 tree never sets it.
+    fb->phase = !ctx_->task3_phase.empty() ? ctx_->task3_phase :
+      (ctx_->have_exit ? "TRANSIT" : (ctx_->have_entry ? "ENTRY" : "APPROACH"));
     fb->progress = static_cast<float>(std::min(1.0, elapsed / timeout_s));
     fb->buoys_known = static_cast<uint32_t>(ctx_->buoys.size());
     uint32_t resolved = 0;
@@ -852,6 +996,17 @@ private:
   rclcpp::Subscription<crusader_msgs::msg::TrackedTargetArray>::SharedPtr targets_sub_;
   rclcpp::Subscription<crusader_msgs::msg::PassagePlan>::SharedPtr plan_sub_;
   rclcpp::Subscription<crusader_msgs::msg::GatePair>::SharedPtr gate_sub_;
+
+  // Task 3
+  std::string dock_topic_;
+  rclcpp::Time dock_t_{0, 0, RCL_ROS_TIME};
+  bool have_dock_ = false;
+  int uav_seq_ = 0;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr docking_pub_, firefighting_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr request_pub_, uav_request_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr cannon_pub_;
+  rclcpp::Subscription<crusader_msgs::msg::DockObservation>::SharedPtr dock_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr ocs_sub_;
 };
 
 }  // namespace crusader_bt

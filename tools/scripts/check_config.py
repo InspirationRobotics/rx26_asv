@@ -197,6 +197,24 @@ def check_params_yaml():
     except KeyError as e:
         fail("shared pose_timeout_s", f"missing key {e}")
 
+    # One camera, one mounting. bt_runner_node places the Task 3 bays with its
+    # own copy of the extrinsic and target_tracker places the buoys with its
+    # own: if they differ, the two worlds disagree about where things are and
+    # neither looks wrong on its own.
+    try:
+        keys = ("cam_x", "cam_y", "cam_yaw_deg")
+        tt = cfg["target_tracker"]["ros__parameters"]
+        bt = cfg["bt_runner_node"]["ros__parameters"]
+        differing = {k: (tt[k], bt[k]) for k in keys if tt[k] != bt[k]}
+        if differing:
+            fail("camera extrinsic consistent",
+                 f"target_tracker vs bt_runner_node {differing}")
+        else:
+            ok("camera extrinsic consistent",
+               "target_tracker and bt_runner_node agree on " + ", ".join(keys))
+    except KeyError as e:
+        fail("camera extrinsic consistent", f"missing key {e}")
+
     # Producer/consumer topic names (see TOPIC_PAIRS).
     for (pn, pk), (cn, ck) in TOPIC_PAIRS:
         try:
