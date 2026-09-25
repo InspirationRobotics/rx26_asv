@@ -109,6 +109,9 @@ class RxlLinkNode(Node):
         self._rx = threading.Thread(target=self._rx_loop, daemon=True)
         self._rx.start()
         self.create_timer(5.0, self._quiet_check)
+        # 1 Hz, the MAVLink convention and what ArduPilot's routing expects to
+        # keep hearing. Protocol, not tuning, so not a parameter.
+        self.create_timer(1.0, self._heartbeat)
 
         self.get_logger().info(
             "rxl_link listening on %s as system %d -> %s, %s; replies "
@@ -318,6 +321,20 @@ class RxlLinkNode(Node):
         return response
 
     # --------------------------------------------------------------- health
+
+    def _heartbeat(self):
+        """Tell the aircraft's autopilot where the boat is. See
+        rxl_codec.send_heartbeat for why the link is one-way without this."""
+        with self._conn_lock:
+            if not self._have_peer():
+                return
+            try:
+                sent = rxl_codec.send_heartbeat(self.conn)
+            except Exception as exc:                     # noqa: BLE001
+                self.get_logger().error("heartbeat not sent: %s" % exc,
+                                        throttle_duration_sec=30.0)
+                return
+        self._record(RadioFrame.DIR_TX, sent, dst=0)
 
     def _quiet_check(self):
         """Say once when the link goes quiet. Publish nothing either way."""

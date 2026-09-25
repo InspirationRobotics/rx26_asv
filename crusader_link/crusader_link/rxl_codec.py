@@ -208,6 +208,24 @@ def has_peer(conn):
     return True
 
 
+def send_heartbeat(conn):
+    """Say "the boat is here" on the radio, and return the sent message.
+
+    NOT a courtesy. Ekko's companion reaches us THROUGH its autopilot, and
+    ArduPilot forwards a message addressed to a system only out a port it has
+    already heard that system on. A boat that only ever replies is never heard
+    first, so the aircraft's buoy map to us has no route and never leaves Ekko,
+    with nothing on either side logging an error (rx26_uav's fake_crusader.py
+    sends one first for the same reason).
+    """
+    from pymavlink import mavutil
+    m = conn.mav.heartbeat_encode(mavutil.mavlink.MAV_TYPE_SURFACE_BOAT,
+                                  mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                                  0, 0, mavutil.mavlink.MAV_STATE_ACTIVE)
+    conn.mav.send(m)
+    return m
+
+
 def send_tunnel(conn, target_system, payload_type, payload):
     """Send one TUNNEL, and return the sent message.
 
@@ -383,6 +401,23 @@ def selftest():
     m = rxlink.MAVLink_heartbeat_message(11, 8, 0, 0, 0, 3)
     chk("describe names a heartbeat's vehicle type",
         describe(roundtrip(m))[2] == "SURFACE_BOAT")
+
+    # send_heartbeat: what the aircraft's autopilot learns its route to us from
+    class _Sink:
+        def __init__(self):
+            self.mav = rxlink.MAVLink(self, srcSystem=42, srcComponent=191)
+            self.buf = b""
+
+        def write(self, b):
+            self.buf += bytes(b)
+
+    sink = _Sink()
+    hb = send_heartbeat(sink)
+    back = rxlink.MAVLink(None).parse_buffer(sink.buf) or []
+    chk("send_heartbeat puts one SURFACE_BOAT heartbeat from 42 on the wire",
+        len(back) == 1 and back[0].get_type() == "HEARTBEAT"
+        and back[0].type == 11 and back[0].get_srcSystem() == 42
+        and hb.get_type() == "HEARTBEAT")
 
     # --- has_peer: the check that decides whether the boat transmits at all ---
     class _FakeUdpIn:
