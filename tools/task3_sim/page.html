@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Task 3 Sim</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root{
+  --bg:#0C141C; --panel:#131F2A; --panel2:#0F1922; --line:#25384a; --ink:#DFE8EF; --dim:#7C8FA0;
+  --ok:#45BCA0; --ok-bg:#45bca01f; --run:#E0A245; --run-bg:#e0a2452e;
+  --fail:#E0736A; --fail-bg:#e0736a1f; --idle:#4A5B6C; --accent:#4EAFD2;
+  --red:#E2524A; --green:#3DBE6E; --blue:#4C8FE8; --water:#0E2230; --water2:#12293a;
+  --mono:"IBM Plex Mono",ui-monospace,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 "IBM Plex Sans",system-ui,sans-serif}
+header{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;padding:12px 18px;border-bottom:1px solid var(--line);background:var(--panel2)}
+h1{font-size:17px;margin:0;font-weight:600;letter-spacing:-.01em}
+h1 small{color:var(--dim);font-weight:400;font-size:13px;margin-left:8px}
+.pill{font-family:var(--mono);font-size:12px;padding:3px 9px;border-radius:99px;border:1px solid var(--line);color:var(--dim);white-space:nowrap}
+.pill.ok{color:var(--ok);border-color:#2f6e5f;background:var(--ok-bg)}
+.pill.run{color:var(--run);border-color:#7a5a2c;background:var(--run-bg)}
+.pill.fail{color:var(--fail);border-color:#7a3f3a;background:var(--fail-bg)}
+.spacer{flex:1}
+button,select,input{font:inherit;color:var(--ink);background:#182838;border:1px solid var(--line);border-radius:6px;padding:5px 10px}
+button{cursor:pointer}
+button:hover{border-color:var(--accent)}
+button.primary{background:#1d4a5e;border-color:#2c6f8c}
+button.warn{background:#4a2624;border-color:#7a3f3a}
+button:disabled{opacity:.45;cursor:default}
+main{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(360px,1fr);gap:14px;padding:14px 18px}
+@media (max-width:1100px){main{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.card h2{margin:0;font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);padding:9px 12px;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:center}
+.card h2 .r{margin-left:auto;text-transform:none;letter-spacing:0;font-family:var(--mono);font-weight:400}
+.col{display:flex;flex-direction:column;gap:14px;min-width:0}
+canvas{display:block;width:100%}
+#map{aspect-ratio:1.25/1;background:var(--water)}
+#cam{aspect-ratio:16/10;background:#1b2530}
+.score{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line)}
+.score div{background:var(--panel);padding:9px 10px}
+.score .k{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+.score .v{font-family:var(--mono);font-size:14px;margin-top:2px}
+.v.ok{color:var(--ok)} .v.fail{color:var(--fail)} .v.pend{color:var(--dim)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;padding:10px 12px;font-family:var(--mono);font-size:12.5px}
+.kv .k{color:var(--dim)}
+.tree{font-family:var(--mono);font-size:12px;max-height:430px;overflow:auto;padding:6px 4px}
+.row{display:flex;gap:8px;align-items:center;padding:1.5px 8px;border-radius:4px;white-space:nowrap}
+.row .g{width:44px;text-align:center;font-size:10.5px;border-radius:3px;padding:0 2px;flex:none}
+.row.SUCCESS .g{color:var(--ok);background:var(--ok-bg)}
+.row.RUNNING{background:var(--run-bg)} .row.RUNNING .g{color:var(--run)}
+.row.FAILURE .g{color:var(--fail);background:var(--fail-bg)}
+.row.IDLE{color:var(--idle)} .row.IDLE .g{color:var(--idle)}
+.row .t{color:var(--dim);font-size:11px}
+.row .kd{font-size:10px;color:var(--dim);border:1px solid var(--line);border-radius:3px;padding:0 4px}
+.log{font-family:var(--mono);font-size:11.5px;max-height:260px;overflow:auto;padding:6px 10px}
+.log div{padding:1px 0;white-space:pre-wrap;word-break:break-word}
+.log .ts{color:var(--dim)} .log .ok{color:var(--ok)} .log .fail{color:var(--fail)} .log .who{color:var(--accent)}
+.knobs{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px 12px;padding:10px 12px}
+.knobs label{display:flex;flex-direction:column;gap:3px;font-size:11.5px;color:var(--dim)}
+.knobs input,.knobs select{width:100%}
+.knobs .act{display:flex;gap:8px;align-items:flex-end;grid-column:1/-1;flex-wrap:wrap}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;padding:8px 12px;border-top:1px solid var(--line);font-size:11.5px;color:var(--dim)}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+.err{color:var(--fail);font-family:var(--mono);font-size:12px;min-height:1.2em;padding:0 12px 8px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media (max-width:700px){.two{grid-template-columns:1fr}.score{grid-template-columns:repeat(2,1fr)}}
+</style></head>
+<body>
+<header>
+  <h1>Task 3 Sim <small>Coordinated Logistics · the real tree, off-ROS</small></h1>
+  <span class="pill" id="p-time">t=0.0s</span>
+  <span class="pill" id="p-mission">idle</span>
+  <span class="pill" id="p-phase">—</span>
+  <span class="pill" id="p-task">TASK_NONE</span>
+  <span class="spacer"></span>
+  <select id="tier" title="Tier">
+    <option value="0">Core</option><option value="1">Advanced</option><option value="2" selected>Disruptive</option>
+  </select>
+  <button class="primary" id="b-go">Start mission</button>
+  <button class="warn" id="b-cancel">Cancel</button>
+  <button id="b-random">New random course</button>
+</header>
+
+<main>
+  <div class="col">
+    <div class="card">
+      <h2>Course · truth and belief <span class="r" id="map-note"></span></h2>
+      <canvas id="map"></canvas>
+      <div class="legend">
+        <span><i style="background:#e8eef3"></i>bay face</span>
+        <span><i style="background:var(--green)"></i><i style="background:var(--red)"></i>indicator (truth)</span>
+        <span><i style="border:2px solid var(--accent)"></i>boat's bay track (#id · bay no. · votes)</span>
+        <span><i style="background:var(--run)"></i>setpoint</span>
+        <span><i style="background:#c8a2ff"></i>lead-in · line-up · berth</span>
+        <span><i style="background:#9fd8ff"></i>water cannon</span>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Scenario <span class="r">reset applies; live knobs apply now</span></h2>
+      <div class="knobs">
+        <label>Green bay<select id="k-green_bay"><option>1</option><option>2</option><option>3</option></select></label>
+        <label>Fire window<select id="k-target_window"><option value="0">0 · left (UL)</option><option value="1">1 · right (LR)</option></select></label>
+        <label>Code colour 1 (tin)<select id="k-c1"><option>red</option><option>green</option><option>blue</option></select></label>
+        <label>Code colour 2 (circle)<select id="k-c2"><option>red</option><option>green</option><option>blue</option></select></label>
+        <label>Dock faces (deg)<input id="k-facing_deg" type="number" step="15"></label>
+        <label>Dock distance (m)<input id="k-dock_n" type="number" step="5"></label>
+        <label>Bay width (m, assumed)<input id="k-bay_width" type="number" step="0.25"></label>
+        <label>WP_RADIUS (m; boat: 2.0)<input id="k-wp_radius" type="number" step="0.1"></label>
+        <label>Strict judge<select id="k-strict_judge"><option value="true">on</option><option value="false">off</option></select></label>
+        <div class="act">
+          <button id="b-reset">Reset course with these</button>
+          <span style="width:12px"></span>
+          <label style="flex-direction:row;align-items:center;gap:6px">Camera
+            <select id="l-camera_ok"><option value="true">on</option><option value="false">off</option></select></label>
+          <label style="min-width:140px">Mis-colour <span id="l-mis-v">0.00</span><input id="l-miscolour" type="range" min="0" max="0.3" step="0.01" value="0"></label>
+          <label style="min-width:140px">Current <span id="l-cur-v">0.00</span> m/s<input id="l-current_mps" type="range" min="0" max="0.3" step="0.01" value="0"></label>
+          <label>Current to (deg)<input id="l-current_to_deg" type="number" step="15" value="90" style="width:90px"></label>
+          <label>Autopilot<select id="l-mode"><option>GUIDED</option><option>MANUAL</option></select></label>
+        </div>
+      </div>
+      <div class="err" id="err"></div>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="card">
+      <h2>RoboCommand &amp; UAV · judged against the truth</h2>
+      <div class="score">
+        <div><div class="k">Docked (green bay)</div><div class="v pend" id="s-dock">—</div></div>
+        <div><div class="k">Fire out</div><div class="v pend" id="s-fire">—</div></div>
+        <div><div class="k">Request</div><div class="v pend" id="s-req">—</div></div>
+        <div><div class="k">UAV tasked</div><div class="v pend" id="s-uav">—</div></div>
+      </div>
+      <div class="kv" id="facts"></div>
+    </div>
+    <div class="card">
+      <h2>Camera · rebuilt from DockObservation <span class="r" id="cam-note"></span></h2>
+      <canvas id="cam"></canvas>
+    </div>
+    <div class="card">
+      <h2>Behaviour tree <span class="r" id="bt-note">task3_disruptive.xml</span></h2>
+      <div class="tree" id="tree"><div style="color:var(--dim);padding:8px">No mission yet. Start one above.</div></div>
+    </div>
+    <div class="two">
+      <div class="card"><h2>Reports sent</h2><div class="log" id="reports"></div></div>
+      <div class="card"><h2>Judge</h2><div class="log" id="judge"></div></div>
+    </div>
+    <div class="card"><h2>Log <span class="r"><label style="font-size:11px"><input type="checkbox" id="only-tree"> tree only</label></span></h2><div class="log" id="log" style="max-height:300px"></div></div>
+  </div>
+</main>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const CSS = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const COLOUR = {red: "#E2524A", green: "#3DBE6E", blue: "#4C8FE8", off: "#2a3440", unknown: "#6b7785"};
+const CV = {0: "unknown", 1: "off", 2: "red", 3: "green", 4: "blue"};
+let S = null, busy = false, formFilled = false;
+
+async function post(path, body) {
+  $("err").textContent = "";
+  const r = await fetch(path, {method: "POST", body: JSON.stringify(body || {})});
+  if (!r.ok) { const j = await r.json().catch(() => ({})); $("err").textContent = j.error || ("HTTP " + r.status); }
+}
+$("b-go").onclick = () => post("/goal", {tier: +$("tier").value});
+$("b-cancel").onclick = () => post("/cancel");
+$("b-random").onclick = () => post("/reset", {randomise: true}).then(() => formFilled = false);
+$("b-reset").onclick = () => {
+  const sc = {
+    green_bay: +$("k-green_bay").value, target_window: +$("k-target_window").value,
+    code: [$("k-c1").value, $("k-c2").value], facing_deg: +$("k-facing_deg").value,
+    dock_n: +$("k-dock_n").value, bay_width: +$("k-bay_width").value,
+    wp_radius: +$("k-wp_radius").value, strict_judge: $("k-strict_judge").value === "true",
+    tier: +$("tier").value,
+  };
+  post("/reset", {scenario: sc}).then(() => formFilled = false);
+};
+$("l-camera_ok").onchange = e => post("/knob", {name: "camera_ok", value: e.target.value === "true"});
+$("l-miscolour").oninput = e => { $("l-mis-v").textContent = (+e.target.value).toFixed(2); };
+$("l-miscolour").onchange = e => post("/knob", {name: "miscolour", value: +e.target.value});
+$("l-current_mps").oninput = e => { $("l-cur-v").textContent = (+e.target.value).toFixed(2); };
+$("l-current_mps").onchange = e => post("/knob", {name: "current_mps", value: +e.target.value});
+$("l-current_to_deg").onchange = e => post("/knob", {name: "current_to_deg", value: +e.target.value});
+$("l-mode").onchange = e => post("/mode", {mode: e.target.value});
+
+function fillForm(sc) {
+  $("k-green_bay").value = sc.green_bay; $("k-target_window").value = sc.target_window;
+  $("k-c1").value = sc.code[0]; $("k-c2").value = sc.code[1];
+  $("k-facing_deg").value = sc.facing_deg; $("k-dock_n").value = sc.dock_n;
+  $("k-bay_width").value = sc.bay_width; $("k-wp_radius").value = sc.wp_radius;
+  $("k-strict_judge").value = String(sc.strict_judge); $("tier").value = sc.tier;
+  $("l-camera_ok").value = String(sc.camera_ok);
+  $("l-miscolour").value = sc.miscolour; $("l-mis-v").textContent = sc.miscolour.toFixed(2);
+  $("l-current_mps").value = sc.current_mps; $("l-cur-v").textContent = sc.current_mps.toFixed(2);
+  $("l-current_to_deg").value = sc.current_to_deg;
+}
+
+// ---------------------------------------------------------------- geometry
+const R = 6371000, D = Math.PI / 180;
+function toLocal(lat, lon, o) { return [(lon - o[1]) * D * R * Math.cos(o[0] * D), (lat - o[0]) * D * R]; }
+function hvec(h) { return [Math.sin(h * D), Math.cos(h * D)]; }
+
+function sizeCanvas(c) {
+  const dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
+  const g = c.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); return [g, w, h];
+}
+
+// ---------------------------------------------------------------- the map
+let view = null;
+function drawMap() {
+  const [g, W, H] = sizeCanvas($("map"));
+  const w = S.world, sc = w.scenario, d = w.dock, b = w.boat;
+  // Fit: the dock with 14 m of its water, and the boat. EASED toward that
+  // rather than jumped, so it tightens smoothly onto the dock as the boat
+  // closes - the berthing is the part worth seeing up close.
+  const far = [d.back[0], d.back[1], ...d.fingers.flat()].map(p => [p[0] + d.out[0] * 14, p[1] + d.out[1] * 14]);
+  const pts = [...d.fingers.flat(), ...far, [b.e - 3, b.n - 3], [b.e + 3, b.n + 3]];
+  let [x0, y0, x1, y1] = [Infinity, Infinity, -Infinity, -Infinity];
+  for (const [x, y] of pts) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+  const key = sc.seed + ":" + sc.facing_deg + ":" + sc.dock_n + ":" + sc.dock_e;
+  if (!view || view.key !== key) view = {key, x0, y0, x1, y1};
+  const ease = 0.12;
+  view.x0 += (x0 - view.x0) * ease; view.x1 += (x1 - view.x1) * ease;
+  view.y0 += (y0 - view.y0) * ease; view.y1 += (y1 - view.y1) * ease;
+  const pad = 2, sx = (W - 24) / (view.x1 - view.x0 + 2 * pad), sy = (H - 24) / (view.y1 - view.y0 + 2 * pad);
+  const s = Math.min(sx, sy), cx = (view.x0 + view.x1) / 2, cy = (view.y0 + view.y1) / 2;
+  const P = (e, n) => [W / 2 + (e - cx) * s, H / 2 - (n - cy) * s];
+
+  g.fillStyle = CSS("--water"); g.fillRect(0, 0, W, H);
+  // 5 m grid
+  g.strokeStyle = "#16303f"; g.lineWidth = 1;
+  for (let e = Math.floor((cx - W / 2 / s) / 5) * 5; e < cx + W / 2 / s; e += 5) { const [px] = P(e, 0); g.beginPath(); g.moveTo(px, 0); g.lineTo(px, H); g.stroke(); }
+  for (let n = Math.floor((cy - H / 2 / s) / 5) * 5; n < cy + H / 2 / s; n += 5) { const [, py] = P(0, n); g.beginPath(); g.moveTo(0, py); g.lineTo(W, py); g.stroke(); }
+  // scale bar + north
+  g.fillStyle = CSS("--dim"); g.font = "11px " + CSS("--mono");
+  g.fillRect(14, H - 18, 5 * s, 2); g.fillText("5 m", 14, H - 24);
+  g.fillText("N ↑", W - 34, 18);
+
+  // trail
+  if (w.boat && w.trail.length > 1) {
+    g.strokeStyle = "#2f5a73"; g.lineWidth = 1.5; g.beginPath();
+    w.trail.forEach(([e, n], i) => { const [x, y] = P(e, n); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.stroke();
+  }
+  // dock: fingers and back wall
+  g.lineCap = "round"; g.strokeStyle = "#8a9aa8"; g.lineWidth = Math.max(3, 0.5 * s);
+  for (const [a, c] of [...d.fingers, d.back]) { g.beginPath(); g.moveTo(...P(...a)); g.lineTo(...P(...c)); g.stroke(); }
+  // faces, indicators, windows, bay numbers
+  const right = d.right, out = d.out;
+  for (const k of ["1", "2", "3"]) {
+    const f = d.faces[k];
+    const a = P(f[0] - right[0] * 0.6, f[1] - right[1] * 0.6), c = P(f[0] + right[0] * 0.6, f[1] + right[1] * 0.6);
+    g.strokeStyle = "#e8eef3"; g.lineWidth = Math.max(4, 0.35 * s); g.beginPath(); g.moveTo(...a); g.lineTo(...c); g.stroke();
+    const ind = +k === d.green_bay ? COLOUR.green : COLOUR.red;
+    const ip = P(f[0] + out[0] * 0.5, f[1] + out[1] * 0.5);
+    g.fillStyle = ind; g.beginPath(); g.arc(ip[0], ip[1], Math.max(4, 0.28 * s), 0, 7); g.fill();
+    // The bay NUMBER, at the mouth of the slip: 1 is on the left facing in.
+    const lp = P(f[0] + out[0] * (sc.bay_depth + 1.4), f[1] + out[1] * (sc.bay_depth + 1.4));
+    g.fillStyle = "#0c141c"; g.strokeStyle = "#8a9aa8"; g.lineWidth = 1.5;
+    g.beginPath(); g.arc(lp[0], lp[1], 10, 0, 7); g.fill(); g.stroke();
+    g.fillStyle = CSS("--ink"); g.font = "600 12px " + CSS("--mono"); g.textAlign = "center"; g.fillText(k, lp[0], lp[1] + 4);
+    if (+k === d.green_bay) {
+      for (const [idx, slot, p] of d.windows[k]) {
+        const col = (w.lights.window === idx) ? COLOUR[w.lights.colour] : COLOUR.off;
+        const wp = P(p[0] - out[0] * 0.25, p[1] - out[1] * 0.25);
+        g.fillStyle = col; g.strokeStyle = "#000"; g.lineWidth = 1;
+        const r = Math.max(3.5, 0.2 * s); g.fillRect(wp[0] - r, wp[1] - r, 2 * r, 2 * r); g.strokeRect(wp[0] - r, wp[1] - r, 2 * r, 2 * r);
+      }
+    }
+  }
+  g.textAlign = "left";
+
+  // belief: the boat's bay tracks, and the berth it planned
+  const bk = S.book, o = S.origin;
+  if (bk && bk.tracks) {
+    if (bk.berth) {
+      const pts = [["predock", bk.berth.predock_lat, bk.berth.predock_lon], ["berth", bk.berth.berth_lat, bk.berth.berth_lon]];
+      const q = pts.map(([n, la, lo]) => P(...toLocal(la, lo, o)));
+      g.setLineDash([5, 4]); g.strokeStyle = "#c8a2ff"; g.lineWidth = 1.5; g.beginPath(); g.moveTo(...q[0]); g.lineTo(...q[1]); g.stroke(); g.setLineDash([]);
+      for (const p of q) { g.fillStyle = "#c8a2ff"; g.beginPath(); g.moveTo(p[0], p[1] - 6); g.lineTo(p[0] + 6, p[1]); g.lineTo(p[0], p[1] + 6); g.lineTo(p[0] - 6, p[1]); g.fill(); }
+    }
+    for (const t of bk.tracks) {
+      const [e, n] = toLocal(t.lat, t.lon, o), p = P(e, n);
+      const chosen = t.id === bk.chosen_track;
+      g.strokeStyle = chosen ? "#c8a2ff" : CSS("--accent"); g.lineWidth = chosen ? 3 : 2;
+      g.beginPath(); g.arc(p[0], p[1], Math.max(9, 0.9 * s), 0, 7); g.stroke();
+      const vcol = t.verdict === "G" ? COLOUR.green : t.verdict === "R" ? COLOUR.red : CSS("--dim");
+      const lp = [p[0] - out[0] * 0 + 12, p[1] - 14];
+      const lab = "#" + t.id + (t.number ? " · bay " + t.number : "") + "  R" + t.red + "/G" + t.green;
+      g.font = "11px " + CSS("--mono"); const tw = g.measureText(lab).width;
+      g.fillStyle = "#0c141ccc"; g.fillRect(lp[0] - 3, lp[1] - 11, tw + 6, 15);
+      g.fillStyle = vcol; g.fillText(lab, lp[0], lp[1]);
+    }
+  }
+
+  // setpoint, loiter point
+  if (b.sp) { const p = P(...b.sp); g.strokeStyle = CSS("--run"); g.lineWidth = 2; g.beginPath(); g.moveTo(p[0] - 7, p[1]); g.lineTo(p[0] + 7, p[1]); g.moveTo(p[0], p[1] - 7); g.lineTo(p[0], p[1] + 7); g.stroke(); }
+  // camera wedge
+  const hf = 39.3, look = b.heading, cam = [b.e + hvec(look)[0] * 0.37, b.n + hvec(look)[1] * 0.37];
+  g.fillStyle = S.world.scenario.camera_ok ? "#4eafd218" : "#e0736a18"; g.beginPath(); g.moveTo(...P(...cam));
+  for (let a = -hf; a <= hf; a += 4) { const v = hvec(look + a); g.lineTo(...P(cam[0] + v[0] * 12, cam[1] + v[1] * 12)); }
+  g.closePath(); g.fill();
+  // hull
+  const hull = b.corners.map(c => P(...c));
+  g.fillStyle = w.contact ? "#e0736a88" : (w.truth_bay ? "#45bca066" : "#dfe8ef40");
+  g.strokeStyle = w.contact ? CSS("--fail") : CSS("--ink"); g.lineWidth = 1.5;
+  g.beginPath(); hull.forEach((p, i) => i ? g.lineTo(...p) : g.moveTo(...p)); g.closePath(); g.fill(); g.stroke();
+  const bow = P(b.e + hvec(b.heading)[0] * 2.44, b.n + hvec(b.heading)[1] * 2.44);
+  g.fillStyle = CSS("--ink"); g.beginPath(); g.arc(bow[0], bow[1], 3, 0, 7); g.fill();
+  // water cannon
+  if (w.cannon && w.cannon.fire) {
+    const f = hvec(b.heading), l = [-f[1], f[0]];
+    const tgt = [cam[0] + f[0] * w.cannon.x + l[0] * w.cannon.y, cam[1] + f[1] * w.cannon.x + l[1] * w.cannon.y];
+    g.strokeStyle = "#9fd8ff"; g.lineWidth = 3; if (w.spray_on === null) g.setLineDash([4, 4]);
+    g.beginPath(); g.moveTo(...P(...cam)); g.lineTo(...P(...tgt)); g.stroke(); g.setLineDash([]);
+  }
+  // current
+  if (sc.current_mps > 0) {
+    const v = hvec(sc.current_to_deg), p = [W - 60, 50];
+    g.strokeStyle = CSS("--dim"); g.lineWidth = 2; g.beginPath(); g.moveTo(p[0] - v[0] * 18, p[1] + v[1] * 18); g.lineTo(p[0] + v[0] * 18, p[1] - v[1] * 18); g.stroke();
+    g.fillStyle = CSS("--dim"); g.fillText(sc.current_mps.toFixed(2) + " m/s", p[0] - 30, p[1] + 34);
+  }
+  $("map-note").textContent = (w.truth_bay ? "hull fully in bay " + w.truth_bay : "not in a bay") + (w.contact ? " · CONTACT" : "") + " · " + b.v.toFixed(2) + " m/s" + (b.loitering ? " · loitering" : "");
+}
+
+// ---------------------------------------------------------------- the camera
+function drawCam() {
+  const [g, W, H] = sizeCanvas($("cam"));
+  g.fillStyle = "#223040"; g.fillRect(0, 0, W, H * 0.46);
+  g.fillStyle = "#15303f"; g.fillRect(0, H * 0.46, W, H);
+  const cam = S.camera, obs = S.obs, k = W / cam.w;
+  const sc = S.world.scenario;
+  if (!sc.camera_ok || !obs) {
+    g.fillStyle = CSS("--fail"); g.font = "600 14px " + CSS("--mono"); g.textAlign = "center";
+    g.fillText(sc.camera_ok ? "no frame yet" : "CAMERA OFF — no DockObservation", W / 2, H / 2); g.textAlign = "left";
+    $("cam-note").textContent = ""; return;
+  }
+  const bays = [...obs.bays].sort((a, b) => b.bearing_deg - a.bearing_deg);
+  for (const b of bays) {
+    let r = null;
+    if (b.has_plane && b.plane_normal[0] !== null) { const t = b.bearing_deg * D, den = b.plane_normal[0] * Math.cos(t) + b.plane_normal[1] * Math.sin(t); if (Math.abs(den) > 0.05) r = -b.plane_offset / den; }
+    if (!r || r <= 0) r = b.range_from_size_m;
+    if (!r) continue;
+    const u = cam.w / 2 - cam.fx * Math.tan(b.bearing_deg * D);
+    const fw = cam.fx * cam.face_w / r, fh = cam.fx * cam.face_h / r;
+    const v = cam.h / 2 - cam.fx * (cam.face_z - cam.cam_z) / r;
+    const x = (u - fw / 2) * k, y = (v - fh / 2) * k;
+    g.fillStyle = "#e9eef2"; g.fillRect(x, y, fw * k, fh * k);
+    // windows by slot
+    for (const w of b.windows) {
+      const slot = cam.slots[w.index]; if (!slot) continue;
+      const wx = u + cam.fx * slot[1] / r, wy = v - cam.fx * slot[2] / r, ws = cam.fx * cam.window_m / r;
+      g.fillStyle = "#111"; g.fillRect((wx - ws * 0.62) * k, (wy - ws * 0.62) * k, ws * 1.24 * k, ws * 1.24 * k);
+      g.fillStyle = COLOUR[CV[w.state]]; g.fillRect((wx - ws / 2) * k, (wy - ws / 2) * k, ws * k, ws * k);
+    }
+    // indicator at the base
+    const iw = fw * 0.5 * k, ih = Math.max(3, fh * 0.1 * k);
+    g.fillStyle = b.indicator_present ? COLOUR[CV[b.indicator_colour]] : "#3a4652";
+    g.fillRect(u * k - iw / 2, y + fh * k + 2, iw, ih);
+    g.fillStyle = "#0c141c"; g.font = "600 " + Math.max(10, Math.min(16, fh * k * 0.14)) + "px " + CSS("--mono"); g.textAlign = "center";
+    g.fillText("idx " + b.bay_index + (b.truncated ? " ✂" : ""), u * k, y + fh * k - 4);
+    g.textAlign = "left";
+  }
+  g.fillStyle = CSS("--ink"); g.font = "12px " + CSS("--mono");
+  const pat = obs.target_pattern ? obs.target_pattern + (obs.target_colours.length ? " [" + obs.target_colours.join(", ") + "]" : "") + " · window " + obs.target_window_index : "—";
+  g.fillStyle = "#0c141cc0"; g.fillRect(6, H - 24, W - 12, 19);
+  g.fillStyle = CSS("--ink"); g.fillText("timing: " + pat + (obs.last_event ? "  · EVENT " + obs.last_event : ""), 12, H - 10);
+  $("cam-note").textContent = obs.bays.length + " bays · " + (obs.observed_fps || 0).toFixed(0) + " fps";
+}
+
+// ---------------------------------------------------------------- panels
+function esc(s) { return String(s).replace(/[&<>]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;"}[c])); }
+function setV(id, state, text) { const e = $(id); e.className = "v " + state; e.textContent = text; }
+
+function panels() {
+  const w = S.world, m = S.mission, sm = w.judge.summary, sc = w.scenario;
+  $("p-time").textContent = "t=" + w.t.toFixed(1) + "s";
+  const mp = $("p-mission");
+  mp.textContent = m.state === "active" ? "running " + m.elapsed_s.toFixed(0) + "s" : m.state === "done" ? m.outcome_name + " · " + m.elapsed_s.toFixed(0) + "s" : "idle";
+  mp.className = "pill " + (m.state === "active" ? "run" : m.state === "done" ? (m.outcome === 0 ? "ok" : "fail") : "");
+  $("p-phase").textContent = (S.feedback && S.feedback.phase) || "—";
+  $("p-task").textContent = S.task; $("p-task").className = "pill " + (S.task === "TASK_NONE" ? "" : "run");
+  $("b-go").disabled = m.state === "active"; $("b-cancel").disabled = m.state !== "active";
+  $("b-reset").disabled = m.state === "active"; $("b-random").disabled = m.state === "active";
+
+  const j = w.judge.events;
+  const find = who => j.filter(e => e.text.startsWith(who));
+  const fin = (arr, okText) => arr.length ? (arr.some(e => e.ok) ? ["ok", okText] : ["fail", "wrong"]) : ["pend", "—"];
+  setV("s-dock", ...(sm.docking ? ["ok", "bay " + sc.green_bay + " ✓"] : fin(find("DockingReport"), "")));
+  setV("s-fire", ...(sm.firefighting ? ["ok", "window " + (sc.target_window + 1) + " ✓"] : fin(find("FirefightingReport"), "")));
+  const need = sc.tier >= 1;
+  setV("s-req", ...(!need ? ["pend", "n/a (Core)"] : sm.request ? ["ok", "✓"] : fin(find("ResourceDeliveryRequest"), "")));
+  setV("s-uav", ...(!need ? ["pend", "n/a (Core)"] : sm.uav ? ["ok", "✓"] : fin(j.filter(e => e.who === "UAV"), "")));
+
+  const code = sc.tier === 2 ? sc.code[0] + " → " + sc.code[1] : sc.tier === 1 ? "ANY → " + sc.code[1] : "—";
+  const bk = S.book || {};
+  const facts = [
+    ["truth", "green bay " + sc.green_bay + " · fire window " + sc.target_window + " · code " + code],
+    ["lights", w.lights.state + " · window " + w.lights.window + " " + w.lights.colour + (w.lights.state === "FIRE" ? " · sprayed " + w.lights.sprayed + "s/" + sc.extinguish_s + "s" : "")],
+    ["belief", bk.choice ? (bk.choice.ok ? "safe bay " + bk.choice.bay : bk.choice.why) : "—"],
+    ["committed", bk.chosen_bay ? "bay " + bk.chosen_bay + (bk.readiness_confirmed ? " · RoboCommand confirmed" : "") : "—"],
+    ["timing", (bk.pattern || "—") + (bk.colours && bk.colours.length ? " [" + bk.colours.join(", ") + "]" : "") + (bk.request ? " → " + bk.request : "")],
+    ["hull", sm.contacts ? sm.contacts + " contact(s) with the dock" : "no contact"],
+    ["result", m.state === "done" ? m.detail : "—"],
+  ];
+  $("facts").innerHTML = facts.map(([k, v]) => `<span class="k">${k}</span><span>${esc(v)}</span>`).join("");
+
+  // tree
+  if (S.bt && S.bt.nodes) {
+    $("tree").innerHTML = S.bt.nodes.map(n => {
+      const g = {SUCCESS: "ok", RUNNING: "run", FAILURE: "FAIL", IDLE: "", SKIPPED: "skip"}[n.status];
+      const kd = {control: "ctl", decorator: "dec", condition: "?", action: "act"}[n.kind] || "";
+      const t = n.type !== n.name ? `<span class="t">${esc(n.type)}</span>` : "";
+      return `<div class="row ${n.status}" style="padding-left:${8 + n.d * 16}px"><span class="g">${g}</span><span class="kd">${kd}</span>${esc(n.name)} ${t}</div>`;
+    }).join("");
+    $("bt-note").textContent = S.tree + " · " + S.bt.elapsed_s.toFixed(1) + "s";
+  }
+  $("reports").innerHTML = S.reports.slice().reverse().map(r => `<div><span class="ts">${r.t.toFixed(1)}</span> <span class="who">${r.kind}</span> ${esc(r.json)}</div>`).join("") || '<div class="ts">nothing yet</div>';
+  $("judge").innerHTML = j.slice().reverse().map(e => `<div class="${e.ok === true ? "ok" : e.ok === false ? "fail" : ""}"><span class="ts">${e.t.toFixed(1)}</span> <b>${esc(e.who)}</b> ${esc(e.text)}</div>`).join("") || '<div class="ts">nothing yet</div>';
+  const only = $("only-tree").checked;
+  const L = $("log"), atEnd = L.scrollTop + L.clientHeight >= L.scrollHeight - 8;
+  L.innerHTML = S.log.filter(e => !only || e.who === "tree").map(e => `<div><span class="ts">${e.t.toFixed(1)}</span> <span class="who">${e.who}</span> ${esc(e.text)}</div>`).join("");
+  if (atEnd) L.scrollTop = L.scrollHeight;
+  if (!formFilled) { fillForm(sc); formFilled = true; }
+}
+
+async function tick() {
+  if (busy) return; busy = true;
+  try {
+    const r = await fetch("/state", {cache: "no-store"});
+    S = await r.json();
+    drawMap(); drawCam(); panels();
+    if (!S.runner_alive) $("err").textContent = "the runner process has exited - restart sim.py";
+  } catch (e) { $("err").textContent = "sim not answering: " + e; }
+  busy = false;
+}
+setInterval(tick, 150); tick();
+window.addEventListener("resize", () => S && (drawMap(), drawCam()));
+</script>
+</body></html>
