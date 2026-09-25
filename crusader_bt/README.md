@@ -10,10 +10,11 @@ crusader_msgs/action/SafePassage        the interface. Unchanged by any of this.
 bt_runner_node                          accepts the goal, owns the TIMEOUT and
         |                               CANCEL, ticks the tree at 10 Hz
 behavior_trees/task1_safe_passage.xml   the mission. Editable without a compiler
-        |
+        |                               (task3_disruptive.xml: Task 3, below)
 src/leaves.cpp                          11 primitives: read a port, call
         |                               nav_math, publish, poll
 include/crusader_bt/nav_math.hpp        ALL the geometry. stdlib only.
+                                        (dock_math.hpp: the same, for Task 3)
 ```
 
 ## The one thing to know before changing anything
@@ -65,6 +66,62 @@ asserts against hand-worked cases with the compass directions spelled out.
 The two "always SUCCESS" contracts are load-bearing. They sit in the reactive
 guard band that is re-ticked ten times a second, and a FAILURE there propagates
 to the root and ends the mission.
+
+## Task 3 — Coordinated Logistics (`task3_disruptive.xml`)
+
+One tree for all three tiers, run by the same `bt_runner_node` under the same
+`SafePassage` action (the runner ticks whatever `tree_file` names; `tier` picks
+how far it goes). Same split as Task 1:
+
+```
+behavior_trees/task3_disruptive.xml     find the GREEN bay, dock, fire, decode
+src/task3_leaves.cpp                    15 leaves: read the Context, call dock_math
+include/crusader_bt/dock_math.hpp       ALL of it: placing, the bay book, numbering,
+                                        choice, berthing, the code, report JSON
+test/test_dock_math.cpp                 121 checks, stdlib only, ~1 s
+```
+
+**Bays are known by where they are, not by `bay_index`.** The dock detector's
+`DockObservation.bay_index` is "left to right in THIS frame": a boat that sees
+bays 2 and 3 is told 0 and 1. `bt_runner_node` places every sighting in the
+world (bearing + face plane + pose + `cam_x/y/yaw`) and folds it into a bay
+track by position (`dock::DockBook`); bay NUMBERS come from sorting three
+confirmed tracks along the dock, left to right **facing** it (`dock::layout`).
+
+**Three numbering schemes meet here and disagree.** The CV's colours put OFF at 1
+and RED at 2; RoboCommand's `Color` and `RXL_COLOR` put RED at 1. Every crossing
+is a named function in `dock_math` with a test, and the mutation that casts one
+into the other fails three of them.
+
+| Leaf | Kind | Contract |
+|---|---|---|
+| `DockCameraAlive` | condition | the detector publishes every frame; silence = dead |
+| `UpdateDockBook` | compute | **always SUCCESS**; logs when the belief changes |
+| `SafeBayKnown` | condition | exactly one bay reads GREEN (strict: others RED) |
+| `PickVantage` | compute | next place to look from — always outside the slips |
+| `CommitSafeBay` | action | commits the GREEN bay and its number |
+| `ChosenBaySafe` | condition | recent readings still say GREEN (guards the berthing legs) |
+| `LinedUp` | condition | already on the centreline, facing in: skip the lead-in |
+| `DockWaypoint` | compute | lead-in / line-up / berth, from the bay's CURRENT estimate |
+| `DockedInBay` | condition | berth tolerances AND the whole hull inside the measured slip |
+| `ReportDocking` | action | `DockingReport(bay_id)` |
+| `AwaitFireTarget` | action | waits for the RED window; re-sends the report until confirmed |
+| `SprayUntilHit` | action | aims every tick; cannon OFF on every exit |
+| `ReportFirefighting` | action | `FirefightingReport(window_id)` |
+| `TierAtLeast` | condition | Core stops after the fire |
+| `DecodeResourceRequest` | action | the code (c1, c2), held 5 s before it is believed |
+| `ReportResourceRequest` | action | `ResourceDeliveryRequest` to RoboCommand, and the relay to the UAV |
+
+**Off-ROS, the whole tree runs against a simulated course**: `tools/task3_sim/`
+builds these leaves and this XML with BehaviorTree.CPP from source and drives
+them through `offros/offros_runner.cpp` — `bt_runner_node`'s loop with JSON lines
+for topics, and a four-symbol `rclcpp` logging shim (`offros/shim`) so
+`leaves.cpp` compiles unchanged. `offros/` is not in `CMakeLists.txt`.
+
+Preconditions and limits the sim found are in the XML's header and in
+`tools/task3_sim/README.md`; the two that need the boat are `WP_RADIUS` (2.0 m
+parks it 2 m short of the berth) and holding a slip against a cross-current
+(GUIDED loiters with `LOIT_RADIUS` 2 m and does not strafe).
 
 ## Subtrees need `_autoremap="true"`
 

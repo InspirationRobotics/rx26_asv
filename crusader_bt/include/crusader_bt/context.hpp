@@ -33,13 +33,16 @@
 #include "behaviortree_cpp/condition_node.h"
 #include "rclcpp/rclcpp.hpp"
 
+#include "crusader_bt/dock_math.hpp"
 #include "crusader_bt/nav_math.hpp"
 
 namespace crusader_bt
 {
 
 /// World state, refreshed by the runner once per tick. Read-only to leaves
-/// except for `waypoint` and `consumed`, which NextWaypoint writes.
+/// except for `waypoint` and `consumed`, which NextWaypoint writes, the gate
+/// bookkeeping the Disruptive Task 1 leaves keep, and the Task 3 commitments
+/// (chosen bay, berth, request) below `dock`.
 struct Context
 {
   std::mutex mu;
@@ -131,6 +134,48 @@ struct Context
   /// the sequence numbering honest.
   bool gate_cleared = false;
 
+  // ---- Task 3: the docking bays ----
+  //
+  // `dock` is written by the runner on every DockObservation, through
+  // ingestDockObservation() below - the ONE function both runners call, so
+  // the ROS node and the off-ROS sim runner cannot disagree about what a frame
+  // means. Everything after it is written by the Task 3 leaves.
+  int tier = 0;                               ///< goal tier: 0 Core, 1 Adv, 2 Disr
+  dock::DockBook dock;                        ///< the bays, world-anchored
+  dock::Mount cam_mount;                      ///< camera_link in base_link
+  double dock_obs_age_s = 1e9;                ///< since the last DockObservation
+  std::uint32_t dock_seq = 0;                 ///< bumps on every DockObservation
+  double dock_t = 0.0;                        ///< that frame's stamp, seconds
+  // The timing layer's verdict on the latest frame, for the bay it tracks.
+  std::string dock_pattern;                   ///< "", steady, flash, code, ...
+  std::vector<dock::Colour> dock_colours;
+  int dock_target_window = -1;                ///< DockWindow.index, -1 = none
+  double dock_fps = 0.0;                      ///< the timing layer's observed rate
+  /// "hit" events seen so far. COUNTED, because DockObservation.last_event is
+  /// set on one frame only and a leaf ticking at 10 Hz can miss that frame.
+  int dock_hits = 0;
+
+  /// How much indicator evidence makes a verdict, and how many sightings make
+  /// a bay. HERE rather than on each leaf's ports because SafeBayKnown and
+  /// CommitSafeBay must apply the SAME rule - a condition that passes on
+  /// looser numbers than the commit that follows it is a tree that stalls.
+  dock::VoteParams dock_votes;
+  int dock_min_obs = 5;
+
+  std::string task3_phase;                    ///< for feedback and the viewers
+  int survey_attempt = 0;                     ///< PickVantage calls, all of them
+  int survey_looks = 0;                       ///< ... of which placed from seen bays
+  int chosen_track = -1;                      ///< committed by CommitSafeBay
+  int chosen_bay = 0;                         ///< its 1-based number
+  dock::Berth berth;                          ///< for the chosen bay
+  int fired_window = -1;                      ///< DockWindow.index we put out
+  /// RoboCommand's ReadinessConfirm for the docking report, from
+  /// /crsd/ocs_command. The light is what the leaves wait on; this only stops
+  /// the report being re-sent.
+  bool readiness_confirmed = false;
+  dock::Request request;                      ///< decoded, held, not yet sent
+  bool have_request = false;
+
   /// Where the boat was when the goal was accepted. "Go home" in a mission
   /// means "back to where this attempt started", not the autopilot's HOME —
   /// those differ whenever the boat was driven out manually first.
@@ -153,9 +198,63 @@ struct Context
   /// Tell the aircraft a gate is cleared and ask for the next pair. Publishes
   /// std_msgs/UInt8 on crsd/gate_reached; rxl_link_node puts it on the air.
   std::function<void(std::uint8_t)> report_gate_reached;
+
+  // ---- Task 3 outputs ----
+  //
+  // The three RoboCommand reports go out as JSON for the OCS to relay, like
+  // the Task 1 report. Field names are rx_reports.proto's.
+  std::function<void(int)> report_docking;          ///< DockingReport.bay_id
+  std::function<void(int)> report_firefighting;     ///< FirefightingReport.window_id
+  /// ResourceDeliveryRequest to RoboCommand.
+  std::function<void(const dock::Request &)> report_request;
+  /// The same request to the UAV, over the radio.
+  std::function<void(const dock::Request &)> relay_request;
+  /// The water cannon: fire or not, aimed at a point in camera_link.
+  std::function<void(bool, double, double, double)> cannon;
 };
 
 using ContextPtr = std::shared_ptr<Context>;
+
+/// Fold one DockObservation into the context. CALL UNDER ctx.mu.
+///
+/// Both runners convert their input (a crusader_msgs/DockObservation, or a
+/// JSON line from the sim) into a dock::Frame and hand it here; nothing about
+/// what a frame MEANS is decided in either runner.
+///
+/// The bays are placed only with a fresh pose and a resolved heading - a
+/// sighting placed from a stale pose is a bay in the wrong place, forever. The
+/// timing layer's verdict does not depend on the pose, so it is always taken.
+inline void ingestDockObservation(Context & c, const dock::Frame & f)
+{
+  if (c.origin_set && c.pose_fresh && std::isfinite(c.heading_deg)) {
+    c.dock.ingest(f, c.boat, c.heading_deg, c.cam_mount);
+  }
+  ++c.dock_seq;
+  c.dock_t = f.t;
+  c.dock_pattern = f.target_pattern;
+  c.dock_colours = f.target_colours;
+  c.dock_target_window = f.target_window_index;
+  c.dock_fps = f.observed_fps;
+  if (f.last_event == "hit") {++c.dock_hits;}
+}
+
+/// Forget everything Task 3 learned. Called at goal start: a second attempt
+/// must not inherit the first one's bays, votes or commitments.
+inline void resetTask3(Context & c)
+{
+  c.dock = dock::DockBook{};
+  c.dock_hits = 0;
+  c.task3_phase.clear();
+  c.fired_window = -1;
+  c.survey_attempt = 0;
+  c.survey_looks = 0;
+  c.chosen_track = -1;
+  c.chosen_bay = 0;
+  c.berth = dock::Berth{};
+  c.readiness_confirmed = false;
+  c.request = dock::Request{};
+  c.have_request = false;
+}
 
 /// A place to go, passed BETWEEN LEAVES on the blackboard.
 ///
@@ -271,6 +370,10 @@ protected:
 /// exactly one environment — the container — and fails at tree-load with a
 /// message about a missing .so rather than about the tree.
 void registerCrusaderNodes(BT::BehaviorTreeFactory & factory);
+
+/// The Task 3 leaves, from src/task3_leaves.cpp. Called by
+/// registerCrusaderNodes, so a runner registers everything with one call.
+void registerTask3Nodes(BT::BehaviorTreeFactory & factory);
 
 }  // namespace crusader_bt
 

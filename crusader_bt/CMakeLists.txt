@@ -17,7 +17,9 @@ find_package(crusader_msgs REQUIRED)
 
 set(DEPS rclcpp rclcpp_action std_msgs behaviortree_cpp crusader_msgs)
 
-add_executable(bt_runner_node src/bt_runner_node.cpp src/leaves.cpp)
+# task3_leaves.cpp is NOT optional: leaves.cpp's registerCrusaderNodes() calls
+# registerTask3Nodes(), so leaving it out is a link error, not a missing tree.
+add_executable(bt_runner_node src/bt_runner_node.cpp src/leaves.cpp src/task3_leaves.cpp)
 target_include_directories(bt_runner_node PRIVATE include)
 ament_target_dependencies(bt_runner_node ${DEPS})
 
@@ -34,10 +36,18 @@ install(DIRECTORY include/ DESTINATION include)
 # one that gets used — the whole point is that a sign error in the side rule is
 # caught in a second, off-boat, rather than by watching the boat pass a buoy on
 # the wrong side.
+#
+# dock_math is the same deal for Task 3 (test/test_dock_math.cpp). Off-ROS the
+# whole Task 3 tree - these leaves, that XML - also runs against a simulated
+# course: tools/task3_sim/ (build.py, then sim.py). offros/ is that runner and
+# is deliberately NOT built here.
 if(BUILD_TESTING)
   add_executable(test_nav_math test/test_nav_math.cpp)
   target_include_directories(test_nav_math PRIVATE include)
   add_test(NAME nav_math COMMAND test_nav_math)
+  add_executable(test_dock_math test/test_dock_math.cpp)
+  target_include_directories(test_dock_math PRIVATE include)
+  add_test(NAME dock_math COMMAND test_dock_math)
 endif()
 
 ament_package()

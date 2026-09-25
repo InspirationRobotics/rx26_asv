@@ -1128,6 +1128,8 @@ void registerCrusaderNodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<AwaitConfirmation>("AwaitConfirmation");
   factory.registerNodeType<GateWaypoint>("GateWaypoint");
   factory.registerNodeType<MarkGateCleared>("MarkGateCleared");
+  // Task 3, in their own file (src/task3_leaves.cpp).
+  registerTask3Nodes(factory);
 }
 
 }  // namespace crusader_bt

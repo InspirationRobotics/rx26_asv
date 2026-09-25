@@ -1,0 +1,201 @@
+<?xml version="1.0"?>
+<!--
+  Task 3 Coordinated Logistics, the USV's half. handbook 3.3.4.
+
+  ONE TREE FOR ALL THREE TIERS. Core stops once the fire is out; Advanced and
+  Disruptive go on to read the resource request off the same window.
+  TierAtLeast is what tells them apart, from the goal's tier.
+
+  WHAT THE COURSE DOES, and why the tree is this shape:
+
+    three bays, numbered LEFT TO RIGHT FACING THEM. Each has a RED or GREEN
+    docking indicator at the base of its face; exactly one is GREEN.
+    Dock in the GREEN one and report DockingReport(bay_id).
+    THEN, and only then, one of that bay's two windows lights RED. Spray it
+    until it turns GREEN (5 s), report FirefightingReport(window_id).
+    Disruptive: off 1 s, then c1 1 s / off 1 s / c2 1 s / off 2 s, for 60 s.
+    c1 is the tin, c2 the circle. Report ResourceDeliveryRequest and relay it
+    to the UAV.
+
+  1. BAYS ARE KNOWN BY WHERE THEY ARE. DockObservation's bay_index is "left to
+     right in THIS frame", so a boat that sees two bays is told 0 and 1
+     whichever two they are. The runner places every sighting in the world and
+     folds it into a track (dock::DockBook); the bay NUMBER comes from sorting
+     three confirmed tracks along the dock (dock::layout).
+
+  2. LOOK FROM WHERE ALL THREE FIT, AND NEVER FROM INSIDE A SLIP. 10 m out,
+     the OAK-D LR's ~79 deg covers ~16 m: the whole dock. Further looks are
+     head on to whichever bay has the fewest readings, from the same 10 m.
+     There is no closer look: with fingers ~6 m long, anything nearer is in a
+     slip, and moving between two such looks crosses a finger (two hull
+     contacts in the sim before this was fixed). So `standoff` is tied to the
+     course: finger length + half a hull (2.4 m) + margin. If nothing is seen
+     from the approach point at all, a ring search looks out from it in five
+     directions before giving up.
+
+     No strafing: GUIDED cannot strafe this hull - it turns instead - and
+     nothing here needs it to. Every look is reached via a lead point further
+     out, because the camera faces forward and GuidedSetpoint.yaw is
+     discarded: the heading a boat stops with is the direction it arrived from.
+
+  3. STRICT, THEN LENIENT. SafeBayKnown(need_others_red) wants GREEN + RED +
+     RED, the consistent picture. Only after every look has been spent does the
+     lenient form accept a lone strong GREEN with the others unread.
+
+  4. THE CHOICE CAN BE UNDONE ON THE WAY IN. ChosenBaySafe re-reads the
+     committed bay's RECENT indicator readings on every tick of the berthing
+     legs. A run of REDs halts the leg and the retry starts the search again -
+     where those recent reds now veto that bay.
+
+  5. ENTER STRAIGHT, FROM OUTSIDE. Lead-in (13 m), line-up (9 m) and berth
+     (3 m) sit on the bay's own centreline. The line-up point is OUTSIDE the
+     fingers for the same reason as the vantages: the boat must be straight
+     before its bow is between them. LinedUp skips the lead-in when the boat
+     is already there (it is, whenever the survey ended head on to this bay).
+     DockWaypoint recomputes the points every tick from the bay's CURRENT
+     estimate; NavigateTo re-sends only when that moves by resend_m.
+
+     PRECONDITION: WP_RADIUS well under the berth tolerance (0.4 m). ArduRover
+     calls a GUIDED destination reached inside WP_RADIUS and loiters where it
+     stopped; this boat's is 2.0 m, which parks it 2 m short of the berth and
+     leaves the enter leg waiting for an arrival that never comes. The sim
+     reproduces it (tools/task3_sim, WP_RADIUS on its page; test_e2e
+     wp_radius_2).
+
+     KNOWN LIMIT, NOT FIXED HERE: once berthed, GUIDED holds by loitering
+     (LOIT_RADIUS 2.0 m) and cannot strafe, and the slip leaves ~0.8 m either
+     side. A 5 cm/s cross-current puts the hull on a finger in ~15 s. Holding
+     in a slip needs the hull's lateral thrust, which GUIDED does not use.
+
+  6. THE FIRE. AwaitFireTarget re-sends the docking report until RoboCommand
+     confirms it (a lost report is a fire that never lights). SprayUntilHit aims
+     every tick at the CV's aim point and switches the cannon OFF on every exit.
+
+  THE GUARD BAND is re-ticked every tick and halts everything below it.
+  DockCameraAlive is in it because the dock detector publishes every frame,
+  bays or not: silence means the node is dead, and a blind boat must not keep
+  driving at a dock. UpdateDockBook never fails (see task3_leaves.cpp).
+
+  TIMEOUT AND CANCEL live in the runner, not here.
+  UNDOCKING is not here: leaving the slip needs a stern-first move, and the
+  setpoint path is position-only. The boat holds in the berth when this ends.
+-->
+<root BTCPP_format="4" main_tree_to_execute="CoordinatedLogistics">
+  <BehaviorTree ID="CoordinatedLogistics">
+    <ReactiveSequence name="guard_band">
+
+      <IsAutonomous/>
+      <DockCameraAlive max_age_s="3.0"/>
+      <UpdateDockBook/>
+
+      <Sequence name="task3">
+
+        <SetTask token="TASK_COORDINATED_LOGISTICS"/>
+
+        <!-- Find the bay, commit, line up - all OUTSIDE the slips. A failure
+             anywhere in here (the chosen bay turning RED on the way in, say)
+             starts the search again with everything learned so far. -->
+        <RetryUntilSuccessful num_attempts="3" name="dock_attempts">
+          <Sequence name="find_and_dock">
+
+            <ReactiveFallback name="find_safe_bay">
+              <SafeBayKnown need_others_red="true"/>
+              <RetryUntilSuccessful num_attempts="4" name="looks">
+                <Sequence name="look">
+                  <PickVantage standoff="10.0" lead_m="3.0" out="{vantage}" lead="{lead}"/>
+                  <!-- Via the lead: the last leg is driven AT the dock, so the
+                       boat stops facing it. -->
+                  <NavigateTo target="port" goal="{lead}" tolerance="2.0"/>
+                  <NavigateTo target="port" goal="{vantage}" tolerance="1.5"/>
+                  <!-- WATCH, then call the look a failure so the retry moves on.
+                       Readings accumulate the whole time; SafeBayKnown above
+                       ends this the moment they settle it.
+
+                       NOT HoldStation: that re-sends the CURRENT position, and
+                       the boat is still doing ~1 m/s when NavigateTo lets go at
+                       1.5 m. It overshoots the new point and turns round to go
+                       back to it - away from the dock it is meant to be
+                       watching. The vantage setpoint stands; the autopilot
+                       stops there and loiters, facing in. -->
+                  <ForceFailure>
+                    <Sleep msec="12000"/>
+                  </ForceFailure>
+                </Sequence>
+              </RetryUntilSuccessful>
+              <SafeBayKnown need_others_red="false"/>
+            </ReactiveFallback>
+
+            <CommitSafeBay/>
+
+            <!-- Onto the centreline from OUTSIDE the line-up point, so the
+                 boat reaches it already heading in. Skipped when it is already
+                 there - a lead-in behind the boat would turn it round twice. -->
+            <Fallback name="lead_in">
+              <LinedUp min_along_m="8.5" lateral_tol="0.8" heading_tol_deg="20.0"/>
+              <ReactiveSequence name="to_lead">
+                <ChosenBaySafe min_ema="0.3"/>
+                <DockWaypoint point="lead" predock_m="9.0" berth_m="3.0" lead_m="4.0" out="{goal}"/>
+                <NavigateTo target="port" goal="{goal}" tolerance="1.5"/>
+              </ReactiveSequence>
+            </Fallback>
+            <ReactiveSequence name="line_up">
+              <ChosenBaySafe min_ema="0.3"/>
+              <DockWaypoint point="predock" predock_m="9.0" berth_m="3.0" lead_m="4.0" out="{goal}"/>
+              <NavigateTo target="port" goal="{goal}" tolerance="0.5" resend_m="0.3"/>
+            </ReactiveSequence>
+
+          </Sequence>
+        </RetryUntilSuccessful>
+
+        <!-- IN THE SLIP FROM HERE ON, AND OUTSIDE THE RETRY ON PURPOSE. A retry
+             starts with a lead-in point 13 m out - BEHIND a boat that is in a
+             slip - and GUIDED reaches a point behind by turning round, which
+             in a 4 m slip means hitting both fingers. There is no reverse on
+             the setpoint path. So a failure past this point fails the mission,
+             loudly, for the operator to recover by hand. -->
+
+        <!-- berth_m is face to BODY ORIGIN: a WAM-V 16's bow is ~2.4 m
+             ahead of it, so 3.0 leaves ~0.5 m off the face. -->
+        <ReactiveSequence name="enter">
+          <ChosenBaySafe min_ema="0.3"/>
+          <DockWaypoint point="berth" predock_m="9.0" berth_m="3.0" lead_m="4.0" out="{goal}"/>
+          <NavigateTo target="port" goal="{goal}" tolerance="0.4" resend_m="0.3"/>
+        </ReactiveSequence>
+
+        <!-- WAIT UNTIL DOCKED, up to 10 s: the boat arrives inside tolerance
+             still settling, and one sample taken mid-swing is not the answer.
+             Inverter / KeepRunningUntilFailure / Inverter is BT for "run until
+             this condition holds". DockedInBay tests the whole HULL against
+             the slip width the boat measured, not just its middle. -->
+        <Timeout msec="10000">
+          <Inverter>
+            <KeepRunningUntilFailure>
+              <Inverter>
+                <DockedInBay along_tol="0.6" lateral_tol="0.5" heading_tol_deg="15.0"
+                             hull_length="4.88" hull_beam="2.44" finger_margin="0.2"/>
+              </Inverter>
+            </KeepRunningUntilFailure>
+          </Inverter>
+        </Timeout>
+
+        <ReportDocking/>
+
+        <AwaitFireTarget timeout_s="60.0" resend_s="10.0"/>
+        <SprayUntilHit timeout_s="60.0" min_green_s="0.4" max_aim_age_s="1.0"/>
+        <ReportFirefighting window_id_base="1"/>
+
+        <!-- Core ends here. Above it, the same window carries the request. -->
+        <Fallback name="request">
+          <Inverter>
+            <TierAtLeast tier="1"/>
+          </Inverter>
+          <Sequence name="read_and_report">
+            <DecodeResourceRequest timeout_s="80.0" hold_s="5.0" min_frames="20"/>
+            <ReportResourceRequest/>
+          </Sequence>
+        </Fallback>
+
+      </Sequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>
