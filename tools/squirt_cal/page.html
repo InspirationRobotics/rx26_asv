@@ -113,15 +113,15 @@ details summary{cursor:pointer;font-weight:600;padding:4px 0}
 <section class="card" id="vcard">
   <div class="wallcap">▲ WALL ▲ — where should the BOAT go?</div>
   <div class="grid3">
-    <button id="v_fl">↖<br>fwd + left</button>
-    <button id="v_f">↑<br>too far FORWARD</button>
-    <button id="v_fr">↗<br>fwd + right</button>
-    <button id="v_l">←<br>too far LEFT</button>
+    <button id="v_fl">↖<br>move fwd + left</button>
+    <button id="v_f">↑<br>move FORWARD</button>
+    <button id="v_fr">↗<br>move fwd + right</button>
+    <button id="v_l">←<br>move LEFT</button>
     <button id="v_ok" class="ok">✓<br>ON</button>
-    <button id="v_r">→<br>too far RIGHT</button>
-    <button id="v_bl">↙<br>back + left</button>
-    <button id="v_b">↓<br>too far BACK</button>
-    <button id="v_br">↘<br>back + right</button>
+    <button id="v_r">→<br>move RIGHT</button>
+    <button id="v_bl">↙<br>move back + left</button>
+    <button id="v_b">↓<br>move BACK</button>
+    <button id="v_br">↘<br>move back + right</button>
   </div>
   <div class="row" style="margin-top:8px">
     <button id="discard" style="flex:2">Didn't see — discard</button>
@@ -365,15 +365,18 @@ on('mSteady', () => { S.arm_mode = 'steady'; render(); setMode('steady'); });
 on('mNow', () => { S.arm_mode = 'now'; render(); setMode('now'); });
 function setMode(m){ post('/mode', {mode: m}); }
 on('cancel', () => post('/cancel'));
-on('v_fl', () => post('/verdict', {fa:'fwd', lat:'left'}));
-on('v_f',  () => post('/verdict', {fa:'fwd', lat:'ok'}));
-on('v_fr', () => post('/verdict', {fa:'fwd', lat:'right'}));
-on('v_l',  () => post('/verdict', {fa:'ok', lat:'left'}));
+// The buttons say where the boat should GO (what people say at the pool);
+// the log keeps what that says about where it WAS: "move forward" = it was
+// too far BACK. squirt_core's FA/LAT and every logged session use the latter.
+on('v_fl', () => post('/verdict', {fa:'back', lat:'right'}));
+on('v_f',  () => post('/verdict', {fa:'back', lat:'ok'}));
+on('v_fr', () => post('/verdict', {fa:'back', lat:'left'}));
+on('v_l',  () => post('/verdict', {fa:'ok', lat:'right'}));
 on('v_ok', () => post('/verdict', {fa:'ok', lat:'ok'}));
-on('v_r',  () => post('/verdict', {fa:'ok', lat:'right'}));
-on('v_bl', () => post('/verdict', {fa:'back', lat:'left'}));
-on('v_b',  () => post('/verdict', {fa:'back', lat:'ok'}));
-on('v_br', () => post('/verdict', {fa:'back', lat:'right'}));
+on('v_r',  () => post('/verdict', {fa:'ok', lat:'left'}));
+on('v_bl', () => post('/verdict', {fa:'fwd', lat:'right'}));
+on('v_b',  () => post('/verdict', {fa:'fwd', lat:'ok'}));
+on('v_br', () => post('/verdict', {fa:'fwd', lat:'left'}));
 on('discard', () => post('/discard', {why: "didn't see"}));
 on('undo', () => post('/undo'));
 on('tapeSet', () => { const v = parseFloat($('tapeIn').value); post('/tape', {range_m: isNaN(v) ? null : v}); });

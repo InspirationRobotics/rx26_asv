@@ -6,7 +6,7 @@ therefore where the boat sits:
 - **sideways** position sets left/right.
 
 This tool finds both for each target. You fire a short burst, and one person
-answers on a phone: "the boat is too far **forward / back / left / right** / on".
+answers on a phone: "the boat should move **forward / back / left / right** / on".
 The tool logs every shot against the LiDAR's range to the wall and says where to
 go next ("7 cm BACK"). The result is a range per target for the Task 3 tree.
 
@@ -32,8 +32,11 @@ Then open **`http://<jetson>:8094`** on the phone, on the boat's WiFi.
    - In *Fire when steady* mode it waits up to 15 s for the steady light, then
      fires.
    - In *Fire now* mode it fires at once, and the shot is logged as not steady.
-5. **Tap where the BOAT should have been.** It is a 3×3 grid, wall at the top.
-   The corners combine two answers, for example too far forward *and* left.
+5. **Tap where the BOAT should go.** It is a 3×3 grid, wall at the top: ↑ is
+   "move forward" (toward the wall). The corners combine two answers, for
+   example move forward *and* left. (The first pool session's buttons said
+   "too far FORWARD" and were answered as "move forward"; its log is read with
+   fore/aft flipped. The buttons now say what people mean.)
    - *Didn't see* discards the shot.
    - *Undo* takes back a mis-tap.
 6. Repeat. After the first hit it probes half a step past it on each side, to
@@ -52,7 +55,7 @@ tool sees the pump output go on and logs a shot the same way.
 
 - **Verdicts are about the boat, not the water.** With a fixed nozzle, "the water
   hit high" means move closer on the rising part of the arc and further back on
-  the falling part. "The boat is too far forward" means the same thing on both
+  the falling part. "The boat should move back" means the same thing on both
   parts. So each verdict is a one-sided bound on the range, and the estimate is a
   bracket, not a physics fit.
 - **The range is the one measured BEFORE the burst.** It is the median over

@@ -5,12 +5,17 @@ aim is where the boat sits: its distance from the face sets the hit height, its
 sideways position sets left/right. This session finds, per target, the range
 (and sideways offset) at which the stream hits, from one person's verdicts:
 
-    fire a short burst -> "the boat is too far FORWARD / BACK / LEFT / RIGHT / on"
+    fire a short burst -> "the boat should move FORWARD / BACK / LEFT / RIGHT / on"
 
-VERDICTS ARE ABOUT THE BOAT, NOT THE WATER. "Too far forward" means the boat
-should move back, whichever side of the arc the stream is on. That makes each
+VERDICTS ARE ABOUT THE BOAT, NOT THE WATER. "Move back" means the boat was too
+far forward, whichever side of the arc the stream is on. That makes each
 verdict a one-sided bound on the measured range, and the fore/aft estimate is a
-bracket: "too far forward at 0.92 m" means the answer is above 0.92 m.
+bracket: "move back, at 0.92 m" means the answer is above 0.92 m.
+
+The page's buttons say where to MOVE (that is how people answer at the pool;
+the first session's labels said "too far FORWARD" and got answered as "move
+forward"). The log, FA and LAT keep where the boat WAS: fa "fwd" = it was too
+far forward = move back.
 
 THE RANGE IS THE ONE MEASURED BEFORE THE BURST (median of the last
 range_window_s): the spray itself returns LiDAR points while it is in the air.
@@ -453,8 +458,10 @@ class App:
         if self.state not in (FIRING, VERDICT) or self.pending is None:
             return False, "no shot is waiting for a verdict"
         self._finish(fa=fa, lat=lat)
-        words = {("ok", "ok"): "on target"}
-        self.message = words.get((fa, lat), f"logged: {fa}/{lat}")
+        move_fa = {"fwd": "move back", "back": "move forward", "ok": ""}
+        move_lat = {"left": "move right", "right": "move left", "ok": ""}
+        said = " + ".join(w for w in (move_fa[fa], move_lat[lat]) if w)
+        self.message = f"logged: {said}" if said else "on target"
         return True, self.message
 
     # ------------------------------------------------ estimates and advice
@@ -538,7 +545,7 @@ class App:
             last = [s for s in self._live_shots(self.target) if s["lat"]]
             if last and last[-1]["lat"] != "ok":
                 away = "right" if last[-1]["lat"] == "left" else "left"
-                out["lat_text"] = f"last shot: too far {last[-1]['lat']}, nudge {away}"
+                out["lat_text"] = f"last shot: move {away}"
         ang = live["angle_deg"]
         if ang is not None and abs(ang) > cfg["square_tol_deg"]:
             out["angle_text"] = f"square up: turn {'left' if ang > 0 else 'right'} " \
