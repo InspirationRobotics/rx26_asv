@@ -142,6 +142,7 @@ class WallRangeNode(Node):
             range_m=None if math.isnan(f.range_m) else round(f.range_m, 3),
             angle_deg=None if math.isnan(f.angle_deg) else round(f.angle_deg, 1),
             lat_m=None if math.isnan(f.lat_m) else round(f.lat_m, 3),
+            skipped_m=None if math.isnan(f.skipped_m) else round(f.skipped_m, 3),
             levelled=self._levelled))))
         if not f.valid:
             self.get_logger().warn(f"no wall: {f.why}", throttle_duration_sec=10.0)

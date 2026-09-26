@@ -68,6 +68,109 @@ def dock(range_m=1.2, angle_deg=0.0, lat=0.0, fingers=True, water=True,
     return pts
 
 
+def raycast_dock(range_m, lat=0.0, setback=0.0, h=0.28, step_deg=0.4, noise=0.008, seed=0):
+    """A sweep ray-cast against the build guide's dock from OUTSIDE the slip.
+
+    Unlike dock(), which lays points on a grid in space, this fires rays on an
+    ANGULAR grid, as the MID360 does, so near things get more points than far
+    ones - which is the whole question from 3.2 m out: the four slip fingers'
+    TIP faces, 2 m nearer and collinear, against the dock edge behind them.
+
+    Levelled frame: the sensor `h` above the water, the deck edge `range_m`
+    ahead, the boat `lat` LEFT of its slip's centre. Fingers 0.5 m wide and 2 m
+    long, slips 1.5 m, all 0.3 m above the water; 1 m panels on the deck,
+    `setback` behind its edge. The sensor sees from 7 deg above horizontal
+    down (mounted upside down)."""
+    rng = np.random.default_rng(seed)
+    az = np.radians(np.arange(-90.0, 90.0, step_deg))
+    el = np.radians(np.arange(-52.0, 7.0, step_deg))
+    A, E = np.meshgrid(az, el)
+    d = np.stack([np.cos(E) * np.cos(A), np.cos(E) * np.sin(A), np.sin(E)], -1).reshape(-1, 3)
+    o = np.array([0.0, 0.0, h])
+    boxes = []                                     # (lo, hi) in (x fwd, y left, z up above water)
+    for c in (-3.0, -1.0, 1.0, 3.0):               # finger centres from the slip centre
+        yc = c - lat                               # the slip centre is `lat` to the boat's RIGHT
+        boxes.append(((range_m - 2.0, yc - 0.25, 0.0), (range_m, yc + 0.25, 0.3)))
+    boxes.append(((range_m, -5.0, 0.0), (range_m + 1.0, 5.0, 0.3)))           # the deck
+    for c in (-2.0, 0.0, 2.0):                                                # the panels
+        yc = c - lat
+        boxes.append(((range_m + setback, yc - 0.5, 0.3), (range_m + setback + 0.02, yc + 0.5, 1.3)))
+    t_best = np.full(d.shape[0], np.inf)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        for lo, hi in boxes:
+            lo, hi = np.array(lo), np.array(hi)
+            t1, t2 = (lo - o) / d, (hi - o) / d
+            tn = np.nanmax(np.minimum(t1, t2), axis=1)
+            tf = np.nanmin(np.maximum(t1, t2), axis=1)
+            hit = (tn <= tf) & (tf > 0)
+            t_best = np.where(hit & (tn > 0) & (tn < t_best), tn, t_best)
+        tw = np.where(d[:, 2] < 0, -h / d[:, 2], np.inf)                      # the water
+    water = tw < t_best
+    t_best = np.minimum(t_best, tw)
+    keep = np.isfinite(t_best) & (t_best < 8.0)
+    pts = o + d[keep] * t_best[keep, None]
+    pts = pts[~water[keep] | (rng.random(keep.sum()) < 0.05)]   # water returns little
+    pts[:, 2] += WATER                                          # hull-bottom datum
+    return pts + rng.normal(0, noise, pts.shape)
+
+
+class TestOutsideTheSlip(unittest.TestCase):
+    """The fixed nozzle fires from ~3.2 m: 1.2 m OUTSIDE the finger tips. The
+    fit must range the dock edge there, not the tips (which read 2 m short and
+    would put the shot 2 m out). task3_fire_test.xml also cross-checks the
+    camera's range (range_check_m) in case this ever goes wrong on the water."""
+
+    def check_edge(self, fit, range_m):
+        self.assertTrue(fit.valid, fit.why)
+        self.assertAlmostEqual(fit.range_m, range_m, delta=0.03,
+                               msg="fitted %.2f m: %s" % (fit.range_m,
+                                   "the finger TIPS" if abs(fit.range_m - (range_m - 2.0)) < 0.1
+                                   else "something else"))
+
+    def test_panel_on_the_edge(self):
+        self.check_edge(wf.fit(raycast_dock(3.2), WATER), 3.2)
+
+    def test_panel_set_back(self):
+        self.check_edge(wf.fit(raycast_dock(3.2, setback=0.5), WATER), 3.2)
+
+    def test_off_the_centreline(self):
+        self.check_edge(wf.fit(raycast_dock(3.2, lat=0.3), WATER), 3.2)
+
+    def test_one_tip_in_the_sector(self):
+        # 0.3 m off the centreline at 3.0 m only ONE finger tip is inside the
+        # +-40 deg sector: no gap to see through, but it is too short to be
+        # the wall, and the dock edge is behind it
+        for sb in (0.0, 0.8):
+            self.check_edge(wf.fit(raycast_dock(3.0, lat=0.3, setback=sb), WATER), 3.0)
+
+    def test_every_range_ranges_the_edge(self):
+        # the whole approach, both panel positions: the SAME surface throughout,
+        # which is what makes a calibrated range mean anything
+        for sb in (0.0, 0.8):
+            for r in (1.0, 1.8, 2.4, 2.8, 3.4, 3.8):
+                self.check_edge(wf.fit(raycast_dock(r, lat=0.15, setback=sb, step_deg=0.5,
+                                                    seed=int(r * 10)), WATER), r)
+
+    def test_the_fingers_still_give_the_offset(self):
+        fit = wf.fit(raycast_dock(3.2, lat=0.2), WATER)
+        self.assertAlmostEqual(fit.lat_m, 0.2, delta=0.05)
+
+    def test_inside_the_slip_unchanged(self):
+        fit = wf.fit(raycast_dock(1.2), WATER)
+        self.check_edge(fit, 1.2)
+        self.assertTrue(math.isnan(fit.skipped_m))
+
+    def test_the_skip_is_reported(self):
+        fit = wf.fit(raycast_dock(3.2, setback=0.5), WATER)
+        if not math.isnan(fit.skipped_m):            # only if the tips won RANSAC
+            self.assertAlmostEqual(fit.skipped_m, 1.2, delta=0.05)
+
+    def test_a_panel_seen_over_the_edge_is_not_a_gap(self):
+        # inside the slip with the panel set back: the edge, not the panel
+        self.check_edge(wf.fit(raycast_dock(1.2, setback=0.5), WATER), 1.2)
+        self.check_edge(wf.fit(raycast_dock(2.5, setback=0.8), WATER), 2.5)
+
+
 class TestWall(unittest.TestCase):
 
     def check(self, fit, range_m, angle_deg=0.0, tol=0.01):

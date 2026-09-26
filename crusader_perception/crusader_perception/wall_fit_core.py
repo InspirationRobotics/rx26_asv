@@ -17,6 +17,27 @@ the target panel, not the panel. Calibration against this number absorbs the
 offset, as long as the tree later positions by the same number (face_setback in
 squirt_cal is only for the starting guess).
 
+A WALL YOU CAN SEE THROUGH IS NOT THE WALL. From OUTSIDE a slip (the nozzle
+fires from ~3.2 m, 1.2 m beyond the 2 m fingers) the four fingers' tip faces are
+collinear, 2 m nearer than the dock edge, and - the LiDAR sampling by angle -
+often carry more points than it. RANSAC takes them. But the slip opening is a
+1.5 m GAP in that line with the dock edge visible through it, which a real
+wall never has. So a line with at least min_inliers points seen THROUGH gaps
+in it is skipped and the fit repeated on what lies beyond
+(test_wall_fit_core.TestOutsideTheSlip, ray-cast from the build guide's dock).
+Points seen OVER a line (a panel set back on the deck, above its edge) cross it
+where it has points, so they do not count. Off the centreline only ONE tip may
+be in the sector - no gap to see through - so a line shorter than a finger
+is wide (SHORT_M) with a wall behind it is skipped too: it is something in
+front of the wall.
+
+AND THE NEAREST SOLID LINE WINS. A panel set back on the deck, seen over the
+edge, can carry more points than the edge; by count alone the answer would
+flip between the two as the range changes, and a calibrated range is only
+worth anything if the same surface is ranged at every distance. So after the
+best-scoring line, a nearer parallel one with a wall's inliers and span that is
+not itself see-through replaces it: the dock EDGE, always.
+
 Frames: body REP-103 (x forward, y LEFT, z up; z datum = the hull bottom, so the
 waterline is ClusterParams.water_z). No ROS; numpy only; unit-tested.
 """
@@ -26,6 +47,15 @@ from dataclasses import dataclass
 import numpy as np
 
 from crusader_perception.lidar_cluster_core import level
+
+SEE_THROUGH_GAP_M = 0.15   # a line with no inlier this close to where a ray crosses it
+BEYOND_M = 0.3             # "beyond" = at least this far past the line
+MAX_SKIPS = 2              # see-through lines skipped before giving up on the far one
+PARALLEL_DEG = 10.0        # a nearer line must be this parallel to replace the best
+SHORT_M = 0.6              # shorter than this (a 0.5 m finger tip), with more behind: not the wall
+NEARER_M = 0.1             # "nearer" = at least this far in front of the best line
+COVER_BIN_M, COVER_MIN = 0.05, 0.5   # a replacement must have points along HALF its span
+NEARER_TRIES = 4           # candidate nearer lines looked at per step
 
 
 @dataclass
@@ -61,6 +91,7 @@ class WallFit:
     left_m: float = float("nan")     # left finger's inner edge, along the wall
     right_m: float = float("nan")    # right finger's, as a positive distance
     n_band: int = 0                  # points that survived the gates
+    skipped_m: float = float("nan")  # a see-through line skipped at this range (fingers' tips)
 
     @property
     def lat_m(self):
@@ -97,6 +128,95 @@ def _line_through(p1, p2):
     return n, float(n @ p1)
 
 
+def _ransac(pts, wp: WallParams, rng):
+    """(n, d) of the line facing the boat with the most points within tol, or None."""
+    if pts.shape[0] < 2:
+        return None
+    best, best_n = None, 0
+    idx = rng.integers(0, pts.shape[0], size=(wp.iters, 2))
+    for i, j in idx:
+        line = _line_through(pts[i], pts[j])
+        if line is None:
+            continue
+        n, d = line
+        if d < 0:
+            n, d = -n, -d                       # normal points from the boat to the wall
+        if abs(math.degrees(math.atan2(n[1], n[0]))) > wp.max_angle_deg:
+            continue                            # a finger, or a wall off to the side
+        cnt = int((np.abs(pts @ n - d) <= wp.tol_m).sum())
+        if cnt > best_n:
+            best, best_n = (n, d), cnt
+    return best
+
+
+def _subsample(pts, wp: WallParams, rng):
+    if pts.shape[0] > wp.max_points:
+        return pts[rng.choice(pts.shape[0], wp.max_points, replace=False)]
+    return pts
+
+
+def _span(xy, line, wp: WallParams):
+    """How far the line's inliers spread along it."""
+    n, d = line
+    inl = xy[np.abs(xy @ n - d) <= wp.tol_m]
+    if inl.shape[0] < 2:
+        return 0.0
+    u = inl @ np.array([-n[1], n[0]])
+    return float(u.max() - u.min())
+
+
+def _solid(xy, line, wp: WallParams):
+    """Enough inliers, spread far enough along the line, to be a wall."""
+    n, d = line
+    return (int((np.abs(xy @ n - d) <= wp.tol_m).sum()) >= wp.min_inliers
+            and _span(xy, line, wp) >= wp.min_span_m)
+
+
+def _wall_like(xy, cand, best, wp: WallParams):
+    """May `cand`, nearer than `best`, replace it? Solid, longer than a finger
+    tip, filled in, parallel to it, and not itself see-through."""
+    dang = abs(math.degrees(math.atan2(cand[0][1], cand[0][0]) -
+                            math.atan2(best[0][1], best[0][0])))
+    return (_solid(xy, cand, wp) and _span(xy, cand, wp) >= SHORT_M
+            and _covered(xy, cand, wp) >= COVER_MIN and dang <= PARALLEL_DEG
+            and _seen_through(xy, cand, wp) is None)
+
+
+def _covered(xy, line, wp: WallParams):
+    """The share of the line's span that has inliers (COVER_BIN_M bins). Two
+    fingers' inner faces make a "line" across the slip with its whole span
+    empty but for the ends; a wall is filled in."""
+    n, d = line
+    inl = xy[np.abs(xy @ n - d) <= wp.tol_m]
+    if inl.shape[0] < 2:
+        return 0.0
+    u = inl @ np.array([-n[1], n[0]])
+    bins = np.floor((u - u.min()) / COVER_BIN_M).astype(int)
+    return len(np.unique(bins)) / (bins.max() + 1)
+
+
+def _seen_through(xy, line, wp: WallParams):
+    """The points beyond `line` if at least min_inliers of them are seen
+    THROUGH gaps in it (the slip opening between the fingers' tips), else None.
+    A point's line of sight crosses the line at along = its along * d / its
+    distance; seen through = inside the line's inlier span with no inlier
+    within SEE_THROUGH_GAP_M of that crossing."""
+    n, d = line
+    resid = xy @ n - d
+    t = np.array([-n[1], n[0]])
+    u_in = np.sort(xy[np.abs(resid) <= wp.tol_m] @ t)
+    beyond = xy[resid > BEYOND_M]
+    if u_in.size < 2 or beyond.shape[0] < wp.min_inliers:
+        return None
+    u_x = (beyond @ t) * d / (beyond @ n)
+    inside = (u_x > u_in[0]) & (u_x < u_in[-1])
+    k = np.clip(np.searchsorted(u_in, u_x), 1, u_in.size - 1)
+    gap = np.minimum(np.abs(u_x - u_in[k - 1]), np.abs(u_in[k] - u_x)) > SEE_THROUGH_GAP_M
+    if int((inside & gap).sum()) < wp.min_inliers:
+        return None
+    return beyond
+
+
 def fit(pts_body, water_z, wp: WallParams = None, roll=0.0, pitch=0.0, seed=0):
     """WallFit for one sweep of BODY-frame points (already to_body'd)."""
     wp = wp or WallParams()
@@ -113,23 +233,42 @@ def fit(pts_body, water_z, wp: WallParams = None, roll=0.0, pitch=0.0, seed=0):
     if xy.shape[0] > wp.max_points:
         score_set = xy[rng.choice(xy.shape[0], wp.max_points, replace=False)]
 
-    best, best_n = None, 0
-    idx = rng.integers(0, score_set.shape[0], size=(wp.iters, 2))
-    for i, j in idx:
-        line = _line_through(score_set[i], score_set[j])
-        if line is None:
-            continue
-        n, d = line
-        if d < 0:
-            n, d = -n, -d                       # normal points from the boat to the wall
-        if abs(math.degrees(math.atan2(n[1], n[0]))) > wp.max_angle_deg:
-            continue                            # a finger, or a wall off to the side
-        cnt = int((np.abs(score_set @ n - d) <= wp.tol_m).sum())
-        if cnt > best_n:
-            best, best_n = (n, d), cnt
+    best = _ransac(score_set, wp, rng)
     if best is None:
         out.why = "no line faces the boat"
         return out
+    fence_d = None
+    for _ in range(MAX_SKIPS):                  # a line you can see through is not the wall
+        beyond = _seen_through(xy, best, wp)
+        if beyond is None and _span(xy, best, wp) < SHORT_M:
+            beyond = xy[xy @ best[0] - best[1] > BEYOND_M]     # ...nor a stub in front of one
+            if beyond.shape[0] < wp.min_inliers:
+                beyond = None
+        if beyond is None:
+            break
+        nxt = _ransac(_subsample(beyond, wp, rng), wp, rng)
+        if nxt is None:
+            break
+        out.skipped_m = fence_d = best[1]
+        best = nxt
+    for _ in range(MAX_SKIPS):                  # ...and the nearest solid one is
+        pool = xy[xy @ best[0] - best[1] < -NEARER_M]
+        if fence_d is not None:
+            pool = pool[pool @ best[0] > fence_d + BEYOND_M]
+        found = None
+        for _ in range(NEARER_TRIES):           # a phantom may score first: drop it, look again
+            if pool.shape[0] < wp.min_inliers:
+                break
+            cand = _ransac(_subsample(pool, wp, rng), wp, rng)
+            if cand is None:
+                break
+            if _wall_like(xy, cand, best, wp):
+                found = cand
+                break
+            pool = pool[np.abs(pool @ cand[0] - cand[1]) > wp.tol_m]
+        if found is None:
+            break
+        best = found
 
     # refine on ALL band points: total least squares on the inliers
     n, d = best
@@ -138,7 +277,9 @@ def fit(pts_body, water_z, wp: WallParams = None, roll=0.0, pitch=0.0, seed=0):
         if inl.shape[0] < 2:
             break
         c = inl.mean(axis=0)
-        _, _, vt = np.linalg.svd(inl - c)
+        # full_matrices=False: the default builds an N x N U for N inliers -
+        # 10k points near a wall is 800 MB and most of a second, every sweep
+        _, _, vt = np.linalg.svd(inl - c, full_matrices=False)
         n = vt[1] / np.linalg.norm(vt[1])
         d = float(n @ c)
         if d < 0:
