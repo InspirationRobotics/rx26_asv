@@ -24,6 +24,8 @@ setup(
             "lidar_cluster_node = crusader_perception.lidar_cluster_node:main",
             "oak_detector = crusader_perception.oak_detector:main",
             "proximity_bridge = crusader_perception.proximity_bridge_node:main",
+            # Task 3 fixed nozzle: not in core.launch.py until it has run on the boat
+            "wall_range_node = crusader_perception.wall_range_node:main",
         ],
     },
 )

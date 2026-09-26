@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Squirt cal</title>
+<style>
+/* One person, one phone, one hand free, in sunlight. Big targets, high
+   contrast, nothing that needs reading twice. Light by default (sunlight);
+   the moon button flips it. */
+:root{
+  --bg:#f4f5f7; --card:#ffffff; --ink:#111418; --dim:#5b6470; --line:#d5d9df;
+  --go:#0a8a3a; --go-bg:#dff5e6; --warn:#a15c00; --warn-bg:#fff1d6;
+  --bad:#b3261e; --bad-bg:#fde2df; --accent:#1c5fd1; --accent-bg:#e3ecfd;
+  --btn:#eef0f3; --btn-ink:#111418; --on-accent:#ffffff;
+}
+:root[data-theme="dark"]{
+  --bg:#0e1116; --card:#171b22; --ink:#eef1f5; --dim:#9aa4b2; --line:#2a313b;
+  --go:#45d07b; --go-bg:#12301f; --warn:#f0b24a; --warn-bg:#35270d;
+  --bad:#ff7a70; --bad-bg:#3a1714; --accent:#7fb0ff; --accent-bg:#162640;
+  --btn:#232a34; --btn-ink:#eef1f5; --on-accent:#0b1220;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);
+  font:16px/1.35 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+body{padding:8px max(10px,env(safe-area-inset-right)) 40px max(10px,env(safe-area-inset-left))}
+main{max-width:520px;margin:0 auto}
+header{display:flex;align-items:center;gap:8px;margin:2px 0 8px}
+header h1{font-size:18px;margin:0;flex:1}
+.pill{font-size:12px;padding:3px 8px;border-radius:99px;background:var(--btn);color:var(--dim)}
+.pill.ok{background:var(--go-bg);color:var(--go)} .pill.bad{background:var(--bad-bg);color:var(--bad)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px;margin:8px 0}
+.banner{border-radius:12px;padding:10px 12px;margin:8px 0;font-weight:600}
+.banner.warn{background:var(--warn-bg);color:var(--warn)} .banner.bad{background:var(--bad-bg);color:var(--bad)}
+.hidden{display:none!important}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.dim{color:var(--dim)} .small{font-size:13px}
+button{font:inherit;border:0;border-radius:12px;background:var(--btn);color:var(--btn-ink);
+  padding:12px 14px;min-height:48px;cursor:pointer;-webkit-tap-highlight-color:transparent;
+  user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+button:disabled{opacity:.35;cursor:default}
+button.on{background:var(--accent);color:var(--on-accent)}
+.seg{display:flex;gap:6px} .seg button{flex:1}
+/* the readout: the one thing to read from the helm */
+#rng{font-size:44px;font-weight:800;letter-spacing:-.5px;font-variant-numeric:tabular-nums}
+#adv{font-size:30px;font-weight:800;margin-top:2px}
+#adv.on{color:var(--go)} #adv.fwd,#adv.back{color:var(--accent)}
+.sub{font-size:15px;margin-top:4px}
+.steady{display:flex;align-items:center;gap:10px;font-weight:700;font-size:18px}
+.dot{width:22px;height:22px;border-radius:50%;background:var(--bad);flex:none}
+.dot.go{background:var(--go)}
+#fire{width:100%;min-height:84px;font-size:22px;font-weight:800;background:var(--accent);
+  color:var(--on-accent);position:relative;overflow:hidden;touch-action:none}
+#fire .fill{position:absolute;left:0;top:0;bottom:0;width:0;background:rgba(255,255,255,.35)}
+#fire.holding .fill{width:100%;transition:width .6s linear}
+#fire:disabled{background:var(--btn);color:var(--dim)}
+#fstat{margin-top:8px;font-weight:600;min-height:22px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.grid3 button{min-height:76px;font-size:15px;font-weight:700;line-height:1.2;padding:8px 4px}
+.grid3 .ok{background:var(--go);color:var(--on-accent);font-size:20px}
+.wallcap{text-align:center;font-size:12px;color:var(--dim);letter-spacing:2px;margin-bottom:6px}
+#vcard.ask{outline:3px solid var(--accent)}
+table{width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums}
+th,td{padding:4px 3px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+tr.x td{opacity:.45;text-decoration:line-through}
+pre{white-space:pre-wrap;font-size:12px;background:var(--btn);padding:8px;border-radius:8px;margin:6px 0}
+.est{margin:6px 0}
+.est b{font-size:15px}
+input[type=number]{font:inherit;width:110px;padding:10px;border-radius:10px;border:1px solid var(--line);
+  background:var(--bg);color:var(--ink)}
+input[type=range]{width:100%}
+details summary{cursor:pointer;font-weight:600;padding:4px 0}
+.tbl{overflow-x:auto}
+</style></head>
+<body><main>
+<header>
+  <h1>Squirt cal</h1>
+  <span class="pill" id="kind">…</span>
+  <span class="pill" id="conn">connecting</span>
+  <button id="theme" title="dark / light" style="min-height:36px;padding:6px 10px">◐</button>
+</header>
+<div id="banner" class="banner warn hidden"></div>
+
+<section class="card">
+  <div class="seg" id="targets"></div>
+</section>
+
+<section class="card">
+  <div class="row" style="justify-content:space-between;align-items:baseline">
+    <div id="rng">—</div><div class="dim" id="goal">target —</div>
+  </div>
+  <div id="adv">—</div>
+  <div class="sub" id="latAdv"></div>
+  <div class="sub" id="angAdv"></div>
+  <div class="small dim" id="src"></div>
+</section>
+
+<section class="card">
+  <div class="steady"><span class="dot" id="sdot"></span><span id="stext">…</span></div>
+  <div class="small dim" id="sdetail"></div>
+</section>
+
+<section class="card">
+  <div class="seg" id="bursts" style="margin-bottom:8px"></div>
+  <div class="seg" style="margin-bottom:8px">
+    <button id="mSteady">Fire when steady</button><button id="mNow">Fire now</button>
+  </div>
+  <button id="fire"><span class="fill"></span><span id="fireLbl">HOLD TO SQUIRT</span></button>
+  <div class="row" style="margin-top:8px"><button id="cancel" style="flex:1">Cancel</button></div>
+  <div id="fstat"></div>
+  <div class="small dim" id="bridge"></div>
+</section>
+
+<section class="card" id="vcard">
+  <div class="wallcap">▲ WALL ▲ — where should the BOAT go?</div>
+  <div class="grid3">
+    <button id="v_fl">↖<br>fwd + left</button>
+    <button id="v_f">↑<br>too far FORWARD</button>
+    <button id="v_fr">↗<br>fwd + right</button>
+    <button id="v_l">←<br>too far LEFT</button>
+    <button id="v_ok" class="ok">✓<br>ON</button>
+    <button id="v_r">→<br>too far RIGHT</button>
+    <button id="v_bl">↙<br>back + left</button>
+    <button id="v_b">↓<br>too far BACK</button>
+    <button id="v_br">↘<br>back + right</button>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button id="discard" style="flex:2">Didn't see — discard</button>
+    <button id="undo" style="flex:1">Undo</button>
+  </div>
+</section>
+
+<section class="card">
+  <div id="ests"></div>
+</section>
+
+<section class="card">
+  <div class="row" style="justify-content:space-between">
+    <b>Shots</b><span class="dim small" id="sess"></span><button id="csv">CSV</button>
+  </div>
+  <div class="tbl"><table><thead><tr><th>#</th><th>tgt</th><th>who</th><th>range</th>
+    <th>side</th><th>pitch pp</th><th>steady</th><th>verdict</th></tr></thead>
+    <tbody id="shots"></tbody></table></div>
+</section>
+
+<section class="card">
+  <div class="row" style="justify-content:space-between"><b>For the tree</b>
+    <button id="copyYaml">Copy</button></div>
+  <pre id="yaml"></pre>
+</section>
+
+<section class="card">
+  <details><summary>No LiDAR? Use a tape measure</summary>
+    <div class="small dim">The range from the tool's reference point (see README) to the
+      wall, in metres. Used for every shot until cleared.</div>
+    <div class="row" style="margin-top:8px">
+      <input type="number" id="tapeIn" step="0.01" min="0.1" max="5" placeholder="1.00">
+      <button id="tapeSet">Set</button><button id="tapeClear">Clear</button>
+    </div>
+  </details>
+  <details><summary>Session and sound</summary>
+    <div class="row" style="margin-top:8px">
+      <button id="sound">Sound: off</button>
+      <button id="chime">Chime when steady: off</button>
+      <button id="newSession">New session</button>
+    </div>
+    <div class="small dim" style="margin-top:6px">Sound needs one tap on the page first
+      (phone rule). The screen lock cannot be held over plain http: set the phone's
+      screen timeout long.</div>
+  </details>
+</section>
+
+<section class="card hidden" id="fakeCard">
+  <b>Fake boat</b> <span class="small dim">(desk testing only)</span>
+  <div class="small" id="fakeTruth" style="margin:6px 0"></div>
+  <label class="small">Sea state <span id="seaV"></span></label>
+  <input type="range" id="sea" min="0" max="3" step="0.1">
+  <div class="grid3" style="margin-top:8px">
+    <span></span><button id="n_f">pilot: 5 cm fwd</button><span></span>
+    <button id="n_l">5 cm left</button><button id="pilotSquirt">pilot squirt</button><button id="n_r">5 cm right</button>
+    <span></span><button id="n_b">5 cm back</button><span></span>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button id="oracle">Oracle verdict</button>
+    <button id="fFollow">Follow advice</button>
+    <button id="fFingers">Fingers</button>
+    <button id="fPump">Pump path</button>
+  </div>
+</section>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+// Every static button is wired with on() or hold(); squirt_cal.py checks at
+// startup that no <button id> in this page is missing from those calls.
+function on(id, fn){ $(id).onclick = fn; }
+function hold(id, ms, fn){
+  const b = $(id); let timer = null;
+  const start = e => { e.preventDefault(); if (b.disabled) return;
+    b.classList.add('holding'); timer = setTimeout(() => { timer = null;
+      b.classList.remove('holding'); fn(); }, ms); };
+  const stop = () => { if (timer){ clearTimeout(timer); timer = null; } b.classList.remove('holding'); };
+  b.addEventListener('pointerdown', start);
+  ['pointerup','pointerleave','pointercancel'].forEach(k => b.addEventListener(k, stop));
+  b.oncontextmenu = e => e.preventDefault();
+}
+
+let S = null, lastEvent = null, wasSteady = false, soundOn = false, chimeOn = false, tapped = false;
+let AC = null;
+function audio(){ if (!AC){ try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){} }
+  if (AC && AC.state === 'suspended') AC.resume(); return AC; }
+function beep(freq, dur, when){ if (!soundOn) return; const ac = audio(); if (!ac) return;
+  const o = ac.createOscillator(), g = ac.createGain(); const t = ac.currentTime + (when || 0);
+  o.frequency.value = freq; g.gain.setValueAtTime(0.25, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(ac.destination); o.start(t); o.stop(t + dur); }
+function buzz(ms){ if (!tapped) return; try { navigator.vibrate && navigator.vibrate(ms); } catch(e){} }
+document.addEventListener('pointerdown', () => { tapped = true; if (soundOn) audio(); }, {passive:true});
+
+async function post(path, body){
+  try {
+    const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'},
+                                 body: JSON.stringify(body || {})});
+    const j = await r.json(); $('fstat').textContent = j.message || '';
+    poll(); return j;
+  } catch(e){ $('fstat').textContent = 'no answer from the boat'; return {ok:false}; }
+}
+
+const fmt = (v, d=2) => (v === null || v === undefined) ? '—' : Number(v).toFixed(d);
+
+function render(){
+  const s = S;
+  $('kind').textContent = s.adapter.kind === 'fake' ? 'FAKE BOAT' : 'boat';
+  $('kind').className = 'pill ' + (s.adapter.kind === 'fake' ? 'bad' : 'ok');
+  // banners: the things that make a session worthless if missed
+  const warn = [];
+  if (s.log_error) warn.push('LOG: ' + s.log_error);
+  if (s.advice.warn) warn.push(s.advice.warn);
+  if (s.mission_active) warn.push('A mission is running: the tool will not fire.');
+  $('banner').textContent = warn.join(' · ');
+  $('banner').classList.toggle('hidden', warn.length === 0);
+
+  // targets
+  const tb = $('targets');
+  if (tb.childElementCount !== s.targets.length){
+    tb.innerHTML = '';
+    s.targets.forEach(t => { const b = document.createElement('button');
+      b.textContent = t.label.replace(', top edge', ' top'); b.dataset.id = t.id;
+      b.onclick = () => post('/target', {id: t.id}); tb.appendChild(b); });
+  }
+  [...tb.children].forEach(b => b.classList.toggle('on', b.dataset.id === s.target));
+
+  // readout
+  const L = s.live, A = s.advice;
+  $('rng').textContent = L.range_m === null ? '— m' : fmt(L.range_m) + ' m';
+  $('goal').textContent = A.goal_range_m === null ? 'target —' : 'target ' + fmt(A.goal_range_m) + ' m';
+  $('adv').textContent = A.fa_text || '—';
+  $('adv').className = A.fa_dir || '';
+  $('latAdv').textContent = A.lat_text || '';
+  $('angAdv').textContent = A.angle_text || '';
+  $('src').textContent = L.src === 'lidar' ? 'LiDAR wall range' + (L.lat_m !== null ? ', fingers seen' : '')
+    : L.src === 'tape' ? 'TAPE range (typed in)' : 'NO RANGE' + (L.age_s ? ` (last ${L.age_s} s ago)` : '');
+  if (A.goal_how) $('src').textContent += ' · target from ' + A.goal_how;
+
+  // steadiness, and the chime for pilot-fired shots
+  const st = s.steady;
+  $('sdot').classList.toggle('go', st.steady);
+  $('stext').textContent = st.steady ? `STEADY ${fmt(st.steady_for_s,1)} s` : (st.reasons[0] || 'not steady');
+  $('sdetail').textContent = `rate ${fmt(st.rate_max_dps,1)}°/s · pitch ±${fmt(st.pitch_dev,1)}° · roll ±${fmt(st.roll_dev,1)}°`
+    + ` · sticks quiet ${fmt(st.sticks_quiet_s,1)} s · attitude ${st.att_hz} Hz`;
+  if (st.steady && !wasSteady && chimeOn) beep(1320, 0.12);
+  wasSteady = st.steady;
+
+  // fire controls
+  [...$('bursts').children].forEach(b => b.classList.toggle('on', Number(b.dataset.b) === s.burst_s));
+  if ($('bursts').childElementCount !== s.burst_choices.length){
+    $('bursts').innerHTML = '';
+    s.burst_choices.forEach(v => { const b = document.createElement('button');
+      b.textContent = v + ' s'; b.dataset.b = v; b.onclick = () => post('/burst', {burst_s: v});
+      $('bursts').appendChild(b); });
+  }
+  $('mSteady').classList.toggle('on', s.arm_mode === 'steady');
+  $('mNow').classList.toggle('on', s.arm_mode === 'now');
+  const idle = s.state === 'idle';
+  $('fire').disabled = !idle || !s.fire_ok;
+  $('fireLbl').textContent = !s.fire_ok ? 'LOG ONLY — flick the pump switch'
+    : s.state === 'armed' ? `WAITING FOR STEADY ${fmt(s.armed_left_s,0)} s`
+    : s.state === 'firing' ? 'FIRING…' : s.state === 'verdict' ? 'VERDICT FIRST ↓' : 'HOLD TO SQUIRT';
+  $('cancel').disabled = s.state !== 'armed';
+  $('bridge').textContent = s.fire_ok ? (s.adapter.status_line || '') : '';
+  if (!s.fire_ok) $('fstat').textContent = s.fire_why;
+  else if (s.state !== 'idle' || !$('fstat').textContent) $('fstat').textContent = s.message;
+
+  // verdict pad
+  const ask = s.state === 'verdict' || s.state === 'firing';
+  ['v_fl','v_f','v_fr','v_l','v_ok','v_r','v_bl','v_b','v_br','discard'].forEach(id => $(id).disabled = !ask);
+  $('undo').disabled = !(idle && s.n_shots > 0);
+  $('vcard').classList.toggle('ask', s.state === 'verdict');
+
+  // estimates
+  $('ests').innerHTML = s.targets.map(t => { const e = s.estimates[t.id], f = e.fa, l = e.lat;
+    const band = f.band ? ` · hits ${fmt(f.band[0])}–${fmt(f.band[1])}` : '';
+    const br = (f.lo !== null && f.hi !== null) ? ` · bracket ${fmt(f.lo)}–${fmt(f.hi)}`
+      : f.lo !== null ? ` · above ${fmt(f.lo)}` : f.hi !== null ? ` · below ${fmt(f.hi)}` : '';
+    const reach = e.model_reach_m === null ? '' : e.model_reach_m < 0
+      ? ` · <span style="color:var(--bad)">model: out of reach by ${fmt(-e.model_reach_m*100,1)} cm</span>`
+      : ` · model: ${fmt(e.model_reach_m*100,0)} cm to spare`;
+    return `<div class="est"><b>${t.label}</b><br>` +
+      `range ${f.centre === null ? '—' : fmt(f.centre) + ' m'} <span class="dim small">(${f.how}, ${f.n} verdict(s)${band}${br})</span>` +
+      (l.centre !== null ? `<br>side ${fmt(l.centre)} m <span class="dim small">(${l.how})</span>` : '') +
+      `<br><span class="small dim">model start ${e.start_range_m === null ? '—' : fmt(e.start_range_m) + ' m'}${reach}</span></div>`;
+  }).join('');
+
+  // shots
+  $('sess').textContent = 'session ' + s.session;
+  $('shots').innerHTML = s.shots.slice().reverse().map(x => {
+    const v = x.discarded ? ('discard: ' + x.why) : [x.fa, x.lat].filter(Boolean).join('/');
+    return `<tr class="${x.discarded ? 'x' : ''}"><td>${x.id}</td><td>${x.target.split('_')[0]}</td>` +
+      `<td>${x.source === 'pilot' ? 'pilot' : 'tool'}</td><td>${fmt(x.range_m)}${x.range_src === 'tape' ? 't' : ''}</td>` +
+      `<td>${fmt(x.lat_m)}</td><td>${fmt(x.pp_pitch_deg,1)}</td><td>${x.steady ? '✓' : '✗'}</td><td>${v}</td></tr>`;
+  }).join('');
+  $('yaml').textContent = s.yaml;
+
+  // audio cues for what happened since the last poll. The first poll only
+  // takes the cursor: a page (re)loaded mid-session must not replay old shots.
+  if (lastEvent === null) lastEvent = s.events.length ? s.events[s.events.length - 1][0] : 0;
+  for (const [seq, kind] of s.events){
+    if (seq <= lastEvent) continue;
+    lastEvent = seq;
+    if (kind === 'fired'){ beep(880, 0.15); buzz(150); }
+    else if (kind === 'verdict'){ beep(660, 0.1); beep(660, 0.1, 0.18); buzz([80,60,80]); }
+    else if (kind === 'refused'){ beep(220, 0.35); }
+  }
+
+  // fake panel
+  const f = s.fake;
+  $('fakeCard').classList.toggle('hidden', !f);
+  if (f){
+    $('fakeTruth').innerHTML = `truth: boat at ${fmt(f.true_range_m)} m, side ${fmt(f.true_lat_m)} m · ` +
+      `target hit at ${f.truth_range_m === null ? 'OUT OF REACH' : fmt(f.truth_range_m) + ' m'} · apex ${fmt(f.apex_z_m)} m`;
+    $('seaV').textContent = fmt(f.sea, 1);
+    if (document.activeElement !== $('sea')) $('sea').value = f.sea;
+    $('fFollow').classList.toggle('on', f.follow_advice);
+    $('fFingers').classList.toggle('on', f.fingers);
+    $('fPump').classList.toggle('on', f.pump_path);
+  }
+}
+
+let inflight = false;
+async function poll(){
+  if (inflight) return; inflight = true;
+  try {
+    const want = (S && S.adapter.kind === 'fake') || !S ? '?layers=fake' : '';
+    const r = await fetch('/state' + want, {cache:'no-store'});
+    const s = await r.json();
+    if (s.error) throw new Error(s.error);
+    S = s; render();
+    $('conn').textContent = 'live'; $('conn').className = 'pill ok';
+  } catch(e){
+    $('conn').textContent = 'NO LINK'; $('conn').className = 'pill bad';
+  } finally { inflight = false; }
+}
+
+// ---- wiring ----
+hold('fire', 600, () => post('/arm', {mode: S ? S.arm_mode : 'steady'}));
+on('mSteady', () => { S.arm_mode = 'steady'; render(); setMode('steady'); });
+on('mNow', () => { S.arm_mode = 'now'; render(); setMode('now'); });
+function setMode(m){ post('/mode', {mode: m}); }
+on('cancel', () => post('/cancel'));
+on('v_fl', () => post('/verdict', {fa:'fwd', lat:'left'}));
+on('v_f',  () => post('/verdict', {fa:'fwd', lat:'ok'}));
+on('v_fr', () => post('/verdict', {fa:'fwd', lat:'right'}));
+on('v_l',  () => post('/verdict', {fa:'ok', lat:'left'}));
+on('v_ok', () => post('/verdict', {fa:'ok', lat:'ok'}));
+on('v_r',  () => post('/verdict', {fa:'ok', lat:'right'}));
+on('v_bl', () => post('/verdict', {fa:'back', lat:'left'}));
+on('v_b',  () => post('/verdict', {fa:'back', lat:'ok'}));
+on('v_br', () => post('/verdict', {fa:'back', lat:'right'}));
+on('discard', () => post('/discard', {why: "didn't see"}));
+on('undo', () => post('/undo'));
+on('tapeSet', () => { const v = parseFloat($('tapeIn').value); post('/tape', {range_m: isNaN(v) ? null : v}); });
+on('tapeClear', () => post('/tape', {range_m: null}));
+on('newSession', () => { if (confirm('Start a new session? The current one stays on disk.')) post('/session/new'); });
+on('sound', () => { soundOn = !soundOn; if (soundOn){ audio(); beep(880, 0.08); }
+  $('sound').textContent = 'Sound: ' + (soundOn ? 'on' : 'off'); $('sound').classList.toggle('on', soundOn); });
+on('chime', () => { chimeOn = !chimeOn; if (chimeOn && !soundOn) $('sound').click();
+  $('chime').textContent = 'Chime when steady: ' + (chimeOn ? 'on' : 'off'); $('chime').classList.toggle('on', chimeOn); });
+on('theme', () => { const r = document.documentElement;
+  r.dataset.theme = r.dataset.theme === 'dark' ? 'light' : 'dark';
+  try { localStorage.setItem('squirt_theme', r.dataset.theme); } catch(e){} });
+on('copyYaml', async () => { try { await navigator.clipboard.writeText($('yaml').textContent);
+  $('fstat').textContent = 'YAML copied'; } catch(e){ const r = document.createRange();
+  r.selectNodeContents($('yaml')); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+  $('fstat').textContent = 'selected: copy it from the menu'; } });
+on('csv', async () => {
+  const r = await fetch('/state?layers=all', {cache:'no-store'}); const s = await r.json();
+  const rows = s.shots_all || s.shots; if (!rows.length) return;
+  const keys = Object.keys(rows[0]);
+  const esc = v => v === null || v === undefined ? '' : /[",\n]/.test(String(v)) ? '"' + String(v).replace(/"/g,'""') + '"' : String(v);
+  const csv = [keys.join(',')].concat(rows.map(x => keys.map(k => esc(x[k])).join(','))).join('\n');
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], {type:'text/csv'}));
+  a.download = 'squirt_' + s.session + '.csv'; a.click(); });
+// fake panel
+on('n_f', () => post('/fake/nudge', {d_range: -0.05}));
+on('n_b', () => post('/fake/nudge', {d_range: 0.05}));
+on('n_l', () => post('/fake/nudge', {d_lat: 0.05}));
+on('n_r', () => post('/fake/nudge', {d_lat: -0.05}));
+on('pilotSquirt', () => post('/fake/pilot_squirt', {burst_s: S ? S.burst_s : 0.3}));
+on('oracle', () => post('/fake/oracle'));
+on('fFollow', () => post('/fake/set', {follow_advice: !(S && S.fake && S.fake.follow_advice)}));
+on('fFingers', () => post('/fake/set', {fingers: !(S && S.fake && S.fake.fingers)}));
+on('fPump', () => post('/fake/set', {pump_path: !(S && S.fake && S.fake.pump_path)}));
+$('sea').onchange = e => post('/fake/set', {sea: Number(e.target.value)});
+
+try { const t = localStorage.getItem('squirt_theme'); if (t) document.documentElement.dataset.theme = t; } catch(e){}
+poll(); setInterval(poll, 250);
+</script>
+</body></html>

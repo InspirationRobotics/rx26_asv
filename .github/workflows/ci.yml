@@ -20,6 +20,27 @@ jobs:
       - name: config + param baseline guards
         run: python3 tools/scripts/check_config.py
 
+  core-tests:
+    name: plain-python core tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install numpy
+      # The rules that decide when water comes out (pump_core), the range the
+      # boat positions itself by (wall_fit_core), and the calibration session
+      # against a simulated boat (tools/squirt_cal). No ROS in any of them.
+      - name: pump_core, wall_fit_core, squirt_cal
+        run: |
+          for t in crusader_fcu/test/test_pump_core.py \
+                   crusader_perception/test/test_wall_fit_core.py \
+                   tools/squirt_cal/test_*.py; do
+            echo "== $t"
+            python3 "$t" || exit 1
+          done
+
   build:
     name: colcon build (ros:humble)
     runs-on: ubuntu-latest
@@ -69,6 +90,7 @@ jobs:
                    "crusader_perception buoy_detector" \
                    "crusader_perception lidar_cluster_node" \
                    "crusader_perception oak_detector" \
+                   "crusader_perception wall_range_node" \
                    "crusader_world_model target_tracker" \
                    "crusader_groundstation ground_station"; do
             grep -qx "$e" /tmp/execs.txt || {
@@ -78,7 +100,7 @@ jobs:
           mods = ["crusader_common.config", "crusader_common.node_main",
                   "crusader_common.param_utils", "crusader_common.stream_cache",
                   "crusader_common.drop_latch", "crusader_common.geo",
-                  "crusader_fcu.telemetry_bridge",
+                  "crusader_fcu.telemetry_bridge", "crusader_fcu.pump_core",
                   "crusader_behavior.safety.rc_heartbeat_core",
                   "crusader_behavior.safety.rc_heartbeat_watchdog",
                   "crusader_behavior.indicator.led_node",
@@ -158,7 +180,7 @@ jobs:
           # syntax error in one would have surfaced on the Jetson at the moment
           # someone reached for it. py_compile does not import, so their
           # numpy/cv2/rclpy dependencies do not need to exist on the runner.
-          python3 -m py_compile tools/*.py tools/scripts/*.py
+          python3 -m py_compile tools/*.py tools/scripts/*.py tools/squirt_cal/*.py
           # Every tracked shell script, so a new one is covered the day it lands
           # rather than the day someone remembers to add it here. setup/*.sh in
           # particular carries the repo-vs-workspace path derivation and the

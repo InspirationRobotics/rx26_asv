@@ -32,6 +32,11 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DockWindow.msg"
   "msg/DockBay.msg"
   "msg/DockObservation.msg"
+  # Task 3's fixed nozzle: the pump path through telemetry_bridge, and the wall
+  # range the boat positions itself by (tools/squirt_cal calibrates against it).
+  "msg/PumpCommand.msg"
+  "msg/PumpState.msg"
+  "msg/WallRange.msg"
   # Actions. Same rule as above: a file not listed here is silently not
   # generated, and the import fails at node start, on the boat.
   "action/SafePassage.action"

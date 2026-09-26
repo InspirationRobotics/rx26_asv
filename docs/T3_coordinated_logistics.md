@@ -115,7 +115,7 @@ commands and acts on none).
 | "Fully docked" defined how; is touching a finger penalised? | RoboNation | `DockedInBay`, the berth depth |
 | The deck's height above water on the day | on site | the window heights, so the pitch |
 | A USV→UAV resource-request message in the RXL dialect (only UAV→USV `RXL_RESOURCE_DELIVERY` exists) | UAV team | `rxl_link_node` putting `/crsd/uav_resource_request` on the air |
-| The water cannon: fixed or pan/tilt, where, what it takes | hardware | whatever subscribes `/crsd/water_cannon` |
+| The water cannon: fixed or pan/tilt, where, what it takes | **answered 2026-09-25: FIXED**, ~45°, ~3 m; on a Pixhawk pass-through output, pilot switch moving to ch10. The boat's position is the aim. `tools/squirt_cal` calibrates the range per window against `/crsd/wall_range`; the pump path is `/crsd/pump_cmd` → `telemetry_bridge` ([G7](G7_pump_bench.md)). `SprayUntilHit` (pan/tilt aim point) still has to be reworked to "go to the calibrated range, wait for steady, burst" | `SprayUntilHit`, and whatever turns `/crsd/water_cannon` into `/crsd/pump_cmd` |
 | The dock detector node itself (draft spec in firefighting-cv) | CV team | everything above; the tree fails fast without it (`DockCameraAlive`) |
 
 Undocking is not implemented: leaving a slip is stern-first and the setpoint path is

@@ -325,7 +325,8 @@ QGroundControl connects by itself.
 | **SA** | 5 | pressed in = Pixhawk control, released = Teensy control. **Keep pressed in** — the Teensy is not in use. |
 | **SB** | 7 | down = **e-stop** (RED, ~994) · middle = released (~1498) · up = **arm** (YELLOW + arming tune, ~1995). `RCx_OPTION=165`. |
 | **SC** | 8 | down = Manual · middle = Hold (boat actively stops) · up = **Guided** (GREEN — needs a mission loaded and GPS lock, else the mode change is rejected). |
-| **SE** | 9 | **PROPOSED, NOT BUILT** — autonomy-drop for RC-override nodes. See §17. |
+| **SE** | 9 | **PROPOSED, NOT BUILT** — autonomy-drop for RC-override nodes. See §17. Ch9 was the water pump until 2026-09-25, and every squirt tripped the drop latch; mix SE → CH9. |
+| pump switch | 10 | off (~1000) / squirt (~2000). Passed through to the pump's Pixhawk output (`SERVOn_FUNCTION=60`). Moved from ch9 on 2026-09-25 — [G7](G7_pump_bench.md). **SB does not stop it**; `telemetry_bridge`'s pump watchdog does. |
 
 **SB down is the real e-stop.** It kills motors instantly in any mode,
 independent of any node or software, at full RC range.

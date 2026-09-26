@@ -18,7 +18,10 @@ sequenceDiagram
     TB->>C: /crsd/autonomy_drop (latched)
     C->>TB: /crsd/force_disarm (never latch-gated)
     C->>TB: /crsd/rc_override (latch-gated)
+    C->>TB: /crsd/pump_cmd (pump_core-gated)
     TB->>MP: ARM_DISARM (force) / RC_CHANNELS_OVERRIDE
+    TB->>MP: DO_REPEAT_SERVO (one cycle) / DO_SET_SERVO (off)
+    TB->>C: /crsd/pump_state
 ```
 
 ## Three rules enforced in code
@@ -77,6 +80,30 @@ After setting it, re-export `params/working_crusader.params` from QGC. `SR0_*`
 is not in `param_guard`'s PROTECTED list, so preflight reports the change as a
 tunable warning rather than failing — but a stale baseline is how a real drift
 later gets waved through as noise.
+
+## The water pump (`pump_core.py`)
+
+Task 3's pump is on a Pixhawk output that passes the pilot's pump switch through
+(ch10, `SERVOn_FUNCTION=60`). `/crsd/pump_cmd` asks for a burst; the bridge sends it
+as **`MAV_CMD_DO_REPEAT_SERVO` with one cycle**, so the **autopilot** returns the
+output to `SERVOn_TRIM` when the burst is over — whatever happens to this node, the
+laptop or the WiFi. That makes **`SERVOn_TRIM` = pump OFF a safety requirement**;
+`check_config` fails a baseline where it is not.
+
+The bridge refuses a burst unless: a pump output is configured (`pump_servo_channel`,
+**0 until [G7](../docs/G7_pump_bench.md) is signed**), RC is fresh, SB is not in
+e-stop, the pilot's switch is OFF, the vehicle is armed (`pump_allow_disarmed` only
+by a `-p` override on the bench), the output reads OFF, and the gap since the last
+burst has passed. OFF (`duration_s: 0`) is never refused.
+
+**The SB e-stop stops motors, not a pass-through output.** So the 20 Hz tick runs a
+watchdog: pump ON with SB in e-stop or RC lost → `DO_SET_SERVO` OFF (once a second).
+Pump still ON 0.3 s after one of our bursts should have ended → OFF, and the pump
+path **latches off** until the bridge restarts: TRIM is probably not OFF, and that is
+a thing to look at, not to retry.
+
+Not mode-gated and not latch-gated: it moves water, not the boat. `pump_core` has no
+ROS and no MAVLink; `python3 crusader_fcu/test/test_pump_core.py` runs every rule.
 
 ## Note on the RC-override path
 

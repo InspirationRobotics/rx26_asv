@@ -33,6 +33,17 @@ Three jobs, deliberately fused into one node:
    enforcement point exists, but nothing exercises them yet. G1 sign-off needs a
    bench node that drives this topic (docs/G1_bench_procedure.md).
 
+4. TX (payload): the ONLY sanctioned path to the water pump. Nodes publish
+   crusader_msgs/PumpCommand on /crsd/pump_cmd; this node checks it against
+   crusader_fcu.pump_core (pump path configured, RC fresh, SB not in e-stop, the
+   pilot's pump switch OFF, armed, output reading OFF, burst length and gap) and
+   sends ONE-cycle MAV_CMD_DO_REPEAT_SERVO, so the autopilot itself ends the
+   burst. A watchdog sends the pump OFF if it is on under e-stop or RC loss (the
+   e-stop stops motors, not a pass-through output), and latches the path off if
+   a burst does not end. State on /crsd/pump_state. Disabled unless
+   pump_servo_channel is set; NOT mode-gated and NOT latch-gated (it moves water,
+   not the boat), which is a team decision recorded in docs/G7_pump_bench.md.
+
 The hardware e-stop (SB switch) remains below and independent of all of this.
 
 Why attitude is its OWN topic and not three more fields on LatLonHead: ATTITUDE
@@ -80,7 +91,7 @@ from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
 from crusader_msgs.msg import (Attitude, FcuStatus, GuidedSetpoint, LatLonHead,
-                               ObstacleDistance, RcChannels)
+                               ObstacleDistance, PumpCommand, PumpState, RcChannels)
 
 from crusader_common import config as crsd_config
 from crusader_common import geo
@@ -88,6 +99,8 @@ from crusader_common.drop_latch import DropLatch
 from crusader_common.node_main import run_node
 from crusader_common.param_utils import declare_from_config
 from crusader_common.stream_cache import StreamCache
+
+from crusader_fcu import pump_core
 
 # MAVLink 2 is REQUIRED, and must be selected before pymavlink is first
 # imported anywhere in this process: mavutil binds its dialect module at
@@ -130,6 +143,26 @@ PARAM_SPEC = {
     "mode_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
                            description="s without HEARTBEAT before the mode is "
                                        "treated as unknown (= not autonomous)"),
+    # --- the water pump (pump_core) ---
+    "pump_servo_channel": dict(read_only=True, lo=0, hi=16,
+                               description="Pixhawk output driving the pump; "
+                                           "0 = no pump path"),
+    "pump_rc_channel": dict(read_only=True, lo=1, hi=18,
+                            description="the pilot's pump switch"),
+    "pump_on_pwm": dict(read_only=True, lo=800, hi=2200,
+                        description="us that run the pump"),
+    "pump_off_pwm": dict(read_only=True, lo=800, hi=2200,
+                         description="us that stop it; MUST equal SERVOn_TRIM"),
+    "pump_max_burst_s": dict(read_only=True, lo=0.05, hi=2.0,
+                             description="longest burst accepted"),
+    "pump_min_gap_s": dict(read_only=True, lo=0.0, hi=30.0,
+                           description="s from one burst's end to the next"),
+    "pump_allow_disarmed": dict(read_only=True,
+                                description="bench only: bursts while disarmed"),
+    "estop_channel": dict(read_only=True, lo=1, hi=18,
+                          description="SB e-stop RC channel"),
+    "estop_threshold": dict(read_only=True, lo=800, hi=2200,
+                            description="us; below = e-stop (or RC lost)"),
 }
 
 RELEASE_FRAMES = 5          # all-zero override frames sent on trip
@@ -196,6 +229,7 @@ class TelemetryBridge(Node):
         self.status_pub = self.create_publisher(FcuStatus, "/crsd/fcu_status", 10)
         self.rc_pub = self.create_publisher(RcChannels, "/crsd/rc_channels", 10)
         self.drop_pub = self.create_publisher(Bool, "/crsd/autonomy_drop", latched_qos)
+        self.pump_pub = self.create_publisher(PumpState, "/crsd/pump_state", 10)
 
         self.create_subscription(RcChannels, "/crsd/rc_override",
                                  self._override_cb, 10)
@@ -223,6 +257,10 @@ class TelemetryBridge(Node):
         self.create_subscription(ObstacleDistance, "crsd/obstacle_distance",
                                  self._obstacle_cb, 10)
         self.create_service(Trigger, "/crsd/autonomy_drop_reset", self._reset_cb)
+        # Sanctioned pump TX (job 4 above). Checked by pump_core, timed by the
+        # autopilot. A topic, not a service: a service waiting on COMMAND_ACK
+        # would block this single-threaded executor, force-disarm included.
+        self.create_subscription(PumpCommand, "/crsd/pump_cmd", self._pump_cb, 10)
 
         # Each stream is republished ONLY while it is fresh. Rebroadcasting the
         # last cached frame with a fresh stamp after MAVProxy dies makes a dead
@@ -235,6 +273,21 @@ class TelemetryBridge(Node):
         self._att = StreamCache(t_out)     # (r, p, y, rspd, pspd, yspd) [rad, rad/s]
         self._status = StreamCache(t_out)  # (mode_str, armed, system_status)
         self._rc = StreamCache(t_out)      # list[int] 18
+        self._servo = StreamCache(t_out)   # the pump output's PWM (SERVO_OUTPUT_RAW)
+        self.pump = pump_core.PumpGate(pump_core.PumpParams.from_dict(p))
+        self._pump_seq = 0
+        self._pump_result = pump_core.RESULT_NONE
+        self._pump_reason = ""
+        self._pump_ack_until = 0.0         # an ACK before this is ours
+        if self.pump.p.servo_channel:
+            self.get_logger().info(
+                f"pump path: SERVO{self.pump.p.servo_channel} "
+                f"(pilot ch{self.pump.p.rc_channel}), on {self.pump.p.on_pwm} / "
+                f"off {self.pump.p.off_pwm}, bursts <= {self.pump.p.max_burst_s:.2f} s"
+                + (" -- DISARMED BURSTS ALLOWED (bench)" if self.pump.p.allow_disarmed
+                   else ""))
+        else:
+            self.get_logger().info("pump path: none (pump_servo_channel 0)")
 
         from pymavlink import mavutil
         self._mavutil = mavutil
@@ -330,6 +383,29 @@ class TelemetryBridge(Node):
                     self._rc.set(rc, t, stamp)
                     if self.latch.rc_sample(rc, t):
                         self._handle_trip()
+                elif mtype == "SERVO_OUTPUT_RAW" and self.pump.p.servo_channel:
+                    pwm = pump_core.servo_raw(msg, self.pump.p.servo_channel)
+                    if pwm is not None:
+                        self._servo.set(pwm, t, stamp)
+                elif mtype == "COMMAND_ACK" and t < self._pump_ack_until and \
+                        msg.command in (pump_core.MAV_CMD_DO_REPEAT_SERVO,
+                                        pump_core.MAV_CMD_DO_SET_SERVO):
+                    # MAVProxy hands every output every ACK, and pymavlink here
+                    # shares sysid 255 with it, so "ours" means "a servo ACK
+                    # inside the window after we sent one". pump_min_gap_s keeps
+                    # it to one pump command in flight.
+                    accepted = msg.result == 0      # MAV_RESULT_ACCEPTED
+                    self._pump_result = (pump_core.RESULT_ACCEPTED if accepted
+                                         else pump_core.RESULT_REJECTED)
+                    if not accepted:
+                        self._pump_reason = f"autopilot rejected it (MAV_RESULT {msg.result})"
+                    self._pump_ack_until = 0.0
+                elif mtype == "STATUSTEXT" and "ServoRelayEvent" in str(msg.text):
+                    # ArduPilot's own words when it will not drive an output,
+                    # e.g. "Channel 10 is already in use": the pump output's
+                    # SERVOn_FUNCTION is not one it may override.
+                    self._pump_reason = str(msg.text)
+                    self.get_logger().error(f"pump: autopilot says {msg.text!r}")
             # Outside the lock: a publish must never be held up by, or hold up,
             # the RC path that force-disarm depends on.
             if att_now is not None:
@@ -376,6 +452,91 @@ class TelemetryBridge(Node):
             m.header.stamp = self._rc.stamp
             m.channels = rc
             self.rc_pub.publish(m)
+        try:
+            self._pump_tick(t)
+        except Exception as e:          # never let the pump take telemetry down
+            self.get_logger().error(f"pump tick failed: {e}",
+                                    throttle_duration_sec=5.0)
+
+    # ---------- the water pump (sanctioned, pump_core-gated) ----------
+
+    def _pump_inputs(self, t):
+        with self._lock:
+            rc = self._rc.get(t)
+            status = self._status.get(t)
+            pwm = self._servo.get(t)
+        return pump_core.PumpInputs(now=t, rc=rc,
+                                    armed=None if status is None else bool(status[1]),
+                                    output_pwm=pwm)
+
+    def _pump_send(self, params, command):
+        self.conn.mav.command_long_send(
+            self.conn.target_system, self.conn.target_component,
+            command, 0, *params)
+
+    def _pump_cb(self, msg: PumpCommand):
+        """A burst, or OFF. Never raises: this runs on the executor that also
+        carries force-disarm."""
+        try:
+            t = time.monotonic()
+            p = self.pump.p
+            self._pump_seq = int(msg.seq)
+            duration = float(msg.duration_s)
+            if duration <= 0.0:
+                if p.servo_channel <= 0:
+                    self._pump_result = pump_core.RESULT_REFUSED
+                    self._pump_reason = "no pump path"
+                    return
+                self._pump_send(pump_core.set_servo_params(p.servo_channel, p.off_pwm),
+                                pump_core.MAV_CMD_DO_SET_SERVO)
+                self._pump_result = pump_core.RESULT_SENT
+                self._pump_reason = f"OFF ({msg.source or '?'})"
+                self._pump_ack_until = t + 1.5
+                return
+            ok, why = self.pump.check_burst(duration, self._pump_inputs(t))
+            if not ok:
+                self._pump_result = pump_core.RESULT_REFUSED
+                self._pump_reason = why
+                self.get_logger().warn(
+                    f"pump burst from {msg.source or '?'} refused: {why}",
+                    throttle_duration_sec=1.0)
+                return
+            self.pump.start_burst(duration, t)
+            self._pump_send(pump_core.repeat_servo_params(p.servo_channel, p.on_pwm,
+                                                          duration),
+                            pump_core.MAV_CMD_DO_REPEAT_SERVO)
+            self._pump_result = pump_core.RESULT_SENT
+            self._pump_reason = f"burst {duration:.2f} s ({msg.source or '?'})"
+            self._pump_ack_until = t + 1.5
+            self.get_logger().info(f"pump: {self._pump_reason}")
+        except Exception as e:
+            self._pump_result = pump_core.RESULT_REFUSED
+            self._pump_reason = f"error: {e}"
+            self.get_logger().error(f"pump command failed: {e}")
+
+    def _pump_tick(self, t):
+        p = self.pump.p
+        if p.servo_channel <= 0:
+            return
+        inp = self._pump_inputs(t)
+        why = self.pump.watchdog(inp)
+        if why:
+            self._pump_send(pump_core.set_servo_params(p.servo_channel, p.off_pwm),
+                            pump_core.MAV_CMD_DO_SET_SERVO)
+            self.get_logger().error(f"pump watchdog: {why} -- OFF sent")
+            self._pump_reason = f"watchdog: {why}"
+        m = PumpState()
+        if self._servo.stamp is not None:
+            m.header.stamp = self._servo.stamp
+        m.enabled = self.pump.enabled
+        m.output_fresh = inp.output_pwm is not None
+        m.output_pwm = int(inp.output_pwm or 0)
+        m.on = p.is_on(inp.output_pwm)
+        m.pilot_pwm = 0 if inp.rc is None else pump_core.rc_value(inp.rc, p.rc_channel)
+        m.last_seq = self._pump_seq
+        m.last_result = self._pump_result
+        m.last_reason = self.pump.latched or self._pump_reason
+        self.pump_pub.publish(m)
 
     def _publish_drop_state(self):
         self.drop_pub.publish(Bool(data=not self.latch.allowed))
@@ -529,6 +690,15 @@ class TelemetryBridge(Node):
     # ---------- teardown ----------
 
     def destroy_node(self):
+        # Best effort: a bridge going down mid-burst still has the autopilot's
+        # own timer ending it, but an explicit OFF costs nothing.
+        if self.pump.p.servo_channel > 0:
+            try:
+                self._pump_send(pump_core.set_servo_params(self.pump.p.servo_channel,
+                                                           self.pump.p.off_pwm),
+                                pump_core.MAV_CMD_DO_SET_SERVO)
+            except Exception:
+                pass
         self._stop.set()
         self._rx_thread.join(timeout=2.0)
         try:

@@ -30,6 +30,11 @@ PROTECTED = [
     "EK3_SRC1_YAW", "AHRS_EKF_TYPE",
     "FRAME_TYPE",                         # =2 OmniX
     "AVOID_ENABLE",                       # avoidance on; margin is tunable, enable is not
+    # The water pump's output, once docs/G7_pump_bench.md names it (n =
+    # telemetry_bridge.pump_servo_channel): "SERVOn_FUNCTION" (the pass-through
+    # of the pump channel) and "SERVOn_TRIM" (= pump OFF: the autopilot ENDS
+    # every burst by returning the output to TRIM). check_config's "pump path"
+    # already fails a baseline where they disagree with the YAML.
 ]
 
 TUNABLE = [

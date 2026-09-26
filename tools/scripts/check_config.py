@@ -66,6 +66,8 @@ CONFIG_DRIVEN_NODES = set("""
     safe_passage_server
     bt_runner_node
     rxl_link_node
+    wall_range_node
+    squirt_cal
 """.split())
 
 # Topic names that two sections must agree on, as (producer, param) ->
@@ -90,13 +92,17 @@ TOPIC_PAIRS = (
      ("ground_station", "clusters_topic")),
     (("proximity_bridge", "output_topic"),
      ("ground_station", "obstacle_topic")),
+    # squirt_cal logs every shot against the wall range; listening to the wrong
+    # topic it would log "no range" forever while the node publishes fine.
+    (("wall_range_node", "wall_topic"), ("squirt_cal", "wall_range_topic")),
 )
 
 # Ports that must stay distinct: two servers cannot bind one socket, and the
 # loser fails at startup with an address-in-use that reads like a crash. The
 # ground station EMBEDS the viewers rather than proxying them, so it has to
 # avoid their ports rather than share them.
-PORT_OWNERS = (("buoy_detector", "stream_port"), ("ground_station", "port"))
+PORT_OWNERS = (("buoy_detector", "stream_port"), ("ground_station", "port"),
+               ("squirt_cal", "port"))
 
 # The three nodes that each build the SAME OAK-D pipeline (only one runs at a
 # time — the camera admits one client). Depth is aligned to the RGB camera at
@@ -385,6 +391,82 @@ def check_params_yaml():
         fail("oak camera params consistent", f"missing key {e}")
 
 
+# ------------------------------------------------------------------ the pump
+
+# ArduPilot output functions that drive the boat. A pump path pointed at one of
+# these would let a "burst" run a thruster: ArduPilot refuses DO_SET_SERVO on
+# them itself, but that is its check, and this one fires before anyone arms.
+MOTOR_FUNCTIONS = {26, 70, 73, 74} | set(range(33, 41))
+
+
+def check_pump():
+    """The water pump's path through telemetry_bridge (docs/G7_pump_bench.md).
+
+    * the pump's RC channel is none of: the sticks, the mode switch, the SB
+      e-stop, or the autonomy-drop channel (every squirt on ch9 tripped the drop
+      latch until 2026-09-25);
+    * squirt_cal and the bridge agree on it, and the bridge's e-stop matches the
+      LED node's;
+    * with a pump output configured, the saved baseline says that output passes
+      the pump channel through (SERVOn_FUNCTION = 50 + ch) and rests at the OFF
+      value (SERVOn_TRIM = pump_off_pwm): the autopilot ENDS every burst by
+      returning the output to TRIM, so a wrong TRIM is a pump that never stops.
+    """
+    import yaml
+    try:
+        cfg = yaml.safe_load(PARAMS_YAML.read_text(encoding="utf-8"))
+        tb = cfg["telemetry_bridge"]["ros__parameters"]
+        sq = cfg["squirt_cal"]["ros__parameters"]
+        led = cfg["pixhawk_led_status_node"]["ros__parameters"]
+        ch, servo = int(tb["pump_rc_channel"]), int(tb["pump_servo_channel"])
+        on, off = int(tb["pump_on_pwm"]), int(tb["pump_off_pwm"])
+        drop, estop = int(tb["drop_channel"]), int(tb["estop_channel"])
+    except (KeyError, OSError, yaml.YAMLError) as e:
+        fail("pump path", f"cannot read the pump config: {e}")
+        return
+    problems = []
+    taken = {1: "steering stick", 2: "stick", 3: "throttle stick", 4: "stick",
+             8: "the mode switch", estop: "the SB e-stop", drop: "autonomy-drop"}
+    if ch in taken:
+        problems.append(f"pump_rc_channel {ch} is {taken[ch]}")
+    if int(sq["pump_rc_channel"]) != ch:
+        problems.append(f"squirt_cal.pump_rc_channel {sq['pump_rc_channel']} != "
+                        f"telemetry_bridge's {ch}")
+    if (estop, int(tb["estop_threshold"])) != (int(led["estop_channel"]),
+                                                int(led["estop_threshold"])):
+        problems.append("telemetry_bridge's estop_channel/threshold differ from "
+                        "pixhawk_led_status_node's")
+    if abs(on - off) < 200:
+        problems.append(f"pump_on_pwm {on} and pump_off_pwm {off} are too close to "
+                        "tell apart")
+    if tb["pump_allow_disarmed"]:
+        problems.append("pump_allow_disarmed is true in the YAML (bench only, by a "
+                        "-p override)")
+    if servo:
+        spec = importlib.util.spec_from_file_location(
+            "param_guard", Path(__file__).parent / "param_guard.py")
+        pg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pg)
+        base = pg.load_param_file(PARAMS_BASELINE) if PARAMS_BASELINE.exists() else {}
+        fn = base.get(f"SERVO{servo}_FUNCTION")
+        trim = base.get(f"SERVO{servo}_TRIM")
+        if fn is None or int(fn) in MOTOR_FUNCTIONS:
+            problems.append(f"SERVO{servo}_FUNCTION is {fn} in the baseline: "
+                            "missing, or a motor output")
+        elif int(fn) != 50 + ch:
+            problems.append(f"SERVO{servo}_FUNCTION is {int(fn)}, not RCIN{ch} "
+                            f"({50 + ch})")
+        if trim is None or int(trim) != off:
+            problems.append(f"SERVO{servo}_TRIM is {trim}, not pump_off_pwm {off}: "
+                            "a burst would END at TRIM")
+    if problems:
+        fail("pump path", "; ".join(problems))
+    else:
+        ok("pump path", f"pump on ch{ch}, " + (f"SERVO{servo} passes it through, "
+                                               f"TRIM = OFF {off}" if servo
+                                               else "no pump output yet (G7)"))
+
+
 # ------------------------------------------------------------ param baseline
 
 def check_param_baseline():
@@ -544,6 +626,7 @@ def check_interfaces():
 def main():
     print(f"repo: {REPO}")
     check_params_yaml()
+    check_pump()
     check_packages()
     check_interfaces()
     check_param_baseline()

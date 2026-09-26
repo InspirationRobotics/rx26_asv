@@ -81,9 +81,12 @@ telemetry_bridge:
     # (OPERATIONS.md §6: down ~994 e-stop, up ~1995 arm) and the latch trips at
     # >= drop_threshold, so ARMING THE BOAT tripped it and blocked every
     # override. Found 2026-09-05. Channel 9 (SE) is the intended switch and is
-    # not yet wired — an unwired channel reads 0, i.e. "not dropped", which is
-    # why the GUIDED path is gated on the MODE instead and does not depend on
-    # this latch at all.
+    # not yet built. It was NOT unused until 2026-09-25: the water pump sat on
+    # ch9 (~2000 when squirting), so every squirt tripped this latch. The pump
+    # moves to ch10 (pump_rc_channel below; docs/G7_pump_bench.md) and SE is
+    # mixed to ch9. An unmapped ch9 reads ~1500 (never trips); a missing one 0.
+    # The GUIDED path is gated on the MODE instead and does not depend on this
+    # latch at all.
     drop_channel: 9                        # [RO] autonomy-drop RC channel (1..18)
     drop_threshold: 1700                   # [RO] us; crossing trips the latch
     drop_invert: false                     # [RO]
@@ -91,6 +94,97 @@ telemetry_bridge:
     stream_timeout_s: 1.0                  # [RO] = shared.pose_timeout_s; s
                                            #      before a stale MAVLink stream
                                            #      stops being republished
+    # --- the water pump: /crsd/pump_cmd -> DO_REPEAT_SERVO (crusader_fcu/pump_core) ---
+    # OFF until docs/G7_pump_bench.md is done: 0 = no pump path, every burst
+    # refused. Then set it to the Pixhawk output whose SERVOn_FUNCTION is
+    # 50 + pump_rc_channel (RCIN10 = 60), with SERVOn_TRIM = pump_off_pwm: the
+    # autopilot ends every burst by returning the output to TRIM.
+    pump_servo_channel: 0                  # [RO] Pixhawk output 1..16; 0 = none
+    pump_rc_channel: 10                    # [RO] the pilot's pump switch. NOT 9:
+                                           #      that is drop_channel above
+    pump_on_pwm: 2000                      # [RO] us; MEASURE on the bench (G7)
+    pump_off_pwm: 1000                     # [RO] us; MUST equal SERVOn_TRIM
+    pump_max_burst_s: 1.0                  # [RO] squirt_cal fires 0.2-0.5 s
+    pump_min_gap_s: 1.0                    # [RO] s from one burst's end to the next
+    pump_allow_disarmed: false             # [RO] bench only, and only by a -p
+                                           #      override on the command line
+    estop_channel: 7                       # [RO] = pixhawk_led_status_node's:
+    estop_threshold: 1200                  # [RO]   SB, below = e-stop or RC lost.
+                                           #        The e-stop stops MOTORS, not a
+                                           #        pass-through output: the
+                                           #        bridge sends the pump OFF then
+
+# ---- Task 3 fixed nozzle: the wall range (crusader_perception/wall_range_node) ----
+# NOT in core.launch.py until it has run on the boat. The LiDAR extrinsic and the
+# waterline come from lidar_cluster_node's section above, not from here: one
+# sensor, one mounting.
+wall_range_node:
+  ros__parameters:
+    cloud_topic: "/livox/lidar"            # [RO] livox container's PointCloud2
+    wall_topic: "/crsd/wall_range"         # [RO] WallRange out, every sweep
+    frame_id: "base_link"                  # [RO]
+    attitude_timeout_s: 0.5                # [RO] older = fit unlevelled
+    health_period_s: 2.0                   # [RO]
+    sector_deg: 40.0                       # [RO] half-angle ahead for the wall
+    finger_sector_deg: 90.0                # [RO] fingers are beside the boat
+    r_min: 0.3                             # [RO] m, horizontal, from the body origin
+    r_max: 4.0                             # [RO]
+    z_min_above_water: 0.03                # [RO] m; the band that is not water
+    z_max_above_water: 1.5                 # [RO]
+    tol_m: 0.03                            # [RO] RANSAC inlier distance
+    iters: 200                             # [RO]
+    max_points: 4000                       # [RO] RANSAC scores a subsample
+    min_inliers: 40                        # [RO]
+    min_span_m: 0.4                        # [RO] this much wall, along it
+    max_angle_deg: 35.0                    # [RO] a wall more oblique is not ahead
+    finger_depth_m: 2.5                    # [RO] fingers within this of the wall
+    finger_min_off_m: 0.25                 # [RO] a finger's inner edge, sideways
+    finger_max_off_m: 1.5                  # [RO]
+    finger_min_points: 15                  # [RO]
+    finger_quantile: 0.1                   # [RO] inner edge = this quantile
+
+# ---- Task 3 fixed nozzle: the calibration tool (tools/squirt_cal) ----
+# A bench tool, not a node in the launch file: python3 tools/squirt_cal/squirt_cal.py
+# Every key must be here (squirt_core.load_config refuses unknown and missing).
+squirt_cal:
+  ros__parameters:
+    port: 8094                             # the phone opens http://<jetson>:8094
+    log_dir: "/root/robotx_ws/logs/squirt_cal"   # bind-mounted: one dir per session
+    snapshot_url: "http://127.0.0.1:8080/stream/raw"   # "" = no camera frames
+    wall_range_topic: "/crsd/wall_range"   # = wall_range_node.wall_topic
+    pump_rc_channel: 10                    # = telemetry_bridge.pump_rc_channel
+    pump_on_threshold_us: 1700             # pilot switch reads ON above this
+    burst_choices_s: [0.2, 0.3, 0.5]
+    burst_default_s: 0.3
+    arm_timeout_s: 15.0                    # give up waiting for steady
+    min_gap_s: 2.0                         # between shots
+    verdict_after_s: 0.8                   # the water's flight + a look
+    pilot_burst_max_s: 3.0
+    range_window_s: 0.5                    # pre-fire range = median over this
+    range_max_age_s: 0.5
+    step_m: 0.1                            # search step until bracketed
+    on_range_tol_m: 0.02
+    min_hits_for_band: 3
+    square_tol_deg: 3.0
+    steady_rate_max_dps: 4.0               # "steady": rates, band, hands off
+    steady_band_deg: 1.5
+    steady_hold_s: 0.5
+    steady_mean_s: 5.0
+    sticks_quiet_s: 1.5
+    stick_tol_us: 25
+    att_min_hz: 10.0                       # needs SR0_EXTRA1 >= 10 (30 intended)
+    # The starting guess only. MEASURE these (docs/G7_pump_bench.md, Phase 0):
+    nozzle_x_m: 0.45                       # nozzle ahead of the body origin
+    nozzle_height_m: 0.4                   # above the water
+    nozzle_elev_deg: 45.0
+    nozzle_range_m: 3.0                    # level range at nozzle_elev_deg
+    deck_height_m: 0.3                     # face panel bottom above the water
+    face_setback_m: 0.0                    # panel behind the edge the LiDAR ranges
+    branch: "near"                         # near = rising part of the arc
+    target_ids: ["ul_top", "lr_top"]
+    target_labels: ["Upper-left window, top edge", "Lower-right window, top edge"]
+    target_edge_mm: [895.0, 645.0]         # above the face panel's bottom edge
+    target_lat_m: [0.22, -0.23]            # window centre from face centre, + left
 
 # ---- LED status stack ----
 led_node:

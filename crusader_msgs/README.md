@@ -22,6 +22,9 @@ The typed contracts between nodes. Four telemetry messages produced by
 | `DockObservation` | the Task 3 dock detector → `bt_runner_node` | everything one camera frame saw of the docking bays, plus the timing layer's verdict (`target_pattern`, `target_colours`, `last_event`). **Published every frame, empty or not.** Stamped at the camera instant. Adopted unchanged from the CV side's draft (firefighting-cv `specs/msg`, pinned in each file) |
 | `DockBay` | inside `DockObservation` | one bay face: indicator colour, windows, face plane, bearing. **`bay_index` is left-to-right in THIS frame, not an id** — identity comes from position (`crusader_bt/dock_math.hpp`). Its colour numbering puts OFF at 1: it is **not** RoboCommand's `Color` |
 | `DockWindow` | inside `DockBay` | one target window: slot `index` (from the bay's geometry, never its colour), light `state`, aim point in `camera_link` |
+| `PumpCommand` | `tools/squirt_cal` (later the Task 3 tree) → `telemetry_bridge` | a pump burst of `duration_s`, or 0 = OFF. **A request**: the bridge refuses anything its own checks do not allow, and the autopilot times the burst (DO_REPEAT_SERVO, one cycle), so nothing upstream can leave the pump on |
+| `PumpState` | `telemetry_bridge` → `tools/squirt_cal` | the pump output's PWM as the Pixhawk reports it (SERVO_OUTPUT_RAW), the pilot's pump channel, and what happened to the last request |
+| `WallRange` | `wall_range_node` → `tools/squirt_cal` (later the Task 3 tree) | the vertical wall ahead from the LiDAR: perpendicular range, angle to square up, and the slip fingers either side. One per sweep, valid or not |
 
 Every message carries a `std_msgs/Header`. **The stamp is the time the MAVLink frame was
 RECEIVED**, not the time it was republished — a consumer judging freshness needs the age
