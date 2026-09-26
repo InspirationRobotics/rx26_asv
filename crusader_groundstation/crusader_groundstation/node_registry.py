@@ -133,6 +133,13 @@ REGISTRY = (
              kind="script", exclusive="port8080", port=8080,
              stream_path="/stream/view",      # bare FrameBuffer -> named "view"
              note="re-serves a camera topic; does NOT open the device"),
+    NodeSpec("dock_view", "dock_view", "tools", "dock_view.py", "viewers",
+             kind="script", exclusive="oakd", port=8080,
+             stream_path="/stream/annotated",
+             views=(("annotated", "Annotated"), ("raw", "Raw")),
+             record_stream_path="/stream/raw",
+             note="the CV team's Task 3 dock model (INTERIM, mock-up bay) + "
+                  "their colour rule; owns the OAK-D; publishes nothing"),
     NodeSpec("lidar_view", "lidar_view", "tools", "lidar_view.py", "viewers",
              kind="script", port=8081,
              stream_path="/stream/plan",      # views: plan / elev / both
@@ -161,7 +168,7 @@ PROFILES = {
 # can start while another holds the socket — which is fine, because the two
 # detectors already cannot co-run for the device itself. Order matters: the
 # first one found running wins the tab.
-CAMERA_TAB_SOURCES = ("buoy_detector", "oak_detector", "oak_view")
+CAMERA_TAB_SOURCES = ("buoy_detector", "oak_detector", "dock_view", "oak_view")
 LIDAR_TAB_SOURCES = ("lidar_view",)
 
 

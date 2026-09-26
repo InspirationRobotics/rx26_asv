@@ -1157,6 +1157,9 @@ def _free_bytes(path):
     return None if gb is None else gb * 1073741824.0
 
 
+YAML_SECTION_ALIASES = {"dock_view": "oak_detector"}
+
+
 def _yaml_defaults(node_name):
     """crusader_params.yaml's section for a node, or {} when it has none.
 
@@ -1165,8 +1168,12 @@ def _yaml_defaults(node_name):
     file, and the tab has to open for them — it just has nothing to compare
     their values against, which it says rather than implying agreement.
     """
+    name = node_name.rstrip("/").split("/")[-1]
+    # tools/dock_view.py has no section of its own: it opens the same camera
+    # with oak_detector's camera values, so that is what it is compared against.
+    name = YAML_SECTION_ALIASES.get(name, name)
     try:
-        return crsd_config.node_params(node_name.rstrip("/").split("/")[-1])
+        return crsd_config.node_params(name)
     except Exception:
         return {}
 

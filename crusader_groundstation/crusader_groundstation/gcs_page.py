@@ -1332,7 +1332,19 @@ function paintTune(){
    Painted only when something changes. The pane holds number boxes an operator
    is part-way through typing into, and a repaint under the cursor loses the
    digits — the same trap the Record tab's topic list carries a comment about. */
-var CAM_NODE = '/oak_detector';
+/* WHICH node the pane tunes: whichever camera node is running, first match
+   wins. dock_view (tools/dock_view.py, the Task 3 dock model) declares the same
+   oak_controls parameters as oak_detector for exactly this reason, so a saved
+   profile applies to either. Nothing running: oak_detector, as before. */
+var CAM_NODES = ['/oak_detector', '/dock_view'];
+function camNode(){
+  var items = (S && S.nodes && S.nodes.items) || [];
+  for(var i = 0; i < CAM_NODES.length; i++){
+    var row = items.filter(function(n){ return '/' + n.name === CAM_NODES[i]; })[0];
+    if(row && row.running) return CAM_NODES[i];
+  }
+  return CAM_NODES[0];
+}
 var camRows = [], camProfiles = [], camStore = null, camGroups = [];
 var camErr = '', camProfErr = '', camBusy = false, camBuilt = false;
 
@@ -1341,7 +1353,7 @@ function camLoadParams(){
   camBusy = true;
   fetch('/params/list', {method:'POST',
                          headers:{'Content-Type':'application/json'},
-                         body: JSON.stringify({node: CAM_NODE})})
+                         body: JSON.stringify({node: camNode()})})
     .then(function(r){ return r.json(); })
     .then(function(j){
       camBusy = false;
@@ -1386,7 +1398,7 @@ function camRunning(){
   var items = (S.nodes && S.nodes.items) || [];
   if(!items.length) return true;
   var row = items.filter(function(n){
-    return '/' + n.name === CAM_NODE; })[0];
+    return '/' + n.name === camNode(); })[0];
   return row ? !!row.running : false;
 }
 
@@ -1396,7 +1408,7 @@ function camRunning(){
 function camSet(name, value){
   var values = {};
   values[name] = value;
-  paramPost(CAM_NODE, values, camLoadParams);
+  paramPost(camNode(), values, camLoadParams);
 }
 
 function camApplyOne(name){
@@ -1413,7 +1425,7 @@ function camApplyProfile(name){
      because it is complete: applied piecemeal, a refusal partway through
      leaves the camera in a state that is neither the old profile nor the new
      one, and nothing on screen would say so. */
-  paramPost(CAM_NODE, row.values, camLoadParams);
+  paramPost(camNode(), row.values, camLoadParams);
 }
 
 function camSaveProfile(){
@@ -1428,7 +1440,7 @@ function camSaveProfile(){
   fetch('/camera/profile/save', {method:'POST',
                                  headers:{'Content-Type':'application/json'},
                                  body: JSON.stringify({name: name,
-                                                       node: CAM_NODE})})
+                                                       node: camNode()})})
     .then(function(r){ return r.json(); })
     .then(function(j){
       toast(j.message || (j.ok ? 'saved' : 'refused'), !j.ok);
@@ -1566,7 +1578,7 @@ function paintCam(){
       if(ev.key === 'Enter'){ ev.preventDefault(); camSaveProfile(); } };
 }
 
-var camWasRunning = null, camNextTry = 0;
+var camWasRunning = null, camNextTry = 0, camWasNode = null;
 var CAM_RETRY_MS = 2000;
 
 function renderCam(){
@@ -1575,6 +1587,13 @@ function renderCam(){
      column beside it goes on saying the camera is not running. Only the
      transition repaints, so a half-typed number still survives the tick. */
   var running = camRunning();
+  /* The camera node changed (oak_detector stopped, dock_view started): the
+     rows on screen belong to the other one, so drop them and ask again. */
+  var node = camNode();
+  if(camBuilt && node !== camWasNode){
+    camWasNode = node; camRows = []; camErr = '';
+    if(running) camLoadParams(); else paintCam();
+  }
   if(camBuilt && running !== camWasRunning){
     camWasRunning = running;
     if(running) camLoadParams(); else paintCam();
