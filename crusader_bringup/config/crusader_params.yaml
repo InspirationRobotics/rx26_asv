@@ -108,6 +108,14 @@ telemetry_bridge:
     pump_min_gap_s: 1.0                    # [RO] s from one burst's end to the next
     pump_allow_disarmed: false             # [RO] bench only, and only by a -p
                                            #      override on the command line
+    # --- GUIDED heading+speed: /crsd/guided_heading_speed -> SET_ATTITUDE_TARGET ---
+    # The fixed-nozzle shot's station keeping (crusader_fcu/guided_hs_core).
+    # Gated by the MODE (GUIDED only) AND the drop latch; a stop is sent when
+    # commands go quiet for hs_deadman_s or the latch trips.
+    hs_max_speed_mps: 0.4                  # [RO] clamp, either direction
+    hs_wp_speed_mps: 1.0                   # [RO] = WP_SPEED: thrust 1.0 means this
+                                           #      (check_config pins it to the baseline)
+    hs_deadman_s: 0.5                      # [RO] s without a command -> one stop
     estop_channel: 7                       # [RO] = pixhawk_led_status_node's:
     estop_threshold: 1200                  # [RO]   SB, below = e-stop or RC lost.
                                            #        The e-stop stops MOTORS, not a
@@ -1204,6 +1212,12 @@ bt_runner_node:
                                             #      is worth more than a version
                                             #      that faked arrival. Turning it
                                             #      true is a G1 gate.
+    fire_pump: false                        # [RO] FALSE = the fixed-nozzle shot's
+                                            #      FireBurst runs DRY: it lines up,
+                                            #      logs "FIRE #n (DRY)" and never
+                                            #      asks for the pump. A separate
+                                            #      switch from publish_setpoints:
+                                            #      moving is G1, water is G7.
     task_token: "TASK_SAFE_PASSAGE"         # [RO] = safe_passage_server.task_token;
                                             #      an RxTask name, gated by
                                             #      check_config against

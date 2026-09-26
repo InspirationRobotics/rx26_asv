@@ -35,8 +35,30 @@ WHAT IS MODELLED, and how honestly:
                  signal for 60 s. The cannon puts the fire out after
                  `extinguish_s` of spray on the right window.
 
+THE FIXED-NOZZLE SHOT (behavior_trees/task3_fire_test.xml) adds:
+
+  the nozzle     fixed on the bow, a drag-free parabola (squirt_cal's
+                 nozzle_model) whose exit speed is FITTED so that a level,
+                 square-on boat at `nozzle_hit_range_m` puts the stream on the
+                 target window's top edge - the pool's answer, 3.22 m. The
+                 water goes where the boat's TRUE pose, pitch and roll send it.
+  the sea        squirt_cal's fake_boat rocking (a few sines under a slow
+                 envelope), plus a pitch kick whenever the boat accelerates.
+  the LiDAR      /crsd/wall_range from the true pose: range to the dock edge,
+                 the wall's bearing, the offset between the slip fingers, noise,
+                 and spray returns while water is in the air. `wall_on_fingers`
+                 makes it lock onto the finger tips instead.
+  the autopilot  GUIDED heading+speed (SET_ATTITUDE_TARGET) as remembered, NOT
+                 verified: acted on only in GUIDED, turns toward the heading,
+                 speed as asked, and after 3 s without a new target a boat
+                 loiters. The SITL check (docs/G1) is what makes this true.
+  the bridge     telemetry_bridge's gates for heading+speed and the pump,
+                 running telemetry_bridge's OWN rule code (guided_hs_core,
+                 pump_core): mode, drop latch, clamp, dead-man, every refusal.
+
 WHAT IS NOT: hydrodynamics, wind, waves, the fingers stopping the hull (contact
-is recorded, not simulated), the water stream's flight, any image processing.
+is recorded, not simulated), the water stream's flight time and droop, any
+image processing.
 
 COORDINATES. World is ENU metres about Scenario.origin: e EAST, n NORTH.
 Headings are compass degrees. The camera frame is REP-103 (x forward, y left,
@@ -48,10 +70,21 @@ C++ consumer using nav_math, and matching it makes "the boat is 1 cm off" mean
 the same thing on both sides.
 """
 import math
+import os
 import random
+import sys
 from dataclasses import dataclass, field, asdict
 
 from vendor.dock_sequence_core import DockSequence
+
+# The bridge's rules and the nozzle's arc, imported rather than re-written: the
+# sim refuses exactly what the boat would. All three are stdlib only.
+_REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+for _p in (os.path.join(_REPO, "crusader_fcu"), os.path.join(_REPO, "tools", "squirt_cal")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+from crusader_fcu import guided_hs_core, pump_core   # noqa: E402
+from nozzle_model import G, NozzleModel               # noqa: E402
 
 EARTH_R = 6371000.0
 DEG = math.pi / 180.0
@@ -188,6 +221,31 @@ class Scenario:
     # disturbance
     current_mps: float = 0.0
     current_to_deg: float = 90.0
+    # ---- the fixed-nozzle shot (task3_fire_test.xml; the Task 3 tree ignores it) ----
+    fire_lit: bool = False                     # the target window is ON FIRE from the start
+    nozzle_x: float = 0.45                     # ahead of the body origin (squirt_cal nozzle_x_m)
+    nozzle_z: float = 0.40                     # above the water
+    nozzle_elev_deg: float = 45.0
+    # THE TRUTH: the wall range at which a level, square-on boat puts the
+    # stream on the target window's TOP EDGE. The pool said ~3.22 m; the
+    # tree's fire_range_m is its belief about this, and fire_cal_error makes
+    # the two differ.
+    nozzle_hit_range_m: float = 3.22
+    nozzle_yaw_bias_deg: float = 0.0           # + = the stream leaves LEFT of the bow
+    sea: float = 0.0                           # rocking: 0 flat .. 3 rough (fake_boat)
+    att_hz: float = 10.0                       # /crsd/attitude (SR0_EXTRA1 = 10)
+    wall_ok: bool = True                       # the LiDAR wall fit finds the dock
+    wall_r_max: float = 4.0                    # wall_range_node.r_max: blind beyond ~this
+    wall_on_fingers: bool = False              # ...but fits the finger tips, finger_len short
+    pump_path: bool = True                     # the bridge has a pump output (G7 done)
+    # ArduRover's simple avoidance: stop short of anything within 2 m while
+    # /crsd/avoidance_enable is true. Off by default: whether the boat's
+    # proximity path is live is unverified, and the Task 3 tree never turns
+    # it off (see the README).
+    autopilot_avoidance: bool = False
+    drop_at_s: float = -1.0                    # the pilot flips SE (autonomy drop) at this
+                                               # world time (the goal goes at ~1 s); < 0 never
+    manual_at_s: float = -1.0                  # ...or SC to MANUAL
 
     def randomise(self, rnd):
         """A fresh course: bay, window, code. The geometry is left alone."""
@@ -294,6 +352,22 @@ class Dock:
         return any(convex_overlap(corners, self.poly(r))
                    for r in self.finger_rects + [self.deck_rect])
 
+    def clearance(self, pt):
+        """Distance from a point to the nearest finger or the deck."""
+        u, v = self.uv(pt)
+        best = 1e9
+        for u0, u1, v0, v1 in self.finger_rects + [self.deck_rect]:
+            best = min(best, math.hypot(max(u0 - u, 0.0, u - u1), max(v0 - v, 0.0, v - v1)))
+        return best
+
+    def slip_at(self, u):
+        """The bay whose slip (between its fingers) spans u, or 0."""
+        for i in (1, 2, 3):
+            lo, hi = self.slip(i)
+            if lo <= u <= hi:
+                return i
+        return 0
+
 
 # ------------------------------------------------------------------ the boat
 
@@ -322,6 +396,7 @@ class Boat:
     DECEL = 0.5                # the braking the speed profile plans with
     RATE_MAX = 60.0            # deg/s actually achieved (ATC_STR_RAT_MAX is 90)
     YAW_ACCEL = 90.0           # deg/s^2
+    HS_TIMEOUT_S = 3.0         # GUIDED heading+speed: no new target for this long -> stop
 
     def __init__(self, e, n, heading, wp_radius=0.2, loit_radius=2.0):
         self.e, self.n, self.yaw = e, n, heading % 360.0
@@ -336,6 +411,11 @@ class Boat:
         self.origin = None     # where the current leg started
         self.returning = False
         self.odometer = 0.0
+        self.clock = 0.0       # seconds of stepping, for the heading+speed timeout
+        self.hs = None         # (heading, speed, received): a GUIDED heading+speed target
+        self.hs_timeouts = 0
+        self.blocked_fwd = False   # the autopilot's avoidance says no closer
+        self.a = 0.0           # forward acceleration last step, m/s^2 (rocks the hull)
 
     @property
     def p(self):
@@ -351,6 +431,7 @@ class Boat:
         The leg starts where the last one was reached, or here if it was not
         (AR_WPNav::set_desired_location), and the boat follows THAT LINE.
         """
+        self.hs = None                          # a position target replaces heading+speed
         if self.sp is not None and norm(sub((e, n), self.sp)) < 0.05:
             return
         self.origin = self.loiter_pt if self.loiter_pt is not None else self.p
@@ -374,6 +455,24 @@ class Boat:
         s = clamp(dot(sub(self.p, o), u), 0.0, length)
         look = max(1.0, 2.0 * abs(self.v))
         return add(o, mul(u, min(length, s + look)))
+
+    def set_heading_speed(self, heading, speed):
+        """A GUIDED heading+speed target (SET_ATTITUDE_TARGET, thrust already
+        turned into m/s). Ignored outside GUIDED, as ArduRover does. AS
+        REMEMBERED, not verified: SITL decides (docs/G1)."""
+        if self.mode != "GUIDED" or not self.armed:
+            return False
+        self.hs = (heading % 360.0, float(speed), self.clock)
+        self.sp = None
+        self.loiter_pt = None
+        self.returning = False
+        return True
+
+    def _drive_hs(self):
+        """Turn toward the heading (pivoting if need be) at the asked speed."""
+        heading, speed, _ = self.hs
+        err = wrap180(heading - self.yaw)
+        return speed, clamp(2.0 * err, -self.RATE_MAX, self.RATE_MAX)
 
     def _arrive(self):
         """Reached: loiter at the STOPPING point, v^2/2a along the heading."""
@@ -414,7 +513,18 @@ class Boat:
 
     def step(self, dt, current=(0.0, 0.0)):
         v_des, r_des = 0.0, 0.0
-        if self.armed and self.mode == "GUIDED" and self.sp is not None:
+        self.clock += dt
+        if self.hs is not None and (self.mode != "GUIDED" or not self.armed):
+            self.hs = None                        # the pilot took it back
+        if self.hs is not None and self.clock - self.hs[2] > self.HS_TIMEOUT_S:
+            # "target not received last 3secs, stopping" - and a boat loiters
+            self.hs = None
+            self.hs_timeouts += 1
+            self._arrive()
+            self.sp = self.loiter_pt
+        if self.armed and self.mode == "GUIDED" and self.hs is not None:
+            v_des, r_des = self._drive_hs()
+        elif self.armed and self.mode == "GUIDED" and self.sp is not None:
             if self.loiter_pt is None and norm(sub(self.sp, self.p)) <= self.wp_radius:
                 self._arrive()
             if self.loiter_pt is None:
@@ -427,7 +537,10 @@ class Boat:
                     self.returning = False
                 if self.returning:
                     v_des, r_des = self._drive(self.loiter_pt, allow_astern=True)
+        if self.blocked_fwd and v_des > 0.0:
+            v_des = 0.0
         dv = clamp(v_des - self.v, -self.ACCEL * dt, self.ACCEL * dt)
+        self.a = dv / dt if dt > 0 else 0.0
         self.v += dv
         dr = clamp(r_des - self.r, -self.YAW_ACCEL * dt, self.YAW_ACCEL * dt)
         self.r += dr
@@ -447,7 +560,7 @@ class Lights:
 
     def __init__(self, sc: Scenario):
         self.sc = sc
-        self.state = "IDLE"
+        self.state = "FIRE" if sc.fire_lit else "IDLE"
         self.t0 = 0.0
         self.sprayed = 0.0
         self.hit_t = None
@@ -497,6 +610,163 @@ class Lights:
             self.state, self.t0 = nxt, t
         elif s in ("FLASH", "CODE") and t - self.t0 >= 60.0:
             self.state, self.t0 = "DONE", t
+
+
+# ------------------------------------------------------------------ the sea
+
+class Sea:
+    """Roll and pitch: tools/squirt_cal/fake_boat.py's rocking (a few sines
+    under a slow envelope, so there are calm spells and rough ones), and a
+    pitch kick that follows the boat's own acceleration - thrust rocks it."""
+
+    def __init__(self, sc: Scenario, rnd: random.Random):
+        self.sc = sc
+        self.phase = [rnd.uniform(0.0, 2.0 * math.pi) for _ in range(6)]
+        self.kick = 0.0
+
+    def step(self, dt, boat):
+        target = min(1.5, 6.0 * abs(boat.a) + 0.02 * abs(boat.r))
+        tau = 0.15 if target > self.kick else 0.8           # quick to start, slow to die
+        self.kick += (target - self.kick) * min(1.0, dt / tau)
+
+    def attitude(self, t):
+        """(roll, pitch, roll_rate, pitch_rate): degrees and deg/s; roll + =
+        right side down, pitch + = bow up (ArduPilot's ATTITUDE)."""
+        ph, sea = self.phase, self.sc.sea
+        env = sea * (0.35 + 0.65 * (0.5 + 0.5 * math.sin(2 * math.pi * t / 23.0 + ph[5])))
+        comps_r = ((1.4, 2.4, ph[0]), (0.5, 1.1, ph[1]))
+        comps_p = ((1.0, 3.2, ph[2]), (0.4, 1.3, ph[3]))
+        r = sum(a * math.sin(2 * math.pi * t / T + p) for a, T, p in comps_r)
+        rr = sum(a * 2 * math.pi / T * math.cos(2 * math.pi * t / T + p) for a, T, p in comps_r)
+        pt = sum(a * math.sin(2 * math.pi * t / T + p) for a, T, p in comps_p)
+        pr = sum(a * 2 * math.pi / T * math.cos(2 * math.pi * t / T + p) for a, T, p in comps_p)
+        k = self.kick
+        pk = k * math.sin(2 * math.pi * t / 0.9)
+        pkr = k * 2 * math.pi / 0.9 * math.cos(2 * math.pi * t / 0.9)
+        return env * r, env * pt + pk, env * rr, env * pr + pkr
+
+
+# ------------------------------------------------------------------ the bridge
+
+class Bridge:
+    """telemetry_bridge's heading+speed and pump paths, gates and all, running
+    the bridge's own rule modules. What it lets through reaches the Boat the
+    way MAVLink would: heading+speed decoded from SET_ATTITUDE_TARGET, a burst
+    as DO_REPEAT_SERVO timed by the autopilot.
+
+    The pump parameters are the ones G7 will set (crusader_params.yaml ships
+    pump_servo_channel 0 until then); `pump_path` False is that 0."""
+    ACK_S = 0.10               # COMMAND_ACK / the output switching, after the command
+    LATENCY_S = 0.12           # pump spin-up: water after the output goes ON
+    WP_SPEED = 1.0             # telemetry_bridge.hs_wp_speed_mps = WP_SPEED
+
+    def __init__(self, sc: Scenario, world):
+        self.w = world
+        self.hs = guided_hs_core.HsGate(guided_hs_core.HsParams(
+            max_speed=0.4, wp_speed=self.WP_SPEED, deadman_s=0.5))
+        self.pp = pump_core.PumpParams(
+            servo_channel=9 if sc.pump_path else 0, rc_channel=10, on_pwm=2000, off_pwm=1000,
+            max_burst_s=1.0, min_gap_s=1.0, allow_disarmed=False,
+            estop_channel=7, estop_threshold=1200)
+        self.pump = pump_core.PumpGate(self.pp)
+        self.seq, self.result, self.reason = 0, pump_core.RESULT_NONE, ""
+        self._ack_at = None
+        self.out_from, self.out_until = -1.0, -1.0     # the pump OUTPUT is ON in here
+        self._trip_seen = False
+        self.stats = {"hs_sent": 0, "hs_dropped": 0, "hs_stops": 0, "last_drop": "",
+                      "pump_cmds": 0, "pump_refused": 0, "bursts": 0, "last_refusal": ""}
+
+    # ---- the pilot's radio, as the bridge reads it
+    def rc(self):
+        ch = [1500] * 18
+        ch[7 - 1] = 1900                                   # SB: not e-stopped
+        ch[9 - 1] = 1900 if self.w.dropped else 1100       # SE: the drop switch
+        ch[10 - 1] = 1000                                  # the pilot's pump switch: OFF
+        return ch
+
+    def output_pwm(self, t):
+        if self.pp.servo_channel <= 0:
+            return None
+        return self.pp.on_pwm if self.out_from <= t < self.out_until else self.pp.off_pwm
+
+    def inputs(self, t):
+        return pump_core.PumpInputs(now=t, rc=self.rc(), armed=self.w.boat.armed,
+                                    output_pwm=self.output_pwm(t))
+
+    # ---- heading + speed
+    def _send(self, fields):
+        _mask, q, thrust = fields
+        heading = math.degrees(2.0 * math.atan2(q[3], q[0])) % 360.0
+        self.w.boat.set_heading_speed(heading, thrust * self.WP_SPEED)
+
+    def on_heading_speed(self, t, heading, speed):
+        ok, why, fields = self.hs.on_command(t, heading, speed, self.w.boat.mode,
+                                             not self.w.dropped)
+        if ok:
+            self._send(fields)
+            self.stats["hs_sent"] += 1
+        else:
+            self.stats["hs_dropped"] += 1
+            self.stats["last_drop"] = why
+        return ok, why
+
+    # ---- the pump
+    def on_pump(self, t, duration, seq, source=""):
+        self.seq = int(seq)
+        self.stats["pump_cmds"] += 1
+        if duration <= 0.0:
+            if self.pp.servo_channel <= 0:
+                self.result, self.reason = pump_core.RESULT_REFUSED, "no pump path"
+                return
+            self.out_until = min(self.out_until, t + self.ACK_S)
+            self.result, self.reason = pump_core.RESULT_SENT, "OFF (%s)" % (source or "?")
+            self._ack_at = t + self.ACK_S
+            return
+        ok, why = self.pump.check_burst(duration, self.inputs(t))
+        if not ok:
+            self.result, self.reason = pump_core.RESULT_REFUSED, why
+            self.stats["pump_refused"] += 1
+            self.stats["last_refusal"] = why
+            return
+        self.pump.start_burst(duration, t)
+        self.out_from, self.out_until = t + self.ACK_S, t + self.ACK_S + duration
+        self.result, self.reason = pump_core.RESULT_SENT, "burst %.2f s (%s)" % (duration, source or "?")
+        self._ack_at = t + self.ACK_S
+        self.stats["bursts"] += 1
+
+    def water(self, t):
+        """Is water leaving the nozzle now?"""
+        return self.out_from + self.LATENCY_S <= t < self.out_until + self.LATENCY_S
+
+    # ---- the 20 Hz tick
+    def tick(self, t):
+        f = self.hs.tick(t)                    # the dead-man
+        if f is not None:
+            self._send(f)
+            self.stats["hs_stops"] += 1
+        if self.w.dropped and not self._trip_seen:
+            self._trip_seen = True
+            f = self.hs.on_trip()              # _handle_trip: stop, once
+            if f is not None:
+                self._send(f)
+                self.stats["hs_stops"] += 1
+        if self._ack_at is not None and t >= self._ack_at:
+            self._ack_at = None
+            if self.result == pump_core.RESULT_SENT:
+                self.result = pump_core.RESULT_ACCEPTED
+        why = self.pump.watchdog(self.inputs(t))
+        if why:
+            self.out_until = min(self.out_until, t)
+            self.reason = "watchdog: " + why
+
+    def pump_state(self, t):
+        pwm = self.output_pwm(t)
+        rc = self.rc()
+        return {"type": "pump_state", "enabled": self.pump.enabled,
+                "output_fresh": pwm is not None, "output_pwm": int(pwm or 0),
+                "on": self.pp.is_on(pwm), "pilot_pwm": pump_core.rc_value(rc, self.pp.rc_channel),
+                "last_seq": self.seq, "last_result": self.result,
+                "last_reason": self.pump.latched or self.reason}
 
 
 # ------------------------------------------------------------------ the camera
@@ -806,6 +1076,24 @@ class World:
         self.last_obs = None               # the latest DockObservation, for the page
         self._pending_confirm = False
         self._mount_sent = False
+        # the fixed-nozzle shot
+        self.sea = Sea(sc, self.rnd)
+        self.att = (0.0, 0.0, 0.0, 0.0)
+        self.bridge = Bridge(sc, self)
+        self.nozzle = self._fit_nozzle()
+        self.dropped = False
+        self.avoidance = True              # the runner publishes true at start
+        self._drop_sent = None
+        self._next_att = 0.0
+        self._next_wall = 0.0
+        self._next_pump = 0.0
+        self.stream = None                 # where the water is crossing the face now
+        self.stream_hit = False
+        self.shots = []                    # one per burst of water: the judge's record
+        self._shot = None
+        self.min_range = 1e9               # closest the body origin came to the dock edge
+        self.event = None                  # {"t", "what", "v_at", "v_1s"}: a pilot takeover
+        self.last_wall = None
 
     # -------------------------------------------------------------- inputs
 
@@ -820,6 +1108,130 @@ class World:
     def on_cannon(self, c):
         self.cannon = c
 
+    def on_avoidance(self, enable):
+        self.avoidance = bool(enable)
+
+    def target_edge(self):
+        """(u, z) of the target window's top edge centre, in dock u and height."""
+        for idx, _slot, (we, wn, wz), (_hw, hh) in self.dock.windows(self.sc.green_bay):
+            if idx == self.sc.target_window:
+                return self.dock.uv((we, wn))[0], wz + hh
+        raise ValueError("no target window")
+
+    def _fit_nozzle(self):
+        """The TRUE nozzle: the exit speed that puts a level, square-on stream
+        from `nozzle_hit_range_m` on the target window's top edge."""
+        sc = self.sc
+        _u, z = self.target_edge()
+        x = sc.nozzle_hit_range_m - sc.nozzle_x
+        th = math.radians(sc.nozzle_elev_deg)
+        k = (sc.nozzle_z + x * math.tan(th) - z) / (x * x)
+        if x <= 0 or k <= 0:
+            raise ValueError("no drag-free arc reaches the edge from nozzle_hit_range_m")
+        return NozzleModel(sc.nozzle_elev_deg, math.sqrt(G / (2.0 * k * math.cos(th) ** 2)),
+                           sc.nozzle_z)
+
+    def wall_range(self):
+        """/crsd/wall_range, from the true pose, with wall_range_node's limits:
+        the LiDAR at the body origin, the wall's points within r_max (so its
+        nearest point a little inside), and a wall more oblique than
+        max_angle_deg (35) not "ahead"."""
+        sc, b, d = self.sc, self.boat, self.dock
+        none = {"type": "wall_range", "valid": False, "range_m": None, "angle_deg": None,
+                "lat_m": None}
+        if not sc.wall_ok:
+            return none
+        u, v = d.uv(b.p)
+        rng = v - (sc.finger_len if sc.wall_on_fingers else 0.0)
+        ang = wrap180(b.yaw - (sc.facing_deg + 180.0))
+        if not (0.3 < rng < sc.wall_r_max - 0.1 and abs(ang) <= 35.0):
+            return none
+        rng += self.rnd.gauss(0.0, 0.006)
+        if self.bridge.water(self.t) or self.t < self.bridge.out_until + self.bridge.LATENCY_S + 0.3:
+            if self.rnd.random() < 0.4:
+                rng -= self.rnd.uniform(0.1, 0.6)         # spray returns
+        lat = None
+        bay = d.slip_at(u)
+        # both fingers in view: the tips within a few metres, and a fit on the
+        # dock edge (one on the tips has no fingers beside it)
+        if bay and not sc.wall_on_fingers and v < sc.finger_len + 3.0:
+            lo, hi = d.slip(bay)
+            lat = (lo + hi) / 2.0 - u + self.rnd.gauss(0.0, 0.008)
+        return {"type": "wall_range", "valid": True, "range_m": rng,
+                "angle_deg": ang + self.rnd.gauss(0.0, 0.3), "lat_m": lat}
+
+    def _crossing(self):
+        """Where the water leaving the nozzle NOW crosses the face plane:
+        (u, z, run) in dock u, height and horizontal run, or None."""
+        sc, b, d = self.sc, self.boat, self.dock
+        nz = add(b.p, mul(hvec(b.yaw), sc.nozzle_x))
+        dirn = hvec(b.yaw - sc.nozzle_yaw_bias_deg)
+        c = -dot(dirn, d.out)
+        _un, vn = d.uv(nz)
+        if c <= 0.2 or vn <= 0.0:
+            return None
+        run = vn / c
+        roll, pitch = self.att[0], self.att[1]
+        z = self.nozzle.height_at(run, pitch)
+        u = d.uv(add(nz, mul(dirn, run)))[0]
+        u += (z - self.nozzle.h) * math.sin(math.radians(roll))   # rolled right: lands right
+        return u, z, run
+
+    STREAM_R = 0.03            # the stream's half-width: an edge graze still goes in
+
+    def _nozzle_hits(self):
+        """Which window the nozzle's water is going into, or None; and the
+        shot record."""
+        t = self.t
+        if not self.bridge.water(t):
+            if self._shot is not None:
+                self._close_shot()
+            self.stream = None
+            return None
+        cr = self._crossing()
+        self.stream = cr
+        if self._shot is None:
+            u, v = self.dock.uv(self.boat.p)
+            self._shot = {"t": round(t, 2), "range": round(v, 3), "heading": round(self.boat.yaw, 1),
+                          "pitch": round(self.att[1], 2), "roll": round(self.att[0], 2),
+                          "on_target_s": 0.0, "samples": []}
+        hit = None
+        if cr is not None:
+            u, z, _run = cr
+            if z > self.sc.deck_z:
+                for bay in (1, 2, 3):
+                    for idx, _slot, (we, wn, wz), (hw, hh) in self.dock.windows(bay):
+                        wu = self.dock.uv((we, wn))[0]
+                        if abs(u - wu) <= hw + self.STREAM_R and abs(z - wz) <= hh + self.STREAM_R:
+                            hit = (bay, idx)
+            tu, tz = self.target_edge()
+            self._shot["samples"].append((round(u - tu, 3), round(z - tz, 3)))
+        on = hit == (self.sc.green_bay, self.sc.target_window)
+        if on:
+            self._shot["on_target_s"] += self.DT
+        return self.sc.target_window if on else None
+
+    def _close_shot(self):
+        sh = self._shot
+        self._shot = None
+        smp = sh.pop("samples")
+        if smp:
+            du = sorted(x[0] for x in smp)[len(smp) // 2]
+            dz = sorted(x[1] for x in smp)[len(smp) // 2]
+        else:
+            du = dz = None
+        sh["du"], sh["dz"] = du, dz
+        sh["hit"] = sh["on_target_s"] > 0.0
+        sh["on_target_s"] = round(sh["on_target_s"], 2)
+        self.shots.append(sh)
+        where = ("no crossing" if du is None else
+                 "%+.0f cm %s, %+.0f cm %s of the top edge" % (
+                     abs(dz) * 100, "above" if dz > 0 else "below",
+                     abs(du) * 100, "right" if du > 0 else "left"))
+        self.judge.log(self.t, "nozzle", "shot %d from %.2f m: %s - %s" % (
+            len(self.shots), sh["range"], where, "IN the window" if sh["hit"] else "missed"),
+            sh["hit"])
+
     def truth_bay(self):
         return self.dock.bay_of(self.boat.corners())
 
@@ -829,9 +1241,28 @@ class World:
         """Advance DT. Returns the messages due to the runner this step."""
         sc, dt = self.sc, self.DT
         cur = mul(hvec(sc.current_to_deg), sc.current_mps)
+        # the pilot's switches
+        tn = self.t + dt
+        if 0.0 <= sc.drop_at_s <= tn and not self.dropped:
+            self.dropped = True
+            self.event = {"t": round(tn, 2), "what": "SE: autonomy dropped", "v_at": round(abs(self.boat.v), 3), "v_1s": None}
+            self.judge.log(tn, "pilot", "SE flipped: autonomy dropped", None)
+        if 0.0 <= sc.manual_at_s <= tn and self.boat.mode != "MANUAL":
+            self.boat.mode = "MANUAL"
+            self.event = {"t": round(tn, 2), "what": "SC: MANUAL", "v_at": round(abs(self.boat.v), 3), "v_1s": None}
+            self.judge.log(tn, "pilot", "SC flipped: MANUAL", None)
+        self.bridge.tick(tn)
+        bow = add(self.boat.p, mul(hvec(self.boat.yaw), Boat.LENGTH / 2.0))
+        self.boat.blocked_fwd = (sc.autopilot_avoidance and self.avoidance
+                                 and self.dock.clearance(bow) < 2.0)
         self.boat.step(dt, cur)
+        self.sea.step(dt, self.boat)
         self.t += dt
         t = self.t
+        self.att = self.sea.attitude(t)
+        self.min_range = min(self.min_range, self.dock.uv(self.boat.p)[1])
+        if self.event is not None and self.event["v_1s"] is None and t >= self.event["t"] + 1.0:
+            self.event["v_1s"] = round(abs(self.boat.v), 3)
 
         corners = self.boat.corners()
         touching = self.dock.contact(corners)
@@ -843,7 +1274,9 @@ class World:
             self.judge.first_docked_t = t
 
         self.spray_on = self._spray_hits()
-        self.lights.step(t, self.spray_on == sc.target_window, dt)
+        nozzle_on = self._nozzle_hits()
+        self.stream_hit = nozzle_on is not None
+        self.lights.step(t, self.spray_on == sc.target_window or nozzle_on is not None, dt)
         if self.judge.confirm_at is not None and t >= self.judge.confirm_at:
             self.judge.confirm_at = None
             self.judge.log(t, "RoboCommand", "ReadinessConfirm sent", True)
@@ -872,6 +1305,22 @@ class World:
                 obs = self.camera.frame(t, self.boat, self.dock, self.lights)
                 self.last_obs = obs
                 out.append(dict(obs, type="dock_obs"))
+        # the fixed-nozzle shot's streams (the Task 3 tree ignores them)
+        if t >= self._next_att:
+            self._next_att += 1.0 / max(0.1, sc.att_hz)
+            r, p_, rr, pr = self.att
+            out.append({"type": "attitude", "roll": r * DEG, "pitch": p_ * DEG,
+                        "rollspeed": rr * DEG, "pitchspeed": pr * DEG})
+        if t >= self._next_wall:
+            self._next_wall += 0.1
+            self.last_wall = self.wall_range()
+            out.append(self.last_wall)
+        if t >= self._next_pump:
+            self._next_pump += 0.1
+            out.append(self.bridge.pump_state(t))
+        if self._drop_sent != self.dropped and t >= 0.2:
+            self._drop_sent = self.dropped         # latched: once, then on change
+            out.append({"type": "autonomy_drop", "data": self.dropped})
         if self._pending_confirm:
             self._pending_confirm = False
             out.append({"type": "ocs_command",
@@ -937,6 +1386,31 @@ class World:
         elif kind == "uav_request":
             self.judge.on_uav(t, payload)
 
+    def fire_snapshot(self):
+        """The fixed-nozzle shot's truth: the arc, the band, the shots."""
+        sc, nz = self.sc, self.nozzle
+        u, v = self.dock.uv(self.boat.p)
+        tu, tz = self.target_edge()
+        wins = [{"bay": b, "index": i, "z0": wz - hh, "z1": wz + hh}
+                for b in (sc.green_bay,) for i, _s, (_e, _n, wz), (_hw, hh) in self.dock.windows(b)]
+        return {
+            "range": round(v, 3), "u": round(u, 3), "target_u": round(tu, 3), "target_z": round(tz, 3),
+            "nozzle": {"x": sc.nozzle_x, "h": nz.h, "elev": nz.elev_deg, "v": round(nz.v, 3),
+                       "hit_range": sc.nozzle_hit_range_m},
+            "windows": wins, "deck_z": sc.deck_z,
+            "att": [round(a, 2) for a in self.att],
+            "stream": self.stream, "stream_hit": self.stream_hit, "water": self.bridge.water(self.t),
+            "wall": self.last_wall,
+            "shots": self.shots[-20:], "n_shots": len(self.shots),
+            "n_hits": sum(1 for s in self.shots if s["hit"]),
+            "window_out": self.lights.hit_t is not None and sc.fire_lit,
+            "bridge": dict(self.bridge.stats),
+            "hs": None if self.boat.hs is None else [round(self.boat.hs[0], 1), round(self.boat.hs[1], 3)],
+            "hs_timeouts": self.boat.hs_timeouts,
+            "avoidance": self.avoidance, "dropped": self.dropped,
+            "min_range": round(self.min_range, 3), "event": self.event,
+        }
+
     def snapshot(self):
         """Truth, for the page."""
         sc = self.sc
@@ -957,6 +1431,7 @@ class World:
             "lights": {"state": self.lights.state, "window": lw, "colour": NAME[lc],
                        "sprayed": round(self.lights.sprayed, 2)},
             "cannon": self.cannon, "spray_on": self.spray_on,
+            "fire": self.fire_snapshot(),
             "truth_bay": self.truth_bay(), "contact": self.in_contact,
             "trail": self.trail[-600:],
             "judge": {"events": self.judge.events[-40:], "summary": self.judge.summary()},

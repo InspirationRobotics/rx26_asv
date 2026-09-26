@@ -37,6 +37,7 @@ main{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(360px,1fr);gap:1
 canvas{display:block;width:100%}
 #map{aspect-ratio:1.25/1;background:var(--water)}
 #cam{aspect-ratio:16/10;background:#1b2530}
+#arc{aspect-ratio:2.4/1;background:#101b25}
 .score{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line)}
 .score div{background:var(--panel);padding:9px 10px}
 .score .k{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
@@ -93,7 +94,8 @@ canvas{display:block;width:100%}
         <span><i style="border:2px solid var(--accent)"></i>boat's bay track (#id · bay no. · votes)</span>
         <span><i style="background:var(--run)"></i>setpoint</span>
         <span><i style="background:#c8a2ff"></i>lead-in · line-up · berth</span>
-        <span><i style="background:#9fd8ff"></i>water cannon</span>
+        <span><i style="background:#9fd8ff"></i>water cannon / nozzle stream</span>
+        <span id="lg-band" style="display:none"><i style="background:#9fd8ff55"></i>true firing range (the nozzle's truth)</span>
       </div>
     </div>
     <div class="card">
@@ -133,6 +135,15 @@ canvas{display:block;width:100%}
         <div><div class="k">UAV tasked</div><div class="v pend" id="s-uav">—</div></div>
       </div>
       <div class="kv" id="facts"></div>
+    </div>
+    <div class="card" id="fire-card" style="display:none">
+      <h2>Fixed nozzle · side view <span class="r" id="arc-note"></span></h2>
+      <canvas id="arc"></canvas>
+      <div class="kv" id="fire-facts"></div>
+      <div class="knobs" style="padding-top:0"><div class="act">
+        <label style="min-width:160px">Sea <span id="l-sea-v">0.0</span> (0 flat · 3 rough)<input id="l-sea" type="range" min="0" max="3" step="0.1" value="0"></label>
+        <button class="warn" id="b-drop" title="The pilot flips SE: the bridge's latch trips and it stops the boat">Drop autonomy (SE)</button>
+      </div></div>
     </div>
     <div class="card">
       <h2>Camera · rebuilt from DockObservation <span class="r" id="cam-note"></span></h2>
@@ -183,6 +194,9 @@ $("l-current_mps").oninput = e => { $("l-cur-v").textContent = (+e.target.value)
 $("l-current_mps").onchange = e => post("/knob", {name: "current_mps", value: +e.target.value});
 $("l-current_to_deg").onchange = e => post("/knob", {name: "current_to_deg", value: +e.target.value});
 $("l-mode").onchange = e => post("/mode", {mode: e.target.value});
+$("l-sea").oninput = e => { $("l-sea-v").textContent = (+e.target.value).toFixed(1); };
+$("l-sea").onchange = e => post("/knob", {name: "sea", value: +e.target.value});
+$("b-drop").onclick = () => post("/drop");
 
 function fillForm(sc) {
   $("k-green_bay").value = sc.green_bay; $("k-target_window").value = sc.target_window;
@@ -194,6 +208,7 @@ function fillForm(sc) {
   $("l-miscolour").value = sc.miscolour; $("l-mis-v").textContent = sc.miscolour.toFixed(2);
   $("l-current_mps").value = sc.current_mps; $("l-cur-v").textContent = sc.current_mps.toFixed(2);
   $("l-current_to_deg").value = sc.current_to_deg;
+  $("l-sea").value = sc.sea; $("l-sea-v").textContent = (+sc.sea).toFixed(1);
 }
 
 // ---------------------------------------------------------------- geometry
@@ -322,6 +337,24 @@ function drawMap() {
     g.strokeStyle = "#9fd8ff"; g.lineWidth = 3; if (w.spray_on === null) g.setLineDash([4, 4]);
     g.beginPath(); g.moveTo(...P(...cam)); g.lineTo(...P(...tgt)); g.stroke(); g.setLineDash([]);
   }
+  // the fixed nozzle: the true firing range across the green slip, and the
+  // stream while water flows (solid = going in, dashed = missing)
+  const fz = w.fire;
+  $("lg-band").style.display = sc.fire_lit ? "" : "none";
+  if (sc.fire_lit && fz) {
+    const c0 = d.faces[String(d.green_bay)], hr = fz.nozzle.hit_range;
+    const a = P(c0[0] + right[0] * -0.75 + out[0] * hr, c0[1] + right[1] * -0.75 + out[1] * hr);
+    const c = P(c0[0] + right[0] * 0.75 + out[0] * hr, c0[1] + right[1] * 0.75 + out[1] * hr);
+    g.strokeStyle = "#9fd8ff55"; g.lineWidth = 2; g.setLineDash([6, 4]);
+    g.beginPath(); g.moveTo(...a); g.lineTo(...c); g.stroke(); g.setLineDash([]);
+    if (fz.water && fz.stream) {
+      const nzp = [b.e + hvec(b.heading)[0] * fz.nozzle.x, b.n + hvec(b.heading)[1] * fz.nozzle.x];
+      const ctr = d.faces["2"];
+      const hitp = [ctr[0] + right[0] * fz.stream[0], ctr[1] + right[1] * fz.stream[0]];
+      g.strokeStyle = "#9fd8ff"; g.lineWidth = 3; if (!fz.stream_hit) g.setLineDash([4, 4]);
+      g.beginPath(); g.moveTo(...P(...nzp)); g.lineTo(...P(...hitp)); g.stroke(); g.setLineDash([]);
+    }
+  }
   // current
   if (sc.current_mps > 0) {
     const v = hvec(sc.current_to_deg), p = [W - 60, 50];
@@ -387,6 +420,71 @@ function drawCam() {
   $("cam-note").textContent = obs.bays.length + " bays · " + (obs.observed_fps || 0).toFixed(0) + " fps · pitch " + cam.pitch_deg + "°";
 }
 
+// ---------------------------------------------------------------- the nozzle, side on
+// The dock face on the right at x = 0, the boat to its left at its TRUE range,
+// heights above the water. The arc is drag-free with the boat's current pitch:
+// solid while water flows, faint otherwise (where it WOULD go now).
+function drawArc() {
+  const fz = S.world.fire, sc = S.world.scenario;
+  $("fire-card").style.display = sc.fire_lit ? "" : "none";
+  if (!sc.fire_lit || !fz) return;
+  const [g, W, H] = sizeCanvas($("arc"));
+  const xmax = Math.max(5, fz.range + 1.2), zmax = 2.0;
+  const L = 34, Rr = 14, T = 10, B = 22;
+  const X = x => W - Rr - (x / xmax) * (W - L - Rr), Z = z => H - B - (z / zmax) * (H - T - B);
+  g.fillStyle = "#101b25"; g.fillRect(0, 0, W, H);
+  g.strokeStyle = "#1c2f3e"; g.lineWidth = 1; g.fillStyle = CSS("--dim"); g.font = "10.5px " + CSS("--mono");
+  for (let x = 0; x <= xmax; x += 1) { g.beginPath(); g.moveTo(X(x), T); g.lineTo(X(x), H - B); g.stroke(); g.fillText(x + " m", X(x) - 10, H - 7); }
+  for (let z = 0.5; z <= zmax; z += 0.5) { g.beginPath(); g.moveTo(L, Z(z)); g.lineTo(W - Rr, Z(z)); g.stroke(); g.fillText(z.toFixed(1), 4, Z(z) + 4); }
+  // water, deck, face, windows
+  g.fillStyle = "#15303f"; g.fillRect(0, Z(0), W, H - Z(0));
+  g.fillStyle = "#6f604a"; g.fillRect(X(0), Z(fz.deck_z), W - X(0), Z(0) - Z(fz.deck_z));
+  g.fillStyle = "#e9eef2"; g.fillRect(X(0) - 3, Z(fz.deck_z + 1.0), 6, Z(fz.deck_z) - Z(fz.deck_z + 1.0));
+  const lw = S.world.lights;
+  for (const wn of fz.windows) {
+    const lit = lw.window === wn.index ? COLOUR[lw.colour] : COLOUR.off;
+    g.fillStyle = lit; g.fillRect(X(0) - 4, Z(wn.z1), 8, Z(wn.z0) - Z(wn.z1));
+    g.fillStyle = CSS("--dim"); g.fillText(wn.index === 0 ? "UL" : "LR", X(0) + 7, Z((wn.z0 + wn.z1) / 2) + 4);
+  }
+  // the true firing range: where a level, square boat's stream meets the top edge
+  g.strokeStyle = "#9fd8ff55"; g.setLineDash([5, 4]); g.beginPath(); g.moveTo(X(fz.nozzle.hit_range), T); g.lineTo(X(fz.nozzle.hit_range), Z(0)); g.stroke(); g.setLineDash([]);
+  // the boat, pitched
+  const pitch = fz.att[1], rr = fz.range, nzx = rr - fz.nozzle.x;
+  const pr = pitch * D, bx = t => rr - t * Math.cos(pr), bz = t => 0.2 + t * Math.sin(pr);
+  g.strokeStyle = CSS("--ink"); g.fillStyle = "#dfe8ef40"; g.lineWidth = 1.5; g.beginPath();
+  g.moveTo(X(bx(-0.5)), Z(bz(-0.5) - 0.15)); g.lineTo(X(bx(0.5)), Z(bz(0.5) - 0.15)); g.lineTo(X(bx(0.5)), Z(bz(0.5) + 0.1)); g.lineTo(X(bx(-0.5)), Z(bz(-0.5) + 0.1)); g.closePath(); g.fill(); g.stroke();
+  // the arc from the nozzle to the face
+  const th = (fz.nozzle.elev + pitch) * D, v2 = fz.nozzle.v * fz.nozzle.v, k = 9.81 / (2 * v2 * Math.cos(th) ** 2);
+  g.strokeStyle = fz.water ? "#9fd8ff" : "#9fd8ff40"; g.lineWidth = fz.water ? 3 : 1.5; g.beginPath();
+  for (let i = 0; i <= 60; i++) { const run = nzx * i / 60, z = fz.nozzle.h + run * Math.tan(th) - k * run * run; i ? g.lineTo(X(nzx - run), Z(z)) : g.moveTo(X(nzx - run), Z(z)); }
+  g.stroke();
+  g.fillStyle = "#9fd8ff"; g.beginPath(); g.arc(X(nzx), Z(fz.nozzle.h), 3, 0, 7); g.fill();
+  // where the recent shots crossed the face (median height, against the top edge)
+  for (const sh of fz.shots) {
+    if (sh.dz === null) continue;
+    g.fillStyle = sh.hit ? CSS("--ok") : CSS("--fail");
+    g.beginPath(); g.arc(X(0) - 12, Z(fz.target_z + sh.dz), 3.5, 0, 7); g.fill();
+  }
+  $("arc-note").textContent = "range " + fz.range.toFixed(2) + " m · pitch " + pitch.toFixed(1) + "° · roll " + fz.att[0].toFixed(1) + "°";
+}
+
+function fireFacts() {
+  const fz = S.world.fire, sc = S.world.scenario;
+  if (!sc.fire_lit || !fz) return;
+  const br = fz.bridge, wl = fz.wall || {};
+  const lidar = wl.valid ? wl.range_m.toFixed(2) + " m" + (wl.lat_m !== null && wl.lat_m !== undefined ? " · fingers " + (wl.lat_m >= 0 ? "+" : "") + wl.lat_m.toFixed(2) + " m (+ left)" : " · no fingers") : "NO WALL";
+  const ap = fz.hs ? "heading " + fz.hs[0] + "° at " + (fz.hs[1] >= 0 ? "+" : "") + fz.hs[1].toFixed(2) + " m/s" : (S.world.boat.loitering ? "loitering" : "no target");
+  const facts = [
+    ["truth", "range " + fz.range.toFixed(2) + " m · " + (fz.u >= 0 ? "+" : "") + fz.u.toFixed(2) + " m from the slip centre (+ right) · closest " + fz.min_range.toFixed(2) + " m"],
+    ["LiDAR", lidar],
+    ["autopilot", S.world.boat.v.toFixed(2) + " m/s · " + ap + (fz.hs_timeouts ? " · " + fz.hs_timeouts + " timeout(s)" : "") + " · avoidance " + (fz.avoidance ? "ON" : "off")],
+    ["bridge", "heading+speed " + br.hs_sent + " sent / " + br.hs_dropped + " dropped / " + br.hs_stops + " stops" + (br.last_drop ? " (" + br.last_drop + ")" : "") + (fz.dropped ? " · SE DROPPED" : "")],
+    ["pump", br.pump_cmds + " asked · " + br.bursts + " burst(s) · " + br.pump_refused + " refused" + (br.last_refusal ? " (" + br.last_refusal + ")" : "") + (S.fire_pump ? "" : " · runner has fire_pump OFF: DRY")],
+    ["shots", fz.n_shots + " · " + fz.n_hits + " in · window " + (fz.window_out ? "OUT" : "burning")],
+  ];
+  $("fire-facts").innerHTML = facts.map(([k, v]) => `<span class="k">${k}</span><span>${esc(v)}</span>`).join("");
+}
+
 // ---------------------------------------------------------------- panels
 function esc(s) { return String(s).replace(/[&<>]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;"}[c])); }
 function setV(id, state, text) { const e = $(id); e.className = "v " + state; e.textContent = text; }
@@ -449,12 +547,12 @@ async function tick() {
   try {
     const r = await fetch("/state", {cache: "no-store"});
     S = await r.json();
-    drawMap(); drawCam(); panels();
+    drawMap(); drawCam(); drawArc(); panels(); fireFacts();
     if (!S.runner_alive) $("err").textContent = "the runner process has exited - restart sim.py";
   } catch (e) { $("err").textContent = "sim not answering: " + e; }
   busy = false;
 }
 setInterval(tick, 150); tick();
-window.addEventListener("resize", () => S && (drawMap(), drawCam()));
+window.addEventListener("resize", () => S && (drawMap(), drawCam(), drawArc()));
 </script>
 </body></html>

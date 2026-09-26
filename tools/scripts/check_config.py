@@ -459,6 +459,26 @@ def check_pump():
         if trim is None or int(trim) != off:
             problems.append(f"SERVO{servo}_TRIM is {trim}, not pump_off_pwm {off}: "
                             "a burst would END at TRIM")
+    # GUIDED heading+speed: thrust 1.0 means WP_SPEED to the autopilot, so the
+    # bridge's idea of it must be the boat's, or every commanded speed is off by
+    # the ratio -- at the dock, that is the difference between 0.2 and 0.4 m/s.
+    try:
+        hs_wp = float(tb["hs_wp_speed_mps"])
+    except KeyError as e:
+        problems.append(f"telemetry_bridge missing {e}")
+    else:
+        spec = importlib.util.spec_from_file_location(
+            "param_guard", Path(__file__).parent / "param_guard.py")
+        pg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pg)
+        base = pg.load_param_file(PARAMS_BASELINE) if PARAMS_BASELINE.exists() else {}
+        wp = base.get("WP_SPEED")
+        if wp is None:
+            problems.append("WP_SPEED missing from the baseline")
+        elif abs(wp - hs_wp) > 1e-6:
+            problems.append(f"telemetry_bridge.hs_wp_speed_mps {hs_wp} != baseline "
+                            f"WP_SPEED {wp}: every heading+speed command would be "
+                            f"scaled by {wp / hs_wp:.2f}")
     if problems:
         fail("pump path", "; ".join(problems))
     else:

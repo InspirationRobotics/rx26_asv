@@ -53,6 +53,33 @@ ros2 topic echo /crsd/autonomy_drop
 | 9 | Bypass attempt | While dropped, publish directly to `/crsd/rc_override` from a fresh shell | Nothing reaches the Pixhawk (RC monitor unchanged) — bridge-level enforcement holds |
 | 10 | Disarm still works when dropped | While dropped, publish `true` to `/crsd/force_disarm` | Vehicle disarms. The force-disarm path is deliberately NOT latch-gated; if this fails, an RC-loss kill is impossible in exactly the situation that produces one |
 
+## The GUIDED heading+speed path (the fixed-nozzle shot)
+
+`task3_fire_test.xml` drives the boat with `/crsd/guided_heading_speed` →
+`telemetry_bridge` → `SET_ATTITUDE_TARGET`. That path is latch-gated **and** mode-gated
+(GUIDED only), clamps speed to `hs_max_speed_mps`, and sends a stop itself when commands go
+quiet (`hs_deadman_s`) or the latch trips (`crusader_fcu/guided_hs_core.py`). Run
+`tools/sitl/check_sitl_hs.py` first, so you know what the autopilot does with the message.
+**Props off.** Drive it by hand:
+
+```bash
+ros2 topic pub -r 5 /crsd/guided_heading_speed crusader_msgs/msg/GuidedHeadingSpeed "{heading_deg: 0.0, speed_mps: 0.15}"
+```
+
+Watch the motor outputs on SERVO_OUTPUT_RAW (QGC MAVLink Inspector) and the bridge's log.
+
+| # | Test | Procedure | Pass criterion |
+|---|------|-----------|----------------|
+| H1 | Refused outside GUIDED | SC in MANUAL, start the publisher | Outputs follow the sticks only; bridge logs `guided heading+speed DROPPED -- mode MANUAL is not GUIDED` |
+| H2 | Acts in GUIDED | Arm, SC → GUIDED | Motor outputs move off neutral |
+| H3 | Dead-man | Ctrl+C the publisher | Outputs back to neutral within ~0.5 s (the bridge's own stop), not 3 s |
+| H4 | Pilot drop | Publisher running, flip SE | Outputs neutral at once; bridge logs the trip; the publisher's messages now DROPPED |
+| H5 | Pilot mode | Publisher running, SC → MANUAL | Outputs follow the sticks at once |
+| H6 | Clamp | Publish `speed_mps: 2.0` in GUIDED | Bridge warns `speed clamped to +0.40`; output no higher than at 0.4 |
+| H7 | Nothing through a trip | While dropped, SC → GUIDED, publish again | Outputs stay neutral until `/crsd/autonomy_drop_reset` |
+
+Until H1–H7 pass, `publish_setpoints` stays **false** on `bt_runner_node` for the fire tree.
+
 ## Sign-off
 
 - Safety lead: ____________  date: ________

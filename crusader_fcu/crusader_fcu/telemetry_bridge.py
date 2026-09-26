@@ -44,6 +44,15 @@ Three jobs, deliberately fused into one node:
    pump_servo_channel is set; NOT mode-gated and NOT latch-gated (it moves water,
    not the boat), which is a team decision recorded in docs/G7_pump_bench.md.
 
+5. TX (autonomy): GUIDED heading + signed speed. Nodes publish
+   crusader_msgs/GuidedHeadingSpeed on /crsd/guided_heading_speed; this node
+   sends it as SET_ATTITUDE_TARGET (crusader_fcu.guided_hs_core) only while the
+   mode is GUIDED AND the autonomy-drop latch allows it, clamps the speed, and
+   sends a stop itself when commands go quiet (hs_deadman_s) or the latch trips.
+   The fixed-nozzle shot's station keeping: astern as well as ahead, and a
+   chosen heading, which position setpoints cannot give this boat.
+   NOTE: ArduRover's handling of the message is from memory until SITL (docs/G1).
+
 The hardware e-stop (SB switch) remains below and independent of all of this.
 
 Why attitude is its OWN topic and not three more fields on LatLonHead: ATTITUDE
@@ -91,7 +100,8 @@ from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
 from crusader_msgs.msg import (Attitude, FcuStatus, GuidedSetpoint, LatLonHead,
-                               ObstacleDistance, PumpCommand, PumpState, RcChannels)
+                               GuidedHeadingSpeed, ObstacleDistance, PumpCommand,
+                               PumpState, RcChannels)
 
 from crusader_common import config as crsd_config
 from crusader_common import geo
@@ -100,7 +110,7 @@ from crusader_common.node_main import run_node
 from crusader_common.param_utils import declare_from_config
 from crusader_common.stream_cache import StreamCache
 
-from crusader_fcu import pump_core
+from crusader_fcu import guided_hs_core, pump_core
 
 # MAVLink 2 is REQUIRED, and must be selected before pymavlink is first
 # imported anywhere in this process: mavutil binds its dialect module at
@@ -119,6 +129,7 @@ REQUIRED_SENDERS = (
     "set_position_target_global_int_send",
     "obstacle_distance_send",
     "command_long_send",
+    "set_attitude_target_send",
 )
 
 # All bridge params are SAFETY CONFIG -> read_only: `ros2 param set` is
@@ -161,6 +172,12 @@ PARAM_SPEC = {
                                 description="bench only: bursts while disarmed"),
     "estop_channel": dict(read_only=True, lo=1, hi=18,
                           description="SB e-stop RC channel"),
+    "hs_max_speed_mps": dict(read_only=True, lo=0.05, hi=1.5,
+                             description="clamp on GUIDED heading+speed commands"),
+    "hs_wp_speed_mps": dict(read_only=True, lo=0.1, hi=5.0,
+                            description="the autopilot's WP_SPEED: thrust 1.0 = this"),
+    "hs_deadman_s": dict(read_only=True, lo=0.1, hi=3.0,
+                         description="s without a heading+speed command -> stop"),
     "estop_threshold": dict(read_only=True, lo=800, hi=2200,
                             description="us; below = e-stop (or RC lost)"),
 }
@@ -261,6 +278,10 @@ class TelemetryBridge(Node):
         # autopilot. A topic, not a service: a service waiting on COMMAND_ACK
         # would block this single-threaded executor, force-disarm included.
         self.create_subscription(PumpCommand, "/crsd/pump_cmd", self._pump_cb, 10)
+        # Sanctioned GUIDED heading+speed TX (job 5). Gated by the mode AND the
+        # drop latch, with a dead-man; see _hs_cb.
+        self.create_subscription(GuidedHeadingSpeed, "/crsd/guided_heading_speed",
+                                 self._hs_cb, 10)
 
         # Each stream is republished ONLY while it is fresh. Rebroadcasting the
         # last cached frame with a fresh stamp after MAVProxy dies makes a dead
@@ -275,6 +296,10 @@ class TelemetryBridge(Node):
         self._rc = StreamCache(t_out)      # list[int] 18
         self._servo = StreamCache(t_out)   # the pump output's PWM (SERVO_OUTPUT_RAW)
         self.pump = pump_core.PumpGate(pump_core.PumpParams.from_dict(p))
+        # Its own lock: _handle_trip runs with self._lock HELD (from the RX
+        # thread), and threading.Lock is not re-entrant.
+        self.hs = guided_hs_core.HsGate(guided_hs_core.HsParams.from_dict(p))
+        self._hs_lock = threading.Lock()
         self._pump_seq = 0
         self._pump_result = pump_core.RESULT_NONE
         self._pump_reason = ""
@@ -454,6 +479,13 @@ class TelemetryBridge(Node):
             self.rc_pub.publish(m)
         try:
             self._pump_tick(t)
+            with self._hs_lock:
+                stop = self.hs.tick(t)
+            if stop is not None:
+                self._hs_send(stop)
+                self.get_logger().warn(
+                    f"guided heading+speed: no command for >{self.hs.p.deadman_s:.1f}s "
+                    "-- stop sent")
         except Exception as e:          # never let the pump take telemetry down
             self.get_logger().error(f"pump tick failed: {e}",
                                     throttle_duration_sec=5.0)
@@ -537,6 +569,38 @@ class TelemetryBridge(Node):
         m.last_result = self._pump_result
         m.last_reason = self.pump.latched or self._pump_reason
         self.pump_pub.publish(m)
+
+    # ---------- GUIDED heading+speed TX (mode AND latch gated, dead-man) ----------
+
+    def _hs_send(self, fields):
+        mask, q, thrust = fields
+        time_boot_ms = int(time.monotonic() * 1000.0) & 0xFFFFFFFF
+        self.conn.mav.set_attitude_target_send(
+            time_boot_ms, self.conn.target_system, self.conn.target_component,
+            mask, q, 0.0, 0.0, 0.0, thrust)
+
+    def _hs_cb(self, msg: GuidedHeadingSpeed):
+        """Forward heading+speed while the pilot has given us GUIDED and has not
+        dropped autonomy. Never raises: this executor also carries force-disarm."""
+        try:
+            t = time.monotonic()
+            with self._lock:
+                status = self._status.get(t)
+                allowed = self.latch.allowed
+            mode = "UNKNOWN" if status is None else str(status[0])
+            with self._hs_lock:
+                ok, why, fields = self.hs.on_command(
+                    t, float(msg.heading_deg), float(msg.speed_mps), mode, allowed)
+            if ok:
+                self._hs_send(fields)
+                if why != "ok":
+                    self.get_logger().warn(f"guided heading+speed: {why}",
+                                           throttle_duration_sec=2.0)
+            else:
+                self.get_logger().warning(f"guided heading+speed DROPPED -- {why}",
+                                          throttle_duration_sec=5.0)
+        except Exception as e:
+            self.get_logger().error(f"guided heading+speed failed: {e}")
 
     def _publish_drop_state(self):
         self.drop_pub.publish(Bool(data=not self.latch.allowed))
@@ -674,6 +738,12 @@ class TelemetryBridge(Node):
             f"AUTONOMY DROP: {self.latch.trip_reason} — releasing RC overrides")
         for _ in range(RELEASE_FRAMES):
             self._send_override([0] * 8)
+        # And stop anything WE were driving in GUIDED: the latch gates new
+        # heading+speed commands, but the last one would otherwise stand for 3 s.
+        with self._hs_lock:
+            stop = self.hs.on_trip()
+        if stop is not None:
+            self._hs_send(stop)
         self._publish_drop_state()
 
     # ---------- reset service ----------

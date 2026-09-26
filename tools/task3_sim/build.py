@@ -167,7 +167,7 @@ def run_test(name):
     src = os.path.join(BT_PKG, "test", f"{name}.cpp")
     exe = os.path.join(BUILD, name + EXE)
     headers = [os.path.join(BT_PKG, "include", "crusader_bt", h)
-               for h in ("nav_math.hpp", "dock_math.hpp")]
+               for h in ("nav_math.hpp", "dock_math.hpp", "fire_math.hpp")]
     stale = newer(src, exe) or any(os.path.isfile(h) and newer(h, exe) for h in headers)
     if stale:
         os.makedirs(BUILD, exist_ok=True)
@@ -206,6 +206,7 @@ def runner():
     shim = os.path.join(BT_PKG, "offros", "shim")
     srcs = [os.path.join(BT_PKG, "src", "leaves.cpp"),
             os.path.join(BT_PKG, "src", "task3_leaves.cpp"),
+            os.path.join(BT_PKG, "src", "fire_leaves.cpp"),
             os.path.join(BT_PKG, "offros", "offros_runner.cpp")]
     objs = [os.path.join(BUILD, "crusader_bt", os.path.basename(s) + ".o") for s in srcs]
     # Every object depends on every crusader_bt header, so touch-rebuild them all
@@ -251,6 +252,7 @@ def main():
     if a.what in ("all", "test"):
         run_test("test_nav_math")
         run_test("test_dock_math")
+        run_test("test_fire_math")
     if a.what == "btcpp":
         btcpp()
     if a.what in ("all", "runner"):

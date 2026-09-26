@@ -34,6 +34,7 @@
 #include "rclcpp/rclcpp.hpp"
 
 #include "crusader_bt/dock_math.hpp"
+#include "crusader_bt/fire_math.hpp"
 #include "crusader_bt/nav_math.hpp"
 
 namespace crusader_bt
@@ -185,6 +186,41 @@ struct Context
   nav::Vec2 home;
   bool have_home = false;
 
+  // ---- the fixed-nozzle shot (fire_math; src/fire_leaves.cpp) ----
+  //
+  // Stand off a wall at the calibrated range, pointed at a window, and fire
+  // when still. The runner feeds the three streams through the ingest*()
+  // functions below; now_s is the runner's clock (monotonic seconds) for this
+  // tick, the SAME clock the samples are stamped with.
+  double now_s = 0.0;
+  std::string mode;                           ///< the autopilot's mode, upper case
+  /// /crsd/autonomy_drop (latched): the pilot's SE switch has cut autonomy.
+  /// Unknown counts as tripped: no message is not permission.
+  bool drop_tripped = true;
+  fire::WallFilter wall;                      ///< /crsd/wall_range, filtered
+  fire::SteadyMonitor steady;                 ///< /crsd/attitude + our own thrust
+  double att_age_s = 1e9;
+  // /crsd/pump_state, as the bridge reports it
+  bool pump_enabled = false;
+  bool pump_on = false;
+  std::uint32_t pump_last_seq = 0;
+  int pump_result = 0;                        ///< PumpState.RESULT_*
+  std::string pump_reason;
+  double pump_age_s = 1e9;
+  /// Posture, like publish_setpoints: false = FireBurst runs DRY (logs, sends
+  /// nothing). Firing is G7's gate; moving is G1's. Two switches, not one.
+  bool fire_pump = false;
+  std::uint32_t pump_seq = 100000;            ///< the tree's burst numbering
+  // written by the fire leaves
+  fire::Aim aim;                              ///< StationKeep's latest solution
+  fire::BurstBook bursts;
+  double cmd_speed = 0.0;                     ///< the last speed StationKeep asked for
+  double last_keep_t = -1.0;
+  /// Set by StationKeep on every tick it commands; the runner clears it before
+  /// each tick and sends a STOP if motion was commanded last tick and not this
+  /// one - a leaf has no hook for "I stopped being ticked".
+  bool hs_commanded = false;
+
   // ---- written by NextWaypoint, read by NavigateTo ----
   nav::Vec2 waypoint;
   bool have_waypoint = false;
@@ -214,6 +250,14 @@ struct Context
   std::function<void(const dock::Request &)> relay_request;
   /// The water cannon: fire or not, aimed at a point in camera_link.
   std::function<void(bool, double, double, double)> cannon;
+
+  // ---- fixed-nozzle shot outputs ----
+  /// GUIDED heading (compass deg) + signed speed (m/s): /crsd/guided_heading_speed.
+  std::function<void(double, double)> heading_speed;
+  /// A pump burst of `seconds` (0 = OFF) with sequence `seq`: /crsd/pump_cmd.
+  std::function<void(double, std::uint32_t)> pump;
+  /// The autopilot's simple avoidance on/off: /crsd/avoidance_enable.
+  std::function<void(bool)> set_avoidance;
 };
 
 using ContextPtr = std::shared_ptr<Context>;
@@ -240,6 +284,40 @@ inline void ingestDockObservation(Context & c, const dock::Frame & f)
   c.dock_target_window = f.target_window_index;
   c.dock_fps = f.observed_fps;
   if (f.last_event == "hit") {++c.dock_hits;}
+}
+
+/// One /crsd/wall_range message. CALL UNDER ctx.mu. Stamped with the heading
+/// at receipt, so the wall's compass bearing survives the boat turning.
+inline void ingestWallRange(
+  Context & c, double t, bool valid, double range_m, double angle_deg, double lat_m)
+{
+  fire::WallSample s;
+  s.t = t;
+  s.valid = valid && std::isfinite(range_m);
+  s.range_m = range_m;
+  s.angle_deg = angle_deg;
+  s.lat_m = lat_m;
+  s.heading_deg = c.heading_deg;
+  c.wall.add(s);
+}
+
+/// One /crsd/attitude message (radians, the autopilot's axes). CALL UNDER ctx.mu.
+/// Only magnitudes and swings matter to "steady", so the axes' signs do not.
+inline void ingestAttitude(
+  Context & c, double t, double roll, double pitch, double roll_rate, double pitch_rate)
+{
+  constexpr double d = 180.0 / fire::kPi;
+  c.steady.feed_att(t, roll * d, pitch * d, roll_rate * d, pitch_rate * d);
+}
+
+/// Forget the last attempt's shots. Called at goal start with resetTask3.
+inline void resetFire(Context & c)
+{
+  c.aim = fire::Aim{};
+  c.bursts.reset();
+  c.cmd_speed = 0.0;
+  c.last_keep_t = -1.0;
+  c.hs_commanded = false;
 }
 
 /// Forget everything Task 3 learned. Called at goal start: a second attempt
@@ -378,6 +456,8 @@ void registerCrusaderNodes(BT::BehaviorTreeFactory & factory);
 /// The Task 3 leaves, from src/task3_leaves.cpp. Called by
 /// registerCrusaderNodes, so a runner registers everything with one call.
 void registerTask3Nodes(BT::BehaviorTreeFactory & factory);
+/// The fixed-nozzle shot's leaves (src/fire_leaves.cpp).
+void registerFireNodes(BT::BehaviorTreeFactory & factory);
 
 }  // namespace crusader_bt
 

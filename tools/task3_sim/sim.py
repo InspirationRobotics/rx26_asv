@@ -25,6 +25,17 @@ takes about two minutes.
     --headless   no server: run one mission, print the judge's verdict as
                  JSON, exit 0 only if every report was right. test_e2e.py
                  drives it this way.
+
+THE FIXED-NOZZLE SHOT, on its own tree:
+
+    python tools/task3_sim/sim.py --fire --fire-pump
+
+--fire runs behavior_trees/task3_fire_test.xml on a course where the upper-left
+window is already burning and the boat starts 3.8 m off the green bay - inside
+wall_range_node's r_max (4 m), which is where the pilot must hand over. Without
+--fire-pump the tree's bursts run DRY, as they do on the boat until Gate G7.
+--set StationKeep.lateral=fingers (repeatable) runs a copy of the tree with
+that port changed; the file itself stays the one truth.
 """
 import argparse
 import http.server
@@ -32,6 +43,7 @@ import json
 import os
 import queue
 import random
+import re
 import subprocess
 import sys
 import threading
@@ -47,6 +59,12 @@ import world as W                                         # noqa: E402
 
 RUNNER = os.path.join(HERE, ".build", "offros_runner" + (".exe" if os.name == "nt" else ""))
 TREE = os.path.join(REPO, "crusader_bt", "behavior_trees", "task3_disruptive.xml")
+FIRE_TREE = os.path.join(REPO, "crusader_bt", "behavior_trees", "task3_fire_test.xml")
+# --fire's course: the UL window burning, the boat 3.8 m off the green bay's
+# slip, square on. The default dock is 20 m north with its bays facing south.
+FIRE_COURSE = {"fire_lit": True, "target_window": 0, "green_bay": 2, "tier": 0,
+               "start_e": 0.0, "start_n": 16.2, "start_heading": 0.0,
+               "extinguish_s": 0.3, "autopilot_avoidance": True}
 PAGE = os.path.join(HERE, "page.html")
 PORT = 8088
 
@@ -57,11 +75,11 @@ OUTCOMES = {0: "SUCCESS", 1: "TIMEOUT", 2: "TREE FAILED", 3: "CANCELLED",
 class RunnerProc:
     """The off-ROS runner as a child: JSON lines in, JSON lines and logs out."""
 
-    def __init__(self, exe, tree):
+    def __init__(self, exe, tree, fire_pump=False):
         if not os.path.isfile(exe):
             sys.exit("no runner at %s - run: python tools/task3_sim/build.py" % exe)
         self.p = subprocess.Popen(
-            [exe, "--tree", tree, "--publish-setpoints"],
+            [exe, "--tree", tree, "--publish-setpoints"] + (["--fire-pump"] if fire_pump else []),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1, encoding="utf-8", errors="replace")
         self.out = queue.Queue()
@@ -104,6 +122,24 @@ class RunnerProc:
             self.p.kill()
 
 
+def patch_tree(tree, sets):
+    """A private copy of `tree` with NODE.port=value overrides applied to the
+    first NODE element that has that port. Returns its path."""
+    with open(tree, encoding="utf-8") as f:
+        txt = f.read()
+    for item in sets:
+        lhs, val = item.split("=", 1)
+        node, port = lhs.split(".", 1)
+        pat = re.compile(r'(<%s\b[^>]*?\b%s=")[^"]*(")' % (re.escape(node), re.escape(port)), re.S)
+        txt, n = pat.subn(lambda m: m.group(1) + val + m.group(2), txt, count=1)
+        if n != 1:
+            raise ValueError("no <%s> with a %s port in %s" % (node, port, os.path.basename(tree)))
+    out = os.path.join(HERE, ".build", "patched_%d_%s" % (os.getpid(), os.path.basename(tree)))
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(txt)
+    return out
+
+
 def _clean(v):
     """NaN is not JSON: the runner reads null as NaN. Also drops the world's
     private _truth fields, which a real camera would not know."""
@@ -119,12 +155,14 @@ def _clean(v):
 class Sim:
     """The world and the runner, stepped together in real time."""
 
-    def __init__(self, sc, exe=RUNNER, tree=TREE):
+    def __init__(self, sc, exe=RUNNER, tree=TREE, fire_pump=False, sets=()):
         self.lock = threading.RLock()
         self.sc = sc
         self.world = W.World(sc)
-        self.runner = RunnerProc(exe, tree)
-        self.tree_name = os.path.basename(tree)
+        self._patched = patch_tree(tree, sets) if sets else None
+        self.runner = RunnerProc(exe, self._patched or tree, fire_pump)
+        self.tree_name = os.path.basename(tree) + (" (%s)" % ", ".join(sets) if sets else "")
+        self.fire_pump = fire_pump
         self.bt = None
         self.book = None
         self.feedback = {}
@@ -143,6 +181,11 @@ class Sim:
     def close(self):
         self.stop = True
         self.runner.close()
+        if self._patched:
+            try:
+                os.remove(self._patched)
+            except OSError:
+                pass
 
     def send_goal(self, tier=None, timeout_s=400.0):
         with self.lock:
@@ -194,13 +237,21 @@ class Sim:
 
     def knob(self, name, value):
         """Live knobs: things that can change mid-run without lying to the tree."""
-        live = {"camera_ok", "miscolour", "unknown_rate", "current_mps", "current_to_deg"}
+        live = {"camera_ok", "miscolour", "unknown_rate", "current_mps", "current_to_deg", "sea"}
         with self.lock:
             if name not in live:
                 raise ValueError("%s is not a live knob; use reset" % name)
             cur = getattr(self.sc, name)
             setattr(self.sc, name, bool(value) if isinstance(cur, bool) else float(value))
         self._note("sim", "%s -> %s" % (name, value))
+
+    def drop(self):
+        """The pilot flips SE: the bridge's latch trips (and stays tripped
+        until a reset, as on the boat)."""
+        with self.lock:
+            self.world.dropped = True
+            self.world.judge.log(self.world.t, "pilot", "SE flipped: autonomy dropped", None)
+        self._note("sim", "SE: autonomy dropped")
 
     def set_mode(self, mode):
         with self.lock:
@@ -251,6 +302,13 @@ class Sim:
                 w.on_setpoint(m["lat"], m["lon"])
             elif kind == "cannon":
                 w.on_cannon(json.loads(m["json"]))
+            # the fixed-nozzle shot: through the bridge's gates, as on the boat
+            elif kind == "heading_speed":
+                w.bridge.on_heading_speed(w.t, float(m["heading_deg"]), float(m["speed_mps"]))
+            elif kind == "pump":
+                w.bridge.on_pump(w.t, float(m["duration_s"]), int(m["seq"]), m.get("source", ""))
+            elif kind == "avoidance":
+                w.on_avoidance(m["enable"])
             elif kind in ("docking_report", "firefighting_report", "resource_request", "uav_request"):
                 payload = json.loads(m["json"])
                 self.reports.append({"t": round(w.t, 2), "kind": kind, "json": m["json"]})
@@ -290,7 +348,7 @@ class Sim:
                 "origin": list(self.sc.origin),
                 "bt": self.bt, "book": self.book, "feedback": self.feedback,
                 "mission": dict(self.mission, outcome_name=OUTCOMES.get(self.mission["outcome"])),
-                "task": self.task, "tree": self.tree_name,
+                "task": self.task, "tree": self.tree_name, "fire_pump": self.fire_pump,
                 "runner_alive": self.runner.alive(),
                 "log": list(self.log)[-120:], "reports": list(self.reports),
             })
@@ -338,6 +396,8 @@ def serve(sim, port):
                     sim.knob(body["name"], body["value"])
                 elif self.path == "/mode":
                     sim.set_mode(body["mode"])
+                elif self.path == "/drop":
+                    sim.drop()
                 else:
                     return self._send(404, '{"error":"not found"}')
             except (RuntimeError, ValueError, KeyError) as e:
@@ -368,7 +428,10 @@ def headless(sim, tier, timeout_s):
           and summ["contacts"] == 0)
     with sim.lock:
         log = [e for e in sim.log if e["who"] != "tree" or "tree @" not in e["text"]]
+    fire = dict(st["world"]["fire"])
+    fire.pop("shots", None)
     out = {"ok": ok, "mission": st["mission"], "judge": summ,
+           "fire": fire, "shots": sim.world.shots,
            "events": st["world"]["judge"]["events"],
            "scenario": st["world"]["scenario"], "reports": st["reports"],
            "log": log[-150:]}
@@ -386,17 +449,28 @@ def main():
     ap.add_argument("--scenario", default="{}",
                     help='JSON of Scenario knobs, e.g. \'{"green_bay": 3, "tier": 1}\'')
     ap.add_argument("--random", action="store_true", help="randomise bay, window and code")
+    ap.add_argument("--fire", action="store_true",
+                    help="the fixed-nozzle shot: task3_fire_test.xml on a burning-window course")
+    ap.add_argument("--fire-pump", action="store_true",
+                    help="bt_runner_node's fire_pump: bursts go to the (simulated) bridge, not DRY")
+    ap.add_argument("--set", action="append", default=[], metavar="NODE.port=value",
+                    help="run a copy of the tree with this port changed (repeatable)")
     a = ap.parse_args()
+    if a.fire and a.tree == TREE:
+        a.tree = FIRE_TREE
 
     sc = W.Scenario()
-    for k, v in json.loads(a.scenario).items():
+    for k, v in (list(FIRE_COURSE.items()) if a.fire else []) + list(json.loads(a.scenario).items()):
         if not hasattr(sc, k):
             sys.exit("no such knob: %s" % k)
         setattr(sc, k, tuple(v) if isinstance(getattr(sc, k), tuple) else v)
     if a.random:
         sc.seed = random.randint(1, 10 ** 6)
         sc.randomise(random.Random(sc.seed))
-    sim = Sim(sc, a.runner, a.tree)
+    try:
+        sim = Sim(sc, a.runner, a.tree, a.fire_pump, a.set)
+    except ValueError as e:
+        sys.exit(str(e))
 
     if a.headless:
         out = headless(sim, sc.tier, a.timeout)

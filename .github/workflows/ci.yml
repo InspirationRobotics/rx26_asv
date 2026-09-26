@@ -29,16 +29,30 @@ jobs:
         with:
           python-version: "3.10"
       - run: pip install numpy
-      # The rules that decide when water comes out (pump_core), the range the
-      # boat positions itself by (wall_fit_core), and the calibration session
-      # against a simulated boat (tools/squirt_cal). No ROS in any of them.
-      - name: pump_core, wall_fit_core, squirt_cal
+      # The rules that decide when water comes out (pump_core) and when the
+      # tree may drive the boat (guided_hs_core), the range the boat positions
+      # itself by (wall_fit_core), the calibration session against a simulated
+      # boat (tools/squirt_cal), and the Task 3 sim's world (the nozzle, the
+      # LiDAR, the bridge's gates). No ROS in any of them.
+      - name: pump_core, guided_hs_core, wall_fit_core, squirt_cal, task3_sim world
         run: |
           for t in crusader_fcu/test/test_pump_core.py \
+                   crusader_fcu/test/test_guided_hs_core.py \
                    crusader_perception/test/test_wall_fit_core.py \
-                   tools/squirt_cal/test_*.py; do
+                   tools/squirt_cal/test_*.py \
+                   tools/task3_sim/test_world.py; do
             echo "== $t"
             python3 "$t" || exit 1
+          done
+      # The maths the behaviour trees drive, dock and aim by: header-only C++,
+      # stdlib only - no ROS, no BehaviorTree.CPP.
+      - name: nav_math, dock_math, fire_math
+        run: |
+          for t in test_nav_math test_dock_math test_fire_math; do
+            echo "== $t"
+            g++ -std=c++17 -O2 -Wall -Wextra -I crusader_bt/include \
+                -o "/tmp/$t" "crusader_bt/test/$t.cpp" || exit 1
+            "/tmp/$t" || exit 1
           done
 
   build:

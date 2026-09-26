@@ -24,6 +24,7 @@ The typed contracts between nodes. Four telemetry messages produced by
 | `DockWindow` | inside `DockBay` | one target window: slot `index` (from the bay's geometry, never its colour), light `state`, aim point in `camera_link` |
 | `PumpCommand` | `tools/squirt_cal` (later the Task 3 tree) → `telemetry_bridge` | a pump burst of `duration_s`, or 0 = OFF. **A request**: the bridge refuses anything its own checks do not allow, and the autopilot times the burst (DO_REPEAT_SERVO, one cycle), so nothing upstream can leave the pump on |
 | `PumpState` | `telemetry_bridge` → `tools/squirt_cal` | the pump output's PWM as the Pixhawk reports it (SERVO_OUTPUT_RAW), the pilot's pump channel, and what happened to the last request |
+| `GuidedHeadingSpeed` | the fire tree (`bt_runner_node`) → `telemetry_bridge` | hold this compass heading at this signed speed, in GUIDED. The bridge sends `SET_ATTITUDE_TARGET` only in GUIDED **and** while the drop latch allows it, clamps the speed, and stops the boat itself if commands go quiet. Astern and a chosen heading: what the fixed-nozzle shot needs and position setpoints cannot give |
 | `WallRange` | `wall_range_node` → `tools/squirt_cal` (later the Task 3 tree) | the vertical wall ahead from the LiDAR: perpendicular range, angle to square up, and the slip fingers either side. One per sweep, valid or not |
 
 Every message carries a `std_msgs/Header`. **The stamp is the time the MAVLink frame was

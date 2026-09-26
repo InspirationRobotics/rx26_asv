@@ -37,6 +37,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/PumpCommand.msg"
   "msg/PumpState.msg"
   "msg/WallRange.msg"
+  "msg/GuidedHeadingSpeed.msg"
   # Actions. Same rule as above: a file not listed here is silently not
   # generated, and the import fails at node start, on the boat.
   "action/SafePassage.action"

@@ -104,6 +104,73 @@ Task 1.
 RoboCommand's `ReadinessConfirm` arrives on `/crsd/ocs_command` (`ocs_client` republishes OCS
 commands and acts on none).
 
+## The fixed-nozzle shot (`task3_fire_test.xml`)
+
+The nozzle is fixed (~45°), so **the boat is the aim**: its range to the dock sets how high the
+water lands, its heading how far left or right. `tools/squirt_cal` found the range for the
+upper-left window's top edge at the pool: LiDAR wall range **3.1–3.4 m, 3.22 m** in the middle.
+`behavior_trees/task3_fire_test.xml` is that shot on its own, to test before it goes into the
+full mission:
+
+```
+ReactiveSequence   guard band, every tick: IsAutonomous, ModeIs GUIDED, NotDropped (SE),
+                   WallRangeAlive, AttitudeAlive
+  StationKeep      ALWAYS SUCCESS: square to the wall until 0.5 m from the firing range, then
+                   on the aim heading; banded speed (0 inside ±5 cm, else 0.12–0.25 m/s)
+  Sequence         avoidance off → up to 5 × [AwaitFiringSolution → FireBurst → WindowOut]
+                   → StopBoat → avoidance on → ShotsFired ≥ 1
+```
+
+Every number is in `crusader_bt/include/crusader_bt/fire_math.hpp` (stdlib only, 79 checks in
+`test/test_fire_math.cpp`), the leaves in `src/fire_leaves.cpp`, and every calibration value is
+an XML port.
+
+**How it moves the boat.** GUIDED **heading + signed speed**: `/crsd/guided_heading_speed` →
+`telemetry_bridge` → MAVLink `SET_ATTITUDE_TARGET` (yaw quaternion, thrust = speed / WP_SPEED).
+Position setpoints cannot go astern or hold a chosen heading. The bridge's rules are
+`crusader_fcu/guided_hs_core.py`: sent only in **GUIDED** with the **SE latch** clear, speed
+clamped to ±0.4 m/s, and one stop command from the bridge itself when commands go quiet for
+0.5 s or SE trips. ArduRover's own 3 s timeout is the last backstop. **How ArduRover treats the
+message is as remembered, not verified**: `tools/sitl/check_sitl_hs.py` is the check.
+
+**Two switches on `bt_runner_node`, both off by default:** `publish_setpoints` (may it move the
+boat — G1) and `fire_pump` (may it squirt — G7). Both off, the tree is a **shadow**: it computes
+and logs the solution every tick (`keep: range 3.41 m, heading 2.1 -> 358.4, speed +0.12 m/s
+(closing in) [shadow: publish_setpoints is off]`) and does nothing.
+
+**What keeps it off the dock and honest:**
+
+| | |
+|---|---|
+| never drives forward inside 1.5 m of the LiDAR range (`min_range_m`) | the autopilot's avoidance stops at 2 m, inside the firing spot, so the tree turns it off for the shot and back on after |
+| the LiDAR range and the camera's (dock book) must agree within 0.5 m | a wall fit on the finger tips reads 2 m short; with no camera (the pool) there is no check |
+| fires only when range ±6 cm, heading ±2°, the hull still (attitude ≥ 8 Hz, rates < 4°/s, ±1.5°), no thrust for 1.5 s — all held 1 s | a degree of pitch moves the hit ~5 cm at 3 m |
+| the LiDAR is ignored while water is in the air | the spray returns points short of the wall |
+| no burst without the bridge's ACK (or SENT with no ACK in 1.5 s); OFF on halt | the autopilot times the burst (DO_REPEAT_SERVO) |
+
+**Hand over inside 4 m.** `wall_range_node.r_max` is 4 m: further out it cannot see the dock
+and the guard band ends the run at once. Drive in by hand, then flip SC to GUIDED.
+
+**Where it fires from.** 3.2 m is *outside* the 2 m fingers. In the full mission the boat would
+dock, report, back out to 3.2 m, and fire — whether that counts is a question for RoboNation
+(below). A spot inside the slip on the rising part of the arc (~1.6 m) may exist; calibrate it
+before relying on it.
+
+### Before it moves the real boat, in this order
+
+1. `colcon build` of `crusader_msgs`, `crusader_fcu`, `crusader_bt` in the container — the first
+   real build of `bt_runner_node`'s Task 3 and fire code (written against no ROS).
+2. `tools/sitl/check_sitl_hs.py` on a machine that runs SITL; correct `guided_hs_core` and the
+   sim's `Boat` to whatever it measures.
+3. `SR0_RC_CHAN` = 10 (the drop latch and the pump watchdog read RC); SC up = GUIDED.
+4. [G7](G7_pump_bench.md) — the pump bench, `SERVO9_TRIM` = the OFF value first.
+5. [G1](G1_bench_procedure.md), including the heading+speed rows — props off.
+6. On the water: a **shadow run** (both switches off; read the log), then **range + heading hold**
+   (`publish_setpoints` on, `fire_pump` off — bursts run DRY), then **fire**.
+
+The sim runs all of it first: `python tools/task3_sim/sim.py --fire --fire-pump`, and 16
+`fire_*` scenarios in `test_e2e.py` (tools/task3_sim/README.md).
+
 ## Open questions
 
 | Question | Who | What depends on it |
@@ -115,7 +182,9 @@ commands and acts on none).
 | "Fully docked" defined how; is touching a finger penalised? | RoboNation | `DockedInBay`, the berth depth |
 | The deck's height above water on the day | on site | the window heights, so the pitch |
 | A USV→UAV resource-request message in the RXL dialect (only UAV→USV `RXL_RESOURCE_DELIVERY` exists) | UAV team | `rxl_link_node` putting `/crsd/uav_resource_request` on the air |
-| The water cannon: fixed or pan/tilt, where, what it takes | **answered 2026-09-25: FIXED**, ~45°, ~3 m; on a Pixhawk pass-through output, pilot switch moving to ch10. The boat's position is the aim. `tools/squirt_cal` calibrates the range per window against `/crsd/wall_range`; the pump path is `/crsd/pump_cmd` → `telemetry_bridge` ([G7](G7_pump_bench.md)). `SprayUntilHit` (pan/tilt aim point) still has to be reworked to "go to the calibrated range, wait for steady, burst" | `SprayUntilHit`, and whatever turns `/crsd/water_cannon` into `/crsd/pump_cmd` |
+| The water cannon: fixed or pan/tilt, where, what it takes | **answered 2026-09-25: FIXED**, ~45°, ~3 m; on a Pixhawk pass-through output, pilot switch moving to ch10. The boat's position is the aim. `tools/squirt_cal` calibrates the range per window against `/crsd/wall_range`; the pump path is `/crsd/pump_cmd` → `telemetry_bridge` ([G7](G7_pump_bench.md)). The shot itself is `task3_fire_test.xml` (above); `task3_disruptive.xml`'s `SprayUntilHit` (pan/tilt aim point) is still to be replaced by it | `SprayUntilHit` |
+| Firing from outside the slip: may the boat back out of the bay to fire, after reporting docked? | RoboNation | where the fixed nozzle can fire from (3.2 m is outside the fingers) |
+| The real dock's deck height, and whether the face panels stand at the deck edge or set back | on site | re-calibrate: 5 cm of height is ~12 cm of range; `face_setback_m` for the camera cross-check |
 | The dock detector node itself (draft spec in firefighting-cv) | CV team | everything above; the tree fails fast without it (`DockCameraAlive`) |
 
 Undocking is not implemented: leaving a slip is stern-first and the setpoint path is

@@ -8,6 +8,10 @@
 //        /crsd/world_targets (TrackedTargetArray) the buoy field
 //        dock/observations   (DockObservation)    Task 3: the bays, every frame
 //        /crsd/ocs_command   (String, JSON)       Task 3: RoboCommand's readiness
+//        /crsd/wall_range    (WallRange)          the fixed-nozzle shot: LiDAR to the dock
+//        /crsd/attitude      (Attitude)           ...and whether the hull is still
+//        /crsd/pump_state    (PumpState)          ...and what the bridge did with a burst
+//        /crsd/autonomy_drop (Bool, latched)      ...the pilot's SE cut
 //   out: /crsd/guided_setpoint    (GuidedSetpoint) ONLY when publish_setpoints
 //        /crsd/current_task       (String, latched)
 //        /crsd/autonomy_active    (Bool)   turns the mast light GREEN
@@ -17,6 +21,8 @@
 //        /crsd/resource_delivery_request (String, JSON)  Task 3, for the OCS
 //        /crsd/uav_resource_request (String, JSON)       Task 3, for the radio
 //        /crsd/water_cannon       (String, JSON)          Task 3, the pump
+//        /crsd/guided_heading_speed (GuidedHeadingSpeed) ONLY when publish_setpoints
+//        /crsd/pump_cmd           (PumpCommand)   ONLY when fire_pump
 //
 // NOTE: the Task 3 plumbing here (onDock, onOcsCommand, the five publishers)
 // has NOT been built against real ROS. It was written on a laptop with no ROS
@@ -27,6 +33,11 @@
 // compiled and exercised off-ROS by crusader_bt/offros/, whose frameFromJson()
 // is this file's onDock() field for field. First colcon build: read the errors
 // here before anywhere else.
+//
+// The fixed-nozzle shot's plumbing (onWallRange, onAttitude, onPumpState,
+// the autonomy_drop subscription, heading_speed/pump, stopIfSilent) was
+// added later, and has not had even that mock check: offros_runner.cpp holds
+// the same logic line for line and is what the sim builds and runs.
 //
 // WHY THE COARSE ACTION SURVIVES the move to a behaviour tree. It is exactly
 // Nav2's shape: bt_navigator exposes ONE NavigateToPose action and runs a tree
@@ -65,6 +76,8 @@
 // Subscriptions write Context under its mutex; the tick loop reads under the
 // same one.
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <atomic>
@@ -83,13 +96,18 @@
 #include "std_msgs/msg/u_int8.hpp"
 
 #include "crusader_msgs/action/safe_passage.hpp"
+#include "crusader_msgs/msg/attitude.hpp"
 #include "crusader_msgs/msg/dock_observation.hpp"
 #include "crusader_msgs/msg/fcu_status.hpp"
 #include "crusader_msgs/msg/gate_pair.hpp"
+#include "crusader_msgs/msg/guided_heading_speed.hpp"
 #include "crusader_msgs/msg/guided_setpoint.hpp"
 #include "crusader_msgs/msg/lat_lon_head.hpp"
 #include "crusader_msgs/msg/passage_plan.hpp"
+#include "crusader_msgs/msg/pump_command.hpp"
+#include "crusader_msgs/msg/pump_state.hpp"
 #include "crusader_msgs/msg/tracked_target_array.hpp"
+#include "crusader_msgs/msg/wall_range.hpp"
 
 #include "crusader_bt/context.hpp"
 #include "crusader_bt/dock_math.hpp"
@@ -175,6 +193,9 @@ public:
     ctx_ = std::make_shared<Context>();
     ctx_->node = this;
     ctx_->publish_setpoints = declare_parameter<bool>("publish_setpoints", false);
+    // The fixed-nozzle shot may squirt: Gate G7, separate from moving (G1).
+    ctx_->fire_pump = declare_parameter<bool>("fire_pump", false);
+    t0_ = std::chrono::steady_clock::now();
 
     // Task 3. THE CAMERA EXTRINSIC MUST EQUAL target_tracker's cam_x / cam_y /
     // cam_yaw_deg: two nodes placing one camera in two places put the bays and
@@ -209,6 +230,11 @@ public:
       "/crsd/resource_delivery_request", 10);
     uav_request_pub_ = create_publisher<std_msgs::msg::String>("/crsd/uav_resource_request", 10);
     cannon_pub_ = create_publisher<std_msgs::msg::String>("/crsd/water_cannon", 10);
+    // The fixed-nozzle shot: GUIDED heading+speed and pump bursts, both through
+    // telemetry_bridge, which gates each (mode + drop latch; pump_core).
+    hs_pub_ = create_publisher<crusader_msgs::msg::GuidedHeadingSpeed>(
+      "/crsd/guided_heading_speed", 10);
+    pump_pub_ = create_publisher<crusader_msgs::msg::PumpCommand>("/crsd/pump_cmd", 10);
 
     status_sub_ = create_subscription<crusader_msgs::msg::FcuStatus>(
       "/crsd/fcu_status", 10,
@@ -229,6 +255,23 @@ public:
     ocs_sub_ = create_subscription<std_msgs::msg::String>(
       "/crsd/ocs_command", 10,
       [this](std_msgs::msg::String::SharedPtr m) {onOcsCommand(m);});
+    wall_sub_ = create_subscription<crusader_msgs::msg::WallRange>(
+      "/crsd/wall_range", 10,
+      [this](crusader_msgs::msg::WallRange::SharedPtr m) {onWallRange(m);});
+    att_sub_ = create_subscription<crusader_msgs::msg::Attitude>(
+      "/crsd/attitude", 10,
+      [this](crusader_msgs::msg::Attitude::SharedPtr m) {onAttitude(m);});
+    pump_sub_ = create_subscription<crusader_msgs::msg::PumpState>(
+      "/crsd/pump_state", 10,
+      [this](crusader_msgs::msg::PumpState::SharedPtr m) {onPumpState(m);});
+    // Latched on the bridge side (TRANSIENT_LOCAL): must match to get the
+    // current value rather than wait for the next change.
+    drop_sub_ = create_subscription<std_msgs::msg::Bool>(
+      "/crsd/autonomy_drop", rclcpp::QoS(1).reliable().transient_local(),
+      [this](std_msgs::msg::Bool::SharedPtr m) {
+        std::lock_guard<std::mutex> lk(ctx_->mu);
+        ctx_->drop_tripped = m->data;
+      });
 
     wireContext();
     publishTask(kTaskNone);
@@ -291,8 +334,43 @@ private:
     for (auto & c : mode) {c = static_cast<char>(std::toupper(c));}
     std::lock_guard<std::mutex> lk(ctx_->mu);
     ctx_->autonomous = auto_modes_.count(mode) > 0;
+    ctx_->mode = mode;
     status_t_ = now();
     have_status_ = true;
+  }
+
+  // --- the fixed-nozzle shot: stamped on the runner's steady clock at
+  // receipt, the same clock ctx_->now_s reads (see refreshFreshness) ---
+
+  double nowS() const
+  {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0_).count();
+  }
+
+  void onWallRange(const crusader_msgs::msg::WallRange::SharedPtr m)
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    ingestWallRange(*ctx_, nowS(), m->valid, m->range_m, m->angle_deg, m->lat_m);
+  }
+
+  void onAttitude(const crusader_msgs::msg::Attitude::SharedPtr m)
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    ingestAttitude(*ctx_, nowS(), m->roll, m->pitch, m->rollspeed, m->pitchspeed);
+    att_t_ = nowS();
+    have_att_ = true;
+  }
+
+  void onPumpState(const crusader_msgs::msg::PumpState::SharedPtr m)
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    ctx_->pump_enabled = m->enabled;
+    ctx_->pump_on = m->on;
+    ctx_->pump_last_seq = m->last_seq;
+    ctx_->pump_result = m->last_result;
+    ctx_->pump_reason = m->last_reason;
+    pump_t_ = nowS();
+    have_pump_ = true;
   }
 
   void onPose(const crusader_msgs::msg::LatLonHead::SharedPtr m)
@@ -504,6 +582,46 @@ private:
     ctx_->cannon = [this](bool fire, double x, double y, double z) {
         publishJson(cannon_pub_, dock::cannonJson(fire, x, y, z));
       };
+    // The fixed-nozzle shot. The offros runner emits the same three as JSON.
+    ctx_->heading_speed = [this](double heading, double speed) {
+        crusader_msgs::msg::GuidedHeadingSpeed m;
+        m.header.stamp = now();
+        m.heading_deg = heading;
+        m.speed_mps = speed;
+        last_hs_heading_ = heading;
+        hs_pub_->publish(m);
+      };
+    ctx_->pump = [this](double seconds, std::uint32_t seq) {
+        crusader_msgs::msg::PumpCommand m;
+        m.header.stamp = now();
+        m.duration_s = static_cast<float>(seconds);
+        m.seq = seq;
+        m.source = "bt_runner";
+        pump_pub_->publish(m);
+      };
+    ctx_->set_avoidance = [this](bool on) {publishAvoidance(on);};
+  }
+
+  /// Motion was commanded last tick and not this one: say STOP, once. A leaf
+  /// has no hook for "I stopped being ticked", and ArduRover carries on for 3 s
+  /// - 0.9 m next to a dock. After every tick, and on every exit. The bridge's
+  /// own dead-man (hs_deadman_s) is the backstop to this.
+  void stopIfSilent(bool exiting)
+  {
+    bool commanded;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      commanded = ctx_->hs_commanded && !exiting;
+      ctx_->hs_commanded = false;
+    }
+    if (hs_active_ && !commanded && std::isfinite(last_hs_heading_)) {
+      crusader_msgs::msg::GuidedHeadingSpeed m;
+      m.header.stamp = now();
+      m.heading_deg = last_hs_heading_;
+      m.speed_mps = 0.0;
+      hs_pub_->publish(m);
+    }
+    hs_active_ = commanded;
   }
 
   static void publishJson(
@@ -688,6 +806,10 @@ private:
     // The dock detector publishes every frame, bays or not, so its silence is
     // a dead node. DockCameraAlive reads the age; the tree picks the limit.
     ctx_->dock_obs_age_s = have_dock_ ? (t - dock_t_).seconds() : 1e9;
+    // The fixed-nozzle shot's clock and ages (steady clock, like its samples).
+    ctx_->now_s = nowS();
+    ctx_->att_age_s = have_att_ ? ctx_->now_s - att_t_ : 1e9;
+    ctx_->pump_age_s = have_pump_ ? ctx_->now_s - pump_t_ : 1e9;
   }
 
   // ---------------------------------------------------------------- execute
@@ -745,6 +867,7 @@ private:
       // not inherit the first one's bays, votes or committed bay.
       ctx_->tier = goal->tier;
       resetTask3(*ctx_);
+      resetFire(*ctx_);
       // "Home" is where THIS attempt started, captured once. Not the autopilot's
       // HOME, which is wherever it was armed and is usually somewhere else after
       // the boat has been driven out manually.
@@ -803,6 +926,7 @@ private:
 
         refreshFreshness();
         st = tree.tickOnce();
+        stopIfSilent(false);
 
         if (verbose_tree_) {
           const std::string frame = view.renderIfChanged();
@@ -893,6 +1017,7 @@ private:
     // has stopped. And the pump OFF: SprayUntilHit switches it off when it is
     // halted, but a tree that throws never halts its leaves.
     if (ctx_->cannon) {ctx_->cannon(false, 0.0, 0.0, 0.0);}
+    stopIfSilent(true);                 // the boat stopped, if we were driving it
     publishTask(kTaskNone);
     publishAvoidance(true);
     std_msgs::msg::Bool off;
@@ -1011,6 +1136,19 @@ private:
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr cannon_pub_;
   rclcpp::Subscription<crusader_msgs::msg::DockObservation>::SharedPtr dock_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr ocs_sub_;
+
+  // The fixed-nozzle shot
+  std::chrono::steady_clock::time_point t0_{};
+  double att_t_ = 0.0, pump_t_ = 0.0;   // nowS() at receipt; guarded by ctx_->mu
+  bool have_att_ = false, have_pump_ = false;
+  bool hs_active_ = false;              // motion commanded last tick (tick thread only)
+  double last_hs_heading_ = std::nan("");
+  rclcpp::Publisher<crusader_msgs::msg::GuidedHeadingSpeed>::SharedPtr hs_pub_;
+  rclcpp::Publisher<crusader_msgs::msg::PumpCommand>::SharedPtr pump_pub_;
+  rclcpp::Subscription<crusader_msgs::msg::WallRange>::SharedPtr wall_sub_;
+  rclcpp::Subscription<crusader_msgs::msg::Attitude>::SharedPtr att_sub_;
+  rclcpp::Subscription<crusader_msgs::msg::PumpState>::SharedPtr pump_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr drop_sub_;
 };
 
 }  // namespace crusader_bt

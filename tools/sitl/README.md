@@ -5,6 +5,7 @@ Headless. No Gazebo, no GPU, no simulated water. Runs on a laptop in WSL2.
 ```bash
 bash tools/sitl/start_sitl.sh          # start
 python3 tools/sitl/check_sitl.py       # 9 checks, ~60 s
+python3 tools/sitl/check_sitl_hs.py    # GUIDED heading+speed (Task 3's fixed nozzle), ~2 min
 bash tools/sitl/start_sitl.sh --stop
 ```
 

@@ -339,5 +339,230 @@ class Judging(unittest.TestCase):
         self.assertIsNone(w._spray_hits())
 
 
+
+def fire_world(**kw):
+    """sim.py --fire's course, with overrides. The boat's body origin at
+    `rng` m in front of bay 2's deck edge, square on, u = `u` (+ right)."""
+    rng, u = kw.pop("rng", 3.22), kw.pop("u", 0.0)
+    sc = W.Scenario(fire_lit=True, target_window=0, green_bay=2, tier=0,
+                    start_e=u, start_n=20.0 - rng, start_heading=0.0, **kw)
+    return W.World(sc)
+
+
+class FixedNozzle(unittest.TestCase):
+    """The truth the fire tree is aimed against."""
+
+    def test_fitted_to_the_pool_number(self):
+        # level and square on at nozzle_hit_range_m, in line with the window:
+        # the stream crosses the face ON the upper-left window's top edge
+        w = fire_world(u=-0.22)
+        u, z, run = w._crossing()
+        self.assertAlmostEqual(run, 3.22 - 0.45, places=6)
+        self.assertAlmostEqual(z, 0.3 + 0.895, places=6)                # deck + 895 mm
+        self.assertAlmostEqual(u, -0.22, places=6)
+        # a drag-free 45 deg arc that does that reaches ~3.9 m on the level
+        self.assertAlmostEqual(w.nozzle.v ** 2 / W.G, 3.885, delta=0.01)
+
+    def test_the_arc_is_falling_there_so_closer_is_higher(self):
+        near = fire_world(rng=3.0, u=-0.22)._crossing()[1]
+        far = fire_world(rng=3.4, u=-0.22)._crossing()[1]
+        self.assertGreater(near, far)
+        # ~0.43 m of height per metre of range on this arc
+        self.assertAlmostEqual((near - far) / 0.4, 0.43, delta=0.05)
+
+    def test_bow_up_lifts_the_stream_and_roll_moves_it_sideways(self):
+        w = fire_world(u=-0.22)
+        z0 = w._crossing()[1]
+        w.att = (0.0, 1.0, 0.0, 0.0)                     # 1 deg bow up
+        self.assertGreater(w._crossing()[1] - z0, 0.02)
+        w.att = (2.0, 0.0, 0.0, 0.0)                     # rolled right
+        self.assertGreater(w._crossing()[0], -0.22 + 0.02)
+
+    def test_turning_left_moves_the_stream_left(self):
+        w = fire_world()
+        u0 = w._crossing()[0]
+        w.boat.yaw = 356.0                               # 4 deg left of square
+        self.assertAlmostEqual(w._crossing()[0] - u0,
+                               -(3.22 - 0.45) * math.tan(math.radians(4.0))
+                               - 0.45 * math.sin(math.radians(4.0)), delta=0.01)
+
+    def test_a_left_skewed_nozzle_lands_left(self):
+        straight = fire_world()._crossing()[0]
+        skewed = fire_world(nozzle_yaw_bias_deg=3.0)._crossing()[0]
+        self.assertAlmostEqual(skewed - straight, -2.77 * math.tan(math.radians(3.0)), delta=0.01)
+
+    def test_the_cal_error_scenario_misses_high(self):
+        # the truth is 3.6 m, the tree fires from 3.22 m: well over the top edge
+        w = fire_world(u=-0.22, nozzle_hit_range_m=3.6)
+        self.assertGreater(w._crossing()[1] - w.target_edge()[1], W.World.STREAM_R + 0.1)
+
+
+class WallRangeSensor(unittest.TestCase):
+
+    def test_range_bearing_and_offset_signs(self):
+        w = fire_world(rng=3.2, u=-0.2)                  # 0.2 m LEFT of the slip centre
+        w.boat.yaw = 5.0                                 # bow 5 deg right of square
+        m = w.wall_range()
+        self.assertTrue(m["valid"])
+        self.assertAlmostEqual(m["range_m"], 3.2, delta=0.03)
+        # the wall's nearest point is 5 deg to the LEFT: + (turn left to square)
+        self.assertAlmostEqual(m["angle_deg"], 5.0, delta=1.5)
+        self.assertAlmostEqual(m["lat_m"], 0.2, delta=0.03)        # + = LEFT
+
+    def test_finger_tip_lock_reads_short_and_sees_no_fingers(self):
+        w = fire_world(rng=3.2, wall_on_fingers=True)
+        m = w.wall_range()
+        self.assertAlmostEqual(m["range_m"], 1.2, delta=0.03)
+        self.assertIsNone(m["lat_m"])
+
+    def test_no_wall_and_out_of_view(self):
+        self.assertFalse(fire_world(wall_ok=False).wall_range()["valid"])
+        w = fire_world()
+        w.boat.yaw = 40.0                                # more oblique than max_angle_deg
+        self.assertFalse(w.wall_range()["valid"])
+        # wall_range_node's r_max (4 m): blind from 4.5 m unless it is raised
+        self.assertFalse(fire_world(rng=4.5).wall_range()["valid"])
+        self.assertTrue(fire_world(rng=4.5, wall_r_max=9.0).wall_range()["valid"])
+        self.assertIsNone(fire_world(rng=6.0, wall_r_max=9.0).wall_range()["lat_m"])  # no fingers
+
+
+class HeadingSpeed(unittest.TestCase):
+    """The autopilot side (as remembered) and the bridge's gates in front of it."""
+
+    def test_drives_the_heading_and_speed_then_times_out_into_loiter(self):
+        b = W.Boat(0.0, 0.0, 0.0)
+        self.assertTrue(b.set_heading_speed(10.0, 0.2))
+        for _ in range(40):
+            b.step(0.05)
+        self.assertAlmostEqual(b.yaw, 10.0, delta=0.5)
+        self.assertAlmostEqual(b.v, 0.2, delta=0.01)
+        for _ in range(int(3.5 / 0.05)):
+            b.step(0.05)
+        self.assertIsNone(b.hs)
+        self.assertEqual(b.hs_timeouts, 1)
+        self.assertTrue(b.loitering)
+
+    def test_astern_is_a_negative_speed(self):
+        b = W.Boat(0.0, 0.0, 0.0)
+        b.set_heading_speed(0.0, -0.2)
+        for _ in range(40):
+            b.step(0.05)
+        self.assertLess(b.n, -0.1)
+        self.assertAlmostEqual(b.yaw, 0.0, delta=0.5)
+
+    def test_ignored_outside_guided(self):
+        b = W.Boat(0.0, 0.0, 0.0)
+        b.mode = "MANUAL"
+        self.assertFalse(b.set_heading_speed(10.0, 0.2))
+
+    def test_bridge_gates_clamp_and_deadman(self):
+        w = fire_world()
+        br = w.bridge
+        ok, why = br.on_heading_speed(0.0, 350.0, 0.9)
+        self.assertTrue(ok)
+        self.assertIn("clamped", why)
+        self.assertAlmostEqual(w.boat.hs[1], 0.4, places=6)
+        self.assertAlmostEqual(w.boat.hs[0], 350.0, places=6)     # through the quaternion
+        br.tick(0.4)
+        self.assertAlmostEqual(w.boat.hs[1], 0.4, places=6)       # not yet
+        br.tick(0.6)
+        self.assertEqual(w.boat.hs[1], 0.0)                       # the dead-man's stop
+        w.boat.mode = "MANUAL"
+        self.assertFalse(br.on_heading_speed(1.0, 0.0, 0.2)[0])
+        w.boat.mode = "GUIDED"
+        w.dropped = True
+        self.assertFalse(br.on_heading_speed(1.0, 0.0, 0.2)[0])
+
+    def test_a_drop_stops_the_boat_from_the_bridge_itself(self):
+        w = fire_world()
+        w.bridge.on_heading_speed(0.0, 0.0, 0.25)
+        w.dropped = True
+        w.bridge.tick(0.1)
+        self.assertEqual(w.boat.hs[1], 0.0)
+
+    def test_avoidance_holds_the_boat_off_only_while_enabled(self):
+        w = fire_world(rng=3.2, autopilot_avoidance=True)
+        w.bridge.on_heading_speed(0.0, 0.0, 0.25)
+        w.step()
+        w.step()
+        self.assertEqual(w.boat.v, 0.0)          # the finger tips are inside 2 m of the bow
+        w.on_avoidance(False)
+        w.bridge.on_heading_speed(w.t, 0.0, 0.25)
+        for _ in range(5):
+            w.step()
+        self.assertGreater(w.boat.v, 0.05)
+
+
+class Pump(unittest.TestCase):
+
+    def test_a_burst_is_water_for_its_length_after_the_ack(self):
+        w = fire_world()
+        br = w.bridge
+        br.on_pump(1.0, 0.5, 7, "test")
+        self.assertEqual(br.result, W.pump_core.RESULT_SENT)
+        self.assertFalse(br.water(1.0 + br.ACK_S))
+        self.assertTrue(br.water(1.0 + br.ACK_S + br.LATENCY_S + 0.01))
+        self.assertTrue(br.water(1.0 + br.ACK_S + br.LATENCY_S + 0.49))
+        self.assertFalse(br.water(1.0 + br.ACK_S + br.LATENCY_S + 0.51))
+        br.tick(1.0 + br.ACK_S)
+        self.assertEqual(br.pump_state(1.2)["last_result"], W.pump_core.RESULT_ACCEPTED)
+        self.assertEqual(br.pump_state(1.2)["last_seq"], 7)
+
+    def test_the_bridges_refusals(self):
+        w = fire_world()
+        br = w.bridge
+        br.on_pump(1.0, 0.5, 1)
+        br.on_pump(1.8, 0.5, 2)                       # 0.2 s after it ended
+        self.assertEqual(br.result, W.pump_core.RESULT_REFUSED)
+        self.assertIn("too soon", br.reason)
+        br.on_pump(5.0, 1.5, 3)                       # longer than pump_max_burst_s
+        self.assertIn("outside", br.reason)
+        w.boat.armed = False
+        br.on_pump(9.0, 0.5, 4)
+        self.assertEqual(br.reason, "disarmed")
+        off = fire_world(pump_path=False).bridge
+        self.assertFalse(off.pump_state(0.0)["enabled"])
+        off.on_pump(0.0, 0.5, 5)
+        self.assertEqual(off.result, W.pump_core.RESULT_REFUSED)
+
+    def test_a_good_burst_puts_the_fire_out_and_is_recorded(self):
+        w = fire_world(u=-0.22, extinguish_s=0.3)
+        w.bridge.on_pump(w.t, 0.5, 1)
+        for _ in range(30):
+            w.step()
+        self.assertEqual(len(w.shots), 1)
+        self.assertTrue(w.shots[0]["hit"])
+        self.assertIsNotNone(w.lights.hit_t)
+        self.assertEqual(w.lights.state, "GREEN")
+
+    def test_spray_returns_only_while_the_water_flies(self):
+        w = fire_world()
+        clean = [w.wall_range()["range_m"] for _ in range(50)]
+        self.assertLess(max(clean) - min(clean), 0.05)
+        w.bridge.on_pump(w.t, 0.5, 1)
+        w.t += 0.3
+        wet = [w.wall_range()["range_m"] for _ in range(100)]
+        self.assertLess(min(wet), 3.22 - 0.09)
+
+
+class Sea(unittest.TestCase):
+
+    def test_flat_and_still_is_level(self):
+        w = fire_world(sea=0.0)
+        for _ in range(40):
+            w.step()
+        self.assertTrue(all(abs(a) < 1e-6 for a in w.att))
+
+    def test_accelerating_kicks_the_pitch(self):
+        w = fire_world(sea=0.0, rng=6.0)
+        w.bridge.on_heading_speed(0.0, 0.0, 0.3)
+        peak = 0.0
+        for _ in range(20):
+            w.bridge.on_heading_speed(w.t, 0.0, 0.3)
+            w.step()
+            peak = max(peak, abs(w.att[1]))
+        self.assertGreater(peak, 0.5)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -126,6 +126,43 @@ see either window from the berth (`cam_pitch_deg` ≈ -25, which the math
 handles); `WP_RADIUS` 2.0 m parks the boat at the finger ends; and GUIDED cannot
 hold a slip against a cross-current (`LOIT_RADIUS` 2 m, no strafing).
 
+## The fixed-nozzle shot (`task3_fire_test.xml`)
+
+The Task 3 nozzle is fixed, so the boat's range and heading ARE the aim. This
+tree is that shot on its own - stand off the dock at the calibrated range, point
+at the window, wait until the hull is still, fire - to test before it replaces
+`SprayUntilHit` in the full mission (docs/T3_coordinated_logistics.md).
+
+```
+behavior_trees/task3_fire_test.xml      guard band + StationKeep + up to 5 shots
+src/fire_leaves.cpp                     11 leaves
+include/crusader_bt/fire_math.hpp       ALL of it: the wall filter, the aim, the keep,
+                                        steady, the gate, the burst book, the cross-check
+test/test_fire_math.cpp                 79 checks, stdlib only
+```
+
+It moves the boat with **GUIDED heading + signed speed** (`heading_speed` in the
+Context → `/crsd/guided_heading_speed` → `telemetry_bridge`, gated by mode, the SE
+latch and a dead-man there), not position setpoints: the shot needs astern and a
+chosen heading. Its inputs are `/crsd/wall_range`, `/crsd/attitude`,
+`/crsd/pump_state` and `/crsd/autonomy_drop`, folded in by the runner
+(`ingestWallRange`, `ingestAttitude`). After every tick the runner sends ONE
+stop if motion was commanded last tick and not this one - a leaf has no hook for
+"I stopped being ticked".
+
+| Leaf | Kind | Contract |
+|---|---|---|
+| `ModeIs` | condition | exactly this mode (heading+speed is ignored outside GUIDED) |
+| `NotDropped` | condition | the SE latch is clear (unknown counts as dropped) |
+| `WallRangeAlive` / `AttitudeAlive` | condition | the streams the shot stands on |
+| `StationKeep` | compute | **always SUCCESS**: square to the wall until close, then the aim heading; banded speed; zero while the LiDAR and camera disagree or water is in the air |
+| `SetAvoidance` | action | the autopilot's 2 m avoidance off for the shot, on after |
+| `AwaitFiringSolution` | action | RUNNING until range, heading, steady, quiet and the gap all hold 1 s; FAILURE on timeout, saying which never held |
+| `FireBurst` | action | one burst via `/crsd/pump_cmd`, keyed on the bridge's ACK; **DRY** unless `fire_pump`; OFF on halt |
+| `WindowOut` | condition | the timing layer's hit |
+| `ShotsFired` | condition | at least N bursts went out (dry ones count) |
+| `StopBoat` | action | speed 0, heading held |
+
 ## Subtrees need `_autoremap="true"`
 
 A `<SubTree>` gets its **own blackboard** and does not inherit the parent's
@@ -151,6 +188,10 @@ this is not a thing anyone guesses.
 boat**. Legs still poll for arrival, so a human can drive the mission by hand and
 the tree follows along — that is the water test worth doing first, and it is
 worth more than a version that faked arrival. Turning it true is a G1 gate.
+
+`fire_pump: false` (the default) means it **cannot squirt**: `FireBurst` runs
+dry. A separate switch, because moving and water are separate gates (G1, G7).
+With both off the fire tree is a shadow that logs every solution it would act on.
 
 ## What is not here
 

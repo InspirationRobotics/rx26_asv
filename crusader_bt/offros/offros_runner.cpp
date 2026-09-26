@@ -32,10 +32,17 @@
 //   pose          {lat, lon, heading|null}                /crsd/pose
 //   dock_obs      DockObservation's fields, stamp in s    dock/observations
 //   ocs_command   {data: {...}}                           /crsd/ocs_command
+//   mount         {x, y, yaw_deg, pitch_deg, face_dz}     bt_runner_node params
+//   wall_range    {valid, range_m, angle_deg, lat_m}      /crsd/wall_range
+//   attitude      {roll, pitch, rollspeed, pitchspeed}    /crsd/attitude (rad)
+//   pump_state    {enabled, on, last_seq, last_result, last_reason}  /crsd/pump_state
+//   autonomy_drop {data: bool}                            /crsd/autonomy_drop
 //   goal          {tier, timeout_s, approach_latitude, approach_longitude}
 //   cancel, quit
 // STDOUT: ready, setpoint, task, autonomy, docking_report, firefighting_report,
-//   resource_request, uav_request, cannon, bt, book, feedback, result.
+//   resource_request, uav_request, cannon, bt, book, feedback, result,
+//   heading_speed {heading_deg, speed_mps}, pump {duration_s, seq, source},
+//   avoidance {enable}.
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -149,6 +156,7 @@ public:
     double mode_grace_s = 3.0;
     double stream_timeout_s = 1.0;
     bool publish_setpoints = false;
+    bool fire_pump = false;        ///< bt_runner_node's fire_pump: FireBurst may squirt
     bool verbose_tree = false;
   };
 
@@ -158,6 +166,8 @@ public:
     ctx_ = std::make_shared<Context>();
     ctx_->node = &node_;
     ctx_->publish_setpoints = p_.publish_setpoints;
+    ctx_->fire_pump = p_.fire_pump;
+    t0_ = Clock::now();
     wireContext();
   }
 
@@ -185,6 +195,15 @@ public:
         onOcsCommand(j);
       } else if (type == "mount") {
         onMount(j);
+      } else if (type == "wall_range") {
+        onWallRange(j);
+      } else if (type == "attitude") {
+        onAttitude(j);
+      } else if (type == "pump_state") {
+        onPumpState(j);
+      } else if (type == "autonomy_drop") {
+        std::lock_guard<std::mutex> lk(ctx_->mu);
+        ctx_->drop_tripped = j.value("data", true);
       } else if (type == "goal") {
         std::lock_guard<std::mutex> lk(goal_mu_);
         if (busy_) {
@@ -212,7 +231,7 @@ public:
   void missionLoop()
   {
     emit({{"type", "ready"}, {"tree", p_.tree_file},
-        {"publish_setpoints", p_.publish_setpoints}});
+        {"publish_setpoints", p_.publish_setpoints}, {"fire_pump", p_.fire_pump}});
     publishTask(kTaskNone);
     while (!stop_) {
       json goal;
@@ -240,6 +259,7 @@ private:
     std::lock_guard<std::mutex> lk(ctx_->mu);
     // shared.autonomous_modes, as bt_runner_node declares it by default.
     ctx_->autonomous = mode == "GUIDED" || mode == "AUTO" || mode == "LOITER" || mode == "RTL";
+    ctx_->mode = mode;
     status_t_ = Clock::now();
     have_status_ = true;
   }
@@ -288,6 +308,40 @@ private:
       ctx_->cam_mount.x, ctx_->cam_mount.y, ctx_->cam_mount.yaw_deg, ctx_->cam_mount.pitch_deg,
       ctx_->dock_face_dz);
   }
+
+  /// /crsd/wall_range: crusader_msgs/WallRange as JSON (valid, range_m,
+  /// angle_deg, lat_m; null = NaN). Stamped on THIS runner's clock at receipt.
+  void onWallRange(const json & j)
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    ingestWallRange(*ctx_, nowS(), j.value("valid", false), num(j, "range_m", dock::kNaN),
+      num(j, "angle_deg", dock::kNaN), num(j, "lat_m", dock::kNaN));
+  }
+
+  /// /crsd/attitude: roll, pitch and their rates in radians (the autopilot's axes).
+  void onAttitude(const json & j)
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    ingestAttitude(*ctx_, nowS(), num(j, "roll", 0.0), num(j, "pitch", 0.0),
+      num(j, "rollspeed", 0.0), num(j, "pitchspeed", 0.0));
+    att_t_ = Clock::now();
+    have_att_ = true;
+  }
+
+  /// /crsd/pump_state: what the bridge did with our bursts.
+  void onPumpState(const json & j)
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    ctx_->pump_enabled = j.value("enabled", false);
+    ctx_->pump_on = j.value("on", false);
+    ctx_->pump_last_seq = j.value("last_seq", 0u);
+    ctx_->pump_result = j.value("last_result", 0);
+    ctx_->pump_reason = j.value("last_reason", std::string());
+    pump_t_ = Clock::now();
+    have_pump_ = true;
+  }
+
+  double nowS() const {return std::chrono::duration<double>(Clock::now() - t0_).count();}
 
   /// /crsd/ocs_command: RoboCommand's RxCommand as JSON. Only the readiness
   /// confirmation matters to Task 3, and the tree does not wait on it - it
@@ -339,6 +393,32 @@ private:
     ctx_->cannon = [this](bool fire, double x, double y, double z) {
         emit({{"type", "cannon"}, {"json", dock::cannonJson(fire, x, y, z)}});
       };
+    // The fixed-nozzle shot. bt_runner_node publishes the same three.
+    ctx_->heading_speed = [this](double heading, double speed) {
+        last_hs_heading_ = heading;
+        emit({{"type", "heading_speed"}, {"heading_deg", heading}, {"speed_mps", speed}});
+      };
+    ctx_->pump = [this](double seconds, std::uint32_t seq) {
+        emit({{"type", "pump"}, {"duration_s", seconds}, {"seq", seq}, {"source", "bt_runner"}});
+      };
+    ctx_->set_avoidance = [this](bool on) {emit({{"type", "avoidance"}, {"enable", on}});};
+  }
+
+  /// Motion was commanded last tick and not this one: say STOP, once. A leaf
+  /// has no hook for "I stopped being ticked", and 3 s of the autopilot
+  /// carrying on is 0.9 m next to a dock. Called after every tick and on exit.
+  void stopIfSilent(bool exiting)
+  {
+    bool commanded;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      commanded = ctx_->hs_commanded && !exiting;
+      ctx_->hs_commanded = false;
+    }
+    if (hs_active_ && !commanded && std::isfinite(last_hs_heading_)) {
+      emit({{"type", "heading_speed"}, {"heading_deg", last_hs_heading_}, {"speed_mps", 0.0}});
+    }
+    hs_active_ = commanded;
   }
 
   /// What the boat believes about the dock, for the sim page to draw next to
@@ -410,6 +490,9 @@ private:
     ctx_->pose_fresh = have_pose_ && ctx_->origin_set &&
       secondsSince(pose_t_) < p_.stream_timeout_s;
     ctx_->dock_obs_age_s = have_dock_ ? secondsSince(dock_t_) : 1e9;
+    ctx_->now_s = nowS();
+    ctx_->att_age_s = have_att_ ? secondsSince(att_t_) : 1e9;
+    ctx_->pump_age_s = have_pump_ ? secondsSince(pump_t_) : 1e9;
     if (have_status_ && secondsSince(status_t_) >= p_.stream_timeout_s) {
       ctx_->autonomous = false;        // a dead HEARTBEAT is not permission
     }
@@ -438,6 +521,7 @@ private:
       ctx_->has_approach = ctx_->approach_lat != 0.0 || ctx_->approach_lon != 0.0;
       ctx_->have_waypoint = false;
       resetTask3(*ctx_);
+      resetFire(*ctx_);
       ctx_->home = ctx_->boat;
       ctx_->have_home = ctx_->pose_fresh;
     }
@@ -484,6 +568,7 @@ private:
 
         refreshFreshness();
         st = tree.tickOnce();
+        stopIfSilent(false);
 
         if (p_.verbose_tree) {
           const std::string frame = view.renderIfChanged(false);
@@ -540,8 +625,11 @@ private:
       RCLCPP_WARN(node_.get_logger(), "RESULT %d after %.1fs: %s", outcome, el, detail.c_str());
     }
     emit({{"type", "result"}, {"outcome", outcome}, {"detail", detail}, {"elapsed_s", el}});
-    // Every exit path: the cannon off, the task stood down, the light off.
+    // Every exit path: the cannon off, the boat stopped, avoidance back on,
+    // the task stood down, the light off.
     if (ctx_->cannon) {ctx_->cannon(false, 0.0, 0.0, 0.0);}
+    stopIfSilent(true);
+    emit({{"type", "avoidance"}, {"enable", true}});
     publishTask(kTaskNone);
     emit({{"type", "autonomy"}, {"active", false}});
   }
@@ -560,8 +648,12 @@ private:
   std::atomic<bool> stop_{false};
 
   // Arrival times, guarded by ctx_->mu like the fields they age.
-  Clock::time_point pose_t_{}, status_t_{}, dock_t_{};
+  Clock::time_point pose_t_{}, status_t_{}, dock_t_{}, att_t_{}, pump_t_{};
   bool have_pose_ = false, have_status_ = false, have_dock_ = false;
+  bool have_att_ = false, have_pump_ = false;
+  Clock::time_point t0_{};                   // the clock ctx.now_s counts from
+  bool hs_active_ = false;                   // motion was commanded last tick
+  double last_hs_heading_ = dock::kNaN;
   int uav_seq_ = 0;
 };
 
@@ -590,6 +682,8 @@ int main(int argc, char ** argv)
       p.stream_timeout_s = std::stod(next("--stream-timeout"));
     } else if (a == "--publish-setpoints") {
       p.publish_setpoints = true;
+    } else if (a == "--fire-pump") {
+      p.fire_pump = true;
     } else if (a == "--verbose-tree") {
       p.verbose_tree = true;
     } else {

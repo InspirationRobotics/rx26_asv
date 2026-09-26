@@ -1,0 +1,82 @@
+<?xml version="1.0"?>
+<!--
+  task3_fire_test.xml - the fixed-nozzle shot on its own: stand off the wall at
+  the calibrated range, point at the upper-left window, wait until the hull is
+  still, fire. Repeat until the window goes out or N shots.
+
+  Run it with bt_runner_node's tree_file pointing here (the same SafePassage
+  action as every tree), or in the sim: tools/task3_sim, scenario fire_test.
+
+  THE NUMBERS come from tools/squirt_cal at the pool on 2026-09-25: the upper-
+  left window's TOP EDGE was hit with the LiDAR wall range at 3.1 to 3.4 m
+  (fire_range_m 3.22). Re-calibrate on the real dock: its deck height is not
+  the pool's, and 5 cm of height moves this range about 12 cm.
+
+  TWO SWITCHES, both off by default, and both on bt_runner_node:
+    publish_setpoints  may the tree MOVE the boat (Gate G1)
+    fire_pump          may it SQUIRT (Gate G7)
+  With both off this tree is a SHADOW: it computes the solution every tick,
+  logs it, and does nothing. That is the first water test.
+
+  THE SHAPE, and the one rule it obeys: "not in the band yet" is never a
+  sibling condition in the guard band, because a ReactiveSequence ends the
+  mission on the first FAILURE. StationKeep always succeeds (like
+  UpdateDockBook); the waiting lives inside the stateful AwaitFiringSolution.
+
+  The guard band ends the run, and the runner stops the boat, if the pilot
+  leaves GUIDED (SC), drops autonomy (SE, ch9), the LiDAR loses the wall for
+  a second, or attitude goes stale.
+
+  lateral: centreline assumes the boat is on the slip centreline; fingers uses
+  the LiDAR's offset between the slip fingers (the number squirt_cal logged);
+  camera uses the window's bearing from the dock detector.
+
+  range_check_m: StationKeep refuses to aim while the LiDAR range and the
+  camera's (the dock book) disagree by more than this. A wall fit locked on
+  the slip finger tips reads ~2 m short. No dock book (the pool): no check.
+-->
+<root BTCPP_format="4" main_tree_to_execute="FireTest">
+  <BehaviorTree ID="FireTest">
+    <ReactiveSequence name="guard_band">
+
+      <IsAutonomous/>
+      <ModeIs mode="GUIDED"/>
+      <NotDropped/>
+      <WallRangeAlive max_age_s="1.0"/>
+      <AttitudeAlive max_age_s="0.5"/>
+
+      <StationKeep fire_range_m="3.22" window_lat_m="0.22" yaw_bias_deg="0.0"
+                   lateral="centreline" window_index="0"
+                   deadband_m="0.05" kp="0.6" v_min="0.12" v_max="0.25"
+                   accel="0.25" min_range_m="1.5" turn_first_deg="10.0"
+                   square_until_m="0.5" range_check_m="0.5" face_setback_m="0.0"/>
+
+      <Sequence name="shots">
+        <!-- The autopilot's avoidance stops the boat at AVOID_MARGIN (2 m)
+             from the dock; the firing range is inside that. min_range_m in
+             StationKeep is what keeps the bow off the dock instead. -->
+        <SetAvoidance enable="false"/>
+
+        <ForceSuccess>
+          <RetryUntilSuccessful num_attempts="5">
+            <Sequence name="one_shot">
+              <AwaitFiringSolution range_tol_m="0.06" heading_tol_deg="2.0"
+                                   hold_s="1.0" gap_s="2.0" timeout_s="60.0"/>
+              <FireBurst burst_s="0.5" flight_s="0.8" ack_timeout_s="1.5"/>
+              <!-- FAILURE until the window reads GREEN long enough (the
+                   timing layer's hit), which retries: aim, wait, fire again.
+                   With no lit window (the pool) it just fires N times. -->
+              <WindowOut/>
+            </Sequence>
+          </RetryUntilSuccessful>
+        </ForceSuccess>
+
+        <StopBoat/>
+        <SetAvoidance enable="true"/>
+        <!-- Five timeouts and no burst is a failure, not a quiet success. -->
+        <ShotsFired min="1"/>
+      </Sequence>
+
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>
