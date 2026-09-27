@@ -425,7 +425,25 @@ def serve(sim, port):
                 return self._send(409, json.dumps({"error": str(e)}))
             self._send(200, '{"ok":true}')
 
-    srv = http.server.ThreadingHTTPServer(("0.0.0.0", port), H)
+    class Server(http.server.ThreadingHTTPServer):
+        # NOT SO_REUSEADDR: on Windows it lets a second sim bind the SAME port
+        # silently, and the browser then talks to whichever answers - the old
+        # docking sim's crosshairs on a --fire page. Exclusive, so a second one
+        # fails loudly instead.
+        allow_reuse_address = os.name != "nt"
+
+        def server_bind(self):
+            import socket
+            if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            super().server_bind()
+
+    try:
+        srv = Server(("0.0.0.0", port), H)
+    except OSError as e:
+        sim.close()
+        sys.exit(f"port {port} is taken ({e.strerror or e}): another sim.py is probably still "
+                 f"running - stop it (Ctrl+C in its window), or use --port")
     srv.daemon_threads = True
     return srv
 
