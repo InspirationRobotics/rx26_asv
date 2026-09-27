@@ -150,7 +150,7 @@ canvas{display:block;width:100%}
       <canvas id="cam"></canvas>
     </div>
     <div class="card">
-      <h2>Behaviour tree <span class="r" id="bt-note">task3_disruptive.xml</span></h2>
+      <h2>Behaviour tree <span class="r" id="bt-note"></span></h2>
       <div class="tree" id="tree"><div style="color:var(--dim);padding:8px">No mission yet. Start one above.</div></div>
     </div>
     <div class="two">
@@ -526,7 +526,8 @@ function panels() {
   ];
   $("facts").innerHTML = facts.map(([k, v]) => `<span class="k">${k}</span><span>${esc(v)}</span>`).join("");
 
-  // tree
+  // tree: the one this sim runs, from the start (not a placeholder)
+  if (!S.bt) $("bt-note").textContent = S.tree;
   if (S.bt && S.bt.nodes) {
     $("tree").innerHTML = S.bt.nodes.map(n => {
       const g = {SUCCESS: "ok", RUNNING: "run", FAILURE: "FAIL", IDLE: "", SKIPPED: "skip"}[n.status];
