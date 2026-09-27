@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""dock_view — the CV team's Task 3 dock model, live on the OAK-D, in the ground station.
+"""dock_view — the CV team's Task 3 dock model, live on the OAK-D: the dock detector.
 
     python3 tools/dock_view.py                 # or: Start "dock_view" on the ground station
 
-A VIEWER TO TEST THE MODEL, not the dock_detector node (that one is specified in
-firefighting-cv specs/dock_detector_node.md and publishes DockObservation). This
-publishes no topics (only its camera parameters). It runs, per frame, the chain the CV team runs offline
+THE DOCK DETECTOR (firefighting-cv specs/dock_detector_node.md): it publishes
+crusader_msgs/DockObservation on dock/observations - the bays, their indicator,
+each window's state AND its aim point x, y, z in camera_link - which is what
+bt_runner_node's Task 3 trees read. Numbers only, a few hundred bytes a frame:
+the image and the depth stay here (crusader_perception/dock_obs_core.py fits the
+face plane to the stereo depth and puts each window on it). --no-publish makes
+it a viewer again. It runs, per frame, the chain the CV team runs offline
 (firefighting-cv ffcv/demo/run_demo.py @ e1173c5):
 
   1. area-downscale the 1920x1200 frame to the detector's 640x400 (exact 3x3 box,
@@ -15,6 +19,9 @@ publishes no topics (only its camera parameters). It runs, per frame, the chain 
      window index from the template's slots (never from colour)
   4. colour_core on the FULL-RES frame: window states, lit window, indicator colour
   5. dock_sequence_core: steady / flash / code timing per window
+  6. dock_obs_core: the face plane from depth, the windows' x, y, z, and the
+     DockObservation (its timing verdict from the bay the spec says to track:
+     the GREEN indicator's, or the only one in view)
 
 and draws it on :8080 (/stream/annotated, /stream/raw) where oak_detector serves,
 so the Camera tab shows it and the Record tab can record the raw view.
@@ -110,7 +117,9 @@ def observe(rgb, dets, cfg, ccfg, template, cc, gc):
             others = [x for x, _ in mine if x is not b] + ([ind[0]] if ind else [])
             st = cc.window_state(rgb, b, fbox, others, ccfg)
             wout.append(dict(index=idn["index"], slot=idn["slot"], box=b, conf=c,
-                             state=st["state"], state_conf=st["confidence"]))
+                             state=st["state"], state_conf=st["confidence"],
+                             ident_conf=idn.get("confidence", idn.get("score", 1.0)),
+                             lit_score=st.get("lit_score", st.get("excess", 0.0))))
         wout.sort(key=lambda w: (w["index"] is None, w["index"] or 0))
         lit = cc.lit_window([dict(state=w["state"], confidence=w["state_conf"]) for w in wout])
         ic = None
@@ -149,6 +158,10 @@ def draw(bgr, bays, status, cv2):
                           6 if w["state"] in ("red", "green", "blue") else 2)
             cv2.putText(img, f"#{w['index']} {w['slot']} {w['state']} {w['state_conf']:.2f}",
                         (b[0], b[3] + 34), cv2.FONT_HERSHEY_SIMPLEX, fs, c, th)
+            if w.get("xyz") is not None:     # the aim point the tree steers by
+                x, y, z = w["xyz"]
+                cv2.putText(img, f"{x:.2f} m  {abs(y) * 100:.0f} cm {'L' if y >= 0 else 'R'}",
+                            (b[0], b[3] + 72), cv2.FONT_HERSHEY_SIMPLEX, fs, c, th)
         seq = bay.get("patterns")
         if seq:
             cv2.putText(img, "pattern " + seq, (f[0], min(img.shape[0] - 10, f[3] + 80)),
@@ -161,8 +174,38 @@ def draw(bgr, bays, status, cv2):
     return cv2.resize(img, (img.shape[1] // 2, img.shape[0] // 2), interpolation=cv2.INTER_AREA)
 
 
+def to_msg(obs, stamp, frame_id):
+    """dock_obs_core's dict -> crusader_msgs/DockObservation."""
+    from crusader_msgs.msg import DockBay, DockObservation, DockWindow
+    m = DockObservation()
+    m.header.stamp = stamp
+    m.header.frame_id = frame_id
+    for b in obs["bays"]:
+        mb = DockBay()
+        for k in ("bay_index", "detector_confidence", "truncated", "indicator_present",
+                  "indicator_colour", "indicator_confidence", "lit_window_index", "lit_state",
+                  "has_plane", "plane_offset", "plane_rms_m", "range_from_size_m", "bearing_deg"):
+            setattr(mb, k, b[k])
+        mb.bbox, mb.indicator_bbox, mb.plane_normal = b["bbox"], b["indicator_bbox"], b["plane_normal"]
+        for w in b["windows"]:
+            mw = DockWindow()
+            for k in ("index", "slot", "identity_confidence", "state", "state_confidence",
+                      "lit_score", "detector_confidence", "has_position", "x", "y", "z"):
+                setattr(mw, k, w[k])
+            mw.bbox = w["bbox"]
+            mb.windows.append(mw)
+        m.bays.append(mb)
+    m.target_pattern = obs["target_pattern"]
+    m.target_colours = obs["target_colours"]
+    m.target_window_index = obs["target_window_index"]
+    m.last_event = obs["last_event"]
+    m.observed_fps = obs["observed_fps"]
+    return m
+
+
 def start_param_node(profile, control_q, dai, oak_controls, log):
-    """A ROS node named `dock_view` whose only job is the camera settings.
+    """A ROS node named `dock_view`: the camera settings, and (see main) the
+    DockObservation publisher.
 
     It declares the SAME camera controls as oak_detector (oak_controls'
     table, the same ranges and choices), starting from oak_detector's values,
@@ -212,6 +255,9 @@ def main(argv=None):
     ap.add_argument("--conf", type=float, default=None, help="default: ffcv.yaml eval.conf")
     ap.add_argument("--port", type=int, default=None, help="default: oak_detector.stream_port")
     ap.add_argument("--log", default="", help="append one JSON line per frame here")
+    ap.add_argument("--topic", default="dock/observations",
+                    help="DockObservation out (= bt_runner_node.dock_topic)")
+    ap.add_argument("--no-publish", action="store_true", help="a viewer only: publish nothing")
     a = ap.parse_args(argv)
     log = Log()
 
@@ -220,7 +266,7 @@ def main(argv=None):
     import depthai as dai
     from crusader_common import config as crsd_config
     from crusader_common.mjpeg_view import FrameBuffer, serve_mjpeg, stop_mjpeg
-    from crusader_perception import oak_controls, oak_pipeline
+    from crusader_perception import dock_obs_core, oak_controls, oak_pipeline
 
     cc, gc, DockSequence, cfg, ccfg, template, thr = load_ffcv(a.ffcv)
     classes = cfg["classes"]
@@ -243,6 +289,16 @@ def main(argv=None):
 
     control_q = device.getInputQueue(oak_pipeline.CONTROL_STREAM, maxSize=1, blocking=False)
     node, executor = start_param_node(profile, control_q, dai, oak_controls, log)
+    # Intrinsics AT THE RGB SIZE IN USE (oak_pipeline.rgb_intrinsics says why);
+    # the depth is aligned to this camera, so it maps by a ratio.
+    intr = oak_pipeline.rgb_intrinsics(device, width, height)
+    pub = None
+    if not a.no_publish:
+        from crusader_msgs.msg import DockObservation
+        pub = node.create_publisher(DockObservation, a.topic, 10)
+        log.info(f"publishing DockObservation on {node.resolve_topic_name(a.topic)} "
+                 f"(window x,y,z from the face plane; intrinsics fx {intr[0]:.0f})")
+    track_seq = DockSequence(cfg["sequence"])      # the tracked bay's timing, for the message
 
     buf, raw = FrameBuffer(), FrameBuffer()
     views = {"annotated": (buf, "Annotated"), "raw": (raw, "Raw")}
@@ -295,12 +351,30 @@ def main(argv=None):
                 bay["patterns"] = " ".join(f"#{w}:{p[0]}" + (":" + "/".join(p[1]) if p[1] else "")
                                            for w, p in sq.patterns.items())
                 bay["events"] = ev
+            # the message: the plane, the aim points, the tracked bay's timing
+            ti = dock_obs_core.tracked_bay(bays)
+            tev = track_seq.update(t - t0, {} if ti is None else
+                                   {w["index"]: w["state"] for w in bays[ti]["windows"]
+                                    if w["index"] is not None})
+            depth = msgs["depth"].getFrame() if "depth" in msgs else None
+            obs = dock_obs_core.observation(bays, depth, (bgr.shape[1], bgr.shape[0]), intr,
+                                            seq=track_seq, seq_events=tev, fps=fps)
+            for bay, ob in zip(bays, obs["bays"]):
+                pos = {w["index"]: (w["x"], w["y"], w["z"]) for w in ob["windows"] if w["has_position"]}
+                for w in bay["windows"]:
+                    w["xyz"] = pos.get(w["index"])
+            if pub is not None:
+                try:
+                    pub.publish(to_msg(obs, node.get_clock().now().to_msg(), "camera_link"))
+                except Exception as e:                  # never let a message stop the camera
+                    log.error(f"DockObservation not published: {e}")
             n += 1
             now = time.monotonic()
             if now - last >= 1.0:
                 fps, last, n = n / (now - last), now, 0
             counts = {k: len(v) for k, v in dets.items()}
-            status = [f"dock_view  INTERIM model (mock-up bay)  {fps:.1f} fps  det {det_ms:.0f} ms",
+            status = [f"dock_view  INTERIM model (mock-up bay)  {fps:.1f} fps  det {det_ms:.0f} ms"
+                      + ("  -> " + a.topic if pub is not None else "  (not publishing)"),
                       "boxes: " + (", ".join(f"{k} {v}" for k, v in counts.items()) or "none")
                       + (f"   reflections dropped {nrej}" if nrej else ""),
                       exposure]
@@ -313,7 +387,9 @@ def main(argv=None):
                     t=round(t - t0, 3), dets={k: [[round(x, 1) for x in b] + [round(p, 3)] for b, p in v]
                                               for k, v in dets.items()},
                     bays=[dict(indicator=b["indicator"] and b["indicator"]["colour"],
-                               windows=[(w["index"], w["state"]) for w in b["windows"]],
+                               windows=[(w["index"], w["state"],
+                                         w.get("xyz") and [round(v, 3) for v in w["xyz"]])
+                                        for w in b["windows"]],
                                lit=b["lit"], range_m=b["range_m"], patterns=b["patterns"],
                                events=b["events"]) for b in bays])) + "\n")
     finally:

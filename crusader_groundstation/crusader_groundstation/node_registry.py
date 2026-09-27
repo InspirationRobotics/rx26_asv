@@ -138,8 +138,9 @@ REGISTRY = (
              stream_path="/stream/annotated",
              views=(("annotated", "Annotated"), ("raw", "Raw")),
              record_stream_path="/stream/raw",
-             note="the CV team's Task 3 dock model (INTERIM, mock-up bay) + "
-                  "their colour rule; owns the OAK-D; publishes nothing"),
+             note="the Task 3 dock detector: the CV team's model (INTERIM, "
+                  "mock-up bay) + colour rule; owns the OAK-D; publishes "
+                  "DockObservation (window x,y,z) on /dock/observations"),
     NodeSpec("lidar_view", "lidar_view", "tools", "lidar_view.py", "viewers",
              kind="script", port=8081,
              stream_path="/stream/plan",      # views: plan / elev / both
