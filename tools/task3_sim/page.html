@@ -118,7 +118,7 @@ canvas{display:block;width:100%}
           <label style="min-width:140px">Mis-colour <span id="l-mis-v">0.00</span><input id="l-miscolour" type="range" min="0" max="0.3" step="0.01" value="0"></label>
           <label style="min-width:140px">Current <span id="l-cur-v">0.00</span> m/s<input id="l-current_mps" type="range" min="0" max="0.3" step="0.01" value="0"></label>
           <label>Current to (deg)<input id="l-current_to_deg" type="number" step="15" value="90" style="width:90px"></label>
-          <label>Autopilot (SC)<select id="l-mode"><option>MANUAL</option><option>HOLD</option><option>GUIDED</option></select></label>
+          <label title="The pilot's SC switch, live. The fire tree drives only in MANUAL; flipping to HOLD mid-run is the pilot taking the boat back. The docking tree drives only in GUIDED.">Autopilot (SC)<select id="l-mode"><option>MANUAL</option><option>HOLD</option><option>GUIDED</option></select></label>
         </div>
       </div>
       <div class="err" id="err"></div>

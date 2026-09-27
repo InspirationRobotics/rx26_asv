@@ -267,8 +267,12 @@ class Sim:
         self._note("sim", "autonomy dropped (latch)")
 
     def set_mode(self, mode):
+        """The pilot's SC switch. It is also the mode the next Reset starts in:
+        a Reset that quietly put MANUAL back under a page saying GUIDED made the
+        two disagree."""
         with self.lock:
             self.world.boat.mode = mode.upper()
+            self.sc.start_mode = mode.upper()
         self._note("sim", "autopilot mode -> %s" % mode.upper())
 
     # -------------------------------------------------------------- the loop
