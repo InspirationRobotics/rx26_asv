@@ -52,9 +52,15 @@ THE FIXED-NOZZLE SHOT (behavior_trees/task3_fire_test.xml) adds:
                  verified: acted on only in GUIDED, turns toward the heading,
                  speed as asked, and after 3 s without a new target a boat
                  loiters. The SITL check (docs/G1) is what makes this true.
-  the bridge     telemetry_bridge's gates for heading+speed and the pump,
-                 running telemetry_bridge's OWN rule code (guided_hs_core,
-                 pump_core): mode, drop latch, clamp, dead-man, every refusal.
+                 MANUAL: the sticks straight to the thrusters on this OmniX
+                 hull - ahead, SIDEWAYS and yaw, each with a deadzone about
+                 the RC trim and a first-order lag for the water; an RC
+                 override stands RC_OVERRIDE_TIME (3 s) after the last one.
+                 GUESSED numbers: the real hull tunes them.
+  the bridge     telemetry_bridge's gates for heading+speed, the sticks and the
+                 pump, running telemetry_bridge's OWN rule code
+                 (guided_hs_core, override_core, pump_core): mode, drop latch,
+                 channels, clamp, dead-man, every refusal.
 
 WHAT IS NOT: hydrodynamics, wind, waves, the fingers stopping the hull (contact
 is recorded, not simulated), the water stream's flight time and droop, any
@@ -83,7 +89,7 @@ _REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 for _p in (os.path.join(_REPO, "crusader_fcu"), os.path.join(_REPO, "tools", "squirt_cal")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
-from crusader_fcu import guided_hs_core, pump_core   # noqa: E402
+from crusader_fcu import guided_hs_core, override_core, pump_core   # noqa: E402
 from nozzle_model import G, NozzleModel               # noqa: E402
 
 EARTH_R = 6371000.0
@@ -243,9 +249,11 @@ class Scenario:
     # proximity path is live is unverified, and the Task 3 tree never turns
     # it off (see the README).
     autopilot_avoidance: bool = False
-    drop_at_s: float = -1.0                    # the pilot flips SE (autonomy drop) at this
-                                               # world time (the goal goes at ~1 s); < 0 never
-    manual_at_s: float = -1.0                  # ...or SC to MANUAL
+    start_mode: str = "GUIDED"                 # the autopilot's mode at t = 0 (SC)
+    drop_at_s: float = -1.0                    # the autonomy-drop latch trips at this world
+                                               # time (the goal goes at ~1 s); < 0 never
+    pilot_mode_at_s: float = -1.0              # ...or the pilot flips SC to pilot_mode
+    pilot_mode: str = "MANUAL"
 
     def randomise(self, rnd):
         """A fresh course: bay, window, code. The geometry is left alone."""
@@ -397,6 +405,15 @@ class Boat:
     RATE_MAX = 60.0            # deg/s actually achieved (ATC_STR_RAT_MAX is 90)
     YAW_ACCEL = 90.0           # deg/s^2
     HS_TIMEOUT_S = 3.0         # GUIDED heading+speed: no new target for this long -> stop
+    # MANUAL on the OmniX hull. GUESSES, to be replaced by the water: full stick
+    # (500 us past the deadzone) ahead / astern / sideways / yaw, and the time
+    # the water takes to bring the hull to a new speed.
+    RC_TRIM = {1: 1489, 3: 1495, 4: 1495}      # RCn_TRIM: steer, throttle, lateral
+    RC_DZ_US = 25              # no thrust within this of trim
+    V_FULL_AHEAD, V_FULL_ASTERN, V_FULL_SIDE = 1.5, 1.0, 0.9   # m/s
+    R_FULL = 90.0              # deg/s
+    TAU_V, TAU_R = 0.8, 0.3    # s
+    RC_OVERRIDE_TIME = 3.0     # the boat's param: an override stands this long
 
     def __init__(self, e, n, heading, wp_radius=0.2, loit_radius=2.0):
         self.e, self.n, self.yaw = e, n, heading % 360.0
@@ -415,7 +432,10 @@ class Boat:
         self.hs = None         # (heading, speed, received): a GUIDED heading+speed target
         self.hs_timeouts = 0
         self.blocked_fwd = False   # the autopilot's avoidance says no closer
-        self.a = 0.0           # forward acceleration last step, m/s^2 (rocks the hull)
+        self.a = 0.0           # acceleration last step, m/s^2 (rocks the hull)
+        self.vl = 0.0          # sideways speed, m/s, + = to PORT
+        self.ov = None         # the RC override standing: 8 channels (0 = the pilot's)
+        self.ov_t = -1e9
 
     @property
     def p(self):
@@ -455,6 +475,22 @@ class Boat:
         s = clamp(dot(sub(self.p, o), u), 0.0, length)
         look = max(1.0, 2.0 * abs(self.v))
         return add(o, mul(u, min(length, s + look)))
+
+    def set_override(self, ch8):
+        """RC_CHANNELS_OVERRIDE as telemetry_bridge sent it. All zeros hands
+        every channel back; anything else stands RC_OVERRIDE_TIME."""
+        if not any(ch8):
+            self.ov = None
+        else:
+            self.ov, self.ov_t = list(ch8), self.clock
+
+    def _stick(self, ch):
+        """-1..1 for RC channel `ch`: the override if one stands, else the
+        pilot's stick (at trim - hands off)."""
+        if self.ov is None or self.clock - self.ov_t > self.RC_OVERRIDE_TIME or not self.ov[ch - 1]:
+            return 0.0
+        d = self.ov[ch - 1] - self.RC_TRIM[ch]
+        return math.copysign(max(0.0, abs(d) - self.RC_DZ_US) / (500.0 - self.RC_DZ_US), d)
 
     def set_heading_speed(self, heading, speed):
         """A GUIDED heading+speed target (SET_ATTITUDE_TARGET, thrust already
@@ -537,17 +573,32 @@ class Boat:
                     self.returning = False
                 if self.returning:
                     v_des, r_des = self._drive(self.loiter_pt, allow_astern=True)
+        vl_des = 0.0
+        manual = self.armed and self.mode == "MANUAL"
+        if manual:                                  # the sticks, straight to the thrusters
+            ahead = self._stick(3)
+            v_des = ahead * (self.V_FULL_AHEAD if ahead > 0 else self.V_FULL_ASTERN)
+            vl_des = -self._stick(4) * self.V_FULL_SIDE     # stick + = starboard
+            r_des = self._stick(1) * self.R_FULL
         if self.blocked_fwd and v_des > 0.0:
             v_des = 0.0
-        dv = clamp(v_des - self.v, -self.ACCEL * dt, self.ACCEL * dt)
-        self.a = dv / dt if dt > 0 else 0.0
+        if manual:
+            k, kr = min(1.0, dt / self.TAU_V), min(1.0, dt / self.TAU_R)
+            dv = (v_des - self.v) * k
+            self.r += (r_des - self.r) * kr
+        else:
+            dv = clamp(v_des - self.v, -self.ACCEL * dt, self.ACCEL * dt)
+            dr = clamp(r_des - self.r, -self.YAW_ACCEL * dt, self.YAW_ACCEL * dt)
+            self.r += dr
+        dvl = (vl_des - self.vl) * min(1.0, dt / self.TAU_V)
+        self.a = math.hypot(dv, dvl) / dt if dt > 0 else 0.0
         self.v += dv
-        dr = clamp(r_des - self.r, -self.YAW_ACCEL * dt, self.YAW_ACCEL * dt)
-        self.r += dr
+        self.vl += dvl
         self.yaw = (self.yaw + self.r * dt) % 360.0
         f = hvec(self.yaw)
-        de = f[0] * self.v * dt + current[0] * dt
-        dn = f[1] * self.v * dt + current[1] * dt
+        lf = port(f)
+        de = (f[0] * self.v + lf[0] * self.vl) * dt + current[0] * dt
+        dn = (f[1] * self.v + lf[1] * self.vl) * dt + current[1] * dt
         self.e += de
         self.n += dn
         self.odometer += math.hypot(de, dn)
@@ -673,14 +724,17 @@ class Bridge:
         self._ack_at = None
         self.out_from, self.out_until = -1.0, -1.0     # the pump OUTPUT is ON in here
         self._trip_seen = False
+        self.ov = override_core.OverrideGate(override_core.OverrideParams(
+            channels=(1, 3, 4), max_us=150, deadman_s=0.5, modes=("MANUAL",)))
         self.stats = {"hs_sent": 0, "hs_dropped": 0, "hs_stops": 0, "last_drop": "",
+                      "ov_sent": 0, "ov_dropped": 0, "ov_releases": 0,
                       "pump_cmds": 0, "pump_refused": 0, "bursts": 0, "last_refusal": ""}
 
     # ---- the pilot's radio, as the bridge reads it
     def rc(self):
         ch = [1500] * 18
         ch[7 - 1] = 1900                                   # SB: not e-stopped
-        ch[9 - 1] = 1900 if self.w.dropped else 1100       # SE: the drop switch
+        ch[9 - 1] = 1900 if self.w.dropped else 1100       # ch9: the drop switch (SD, proposed)
         ch[10 - 1] = 1000                                  # the pilot's pump switch: OFF
         return ch
 
@@ -707,6 +761,20 @@ class Bridge:
             self.stats["hs_sent"] += 1
         else:
             self.stats["hs_dropped"] += 1
+            self.stats["last_drop"] = why
+        return ok, why
+
+    # ---- the sticks (MANUAL)
+    def on_override(self, t, channels):
+        ok, why, out = self.ov.on_command(t, channels, self.w.boat.mode, not self.w.dropped)
+        if out is not None:
+            self.w.boat.set_override(out)
+            if not any(out):
+                self.stats["ov_releases"] += 1
+        if ok and why != "release":
+            self.stats["ov_sent"] += 1
+        elif not ok:
+            self.stats["ov_dropped"] += 1
             self.stats["last_drop"] = why
         return ok, why
 
@@ -750,6 +818,13 @@ class Bridge:
             if f is not None:
                 self._send(f)
                 self.stats["hs_stops"] += 1
+            if self.ov.on_trip() is not None:  # ...and release the sticks
+                self.w.boat.set_override(override_core.release())
+                self.stats["ov_releases"] += 1
+        rel = self.ov.tick(t, self.w.boat.mode)          # the sticks' dead-man, the mode
+        if rel is not None:
+            self.w.boat.set_override(rel)
+            self.stats["ov_releases"] += 1
         if self._ack_at is not None and t >= self._ack_at:
             self._ack_at = None
             if self.result == pump_core.RESULT_SENT:
@@ -1062,6 +1137,7 @@ class World:
         self.rnd = random.Random(sc.seed)
         self.dock = Dock(sc)
         self.boat = Boat(sc.start_e, sc.start_n, sc.start_heading, sc.wp_radius, sc.loit_radius)
+        self.boat.mode = str(sc.start_mode).upper()
         self.lights = Lights(sc)
         self.camera = Camera(sc, self.rnd)
         self.judge = Judge(sc)
@@ -1107,6 +1183,10 @@ class World:
 
     def on_cannon(self, c):
         self.cannon = c
+
+    def boat_speed(self):
+        """Through the water, ahead and sideways together."""
+        return math.hypot(self.boat.v, self.boat.vl)
 
     def on_avoidance(self, enable):
         self.avoidance = bool(enable)
@@ -1245,12 +1325,15 @@ class World:
         tn = self.t + dt
         if 0.0 <= sc.drop_at_s <= tn and not self.dropped:
             self.dropped = True
-            self.event = {"t": round(tn, 2), "what": "SE: autonomy dropped", "v_at": round(abs(self.boat.v), 3), "v_1s": None}
-            self.judge.log(tn, "pilot", "SE flipped: autonomy dropped", None)
-        if 0.0 <= sc.manual_at_s <= tn and self.boat.mode != "MANUAL":
-            self.boat.mode = "MANUAL"
-            self.event = {"t": round(tn, 2), "what": "SC: MANUAL", "v_at": round(abs(self.boat.v), 3), "v_1s": None}
-            self.judge.log(tn, "pilot", "SC flipped: MANUAL", None)
+            self.event = {"t": round(tn, 2), "what": "autonomy dropped (latch)",
+                          "v_at": round(self.boat_speed(), 3), "v_1s": None}
+            self.judge.log(tn, "pilot", "autonomy dropped (the drop latch tripped)", None)
+        want = str(sc.pilot_mode).upper()
+        if 0.0 <= sc.pilot_mode_at_s <= tn and self.boat.mode != want and self.event is None:
+            self.boat.mode = want
+            self.event = {"t": round(tn, 2), "what": "SC: " + want,
+                          "v_at": round(self.boat_speed(), 3), "v_1s": None}
+            self.judge.log(tn, "pilot", "SC flipped: " + want, None)
         self.bridge.tick(tn)
         bow = add(self.boat.p, mul(hvec(self.boat.yaw), Boat.LENGTH / 2.0))
         self.boat.blocked_fwd = (sc.autopilot_avoidance and self.avoidance
@@ -1262,7 +1345,13 @@ class World:
         self.att = self.sea.attitude(t)
         self.min_range = min(self.min_range, self.dock.uv(self.boat.p)[1])
         if self.event is not None and self.event["v_1s"] is None and t >= self.event["t"] + 1.0:
-            self.event["v_1s"] = round(abs(self.boat.v), 3)
+            self.event["v_1s"] = round(self.boat_speed(), 3)
+            b = self.boat
+            # is anything of OURS still driving it? a standing override, or a
+            # heading+speed target that is not a stop
+            self.event["ours_1s"] = bool(
+                (b.ov is not None and b.clock - b.ov_t <= b.RC_OVERRIDE_TIME)
+                or (b.hs is not None and abs(b.hs[1]) > 1e-6))
 
         corners = self.boat.corners()
         touching = self.dock.contact(corners)
@@ -1310,7 +1399,8 @@ class World:
             self._next_att += 1.0 / max(0.1, sc.att_hz)
             r, p_, rr, pr = self.att
             out.append({"type": "attitude", "roll": r * DEG, "pitch": p_ * DEG,
-                        "rollspeed": rr * DEG, "pitchspeed": pr * DEG})
+                        "rollspeed": rr * DEG, "pitchspeed": pr * DEG,
+                        "yawspeed": self.boat.r * DEG})
         if t >= self._next_wall:
             self._next_wall += 0.1
             self.last_wall = self.wall_range()
@@ -1406,6 +1496,8 @@ class World:
             "window_out": self.lights.hit_t is not None and sc.fire_lit,
             "bridge": dict(self.bridge.stats),
             "hs": None if self.boat.hs is None else [round(self.boat.hs[0], 1), round(self.boat.hs[1], 3)],
+            "sticks": None if self.boat.ov is None else [self.boat.ov[2], self.boat.ov[3], self.boat.ov[0]],
+            "mode": self.boat.mode, "vl": round(self.boat.vl, 3),
             "hs_timeouts": self.boat.hs_timeouts,
             "avoidance": self.avoidance, "dropped": self.dropped,
             "min_range": round(self.min_range, 3), "event": self.event,

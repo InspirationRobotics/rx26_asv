@@ -564,5 +564,81 @@ class Sea(unittest.TestCase):
         self.assertGreater(peak, 0.5)
 
 
+
+class ManualSticks(unittest.TestCase):
+    """MANUAL on the OmniX hull, and the bridge's rules for the sticks."""
+
+    @staticmethod
+    def drive(b, ch8, seconds):
+        b.set_override(ch8)
+        for _ in range(int(seconds / 0.05)):
+            b.step(0.05)
+
+    def boat(self):
+        b = W.Boat(0.0, 0.0, 0.0)
+        b.mode = "MANUAL"
+        return b
+
+    def test_each_stick_its_own_way(self):
+        b = self.boat()
+        self.drive(b, [0, 0, 1600, 0, 0, 0, 0, 0], 3.0)       # ch3 throttle
+        self.assertGreater(b.n, 0.2)                          # ahead (north)
+        self.assertAlmostEqual(b.e, 0.0, places=6)
+        b = self.boat()
+        self.drive(b, [0, 0, 0, 1600, 0, 0, 0, 0], 3.0)       # ch4 lateral, + = starboard
+        self.assertGreater(b.e, 0.1)                          # to the RIGHT (east)
+        self.assertAlmostEqual(b.yaw, 0.0, places=6)
+        b = self.boat()
+        self.drive(b, [1600, 0, 0, 0, 0, 0, 0, 0], 1.0)       # ch1 steer, + = right
+        self.assertGreater(b.yaw, 5.0)
+        self.assertLess(b.yaw, 180.0)
+
+    def test_the_deadzone(self):
+        b = self.boat()
+        self.drive(b, [0, 0, 1515, 0, 0, 0, 0, 0], 3.0)       # 20 us past trim 1495: inside 25
+        self.assertAlmostEqual(b.n, 0.0, places=9)
+
+    def test_an_override_stands_3_s_then_the_pilot_has_it(self):
+        b = self.boat()
+        b.set_override([0, 0, 1700, 0, 0, 0, 0, 0])
+        for _ in range(int(2.5 / 0.05)):
+            b.step(0.05)
+        self.assertGreater(b.v, 0.3)
+        for _ in range(int(3.0 / 0.05)):
+            b.step(0.05)
+        self.assertLess(b.v, 0.05)                            # the sticks at trim: coasting down
+
+    def test_ignored_outside_manual(self):
+        b = W.Boat(0.0, 0.0, 0.0)
+        b.mode = "HOLD"
+        self.drive(b, [0, 0, 1700, 0, 0, 0, 0, 0], 2.0)
+        self.assertAlmostEqual(b.n, 0.0, places=9)
+
+    def test_bridge_gates_the_sticks(self):
+        w = fire_world(start_mode="MANUAL")
+        br = w.bridge
+        ch = [0] * 18
+        ch[2], ch[6], ch[7] = 2000, 1000, 1900                # throttle, SB, SC
+        ok, why = br.on_override(0.0, ch)
+        self.assertTrue(ok)
+        self.assertEqual(w.boat.ov[2], 1650)                  # clamped
+        self.assertEqual((w.boat.ov[6], w.boat.ov[7]), (0, 0))   # SB, SC stay the pilot's
+        br.tick(0.6)                                          # 0.6 s of silence
+        self.assertIsNone(w.boat.ov)                          # released
+        w.boat.mode = "HOLD"
+        ok, why = br.on_override(1.0, ch)
+        self.assertFalse(ok)
+        self.assertIn("HOLD", why)
+
+    def test_a_trip_releases_the_sticks(self):
+        w = fire_world(start_mode="MANUAL")
+        ch = [0] * 18
+        ch[2] = 1600
+        w.bridge.on_override(0.0, ch)
+        w.dropped = True
+        w.bridge.tick(0.1)
+        self.assertIsNone(w.boat.ov)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -289,6 +289,7 @@ private:
     ctx_->pose_fresh = have_pose_ && ctx_->origin_set &&
       secondsSince(pose_t_) < p_.stream_timeout_s;
     ingestDockObservation(*ctx_, f);
+    ingestFireWindows(*ctx_, nowS(), f);
     dock_t_ = Clock::now();
     have_dock_ = true;
   }
@@ -323,7 +324,7 @@ private:
   {
     std::lock_guard<std::mutex> lk(ctx_->mu);
     ingestAttitude(*ctx_, nowS(), num(j, "roll", 0.0), num(j, "pitch", 0.0),
-      num(j, "rollspeed", 0.0), num(j, "pitchspeed", 0.0));
+      num(j, "rollspeed", 0.0), num(j, "pitchspeed", 0.0), num(j, "yawspeed", dock::kNaN));
     att_t_ = Clock::now();
     have_att_ = true;
   }
@@ -402,6 +403,12 @@ private:
         emit({{"type", "pump"}, {"duration_s", seconds}, {"seq", seq}, {"source", "bt_runner"}});
       };
     ctx_->set_avoidance = [this](bool on) {emit({{"type", "avoidance"}, {"enable", on}});};
+    // The sticks (MANUAL). bt_runner_node maps them onto RC channels; the sim
+    // does the same mapping, with the same defaults, before the bridge's gate.
+    ctx_->sticks = [this](double fwd, double lat, double yaw) {
+        emit({{"type", "sticks"}, {"fwd_us", fwd}, {"lat_us", lat}, {"yaw_us", yaw}});
+      };
+    ctx_->release_sticks = [this]() {emit({{"type", "sticks"}, {"release", true}});};
   }
 
   /// Motion was commanded last tick and not this one: say STOP, once. A leaf
@@ -419,6 +426,15 @@ private:
       emit({{"type", "heading_speed"}, {"heading_deg", last_hs_heading_}, {"speed_mps", 0.0}});
     }
     hs_active_ = commanded;
+    // ...and the sticks: released (handed back to the pilot), not held at neutral
+    bool sticks;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      sticks = ctx_->sticks_commanded && !exiting;
+      ctx_->sticks_commanded = false;
+    }
+    if (sticks_active_ && !sticks && ctx_->release_sticks) {ctx_->release_sticks();}
+    sticks_active_ = sticks;
   }
 
   /// What the boat believes about the dock, for the sim page to draw next to
@@ -522,6 +538,7 @@ private:
       ctx_->have_waypoint = false;
       resetTask3(*ctx_);
       resetFire(*ctx_);
+      goal_mode_ = ctx_->mode;
       ctx_->home = ctx_->boat;
       ctx_->have_home = ctx_->pose_fresh;
     }
@@ -595,10 +612,14 @@ private:
             detail = "tree completed: " + treeName();
           } else {
             std::lock_guard<std::mutex> lk(ctx_->mu);
-            if (!ctx_->autonomous) {
+            // The pilot took it back = the MODE CHANGED during the run. A tree
+            // that drives in MANUAL (task3_fire_manual.xml) is never
+            // "autonomous", so "not autonomous" alone is not the pilot.
+            if (ctx_->mode != goal_mode_ || (!ctx_->autonomous && goal_mode_ != "MANUAL")) {
               outcome = OUTCOME_NOT_AUTONOMOUS;
-              detail = "flight mode left the autonomous set — the pilot took "
-                "control; not fighting for it";
+              detail = "flight mode " + (ctx_->mode != goal_mode_ ?
+                goal_mode_ + " -> " + ctx_->mode : ctx_->mode + " is not autonomous") +
+                " — the pilot took control; not fighting for it";
             } else {
               outcome = OUTCOME_NO_ENTRY;
               detail = "tree " + treeName() + " returned FAILURE — see the "
@@ -653,6 +674,8 @@ private:
   bool have_att_ = false, have_pump_ = false;
   Clock::time_point t0_{};                   // the clock ctx.now_s counts from
   bool hs_active_ = false;                   // motion was commanded last tick
+  bool sticks_active_ = false;               // the sticks were commanded last tick
+  std::string goal_mode_;                    // the mode when this goal started
   double last_hs_heading_ = dock::kNaN;
   int uav_seq_ = 0;
 };

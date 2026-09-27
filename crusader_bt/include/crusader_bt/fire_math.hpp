@@ -27,6 +27,15 @@
 //                 pitch moves the hit ~2-3 cm.
 //   the gate      all of the above held for hold_s, then one burst.
 //
+// TWO WAYS TO HOLD THE SPOT. The first (solveAim / stationKeep) is for GUIDED
+// heading + speed, which cannot strafe: left/right aim is by TURNING. The
+// second (the strafe keep, below) is for MANUAL on this OmniX hull, which can:
+// the bow stays square to the face, the boat SLIDES until the window is on the
+// nozzle's line, and range is the LiDAR's. Its left/right and its square-up
+// both come from the CAMERA (DockObservation window x,y,z and the face plane),
+// not from the LiDAR's wall angle: the camera sees the window itself, the
+// LiDAR only a wall that may not be flat.
+//
 // CONVENTIONS (the same as dock_math):
 //
 //   Heading is compass degrees, clockwise from north. Body frame is REP-103:
@@ -139,6 +148,23 @@ public:
     }
     if (v.empty()) {return kNaN;}
     return wrap360(ref + median(v));
+  }
+
+  // d(range)/dt [m/s] over the last `window` s of usable samples (least
+  // squares): the surge axis's damping in MANUAL, where no autopilot speed loop
+  // does it. NaN with too few.
+  double rate(double now, double window = 0.8) const
+  {
+    double st = 0, sv = 0, stt = 0, stv = 0; int n = 0;
+    for (const auto & s : buf_) {
+      if (!s.valid || s.t < now - window || s.t <= blank_until_ || s.t > now + 1e-9 ||
+        !std::isfinite(s.range_m)) {continue;}
+      const double t = s.t - now;
+      st += t; sv += s.range_m; stt += t * t; stv += t * s.range_m; ++n;
+    }
+    if (n < 4) {return kNaN;}
+    const double den = n * stt - st * st;
+    return std::fabs(den) < 1e-12 ? kNaN : (n * stv - st * sv) / den;
   }
 
   void reset() {buf_.clear(); blank_until_ = -1e18; last_t_ = last_valid_t_ = -1.0;}
@@ -340,8 +366,12 @@ inline KeepCmd stationKeep(
       c.why = "at the minimum range";
     }
   }
+  // Slew-limit only a GROWING speed; less is allowed at once (the autopilot
+  // brakes at its own ATC_ACCEL_MAX), so the floor is never ramped through.
   const double step = std::max(0.0, p.accel * dt);
-  c.speed_mps = std::clamp(want, prev_speed - step, prev_speed + step);
+  if (want * prev_speed < 0.0) {c.speed_mps = std::clamp(want, -step, step);}
+  else if (std::fabs(want) <= std::fabs(prev_speed)) {c.speed_mps = want;}
+  else {c.speed_mps = std::clamp(want, prev_speed - step, prev_speed + step);}
   if (std::fabs(c.speed_mps) < 1e-6) {c.speed_mps = 0.0;}
   return c;
 }
@@ -435,6 +465,260 @@ private:
   std::deque<A> att_;
   double last_thrust_t_ = -1.0;
 };
+
+// ------------------------------------------------------------------ the camera, for the strafe keep
+
+// A number over time: medians, a least-squares slope, an age. Compass
+// headings go in `circular` series so 359 and 1 are 2 degrees apart.
+class Series
+{
+public:
+  explicit Series(bool circular = false) : circular_(circular) {}
+
+  void add(double t, double v)
+  {
+    if (!std::isfinite(v)) {return;}
+    buf_.push_back({t, v});
+    while (!buf_.empty() && buf_.front().first < t - 10.0) {buf_.pop_front();}
+  }
+
+  double age(double now) const
+  {
+    return buf_.empty() ? std::numeric_limits<double>::infinity() : now - buf_.back().first;
+  }
+
+  double median(double now, double window) const
+  {
+    std::vector<double> v;
+    const double ref = buf_.empty() ? 0.0 : buf_.back().second;
+    for (const auto & s : buf_) {
+      if (s.first >= now - window && s.first <= now + 1e-9) {
+        v.push_back(circular_ ? wrap180(s.second - ref) : s.second);
+      }
+    }
+    if (v.empty()) {return kNaN;}
+    const double m = fire::median(v);
+    return circular_ ? wrap360(ref + m) : m;
+  }
+
+  double slope(double now, double window) const   // per second; not for circular
+  {
+    double st = 0, sv = 0, stt = 0, stv = 0; int n = 0;
+    for (const auto & s : buf_) {
+      if (s.first < now - window || s.first > now + 1e-9) {continue;}
+      const double t = s.first - now;
+      st += t; sv += s.second; stt += t * t; stv += t * s.second; ++n;
+    }
+    if (n < 4) {return kNaN;}
+    const double den = n * stt - st * st;
+    return std::fabs(den) < 1e-12 ? kNaN : (n * stv - st * sv) / den;
+  }
+
+  void reset() {buf_.clear();}
+
+private:
+  bool circular_;
+  std::deque<std::pair<double, double>> buf_;
+};
+
+struct P3 {double x = kNaN, y = kNaN, z = kNaN;};
+
+// camera_link -> base_link. The camera frame is REP-103 (x along the optical
+// axis, y left, z up), pitched by `pitch_deg` (+ = aimed DOWN, as dock::Mount)
+// and yawed by `yaw_deg` (+ = aimed LEFT), with its origin at (mx, my) in the
+// body. `point` false rotates a DIRECTION (a plane normal) without moving it.
+inline P3 camToBody(
+  const P3 & c, double mx, double my, double yaw_deg, double pitch_deg, bool point = true)
+{
+  const double p = pitch_deg * kDeg, y = yaw_deg * kDeg;
+  const double xl = c.x * std::cos(p) + c.z * std::sin(p);     // undo the pitch
+  const double zl = -c.x * std::sin(p) + c.z * std::cos(p);
+  P3 b;
+  b.x = xl * std::cos(y) - c.y * std::sin(y);                  // undo the yaw
+  b.y = xl * std::sin(y) + c.y * std::cos(y);
+  b.z = zl;
+  if (point) {b.x += mx; b.y += my;}
+  return b;
+}
+
+// How far to turn LEFT (deg) to square the bow to the face, from the two
+// windows of ONE bay in ONE frame, in the body frame: square on, the upper-
+// left window is straight LEFT of the lower-right one. NaN if their spacing
+// is not the face's (expect_m +- tol_m): then one of them is not what the
+// detector says it is.
+inline double squareFromWindows(
+  double ulx, double uly, double lrx, double lry, double expect_m, double tol_m)
+{
+  const double dx = ulx - lrx, dy = uly - lry;
+  const double sep = std::hypot(dx, dy);
+  if (!std::isfinite(sep) || std::fabs(sep - expect_m) > tol_m || dy <= 0.0) {return kNaN;}
+  return std::atan2(-dx, dy) / kDeg;
+}
+
+// The same, from the face's plane normal in the body frame (pointing AT the
+// camera, as DockBay has it): square on it is (-1, 0).
+inline double squareFromNormal(double nx, double ny)
+{
+  if (!std::isfinite(nx) || !std::isfinite(ny) || -nx < 0.5) {return kNaN;}
+  return std::atan2(-ny, -nx) / kDeg;
+}
+
+// ------------------------------------------------------------------ the strafe keep (MANUAL)
+
+// Stick deflections in microseconds about each channel's neutral, in the
+// sense dp_hold drove this hull: fwd + = ahead, lat + = to STARBOARD,
+// yaw + = turn right. The runner maps them onto the RC channels.
+struct Sticks
+{
+  double fwd_us = 0.0, lat_us = 0.0, yaw_us = 0.0;
+  double max_abs() const {return std::max({std::fabs(fwd_us), std::fabs(lat_us), std::fabs(yaw_us)});}
+};
+
+struct StrafeParams
+{
+  double fire_range_m = 3.22;    // LiDAR range to fire from (squirt_cal)
+  double deadband_range_m = 0.05;
+  double deadband_lat_m = 0.04;
+  // Square matters little once the aim is by strafing: the window's y in the
+  // BODY frame is where the stream lands whatever the heading, and 3 deg off
+  // square changes the stream's run by ~4 mm. A tight yaw band only makes the
+  // camera's noise into thrust, and thrust into rocking.
+  double deadband_yaw_deg = 3.0;
+  // dp_hold's tune on this hull: 90 us/m forward and lateral, 4 us/deg yaw with
+  // 3 us per deg/s of damping, 120 us cap. The D terms on range and lateral are
+  // new: MANUAL has no autopilot speed loop to stop an overshoot.
+  double kp_fwd = 90.0, kd_fwd = 60.0;     // us per m, us per m/s
+  double kp_lat = 90.0, kd_lat = 30.0;
+  double kp_yaw = 4.0, kd_yaw = 3.0;       // us per deg, us per deg/s
+  // I on range and lateral: a steady current or wind needs a steady push, and
+  // P alone only gives one at an error - 0.5 m of it for 5 cm/s. Integrated
+  // only NEAR the target and NEARLY STILL - held off, not arriving - so the
+  // approach does not wind it up into an overshoot. Capped.
+  double ki_fwd = 20.0, ki_lat = 30.0;     // us per m.s
+  double i_max_us = 80.0;
+  double i_zone_m = 0.5;
+  double i_rate_mps = 0.03;
+  double min_us = 30.0;          // ADDED to every correction: the ESC deadband (+-25) and a bit
+  double max_us = 120.0;
+  double slew_us_s = 200.0;      // per axis: gentle, thrust rocks the hull
+  double min_range_m = 1.5;      // never push AHEAD inside this
+  double square_first_deg = 10.0;  // further off square than this: turn only
+};
+
+struct StrafeInputs
+{
+  double range_m = kNaN;         // LiDAR, filtered
+  double range_rate = kNaN;      // m/s, + = opening
+  double lat_err_m = kNaN;       // the window, LEFT of the nozzle's line (+) [m]
+  double lat_rate = kNaN;        // d(lat_err)/dt
+  double yaw_err_deg = kNaN;     // turn RIGHT this much to be square (+)
+  double yaw_rate_dps = kNaN;    // + = turning right (ATTITUDE.yawspeed)
+};
+
+struct StrafeCmd
+{
+  Sticks sticks;
+  bool range_ok = false, lat_ok = false, yaw_ok = false;
+  // any axis outside its band (P/D acting): the boat is being MOVED, which is
+  // what rocks it. A steady holding push (I alone) is not correcting.
+  bool correcting = false;
+  std::string why;
+};
+
+// What the keep carries from tick to tick: the last sticks (for the slew) and
+// the two integrators.
+struct StrafeState
+{
+  Sticks prev;
+  double i_fwd = 0.0, i_lat = 0.0;    // us; i_lat in the lateral stick's sense (+ starboard)
+};
+
+// One axis: nothing inside the band; outside it P + D, with the thruster
+// deadband COMPENSATED - min_us is ADDED to every non-zero command, not used as
+// a floor. Blue Robotics ESCs do nothing within +-25 us of neutral, so as a
+// floor a 0.5 m error still asked for next to no thrust, and 5 cm/s of current
+// held the boat there (the sim's fire_current). Capped at max_us. COASTING:
+// already moving toward the target fast enough to arrive within coast_s, it
+// pushes no more - a kick there is what makes it hunt - unless D says brake.
+inline double axisLaw(double err, double derr, double kp, double kd, double db,
+  double min_us, double max_us, double coast_s = 1.5)
+{
+  if (!std::isfinite(err) || std::fabs(err) <= db) {return 0.0;}
+  const double d = std::isfinite(derr) ? derr : 0.0;
+  const double u = kp * err + kd * d;
+  if (err * d < 0.0 && std::fabs(err) < std::fabs(d) * coast_s && u * err > 0.0) {return 0.0;}
+  if (u == 0.0) {return 0.0;}
+  return std::copysign(std::min(min_us + std::fabs(u), max_us), u);
+}
+
+// The three sticks toward: range = fire_range (LiDAR), the window on the
+// nozzle's line (camera, by strafing), the bow square to the face (camera).
+// `st` carries the slew and the integrators; `dt` is since the last call.
+inline StrafeCmd strafeKeep(
+  const StrafeParams & p, const StrafeInputs & in, StrafeState & st, double dt)
+{
+  const Sticks prev = st.prev;
+  StrafeCmd c;
+  Sticks want;
+  const double rerr = in.range_m - p.fire_range_m;             // + = too far out
+  c.range_ok = std::isfinite(rerr) && std::fabs(rerr) <= p.deadband_range_m;
+  c.lat_ok = std::isfinite(in.lat_err_m) && std::fabs(in.lat_err_m) <= p.deadband_lat_m;
+  c.yaw_ok = std::isfinite(in.yaw_err_deg) && std::fabs(in.yaw_err_deg) <= p.deadband_yaw_deg;
+
+  want.yaw_us = axisLaw(in.yaw_err_deg, std::isfinite(in.yaw_rate_dps) ? -in.yaw_rate_dps : kNaN,
+      p.kp_yaw, p.kd_yaw, p.deadband_yaw_deg, p.min_us, p.max_us);
+  c.correcting = want.yaw_us != 0.0;
+  if (std::isfinite(in.yaw_err_deg) && std::fabs(in.yaw_err_deg) > p.square_first_deg) {
+    c.why = "squaring up first";
+  } else {
+    const bool yawing = c.correcting;
+    const double pd_fwd = axisLaw(rerr, in.range_rate, p.kp_fwd, p.kd_fwd, p.deadband_range_m,
+        p.min_us, p.max_us);
+    // window LEFT of the line -> slide left -> lateral stick NEGATIVE (+ = starboard)
+    const double pd_lat = -axisLaw(in.lat_err_m, in.lat_rate, p.kp_lat, p.kd_lat,
+        p.deadband_lat_m, p.min_us, p.max_us);
+    c.correcting = yawing || pd_fwd != 0.0 || pd_lat != 0.0;
+    const double h = std::max(0.0, dt);
+    auto still = [&p](double r) {return !std::isfinite(r) || std::fabs(r) < p.i_rate_mps;};
+    if (std::isfinite(rerr) && std::fabs(rerr) < p.i_zone_m && still(in.range_rate)) {
+      st.i_fwd = std::clamp(st.i_fwd + p.ki_fwd * rerr * h, -p.i_max_us, p.i_max_us);
+    }
+    if (std::isfinite(in.lat_err_m) && std::fabs(in.lat_err_m) < p.i_zone_m && still(in.lat_rate)) {
+      st.i_lat = std::clamp(st.i_lat - p.ki_lat * in.lat_err_m * h, -p.i_max_us, p.i_max_us);
+    }
+    want.fwd_us = std::isfinite(rerr) ? std::clamp(pd_fwd + st.i_fwd, -p.max_us, p.max_us) : 0.0;
+    want.lat_us = std::isfinite(in.lat_err_m) ?
+      std::clamp(pd_lat + st.i_lat, -p.max_us, p.max_us) : 0.0;
+    if (want.fwd_us > 0.0 && std::isfinite(in.range_m) && in.range_m <= p.min_range_m) {
+      want.fwd_us = 0.0;
+      st.i_fwd = std::min(st.i_fwd, 0.0);
+      c.why = "at the minimum range";
+    }
+    if (c.why.empty()) {
+      if (!std::isfinite(rerr)) {c.why = "no range";}
+      else if (!std::isfinite(in.lat_err_m)) {c.why = "window not seen: holding sideways";}
+      else if (!std::isfinite(in.yaw_err_deg)) {c.why = "no face angle yet";}
+      else if (c.range_ok && c.lat_ok && c.yaw_ok) {c.why = "on the spot";}
+      else {c.why = "moving in";}
+    }
+  }
+  // Slew-limit only GROWING thrust. Less thrust is always allowed at once -
+  // above all at the minimum range, where a ramp down is thrust toward the
+  // dock after the floor said none.
+  const double step = std::max(0.0, p.slew_us_s * dt);
+  auto slew = [step](double w, double pr) {
+      double v;
+      if (w * pr < 0.0) {v = std::clamp(w, -step, step);}                 // through zero
+      else if (std::fabs(w) <= std::fabs(pr)) {v = w;}                    // easing off
+      else {v = std::clamp(w, pr - step, pr + step);}                     // building up
+      return std::fabs(v) < 1e-6 ? 0.0 : v;
+    };
+  c.sticks.fwd_us = slew(want.fwd_us, prev.fwd_us);
+  c.sticks.lat_us = slew(want.lat_us, prev.lat_us);
+  c.sticks.yaw_us = slew(want.yaw_us, prev.yaw_us);
+  st.prev = c.sticks;
+  return c;
+}
 
 // ------------------------------------------------------------------ the gate
 

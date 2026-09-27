@@ -1,0 +1,85 @@
+<?xml version="1.0"?>
+<!--
+  task3_fire_manual.xml - the fixed-nozzle shot in MANUAL, on the sticks: stand
+  off the dock at the calibrated range, SQUARE to the face, SLIDE sideways
+  until the upper-left window is on the nozzle's line, wait until the hull is
+  still, fire. Repeat until the window goes out or 5 shots.
+
+  WHY MANUAL. This hull is OmniX: it strafes. ArduRover's GUIDED does not use
+  that (it turns and drives), so a sideways correction there means turning the
+  whole boat - which moves the aim with every degree. In MANUAL the tree drives
+  the sticks the way the team's dp_hold did (RC override: ch1 steer, ch3
+  throttle, ch4 lateral), so the bow stays square and the boat slides.
+  task3_fire_test.xml is the GUIDED version, kept for when GUIDED strafes.
+
+  WHAT EACH AXIS USES:
+    range (surge)      the LiDAR wall range, to fire_range_m
+    left/right (sway)  the CAMERA: DockWindow x,y,z of window_index, in the
+                       body frame - the window onto the nozzle's line
+    square (yaw)       the CAMERA: the line through the face's two windows (or
+                       the face plane), turned into a compass heading and held
+                       on the compass between frames
+  The LiDAR's wall angle is not used: the wall may not be flat, the face is.
+
+  THE NUMBERS come from tools/squirt_cal at the pool on 2026-09-25 (fire_range_m
+  3.22, the upper-left window's top edge) and from dp_hold's tune on this hull
+  (gains, 120 us cap). Re-calibrate on the real dock.
+
+  HOW TO RUN IT. bt_runner_node with tree_file pointing here, the boat in
+  MANUAL, then the SafePassage goal as for every tree. In the sim:
+  tools/task3_sim/sim.py with its fire and fire-pump flags (its README).
+
+  TWO SWITCHES, both off by default, both on bt_runner_node:
+    publish_setpoints  may the tree take the STICKS (Gate G1)
+    fire_pump          may it SQUIRT (Gate G7)
+  With both off this tree is a shadow: it logs every stick command it would
+  send ("strafe: range 3.41 m, window +0.12 m left ... [shadow ...]").
+
+  TAKING IT BACK. telemetry_bridge forwards the sticks only in MANUAL, only on
+  ch1/3/4, and releases them after 0.5 s of silence. So:
+    SC out of MANUAL   the guard band ends the run, the bridge refuses and
+                       releases the sticks: the boat is the pilot's at once
+    SB                 the e-stop: motors off, whatever the software says
+    (a drop switch on ch9, SD, when it exists, releases them too)
+  The guard band also ends the run if the LiDAR loses the wall for a second
+  or attitude goes stale; the runner then releases the sticks.
+-->
+<root BTCPP_format="4" main_tree_to_execute="FireManual">
+  <BehaviorTree ID="FireManual">
+    <ReactiveSequence name="guard_band">
+
+      <ModeIs mode="MANUAL"/>
+      <NotDropped/>
+      <WallRangeAlive max_age_s="1.0"/>
+      <AttitudeAlive max_age_s="0.5"/>
+
+      <StrafeKeep fire_range_m="3.22" window_index="0" lateral_bias_m="0.0" nozzle_y_m="0.0"
+                  cam_timeout_s="0.5" face_timeout_s="3.0"
+                  range_check_m="0.5" face_setback_m="0.0"
+                  deadband_range_m="0.05" deadband_lat_m="0.04" deadband_yaw_deg="3.0"
+                  kp_fwd="90" kd_fwd="60" kp_lat="90" kd_lat="30" kp_yaw="4" kd_yaw="3"
+                  ki_fwd="20" ki_lat="30" i_max_us="80"
+                  min_us="30" max_us="120" slew_us_s="200"
+                  min_range_m="1.5" square_first_deg="10"/>
+
+      <Sequence name="shots">
+        <ForceSuccess>
+          <RetryUntilSuccessful num_attempts="5">
+            <Sequence name="one_shot">
+              <AwaitStrafeSolution fire_range_m="3.22" range_tol_m="0.06" lat_tol_m="0.05"
+                                   yaw_tol_deg="5.0" hold_s="1.0" gap_s="2.0" timeout_s="60.0"/>
+              <FireBurst burst_s="0.5" flight_s="0.8" ack_timeout_s="1.5"/>
+              <!-- FAILURE until the window reads GREEN long enough, which
+                   retries: line up, wait, fire again. With no lit window (the
+                   pool) it just fires up to 5 times. -->
+              <WindowOut/>
+            </Sequence>
+          </RetryUntilSuccessful>
+        </ForceSuccess>
+        <!-- Five timeouts and no burst is a failure, not a quiet success. -->
+        <ShotsFired min="1"/>
+      </Sequence>
+
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

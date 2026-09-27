@@ -194,7 +194,7 @@ struct Context
   // tick, the SAME clock the samples are stamped with.
   double now_s = 0.0;
   std::string mode;                           ///< the autopilot's mode, upper case
-  /// /crsd/autonomy_drop (latched): the pilot's SE switch has cut autonomy.
+  /// /crsd/autonomy_drop (latched): the drop latch (ch9) has cut autonomy.
   /// Unknown counts as tripped: no message is not permission.
   bool drop_tripped = true;
   fire::WallFilter wall;                      ///< /crsd/wall_range, filtered
@@ -220,6 +220,27 @@ struct Context
   /// each tick and sends a STOP if motion was commanded last tick and not this
   /// one - a leaf has no hook for "I stopped being ticked".
   bool hs_commanded = false;
+
+  // ---- the strafe keep (MANUAL; fire_math's second half) ----
+  // The camera's windows of the bay ahead, in the BODY frame, per
+  // DockWindow.index (0 = upper-left, 1 = lower-right), stamped on now_s's
+  // clock at receipt (ingestFireWindows). And the compass heading that squares
+  // the bow to that face, from the two windows (or the face plane).
+  fire::Series fire_win_x[2];
+  fire::Series fire_win_y[2];
+  fire::Series face_heading{true};
+  std::string face_src;                       ///< "windows" / "plane": the last source
+  double face_target = fire::kNaN;            ///< the last good square heading, held
+  double yaw_rate_dps = fire::kNaN;           ///< ATTITUDE.yawspeed, + = turning right
+  fire::StrafeState strafe_state;             ///< the keep's slew and integrators
+  fire::StrafeInputs strafe_in;               ///< what the keep saw last tick, for the gate
+  fire::StrafeCmd strafe;                     ///< ... and what it made of it
+  std::string strafe_block;                   ///< non-empty: the keep refuses (why)
+  double last_strafe_t = -1.0;
+  /// Set by StrafeKeep on every tick it commands the sticks; the runner clears
+  /// it before each tick and RELEASES the sticks if they were commanded last
+  /// tick and not this one.
+  bool sticks_commanded = false;
 
   // ---- written by NextWaypoint, read by NavigateTo ----
   nav::Vec2 waypoint;
@@ -258,6 +279,11 @@ struct Context
   std::function<void(double, std::uint32_t)> pump;
   /// The autopilot's simple avoidance on/off: /crsd/avoidance_enable.
   std::function<void(bool)> set_avoidance;
+  /// The sticks (MANUAL, RC override): deflections in us about neutral, as
+  /// fire::Sticks - fwd + ahead, lat + starboard, yaw + right. /crsd/rc_override.
+  std::function<void(double, double, double)> sticks;
+  /// Hand every channel back to the pilot (an all-zero override).
+  std::function<void()> release_sticks;
 };
 
 using ContextPtr = std::shared_ptr<Context>;
@@ -304,10 +330,55 @@ inline void ingestWallRange(
 /// One /crsd/attitude message (radians, the autopilot's axes). CALL UNDER ctx.mu.
 /// Only magnitudes and swings matter to "steady", so the axes' signs do not.
 inline void ingestAttitude(
-  Context & c, double t, double roll, double pitch, double roll_rate, double pitch_rate)
+  Context & c, double t, double roll, double pitch, double roll_rate, double pitch_rate,
+  double yaw_rate = fire::kNaN)
 {
   constexpr double d = 180.0 / fire::kPi;
   c.steady.feed_att(t, roll * d, pitch * d, roll_rate * d, pitch_rate * d);
+  c.yaw_rate_dps = yaw_rate * d;     // NED yaw rate: + = clockwise = turning right
+}
+
+/// The strafe keep's view of one DockObservation. CALL UNDER ctx.mu, after
+/// ingestDockObservation, with `t` on now_s's clock (the frame's own stamp is
+/// another clock). Takes the bay nearest the bow that has a positioned
+/// window; puts its windows into the body frame through cam_mount; and, when
+/// both windows are there at the face's spacing, the heading that would square
+/// the bow to it - else the same from the face plane's normal.
+inline void ingestFireWindows(Context & c, double t, const dock::Frame & f)
+{
+  constexpr double kFaceSepM = 0.45, kFaceSepTolM = 0.15;   // UL-LR, build guide
+  const dock::BaySighting * best = nullptr;
+  for (const auto & b : f.bays) {
+    bool any = false;
+    for (const auto & w : b.windows) {any = any || (w.has_position && w.index >= 0 && w.index <= 1);}
+    if (!any) {continue;}
+    if (best == nullptr || std::fabs(b.bearing_deg) < std::fabs(best->bearing_deg)) {best = &b;}
+  }
+  if (best == nullptr) {return;}
+  const auto & m = c.cam_mount;
+  fire::P3 body[2];
+  bool have[2] = {false, false};
+  for (const auto & w : best->windows) {
+    if (!w.has_position || w.index < 0 || w.index > 1) {continue;}
+    body[w.index] = fire::camToBody(fire::P3{w.x, w.y, w.z}, m.x, m.y, m.yaw_deg, m.pitch_deg);
+    have[w.index] = true;
+    c.fire_win_x[w.index].add(t, body[w.index].x);
+    c.fire_win_y[w.index].add(t, body[w.index].y);
+  }
+  if (!std::isfinite(c.heading_deg)) {return;}
+  double left = fire::kNaN;
+  if (have[0] && have[1]) {
+    left = fire::squareFromWindows(body[0].x, body[0].y, body[1].x, body[1].y,
+        kFaceSepM, kFaceSepTolM);
+    if (std::isfinite(left)) {c.face_src = "windows";}
+  }
+  if (!std::isfinite(left) && best->has_normal) {
+    const fire::P3 n = fire::camToBody(fire::P3{best->nx, best->ny, best->nz}, 0, 0,
+        m.yaw_deg, m.pitch_deg, false);
+    left = fire::squareFromNormal(n.x, n.y);
+    if (std::isfinite(left)) {c.face_src = "plane";}
+  }
+  if (std::isfinite(left)) {c.face_heading.add(t, fire::wrap360(c.heading_deg - left));}
 }
 
 /// Forget the last attempt's shots. Called at goal start with resetTask3.
@@ -318,6 +389,13 @@ inline void resetFire(Context & c)
   c.cmd_speed = 0.0;
   c.last_keep_t = -1.0;
   c.hs_commanded = false;
+  c.strafe_state = fire::StrafeState{};
+  c.strafe = fire::StrafeCmd{};
+  c.strafe_in = fire::StrafeInputs{};
+  c.strafe_block.clear();
+  c.last_strafe_t = -1.0;
+  c.face_target = fire::kNaN;
+  c.sticks_commanded = false;
 }
 
 /// Forget everything Task 3 learned. Called at goal start: a second attempt

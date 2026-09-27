@@ -11,7 +11,7 @@
 //        /crsd/wall_range    (WallRange)          the fixed-nozzle shot: LiDAR to the dock
 //        /crsd/attitude      (Attitude)           ...and whether the hull is still
 //        /crsd/pump_state    (PumpState)          ...and what the bridge did with a burst
-//        /crsd/autonomy_drop (Bool, latched)      ...the pilot's SE cut
+//        /crsd/autonomy_drop (Bool, latched)      ...the drop latch (ch9)
 //   out: /crsd/guided_setpoint    (GuidedSetpoint) ONLY when publish_setpoints
 //        /crsd/current_task       (String, latched)
 //        /crsd/autonomy_active    (Bool)   turns the mast light GREEN
@@ -23,6 +23,7 @@
 //        /crsd/water_cannon       (String, JSON)          Task 3, the pump
 //        /crsd/guided_heading_speed (GuidedHeadingSpeed) ONLY when publish_setpoints
 //        /crsd/pump_cmd           (PumpCommand)   ONLY when fire_pump
+//        /crsd/rc_override        (RcChannels)    the sticks, MANUAL, ONLY when publish_setpoints
 //
 // NOTE: the Task 3 plumbing here (onDock, onOcsCommand, the five publishers)
 // has NOT been built against real ROS. It was written on a laptop with no ROS
@@ -106,6 +107,7 @@
 #include "crusader_msgs/msg/passage_plan.hpp"
 #include "crusader_msgs/msg/pump_command.hpp"
 #include "crusader_msgs/msg/pump_state.hpp"
+#include "crusader_msgs/msg/rc_channels.hpp"
 #include "crusader_msgs/msg/tracked_target_array.hpp"
 #include "crusader_msgs/msg/wall_range.hpp"
 
@@ -195,6 +197,15 @@ public:
     ctx_->publish_setpoints = declare_parameter<bool>("publish_setpoints", false);
     // The fixed-nozzle shot may squirt: Gate G7, separate from moving (G1).
     ctx_->fire_pump = declare_parameter<bool>("fire_pump", false);
+    // The sticks for the MANUAL fire tree (StrafeKeep): which RC channel is
+    // [ahead, lateral, yaw] and its neutral, as the team's dp_hold drove it.
+    stick_ch_ = declare_parameter<std::vector<int64_t>>("stick_channels", {3, 4, 1});
+    stick_neutral_ = declare_parameter<std::vector<int64_t>>("stick_neutral_us", {1495, 1495, 1489});
+    stick_reverse_ = declare_parameter<std::vector<bool>>("stick_reverse", {false, false, false});
+    if (stick_ch_.size() != 3 || stick_neutral_.size() != 3 || stick_reverse_.size() != 3) {
+      throw std::runtime_error("stick_channels / stick_neutral_us / stick_reverse need 3 entries "
+        "each: [ahead, lateral, yaw]");
+    }
     t0_ = std::chrono::steady_clock::now();
 
     // Task 3. THE CAMERA EXTRINSIC MUST EQUAL target_tracker's cam_x / cam_y /
@@ -235,6 +246,9 @@ public:
     hs_pub_ = create_publisher<crusader_msgs::msg::GuidedHeadingSpeed>(
       "/crsd/guided_heading_speed", 10);
     pump_pub_ = create_publisher<crusader_msgs::msg::PumpCommand>("/crsd/pump_cmd", 10);
+    // The sticks (MANUAL): telemetry_bridge forwards them only in MANUAL, only
+    // on its override_channels, clamped, and releases them on silence.
+    rc_pub_ = create_publisher<crusader_msgs::msg::RcChannels>("/crsd/rc_override", 10);
 
     status_sub_ = create_subscription<crusader_msgs::msg::FcuStatus>(
       "/crsd/fcu_status", 10,
@@ -356,7 +370,7 @@ private:
   void onAttitude(const crusader_msgs::msg::Attitude::SharedPtr m)
   {
     std::lock_guard<std::mutex> lk(ctx_->mu);
-    ingestAttitude(*ctx_, nowS(), m->roll, m->pitch, m->rollspeed, m->pitchspeed);
+    ingestAttitude(*ctx_, nowS(), m->roll, m->pitch, m->rollspeed, m->pitchspeed, m->yawspeed);
     att_t_ = nowS();
     have_att_ = true;
   }
@@ -600,6 +614,25 @@ private:
         pump_pub_->publish(m);
       };
     ctx_->set_avoidance = [this](bool on) {publishAvoidance(on);};
+    ctx_->sticks = [this](double fwd, double lat, double yaw) {
+        const double v[3] = {fwd, lat, yaw};
+        crusader_msgs::msg::RcChannels m;
+        m.header.stamp = now();
+        for (auto & c : m.channels) {c = 0;}              // everything else: the pilot's
+        for (int i = 0; i < 3; ++i) {
+          const int64_t ch = stick_ch_[i];
+          if (ch < 1 || ch > 18) {continue;}
+          const double d = stick_reverse_[i] ? -v[i] : v[i];
+          m.channels[ch - 1] = static_cast<uint16_t>(std::lround(stick_neutral_[i] + d));
+        }
+        rc_pub_->publish(m);
+      };
+    ctx_->release_sticks = [this]() {
+        crusader_msgs::msg::RcChannels m;
+        m.header.stamp = now();
+        for (auto & c : m.channels) {c = 0;}
+        rc_pub_->publish(m);
+      };
   }
 
   /// Motion was commanded last tick and not this one: say STOP, once. A leaf
@@ -622,6 +655,15 @@ private:
       hs_pub_->publish(m);
     }
     hs_active_ = commanded;
+    // ...and the sticks: released (handed back to the pilot), not held at neutral
+    bool sticks;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      sticks = ctx_->sticks_commanded && !exiting;
+      ctx_->sticks_commanded = false;
+    }
+    if (sticks_active_ && !sticks && ctx_->release_sticks) {ctx_->release_sticks();}
+    sticks_active_ = sticks;
   }
 
   static void publishJson(
@@ -686,6 +728,7 @@ private:
     // Freshness at THIS instant: ingest places bays only on a fresh pose.
     ctx_->pose_fresh = ctx_->origin_set && (t - pose_t_).seconds() < stream_timeout_s_;
     ingestDockObservation(*ctx_, f);
+    ingestFireWindows(*ctx_, nowS(), f);
     dock_t_ = t;
     have_dock_ = true;
   }
@@ -868,6 +911,7 @@ private:
       ctx_->tier = goal->tier;
       resetTask3(*ctx_);
       resetFire(*ctx_);
+      goal_mode_ = ctx_->mode;
       // "Home" is where THIS attempt started, captured once. Not the autopilot's
       // HOME, which is wherever it was armed and is usually somewhere else after
       // the boat has been driven out manually.
@@ -965,10 +1009,14 @@ private:
             detail = "tree completed: " + treeName();
           } else {
             std::lock_guard<std::mutex> lk(ctx_->mu);
-            if (!ctx_->autonomous) {
+            // The pilot took it back = the MODE CHANGED during the run. A tree
+            // that drives in MANUAL (task3_fire_manual.xml) is never
+            // "autonomous", so "not autonomous" alone is not the pilot.
+            if (ctx_->mode != goal_mode_ || (!ctx_->autonomous && goal_mode_ != "MANUAL")) {
               outcome = SafePassage::Result::OUTCOME_NOT_AUTONOMOUS;
-              detail = "flight mode left the autonomous set — the pilot took "
-                "control; not fighting for it";
+              detail = "flight mode " + (ctx_->mode != goal_mode_ ?
+                goal_mode_ + " -> " + ctx_->mode : ctx_->mode + " is not autonomous") +
+                " — the pilot took control; not fighting for it";
             } else {
               outcome = SafePassage::Result::OUTCOME_NO_ENTRY;
               detail = "tree " + treeName() + " returned FAILURE — see the "
@@ -1142,6 +1190,11 @@ private:
   double att_t_ = 0.0, pump_t_ = 0.0;   // nowS() at receipt; guarded by ctx_->mu
   bool have_att_ = false, have_pump_ = false;
   bool hs_active_ = false;              // motion commanded last tick (tick thread only)
+  bool sticks_active_ = false;          // the sticks commanded last tick (tick thread only)
+  std::string goal_mode_;               // the mode when this goal started (under ctx_->mu)
+  std::vector<int64_t> stick_ch_, stick_neutral_;
+  std::vector<bool> stick_reverse_;
+  rclcpp::Publisher<crusader_msgs::msg::RcChannels>::SharedPtr rc_pub_;
   double last_hs_heading_ = std::nan("");
   rclcpp::Publisher<crusader_msgs::msg::GuidedHeadingSpeed>::SharedPtr hs_pub_;
   rclcpp::Publisher<crusader_msgs::msg::PumpCommand>::SharedPtr pump_pub_;

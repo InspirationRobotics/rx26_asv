@@ -34,11 +34,13 @@ jobs:
       # itself by (wall_fit_core), the calibration session against a simulated
       # boat (tools/squirt_cal), and the Task 3 sim's world (the nozzle, the
       # LiDAR, the bridge's gates). No ROS in any of them.
-      - name: pump_core, guided_hs_core, wall_fit_core, squirt_cal, task3_sim world
+      - name: pump/guided_hs/override cores, wall_fit, dock_obs, squirt_cal, task3_sim world
         run: |
           for t in crusader_fcu/test/test_pump_core.py \
                    crusader_fcu/test/test_guided_hs_core.py \
+                   crusader_fcu/test/test_override_core.py \
                    crusader_perception/test/test_wall_fit_core.py \
+                   crusader_perception/test/test_dock_obs_core.py \
                    tools/squirt_cal/test_*.py \
                    tools/task3_sim/test_world.py; do
             echo "== $t"

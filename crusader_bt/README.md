@@ -126,38 +126,47 @@ see either window from the berth (`cam_pitch_deg` ≈ -25, which the math
 handles); `WP_RADIUS` 2.0 m parks the boat at the finger ends; and GUIDED cannot
 hold a slip against a cross-current (`LOIT_RADIUS` 2 m, no strafing).
 
-## The fixed-nozzle shot (`task3_fire_test.xml`)
+## The fixed-nozzle shot (`task3_fire_manual.xml`, `task3_fire_test.xml`)
 
-The Task 3 nozzle is fixed, so the boat's range and heading ARE the aim. This
-tree is that shot on its own - stand off the dock at the calibrated range, point
-at the window, wait until the hull is still, fire - to test before it replaces
-`SprayUntilHit` in the full mission (docs/T3_coordinated_logistics.md).
+The Task 3 nozzle is fixed, so the boat's position IS the aim. These trees are
+that shot on its own - stand off the dock at the calibrated range, get the
+window on the nozzle's line, wait until the hull is still, fire - to test before
+it replaces `SprayUntilHit` in the full mission (docs/T3_coordinated_logistics.md).
 
 ```
-behavior_trees/task3_fire_test.xml      guard band + StationKeep + up to 5 shots
-src/fire_leaves.cpp                     11 leaves
-include/crusader_bt/fire_math.hpp       ALL of it: the wall filter, the aim, the keep,
-                                        steady, the gate, the burst book, the cross-check
-test/test_fire_math.cpp                 79 checks, stdlib only
+behavior_trees/task3_fire_manual.xml    MANUAL, the sticks, STRAFING (the one to use)
+behavior_trees/task3_fire_test.xml      GUIDED heading+speed (aims by turning; kept)
+src/fire_leaves.cpp                     13 leaves
+include/crusader_bt/fire_math.hpp       ALL of it: the wall filter, the aim, both keeps,
+                                        the camera->body maths, steady, the gate, the
+                                        burst book, the cross-check
+test/test_fire_math.cpp                 117 checks, stdlib only
 ```
 
-It moves the boat with **GUIDED heading + signed speed** (`heading_speed` in the
-Context → `/crsd/guided_heading_speed` → `telemetry_bridge`, gated by mode, the SE
-latch and a dead-man there), not position setpoints: the shot needs astern and a
-chosen heading. Its inputs are `/crsd/wall_range`, `/crsd/attitude`,
-`/crsd/pump_state` and `/crsd/autonomy_drop`, folded in by the runner
-(`ingestWallRange`, `ingestAttitude`). After every tick the runner sends ONE
-stop if motion was commanded last tick and not this one - a leaf has no hook for
-"I stopped being ticked".
+**MANUAL** (`StrafeKeep`): the sticks as RC overrides (`sticks` in the Context ->
+`/crsd/rc_override`), mapped onto channels by `stick_channels` /
+`stick_neutral_us` / `stick_reverse` (dp_hold's ch3/ch4/ch1). Range from the
+LiDAR; sideways and square from the camera's `DockWindow` x, y, z
+(`ingestFireWindows`, through `cam_mount`). `telemetry_bridge` forwards them only
+in MANUAL, only on ch1/3/4, and releases them on silence. **GUIDED**
+(`StationKeep`): heading + signed speed via `/crsd/guided_heading_speed`.
+
+Inputs: `/crsd/wall_range`, `/crsd/attitude` (with yaw rate), `/crsd/pump_state`,
+`/crsd/autonomy_drop`, and `dock/observations`, folded in by the runner. After
+every tick the runner sends ONE stop (GUIDED) or ONE release (MANUAL) if motion
+was commanded last tick and not this one - a leaf has no hook for "I stopped
+being ticked".
 
 | Leaf | Kind | Contract |
 |---|---|---|
 | `ModeIs` | condition | exactly this mode (heading+speed is ignored outside GUIDED) |
-| `NotDropped` | condition | the SE latch is clear (unknown counts as dropped) |
+| `NotDropped` | condition | the drop latch (ch9) is clear (unknown counts as dropped) |
 | `WallRangeAlive` / `AttitudeAlive` | condition | the streams the shot stands on |
-| `StationKeep` | compute | **always SUCCESS**: square to the wall until close, then the aim heading; banded speed; zero while the LiDAR and camera disagree or water is in the air |
+| `StrafeKeep` | compute | MANUAL. **always SUCCESS**: surge to the range (LiDAR), sway onto the window and yaw square (camera); P+D with the ESC deadband compensated, I near the target, capped; zero while the LiDAR and camera disagree or water is in the air |
+| `AwaitStrafeSolution` | action | MANUAL. RUNNING until range, window on the line, square, camera fresh, steady and not being moved all hold 1 s |
+| `StationKeep` | compute | GUIDED. **always SUCCESS**: square to the wall until close, then the aim heading; banded speed; zero while the LiDAR and camera disagree or water is in the air |
 | `SetAvoidance` | action | the autopilot's 2 m avoidance off for the shot, on after |
-| `AwaitFiringSolution` | action | RUNNING until range, heading, steady, quiet and the gap all hold 1 s; FAILURE on timeout, saying which never held |
+| `AwaitFiringSolution` | action | GUIDED. RUNNING until range, heading, steady, quiet and the gap all hold 1 s; FAILURE on timeout, saying which never held |
 | `FireBurst` | action | one burst via `/crsd/pump_cmd`, keyed on the bridge's ACK; **DRY** unless `fire_pump`; OFF on halt |
 | `WindowOut` | condition | the timing layer's hit |
 | `ShotsFired` | condition | at least N bursts went out (dry ones count) |

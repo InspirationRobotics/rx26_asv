@@ -7,18 +7,19 @@ water.
 **This is a software layer above the hardware e-stop (SB switch), never a replacement.
 The e-stop is tested first, separately, every session.**
 
-## Before you start: there is no override publisher any more
+## Before you start: what drives the override path now
 
-v0.5 removed every node that published to `/crsd/rc_override`, including the
-`rc_override_smoke` bench node this procedure used to drive. The **enforcement point**
-survives — `telemetry_bridge` still gates the topic behind the latch — so the gate is
-still testable, but you now drive it by hand with `ros2 topic pub` (below), or you write a
-replacement bench node first.
+v0.5 removed every node that published to `/crsd/rc_override`. It has one again:
+`bt_runner_node` running `task3_fire_manual.xml` (the fixed-nozzle shot, MANUAL, strafing) with
+`publish_setpoints` true. The **enforcement point** is `telemetry_bridge`, which since then
+forwards an override only **in MANUAL**, only on **ch1/3/4** (steer, throttle, lateral — never
+SB ch7, SC ch8 or the pump), clamped to ±150 µs about 1500, and **releases** the sticks after
+0.5 s without one (`crusader_fcu/override_core.py`). The rows O1–O8 below test exactly that.
 
-A hand-driven override, props off:
+A hand-driven override, props off (ch1 steer, ch3 throttle, ch4 lateral; 0 = the pilot's):
 
 ```bash
-ros2 topic pub -r 10 /crsd/rc_override interfaces/msg/RcChannels "{channels: [1500,1500,1500,1500,1500,1500,1500,1500,0,0,0,0,0,0,0,0,0,0]}"
+ros2 topic pub -r 10 /crsd/rc_override crusader_msgs/msg/RcChannels "{channels: [1560,0,1560,1560,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}"
 ```
 
 Watch the latch state in another shell:
@@ -73,12 +74,31 @@ Watch the motor outputs on SERVO_OUTPUT_RAW (QGC MAVLink Inspector) and the brid
 | H1 | Refused outside GUIDED | SC in MANUAL, start the publisher | Outputs follow the sticks only; bridge logs `guided heading+speed DROPPED -- mode MANUAL is not GUIDED` |
 | H2 | Acts in GUIDED | Arm, SC → GUIDED | Motor outputs move off neutral |
 | H3 | Dead-man | Ctrl+C the publisher | Outputs back to neutral within ~0.5 s (the bridge's own stop), not 3 s |
-| H4 | Pilot drop | Publisher running, flip SE | Outputs neutral at once; bridge logs the trip; the publisher's messages now DROPPED |
+| H4 | Pilot drop | Publisher running, flip the drop switch (ch9: SD, once mixed) | Outputs neutral at once; bridge logs the trip; the publisher's messages now DROPPED |
 | H5 | Pilot mode | Publisher running, SC → MANUAL | Outputs follow the sticks at once |
 | H6 | Clamp | Publish `speed_mps: 2.0` in GUIDED | Bridge warns `speed clamped to +0.40`; output no higher than at 0.4 |
 | H7 | Nothing through a trip | While dropped, SC → GUIDED, publish again | Outputs stay neutral until `/crsd/autonomy_drop_reset` |
 
 Until H1–H7 pass, `publish_setpoints` stays **false** on `bt_runner_node` for the fire tree.
+
+## The RC override path (the MANUAL fire tree)
+
+`task3_fire_manual.xml` takes the sticks through `/crsd/rc_override`. **Props off.** Publisher
+as above; watch SERVO_OUTPUT_RAW and the bridge's log.
+
+| # | Test | Procedure | Pass criterion |
+|---|------|-----------|----------------|
+| O1 | Refused outside MANUAL | SC middle (HOLD) or up (GUIDED), start the publisher | Outputs unchanged; bridge logs `rc override DROPPED -- mode HOLD is not one of MANUAL` |
+| O2 | Acts in MANUAL | Arm, SC down (MANUAL) | Motor outputs move off neutral |
+| O3 | Dead-man | Ctrl+C the publisher | Outputs follow the sticks again within ~0.5 s (the bridge's release), not 3 s |
+| O4 | Pilot mode | Publisher running, SC → HOLD | Outputs neutral at once |
+| O5 | Never SB, SC or the pump | Publish ch7 = 1000, ch8 = 1900, ch10 = 2000 as well | The boat does not e-stop, change mode or squirt |
+| O6 | Clamp | Publish ch3 = 2000 | Output no further than 1650 µs of input; bridge warns `clamped` |
+| O7 | SB wins | Publisher running, SB down | Motors stop |
+| O8 | Drop switch | Once SD is mixed to ch9: publisher running, flip SD | Released at once; further overrides DROPPED until the reset service |
+| O9 | Directions | `bt_runner_node` with the fire tree and `publish_setpoints` true, in MANUAL, the tree's log side by side | `fwd +` thrusts AHEAD, `lat +` to STARBOARD, `yaw +` turns RIGHT. If one is backwards, set `stick_reverse` for it |
+
+Until O1–O7 and O9 pass, `publish_setpoints` stays **false** for `task3_fire_manual.xml`.
 
 ## Sign-off
 

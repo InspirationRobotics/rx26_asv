@@ -30,10 +30,13 @@ THE FIXED-NOZZLE SHOT, on its own tree:
 
     python tools/task3_sim/sim.py --fire --fire-pump
 
---fire runs behavior_trees/task3_fire_test.xml on a course where the upper-left
-window is already burning and the boat starts 3.8 m off the green bay - inside
-wall_range_node's r_max (4 m), which is where the pilot must hand over. Without
---fire-pump the tree's bursts run DRY, as they do on the boat until Gate G7.
+--fire runs behavior_trees/task3_fire_manual.xml - MANUAL, on the sticks,
+strafing - on a course where the upper-left window is already burning and the
+boat starts 3.8 m off the green bay (inside wall_range_node's r_max, 4 m, which
+is where the pilot must hand over), in MANUAL, with the camera level as it is
+on the boat. --fire-guided runs task3_fire_test.xml, the GUIDED heading+speed
+version, instead. Without --fire-pump the bursts run DRY, as on the boat
+until Gate G7.
 --set StationKeep.lateral=fingers (repeatable) runs a copy of the tree with
 that port changed; the file itself stays the one truth.
 """
@@ -59,12 +62,20 @@ import world as W                                         # noqa: E402
 
 RUNNER = os.path.join(HERE, ".build", "offros_runner" + (".exe" if os.name == "nt" else ""))
 TREE = os.path.join(REPO, "crusader_bt", "behavior_trees", "task3_disruptive.xml")
-FIRE_TREE = os.path.join(REPO, "crusader_bt", "behavior_trees", "task3_fire_test.xml")
+FIRE_TREE = os.path.join(REPO, "crusader_bt", "behavior_trees", "task3_fire_manual.xml")
+FIRE_TREE_GUIDED = os.path.join(REPO, "crusader_bt", "behavior_trees", "task3_fire_test.xml")
 # --fire's course: the UL window burning, the boat 3.8 m off the green bay's
-# slip, square on. The default dock is 20 m north with its bays facing south.
+# slip, square on, in MANUAL, the camera level (the boat's mount). The default
+# dock is 20 m north with its bays facing south.
 FIRE_COURSE = {"fire_lit": True, "target_window": 0, "green_bay": 2, "tier": 0,
                "start_e": 0.0, "start_n": 16.2, "start_heading": 0.0,
-               "extinguish_s": 0.3, "autopilot_avoidance": True}
+               "extinguish_s": 0.3, "start_mode": "MANUAL", "cam_pitch_deg": 0.0}
+# --fire-guided's: the same, in GUIDED, with the autopilot's avoidance acting.
+FIRE_COURSE_GUIDED = dict(FIRE_COURSE, start_mode="GUIDED", cam_pitch_deg=-25.0,
+                          autopilot_avoidance=True)
+# The sticks onto RC channels, as bt_runner_node's defaults (stick_channels,
+# stick_neutral_us): (channel, neutral) for ahead, lateral, yaw.
+STICKS = ((3, 1495), (4, 1495), (1, 1489))
 PAGE = os.path.join(HERE, "page.html")
 PORT = 8088
 
@@ -237,7 +248,8 @@ class Sim:
 
     def knob(self, name, value):
         """Live knobs: things that can change mid-run without lying to the tree."""
-        live = {"camera_ok", "miscolour", "unknown_rate", "current_mps", "current_to_deg", "sea"}
+        live = {"camera_ok", "miscolour", "unknown_rate", "current_mps", "current_to_deg", "sea",
+                "wall_ok"}
         with self.lock:
             if name not in live:
                 raise ValueError("%s is not a live knob; use reset" % name)
@@ -246,12 +258,13 @@ class Sim:
         self._note("sim", "%s -> %s" % (name, value))
 
     def drop(self):
-        """The pilot flips SE: the bridge's latch trips (and stays tripped
-        until a reset, as on the boat)."""
+        """The autonomy-drop latch trips (a drop switch on ch9 - none is wired
+        yet; SD is the candidate) and stays tripped until a reset, as on the
+        boat."""
         with self.lock:
             self.world.dropped = True
-            self.world.judge.log(self.world.t, "pilot", "SE flipped: autonomy dropped", None)
-        self._note("sim", "SE: autonomy dropped")
+            self.world.judge.log(self.world.t, "pilot", "autonomy dropped (the drop latch)", None)
+        self._note("sim", "autonomy dropped (latch)")
 
     def set_mode(self, mode):
         with self.lock:
@@ -267,6 +280,7 @@ class Sim:
     def _loop(self):
         dt = W.World.DT
         next_t = time.monotonic()
+        self.lag_s = 0.0                  # real time lost to an overloaded machine
         while not self.stop:
             with self.lock:
                 msgs = self.world.step()
@@ -278,6 +292,7 @@ class Sim:
             if lag > 0:
                 time.sleep(lag)
             elif lag < -1.0:
+                self.lag_s += -lag
                 next_t = time.monotonic()          # fell badly behind: do not sprint
 
     def _drain(self):
@@ -309,6 +324,12 @@ class Sim:
                 w.bridge.on_pump(w.t, float(m["duration_s"]), int(m["seq"]), m.get("source", ""))
             elif kind == "avoidance":
                 w.on_avoidance(m["enable"])
+            elif kind == "sticks":
+                ch = [0] * 18
+                if not m.get("release"):
+                    for (c, neutral), key in zip(STICKS, ("fwd_us", "lat_us", "yaw_us")):
+                        ch[c - 1] = int(round(neutral + float(m[key])))
+                w.bridge.on_override(w.t, ch)
             elif kind in ("docking_report", "firefighting_report", "resource_request", "uav_request"):
                 payload = json.loads(m["json"])
                 self.reports.append({"t": round(w.t, 2), "kind": kind, "json": m["json"]})
@@ -431,6 +452,7 @@ def headless(sim, tier, timeout_s):
     fire = dict(st["world"]["fire"])
     fire.pop("shots", None)
     out = {"ok": ok, "mission": st["mission"], "judge": summ,
+           "lag_s": round(getattr(sim, "lag_s", 0.0), 1),
            "fire": fire, "shots": sim.world.shots,
            "events": st["world"]["judge"]["events"],
            "scenario": st["world"]["scenario"], "reports": st["reports"],
@@ -450,17 +472,24 @@ def main():
                     help='JSON of Scenario knobs, e.g. \'{"green_bay": 3, "tier": 1}\'')
     ap.add_argument("--random", action="store_true", help="randomise bay, window and code")
     ap.add_argument("--fire", action="store_true",
-                    help="the fixed-nozzle shot: task3_fire_test.xml on a burning-window course")
+                    help="the fixed-nozzle shot in MANUAL (task3_fire_manual.xml), window burning")
+    ap.add_argument("--fire-guided", action="store_true",
+                    help="the same in GUIDED heading+speed (task3_fire_test.xml)")
     ap.add_argument("--fire-pump", action="store_true",
                     help="bt_runner_node's fire_pump: bursts go to the (simulated) bridge, not DRY")
     ap.add_argument("--set", action="append", default=[], metavar="NODE.port=value",
                     help="run a copy of the tree with this port changed (repeatable)")
     a = ap.parse_args()
-    if a.fire and a.tree == TREE:
-        a.tree = FIRE_TREE
+    course = {}
+    if a.fire_guided:
+        course = FIRE_COURSE_GUIDED
+        a.tree = FIRE_TREE_GUIDED if a.tree == TREE else a.tree
+    elif a.fire:
+        course = FIRE_COURSE
+        a.tree = FIRE_TREE if a.tree == TREE else a.tree
 
     sc = W.Scenario()
-    for k, v in (list(FIRE_COURSE.items()) if a.fire else []) + list(json.loads(a.scenario).items()):
+    for k, v in list(course.items()) + list(json.loads(a.scenario).items()):
         if not hasattr(sc, k):
             sys.exit("no such knob: %s" % k)
         setattr(sc, k, tuple(v) if isinstance(getattr(sc, k), tuple) else v)

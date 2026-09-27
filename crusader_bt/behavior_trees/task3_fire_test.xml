@@ -24,7 +24,7 @@
   UpdateDockBook); the waiting lives inside the stateful AwaitFiringSolution.
 
   The guard band ends the run, and the runner stops the boat, if the pilot
-  leaves GUIDED (SC), drops autonomy (SE, ch9), the LiDAR loses the wall for
+  leaves GUIDED (SC), the drop latch trips (ch9), the LiDAR loses the wall for
   a second, or attitude goes stale.
 
   lateral: centreline assumes the boat is on the slip centreline; fingers uses

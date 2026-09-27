@@ -167,7 +167,12 @@ int main()
     c = stationKeep(k, 5.0, 3.22, 0.0, 0.0, 0.0, 0.1);
     chk_near("slew-limited from rest", c.speed_mps, k.accel * 0.1, 1e-9);
     c = stationKeep(k, 3.22, 3.22, 0.0, 0.0, 0.2, 0.1);
-    chk_near("slew-limited to a stop", c.speed_mps, 0.2 - k.accel * 0.1, 1e-9);
+    chk("a stop is immediate (only growing speed is slewed)", c.speed_mps == 0.0);
+    c = stationKeep(k, 1.4, 3.22, 0.0, 0.0, 0.2, 0.1);
+    chk("reversing ahead->astern goes through zero gently", c.speed_mps < 0.0 &&
+      c.speed_mps >= -k.accel * 0.1 - 1e-9);
+    c = stationKeep(k, 1.5, 1.0, 0.0, 0.0, 0.2, 0.1);
+    chk("at the floor, forward is cut at once", c.speed_mps == 0.0);
     // turn before driving
     c = stationKeep(fast, 5.0, 3.22, 30.0, 0.0, 0.0, 0.1);
     chk_near("heading error 30 deg: turn first, zero speed", c.speed_mps, 0.0, 1e-12);
@@ -270,6 +275,121 @@ int main()
     chk("no camera: no check", rangesAgree(1.22, kNaN, 0.5));
     chk("tol 0: off", rangesAgree(1.22, 3.22, 0.0));
     chk("no LiDAR with a camera: disagree", !rangesAgree(kNaN, 3.22, 0.5));
+  }
+
+  std::printf("the camera, for the strafe keep\n");
+  {
+    const P3 a = camToBody(P3{3.0, 0.2, 0.5}, 0.37, 0.0, 0.0, 0.0);
+    chk("level: a translation", std::fabs(a.x - 3.37) < 1e-9 && std::fabs(a.y - 0.2) < 1e-9 &&
+      std::fabs(a.z - 0.5) < 1e-9);
+    const P3 up = camToBody(P3{1.0, 0.0, 0.0}, 0.0, 0.0, 0.0, -25.0, false);
+    chk_near("pitched UP 25: its axis climbs", up.z, std::sin(25.0 * kDeg), 1e-9);
+    const P3 left = camToBody(P3{1.0, 0.0, 0.0}, 0.0, 0.0, 10.0, 0.0, false);
+    chk("yawed LEFT: its axis points left", left.y > 0.17 && left.y < 0.18);
+
+    chk_near("square on: no turn", squareFromWindows(3.0, 0.22, 3.0, -0.23, 0.45, 0.15), 0.0, 1e-9);
+    // the boat yawed 5 deg RIGHT: the face appears rotated the other way
+    const double th = 5.0 * kDeg;
+    const double ulx = 3 * std::cos(th) - 0.22 * std::sin(th), uly = 3 * std::sin(th) + 0.22 * std::cos(th);
+    const double lrx = 3 * std::cos(th) + 0.23 * std::sin(th), lry = 3 * std::sin(th) - 0.23 * std::cos(th);
+    chk_near("yawed right 5: turn LEFT 5", squareFromWindows(ulx, uly, lrx, lry, 0.45, 0.15), 5.0, 1e-9);
+    chk("wrong spacing: not trusted", std::isnan(squareFromWindows(3.0, 0.5, 3.0, -0.5, 0.45, 0.15)));
+    chk("windows swapped: not trusted", std::isnan(squareFromWindows(3.0, -0.22, 3.0, 0.23, 0.45, 0.15)));
+    chk_near("normal square on", squareFromNormal(-1.0, 0.0), 0.0, 1e-9);
+    chk_near("normal, yawed right 5: turn left 5",
+      squareFromNormal(-std::cos(th), -std::sin(th)), 5.0, 1e-9);
+    chk("a normal facing away: not trusted", std::isnan(squareFromNormal(0.2, 0.9)));
+
+    Series h(true);
+    h.add(0.0, 359.0); h.add(0.1, 1.0); h.add(0.2, 2.0);
+    chk_near("circular median across north", h.median(0.2, 1.0), 1.0, 1e-9);
+    Series y;
+    for (int i = 0; i <= 10; ++i) {y.add(i * 0.1, 0.5 - 0.2 * i * 0.1);}
+    chk_near("slope", y.slope(1.0, 2.0), -0.2, 1e-9);
+    chk("age", std::fabs(y.age(1.5) - 0.5) < 1e-9);
+
+    WallFilter w;
+    for (int i = 0; i <= 10; ++i) {w.add(WallSample{i * 0.1, true, 3.5 - 0.1 * i * 0.1, 0, kNaN, 0});}
+    chk_near("range rate", w.rate(1.0), -0.1, 1e-9);
+  }
+
+  std::printf("the strafe keep\n");
+  {
+    StrafeParams p;
+    chk("in the band: nothing", axisLaw(0.04, 0.0, 90, 60, 0.05, 30, 120) == 0.0);
+    chk_near("just out: the deadband offset plus P", axisLaw(0.06, 0.0, 90, 60, 0.05, 30, 120),
+      30.0 + 90 * 0.06, 1e-9);
+    chk_near("half a metre: offset + 45 us, not 45", axisLaw(0.5, 0.0, 90, 60, 0.05, 30, 120),
+      75.0, 1e-9);
+    chk_near("far out: capped", axisLaw(3.0, 0.0, 90, 60, 0.05, 30, 120), 120.0, 1e-9);
+    chk("arriving within 1.5 s: coast", axisLaw(0.2, -0.29, 90, 60, 0.05, 30, 120) == 0.0);
+    chk("creeping in (2 cm/s, 16 cm out): keep pushing",
+      axisLaw(0.16, -0.02, 90, 60, 0.05, 30, 120) > 30.0);
+    chk("overshooting: brake", axisLaw(0.1, -0.5, 90, 60, 0.05, 30, 120) < 0.0);
+
+    StrafeInputs in;
+    in.range_m = 4.0; in.range_rate = 0.0; in.lat_err_m = 0.2; in.lat_rate = 0.0;
+    in.yaw_err_deg = 0.0; in.yaw_rate_dps = 0.0;
+    StrafeState big; big.prev.fwd_us = 200; big.prev.lat_us = -200;
+    StrafeCmd c = strafeKeep(p, in, big, 1.0);
+    chk_near("too far: ahead, offset + P on 0.78 m", c.sticks.fwd_us, p.min_us + 90.0 * 0.78, 1e-6);
+    chk("window LEFT: slide left (lat -)", c.sticks.lat_us < -15.0);
+    chk("square: no yaw", c.sticks.yaw_us == 0.0);
+    chk("not on the spot", !c.range_ok && !c.lat_ok && c.yaw_ok);
+
+    in.yaw_err_deg = 20.0;
+    big.prev.fwd_us = 200; big.prev.lat_us = -200;
+    c = strafeKeep(p, in, big, 1.0);
+    chk("far off square: turn only", c.sticks.fwd_us == 0.0 && c.sticks.lat_us == 0.0 &&
+      c.sticks.yaw_us > 0.0 && c.why == "squaring up first");
+
+    in.yaw_err_deg = 0.0; in.range_m = 1.4;
+    big.prev.fwd_us = 200; big.i_fwd = 50;
+    c = strafeKeep(p, in, big, 1.0);
+    chk("inside the minimum range: never ahead", c.sticks.fwd_us <= 0.0);
+    {
+      // the target itself inside the floor, and an integrator pushing ahead:
+      // the floor wins, and the integrator is emptied
+      StrafeParams q = p; q.fire_range_m = 1.45;
+      StrafeState s2; s2.i_fwd = 50.0; s2.prev.fwd_us = 50.0;
+      StrafeInputs i2 = in; i2.range_m = 1.40; i2.range_rate = 0.0;
+      const StrafeCmd c2 = strafeKeep(q, i2, s2, 0.1);
+      chk("the floor beats the integrator", c2.sticks.fwd_us <= 0.0 && s2.i_fwd <= 0.0);
+    }
+
+    StrafeState z;
+    in.range_m = 3.22; in.lat_err_m = 0.0;
+    c = strafeKeep(p, in, z, 1.0);
+    chk("on the spot: all zero", c.sticks.max_abs() == 0.0 && c.range_ok && c.lat_ok && c.yaw_ok &&
+      c.why == "on the spot" && !c.correcting);
+
+    StrafeState z2;
+    in.range_m = 5.0;
+    c = strafeKeep(p, in, z2, 0.1);
+    chk_near("slew-limited", c.sticks.fwd_us, 20.0, 1e-9);
+    chk("far out: correcting, no windup", c.correcting && z2.i_fwd == 0.0);
+    {
+      // arriving (10 cm out, closing at 8 cm/s): no windup either
+      StrafeState a;
+      StrafeInputs ai = in; ai.range_m = 3.32; ai.range_rate = -0.08;
+      for (int i = 0; i < 20; ++i) {strafeKeep(p, ai, a, 0.1);}
+      chk("arriving: no windup", a.i_fwd == 0.0);
+    }
+
+    StrafeState z3;
+    in.range_m = 3.22; in.lat_err_m = kNaN;
+    c = strafeKeep(p, in, z3, 1.0);
+    chk("no window: no sideways thrust", c.sticks.lat_us == 0.0);
+
+    // a current pushing the boat right: the window sits 2 cm LEFT (inside the
+    // band) for 10 s. P gives nothing there; I builds a steady push LEFT.
+    StrafeState cur;
+    in.lat_err_m = 0.02; in.lat_rate = 0.0;
+    for (int i = 0; i < 100; ++i) {c = strafeKeep(p, in, cur, 0.1);}
+    chk_near("I: a steady push left against the current", c.sticks.lat_us, -0.02 * 30.0 * 10.0, 0.5);
+    chk("... and holding is not correcting", !c.correcting && c.lat_ok);
+    for (int i = 0; i < 2000; ++i) {c = strafeKeep(p, in, cur, 0.1);}
+    chk_near("I is capped", c.sticks.lat_us, -80.0, 1e-9);
   }
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fails);

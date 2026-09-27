@@ -118,7 +118,7 @@ canvas{display:block;width:100%}
           <label style="min-width:140px">Mis-colour <span id="l-mis-v">0.00</span><input id="l-miscolour" type="range" min="0" max="0.3" step="0.01" value="0"></label>
           <label style="min-width:140px">Current <span id="l-cur-v">0.00</span> m/s<input id="l-current_mps" type="range" min="0" max="0.3" step="0.01" value="0"></label>
           <label>Current to (deg)<input id="l-current_to_deg" type="number" step="15" value="90" style="width:90px"></label>
-          <label>Autopilot<select id="l-mode"><option>GUIDED</option><option>MANUAL</option></select></label>
+          <label>Autopilot (SC)<select id="l-mode"><option>MANUAL</option><option>HOLD</option><option>GUIDED</option></select></label>
         </div>
       </div>
       <div class="err" id="err"></div>
@@ -142,7 +142,7 @@ canvas{display:block;width:100%}
       <div class="kv" id="fire-facts"></div>
       <div class="knobs" style="padding-top:0"><div class="act">
         <label style="min-width:160px">Sea <span id="l-sea-v">0.0</span> (0 flat · 3 rough)<input id="l-sea" type="range" min="0" max="3" step="0.1" value="0"></label>
-        <button class="warn" id="b-drop" title="The pilot flips SE: the bridge's latch trips and it stops the boat">Drop autonomy (SE)</button>
+        <button class="warn" id="b-drop" title="The drop latch trips (ch9; SD proposed): the bridge stops the boat and releases the sticks">Drop autonomy (latch)</button>
       </div></div>
     </div>
     <div class="card">
@@ -209,6 +209,7 @@ function fillForm(sc) {
   $("l-current_mps").value = sc.current_mps; $("l-cur-v").textContent = sc.current_mps.toFixed(2);
   $("l-current_to_deg").value = sc.current_to_deg;
   $("l-sea").value = sc.sea; $("l-sea-v").textContent = (+sc.sea).toFixed(1);
+  $("l-mode").value = String(sc.start_mode || "GUIDED").toUpperCase();
 }
 
 // ---------------------------------------------------------------- geometry
@@ -473,12 +474,14 @@ function fireFacts() {
   if (!sc.fire_lit || !fz) return;
   const br = fz.bridge, wl = fz.wall || {};
   const lidar = wl.valid ? wl.range_m.toFixed(2) + " m" + (wl.lat_m !== null && wl.lat_m !== undefined ? " · fingers " + (wl.lat_m >= 0 ? "+" : "") + wl.lat_m.toFixed(2) + " m (+ left)" : " · no fingers") : "NO WALL";
-  const ap = fz.hs ? "heading " + fz.hs[0] + "° at " + (fz.hs[1] >= 0 ? "+" : "") + fz.hs[1].toFixed(2) + " m/s" : (S.world.boat.loitering ? "loitering" : "no target");
+  const ap = fz.sticks ? "sticks (µs) ahead " + fz.sticks[0] + " · lateral " + fz.sticks[1] + " · steer " + fz.sticks[2]
+    : fz.hs ? "heading " + fz.hs[0] + "° at " + (fz.hs[1] >= 0 ? "+" : "") + fz.hs[1].toFixed(2) + " m/s"
+    : (S.world.boat.loitering ? "loitering" : "the pilot's sticks");
   const facts = [
     ["truth", "range " + fz.range.toFixed(2) + " m · " + (fz.u >= 0 ? "+" : "") + fz.u.toFixed(2) + " m from the slip centre (+ right) · closest " + fz.min_range.toFixed(2) + " m"],
     ["LiDAR", lidar],
-    ["autopilot", S.world.boat.v.toFixed(2) + " m/s · " + ap + (fz.hs_timeouts ? " · " + fz.hs_timeouts + " timeout(s)" : "") + " · avoidance " + (fz.avoidance ? "ON" : "off")],
-    ["bridge", "heading+speed " + br.hs_sent + " sent / " + br.hs_dropped + " dropped / " + br.hs_stops + " stops" + (br.last_drop ? " (" + br.last_drop + ")" : "") + (fz.dropped ? " · SE DROPPED" : "")],
+    ["autopilot", fz.mode + " · " + S.world.boat.v.toFixed(2) + " m/s ahead, " + fz.vl.toFixed(2) + " m/s to port · " + ap + (fz.hs_timeouts ? " · " + fz.hs_timeouts + " timeout(s)" : "") + " · avoidance " + (fz.avoidance ? "ON" : "off")],
+    ["bridge", "heading+speed " + br.hs_sent + " sent / " + br.hs_dropped + " dropped / " + br.hs_stops + " stops" + (br.last_drop ? " (" + br.last_drop + ")" : "") + (fz.dropped ? " · DROPPED" : "")],
     ["pump", br.pump_cmds + " asked · " + br.bursts + " burst(s) · " + br.pump_refused + " refused" + (br.last_refusal ? " (" + br.last_refusal + ")" : "") + (S.fire_pump ? "" : " · runner has fire_pump OFF: DRY")],
     ["shots", fz.n_shots + " · " + fz.n_hits + " in · window " + (fz.window_out ? "OUT" : "burning")],
   ];

@@ -3,7 +3,7 @@
 ```bash
 python tools/task3_sim/build.py      # once: BT.CPP from source, the math tests, the runner
 python tools/task3_sim/sim.py        # then open http://localhost:8088
-python tools/task3_sim/sim.py --fire --fire-pump    # the fixed-nozzle shot on its own
+python tools/task3_sim/sim.py --fire --fire-pump    # the fixed-nozzle shot on its own (MANUAL)
 ```
 
 Plain Python ≥ 3.10 and g++ (MSYS2's mingw-w64 on Windows). **No WSL, no Docker, no ROS.**
@@ -64,9 +64,11 @@ competition day. 8088 is clear of 8085 (bt_view), 8086 (Task 1 aircraft), 8087 (
 
 ## The fixed-nozzle shot (`--fire`)
 
-`sim.py --fire` runs `behavior_trees/task3_fire_test.xml` (docs/T3_coordinated_logistics.md) on
-a course where the upper-left window is already burning and the boat starts 3.8 m off the green
-bay's slip. What it adds to the world:
+`sim.py --fire` runs `behavior_trees/task3_fire_manual.xml` (docs/T3_coordinated_logistics.md):
+MANUAL, the sticks, strafing onto the window from the camera's window x, y, z. The course: the
+upper-left window already burning, the boat 3.8 m off the green bay's slip, in MANUAL, the camera
+level (the boat's mount). `--fire-guided` runs `task3_fire_test.xml`, the GUIDED heading+speed
+version, instead. What it adds to the world:
 
 - **The nozzle**: a drag-free 45° arc, fitted so a level, square-on boat at `nozzle_hit_range_m`
   (3.22, the pool's answer) puts the stream on the window's top edge. The water goes where the
@@ -75,22 +77,27 @@ bay's slip. What it adds to the world:
   boat accelerates.
 - **The LiDAR**: `/crsd/wall_range` from the true pose with `wall_range_node`'s limits (r_max
   4 m, ±35°), the fingers' offset, noise, spray returns; `wall_on_fingers` fits the tips instead.
-- **The autopilot**: GUIDED heading+speed as `guided_hs_core` remembers it (turns toward the
-  heading, speed as asked, loiters 3 s after the last target), avoidance at 2 m while enabled.
-- **The bridge**: its gates, running `guided_hs_core` and `pump_core` themselves.
+- **The autopilot**: MANUAL on the OmniX hull - the sticks straight to the thrusters, ahead,
+  sideways and yaw, each with a ±25 µs deadzone about the RC trim and a lag for the water; an
+  override stands 3 s (`RC_OVERRIDE_TIME`). GUIDED heading+speed as `guided_hs_core` remembers
+  it. The numbers are GUESSES: the real hull tunes them.
+- **The bridge**: its gates, running `guided_hs_core`, `override_core` and `pump_core` themselves.
 
 Without `--fire-pump` the bursts run DRY, as on the boat before G7. `--set NODE.port=value`
-runs a copy of the tree with one port changed (`--set StationKeep.lateral=fingers`). The page
-adds a side view of the arc with each shot's crossing, the bridge's counts, a sea slider and
-the pilot's SE switch.
+runs a copy of the tree with one port changed (`--set StrafeKeep.kp_lat=120`). The page adds a
+side view of the arc with each shot's crossing, the bridge's counts, a sea slider and a button
+that trips the drop latch; the Autopilot selector is SC (MANUAL / HOLD / GUIDED).
 
 ## Tests
 
 | | What | Time |
 |---|---|---|
-| `build.py test` | `test_nav_math` (140), `test_dock_math` (136), `test_fire_math` (79), stdlib only | 3 s |
+| `build.py test` | `test_nav_math` (140), `test_dock_math` (136), `test_fire_math` (117), stdlib only | 3 s |
 | `test_world.py` | the simulated world on its own: build-guide geometry, numbering, boat, lights, camera view, judge; the nozzle, LiDAR, heading+speed, bridge, pump and sea | < 1 s |
-| `test_e2e.py` | the real trees against 30 scenarios, 6 at a time, **real time** (`test_e2e.py fire` = the 16 fire ones) | ~8 min |
+| `test_e2e.py` | the real trees against 34 scenarios, half the cores + 1 at a time, **real time** (`test_e2e.py fire` = the 20 fire ones; `-j N` to choose) | ~15 min on 4 cores |
+
+REAL TIME means an overloaded machine is a slower boat and a staler camera to the tree: a run
+that fell behind says so (`[sim fell N s behind real time]`), and is not a controller result.
 
 Every e2e scenario states what *should* happen, failures included:
 
@@ -107,22 +114,24 @@ Every e2e scenario states what *should* happen, failures included:
 | `no_camera` | fails **in < 10 s** | a dead dock detector stops the run |
 | `no_fire` | fails, **no fire report** | a fire that never lights is never claimed out |
 
-And the fixed-nozzle shot:
+And the fixed-nozzle shot, MANUAL (`task3_fire_manual.xml`) unless it says GUIDED:
 
 | Scenario | Expect | Proves |
 |---|---|---|
-| `fire_calm` `fire_close_start` | window out | the approach, backing out from inside the slip (2 m), one burst |
+| `fire_calm` `fire_close_start` | window out | the approach; backing out from inside the slip (2 m), where the upper window is not in view |
+| `fire_offset_left` `fire_offset_right` | window out | 0.4 m off either way: it SLIDES onto the window (camera window y) |
+| `fire_yawed` | window out | 8° off square: squares up from the camera's two windows |
+| `fire_current` | window out | 5 cm/s across: the integrator builds the steady push that holds the line |
 | `fire_rocking` | window out, later | waits for a calm spell (sea 2) |
 | `fire_rough` | **no burst** | never calls sea 3 steady |
-| `fire_offset` `fire_current` | window out (`lateral=fingers`) | 0.3 m off the centreline, 3 cm/s across: aimed from the fingers' offset |
-| `fire_far_start` | window out | from 8 m, square first then aim - if `r_max` were raised |
 | `fire_beyond_lidar` | **no burst**, at once | from 5 m the LiDAR (r_max 4 m) cannot see the dock |
-| `fire_no_wall` `fire_slow_att` | **no burst** | no wall; attitude at 4 Hz cannot judge steady |
-| `fire_finger_lock` | **no burst**, boat still | the LiDAR on the finger tips disagrees with the camera by 2 m |
-| `fire_drop` `fire_mode_manual` | **stopped within 1 s** from 0.25 m/s | SE: the bridge's own stop (take it out and the boat carries on); SC: the mode |
+| `fire_no_wall` `fire_no_camera` `fire_slow_att` | **no burst** | no wall; no window to slide onto; attitude at 4 Hz cannot judge steady |
+| `fire_finger_lock` | **no burst**, sticks at zero | the LiDAR on the finger tips disagrees with the camera by 2 m |
+| `fire_drop` `fire_sc_hold` | **released**, slowing | the drop latch, or SC to HOLD: 1 s later nothing of ours drives it |
 | `fire_pump_off` | **fails**, no water | no pump output: FireBurst refuses, loudly |
-| `fire_cal_error` | 5 shots, **all miss** 16 cm high | a wrong calibration is visible shot by shot |
+| `fire_cal_error` | 5 shots, **all miss** ~15 cm high | a wrong calibration is visible shot by shot |
 | `fire_dry` | "fires" 5 × DRY, no pump command | the shadow posture |
+| `guided_calm` `guided_drop` | window out; stopped | GUIDED heading+speed still works, and the bridge's own stop on a trip |
 
 ## The course and the boat
 
@@ -176,6 +185,20 @@ water. **Assumed:** the deck's height above the water (0.3 m).
    second guard.
 4. **`wall_fit_core`'s refine did a full SVD** - an N×N matrix per sweep, 0.5 s on a desktop
    near a wall. Now 30 ms.
+
+And in MANUAL, on the sticks:
+
+5. **The thruster deadband ate the small corrections.** With the minimum deflection as a
+   floor, 0.5 m of error still asked for ~0.05 m/s, and 5 cm/s of current held the boat there
+   forever. The deadband is now COMPENSATED (added to every correction).
+6. **P alone cannot hold against a current**: it settles where the push balances it, 0.25 m off
+   the window. An integrator does it - but integrating on the approach wound it up into a 7 cm
+   overshoot past the band, so it integrates only near the target and nearly still.
+7. **The slew limit ramped thrust DOWN too**, so at the 1.5 m floor forward thrust lingered for
+   a tick after the floor said none. Only growing thrust is slewed now (both keeps).
+8. **A tight yaw band turned the camera's noise into thrust, and thrust into rocking**: the shot
+   waited forever for "no correction for 1.5 s". Once the aim is by strafing, 3° off square
+   moves the stream ~4 mm, so the yaw band is 3° and the gate 5°.
 
 ## What it is not
 

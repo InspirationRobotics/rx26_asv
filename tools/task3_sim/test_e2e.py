@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """test_e2e.py — the real tree against the simulated course, scenario by scenario.
 
-    python tools/task3_sim/test_e2e.py              # everything, ~8 min
+    python tools/task3_sim/test_e2e.py              # everything, ~15 min on 4 cores
+    python tools/task3_sim/test_e2e.py -j 2 fire    # 2 at a time
     python tools/task3_sim/test_e2e.py bay1 core    # just these
     python tools/task3_sim/test_e2e.py fire         # every fire_* scenario
 
 Each scenario is one `sim.py --headless` run in its own process, several at
-once. Real time, because the tree's timers are wall-clock.
+once. Real time, because the tree's timers are wall-clock - so an overloaded
+machine is a slower boat and a staler camera to the tree. The default is half
+the cores plus one; a run that fell behind real time says so in its line.
 
 Every scenario states what SHOULD happen, including the ones that should fail.
 A failure case that passes is as much a bug as a pass case that fails: the
@@ -42,14 +45,15 @@ SIM = os.path.join(HERE, "sim.py")
 #   "fire_out"      SUCCESS, the window put out by a burst of water, no hull
 #                   contact, never inside the keep's 1.5 m floor
 #   "no_burst"      not a drop of water, not even a pump command, and no SUCCESS
-#   "stops"         the pilot takes it back mid-approach (over 10 cm/s): below
-#                   5 cm/s 1 s later, no water after, and no SUCCESS
+#   "stops"         the pilot takes it back mid-approach (moving): 1 s later
+#                   nothing of ours still drives it, it is slowing, no water
+#                   after, and no SUCCESS
 #   "fail_loud"     the pump path is down: FAILURE, and no water
 #   "misses"        bursts go out and every one misses: the window stays lit
 #   "dry"           fire_pump off: the tree lines up and "fires" DRY - no pump
 #                   command at all - and the window stays lit
 FIRE = {"fire": True, "pump": True}
-FINGERS = dict(FIRE, set=["StationKeep.lateral=fingers"])
+GUIDED = {"fire_guided": True, "pump": True}
 SCENARIOS = {
     # The default course: the build guide's dock 20 m ahead, bays opening south,
     # the camera pitched up 25 deg (see world.Scenario.cam_pitch_deg).
@@ -81,43 +85,47 @@ SCENARIOS = {
     # Confirmed, but the fire never lights: fail, and never claim a fire out.
     "no_fire":     ({"green_bay": 2, "tier": 2, "activation_delay_s": 1e6}, "no_fire", 180),
 
-    # ---- the fixed-nozzle shot. The boat starts 3.8 m off bay 2's slip.
-    "fire_calm":        ({}, "fire_out", 60, FIRE),
+    # ---- the fixed-nozzle shot, MANUAL on the sticks (task3_fire_manual.xml).
+    # The boat starts 3.8 m off bay 2's slip, square, in MANUAL, camera level.
+    "fire_calm":        ({}, "fire_out", 90, FIRE),
     # Rocking: it must wait for a calm spell, and still hit.
     "fire_rocking":     ({"sea": 2.0, "seed": 3}, "fire_out", 120, FIRE),
     # Too rough to ever call steady: it never fires.
     "fire_rough":       ({"sea": 3.0, "seed": 3}, "no_burst", 60, FIRE),
-    # 3 cm/s across the slip: it drifts sideways (heading+speed cannot strafe);
-    # the fingers' offset re-aims the heading.
-    "fire_current":     ({"current_mps": 0.03, "current_to_deg": 90.0}, "fire_out", 90, FINGERS),
-    # 0.3 m left of the slip centre: aimed from the fingers' offset.
-    "fire_offset":      ({"start_e": -0.3}, "fire_out", 60, FINGERS),
+    # 0.4 m off to either side: it SLIDES onto the window (camera window y).
+    "fire_offset_left": ({"start_e": -0.4}, "fire_out", 90, FIRE),
+    "fire_offset_right": ({"start_e": 0.4}, "fire_out", 90, FIRE),
+    # 8 deg off square: it squares up to the face from the camera, then slides.
+    "fire_yawed":       ({"start_heading": 8.0}, "fire_out", 90, FIRE),
+    # 5 cm/s across the slip: strafing holds the line against it.
+    "fire_current":     ({"current_mps": 0.05, "current_to_deg": 90.0}, "fire_out", 90, FIRE),
     # Starts 2.0 m out, between the fingers: backs out to the firing range.
-    "fire_close_start": ({"start_n": 18.0}, "fire_out", 60, FIRE),
+    "fire_close_start": ({"start_n": 18.0}, "fire_out", 90, FIRE),
     # 5 m out the LiDAR cannot see the dock (wall_range_node.r_max 4 m): the
-    # guard band stops the run at once. Hand over inside 4 m...
+    # guard band stops the run at once. Hand over inside 4 m.
     "fire_beyond_lidar": ({"start_n": 15.0}, "no_burst", 30, FIRE),
-    # ...or raise r_max: from 8 m it approaches square, then aims.
-    "fire_far_start":   ({"start_n": 12.0, "wall_r_max": 9.0}, "fire_out", 90, FIRE),
-    # No wall from the LiDAR: nothing moves, nothing fires.
     "fire_no_wall":     ({"wall_ok": False}, "no_burst", 30, FIRE),
+    # No camera: no window to slide onto, no face to square to - never fires.
+    "fire_no_camera":   ({"camera_ok": False}, "no_burst", 45, FIRE),
     # Attitude at 4 Hz is too slow to call the hull steady: never fires.
     "fire_slow_att":    ({"att_hz": 4.0}, "no_burst", 45, FIRE),
     # The wall fit locks onto the finger tips, 2 m short: the camera's range
-    # disagrees, so no aim and no shot.
+    # disagrees, so the sticks stay at zero and nothing fires.
     "fire_finger_lock": ({"wall_on_fingers": True}, "no_burst", 45, FIRE),
-    # The pilot takes it back mid-approach, both ways. Autopilot avoidance
-    # off, so the stop is the bridge's (SE) or the mode's (SC), not a lucky
-    # re-enabled avoidance next to the fingers.
-    "fire_drop":        ({"drop_at_s": 2.5, "autopilot_avoidance": False}, "stops", 40, FIRE),
-    "fire_mode_manual": ({"manual_at_s": 2.5, "autopilot_avoidance": False}, "stops", 40, FIRE),
+    # The pilot takes it back mid-approach: the drop latch, or SC out of MANUAL.
+    "fire_drop":        ({"drop_at_s": 2.5}, "stops", 40, FIRE),
+    "fire_sc_hold":     ({"pilot_mode_at_s": 2.5, "pilot_mode": "HOLD"}, "stops", 40, FIRE),
     # The bridge has no pump output (G7 not done): FireBurst fails, loudly.
-    "fire_pump_off":    ({"pump_path": False}, "fail_loud", 90, FIRE),
+    "fire_pump_off":    ({"pump_path": False}, "fail_loud", 120, FIRE),
     # The calibration is wrong (the truth is 3.6 m, the tree believes 3.22):
     # it fires, misses high, and says so shot by shot.
-    "fire_cal_error":   ({"nozzle_hit_range_m": 3.6}, "misses", 120, FIRE),
+    "fire_cal_error":   ({"nozzle_hit_range_m": 3.6}, "misses", 150, FIRE),
     # fire_pump off: the shadow posture. Lines up, fires DRY, no water.
-    "fire_dry":         ({}, "dry", 90, {"fire": True}),
+    "fire_dry":         ({}, "dry", 120, {"fire": True}),
+    # ---- the GUIDED heading+speed version (task3_fire_test.xml), kept for when
+    # GUIDED can strafe: that it still works, and still stops.
+    "guided_calm":      ({}, "fire_out", 60, GUIDED),
+    "guided_drop":      ({"drop_at_s": 2.5, "autopilot_avoidance": False}, "stops", 40, GUIDED),
 }
 
 
@@ -128,6 +136,8 @@ def run(name):
             "--scenario", json.dumps(knobs)]
     if opts.get("fire"):
         args.append("--fire")
+    if opts.get("fire_guided"):
+        args.append("--fire-guided")
     if opts.get("pump"):
         args.append("--fire-pump")
     for item in opts.get("set", []):
@@ -163,10 +173,12 @@ def run(name):
         ok = (m.get("outcome") != 0 and "docking_report" in reported
               and "firefighting_report" not in reported)
         why = "%s, reports %s" % (m.get("outcome_name"), reported)
-    elif expect.startswith("fire_") or expect in ("no_burst", "stops", "fail_loud", "misses", "dry"):
+    elif expect in ("fire_out", "no_burst", "stops", "fail_loud", "misses", "dry"):
         ok, why = fire_verdict(expect, out)
     else:
         ok, why = False, "unknown expectation " + expect
+    if out.get("lag_s", 0) > 1.0:
+        why += "  [sim fell %.0f s behind real time: an overloaded machine]" % out["lag_s"]
     return name, ok, why, time.monotonic() - t0
 
 
@@ -187,7 +199,9 @@ def fire_verdict(expect, out):
     elif expect == "stops":
         ev = f["event"] or {}
         v1 = ev.get("v_1s")
-        ok = (v1 is not None and v1 < 0.05 and (ev.get("v_at") or 0) > 0.1 and outcome != 0
+        va = ev.get("v_at") or 0.0
+        ok = (v1 is not None and va > 0.04 and v1 < max(0.05, 0.5 * va)
+              and ev.get("ours_1s") is False and outcome != 0
               and all(s["t"] < ev["t"] for s in shots))
         desc += ", %s at %.1fs at %s m/s -> %s m/s 1 s later" % (ev.get("what"), ev.get("t", 0),
                                                                  ev.get("v_at"), v1)
@@ -205,15 +219,19 @@ def fire_verdict(expect, out):
 
 
 def main():
-    names = sys.argv[1:] or list(SCENARIOS)
+    args = sys.argv[1:]
+    jobs = max(1, (os.cpu_count() or 4) // 2 + 1)
+    if args[:1] == ["-j"]:
+        jobs, args = int(args[1]), args[2:]
+    names = args or list(SCENARIOS)
     if names == ["fire"]:
-        names = [n for n in SCENARIOS if n.startswith("fire_")]
+        names = [n for n in SCENARIOS if n.startswith(("fire_", "guided_"))]
     for n in names:
         if n not in SCENARIOS:
             sys.exit("no scenario %r; have: %s" % (n, ", ".join(SCENARIOS)))
-    print("running %d scenarios, 6 at a time, in real time ..." % len(names), flush=True)
+    print("running %d scenarios, %d at a time, in real time ..." % (len(names), jobs), flush=True)
     results = []
-    with ThreadPoolExecutor(6) as pool:
+    with ThreadPoolExecutor(jobs) as pool:
         for name, ok, why, took in pool.map(run, names):
             results.append(ok)
             print("  [%s] %-16s %-9s %5.0fs  %s" % ("ok" if ok else "FAIL", name,

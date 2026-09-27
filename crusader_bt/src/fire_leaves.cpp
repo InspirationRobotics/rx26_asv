@@ -26,6 +26,13 @@
 // TWO POSTURE SWITCHES, both off by default: publish_setpoints (may move the
 // boat: Gate G1) and fire_pump (may squirt: Gate G7). With both off this tree
 // is a shadow - it computes and logs every solution and does nothing.
+//
+// TWO TREES. task3_fire_test.xml holds the spot in GUIDED with heading+speed
+// (StationKeep, AwaitFiringSolution): it cannot strafe, so it aims by turning.
+// task3_fire_manual.xml holds it in MANUAL on the sticks (StrafeKeep,
+// AwaitStrafeSolution): square to the face, SLIDE onto the window. The
+// shot itself (FireBurst) and the guards are shared.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -98,7 +105,8 @@ public:
   }
 };
 
-/// The pilot has not dropped autonomy on SE (ch9). The bridge refuses our
+/// The autonomy-drop latch is clear (ch9; SD is the proposed switch, none is
+/// wired yet, so today it never trips). The bridge refuses our
 /// commands while it is tripped; knowing it here ends the mission instead of
 /// commanding into a wall of refusals.
 class NotDropped : public CrusaderCondition
@@ -488,6 +496,241 @@ private:
   bool dry_ = true, sent_ = false, accepted_ = false;
 };
 
+/// Hold the firing spot on the STICKS (MANUAL, RC override): the LiDAR range
+/// to the firing range (surge), the window onto the nozzle's line (sway,
+/// from the camera's window x,y,z) and the bow square to the face (yaw, from
+/// the camera's two windows or the face plane, closed on the compass so a
+/// dropped frame does not drop the heading). ALWAYS SUCCESS, like StationKeep:
+/// "not there yet" is a stick command and a reason, never a FAILURE.
+class StrafeKeep : public CrusaderSyncAction
+{
+public:
+  StrafeKeep(const std::string & n, const BT::NodeConfig & c) : CrusaderSyncAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<double>("fire_range_m", 3.22, "LiDAR wall range to fire from (squirt_cal)"),
+      BT::InputPort<int>("window_index", 0, "DockWindow.index to hit (0 = upper-left)"),
+      BT::InputPort<double>("lateral_bias_m", 0.0,
+        "calibrated: + puts the stream this much further LEFT at the window"),
+      BT::InputPort<double>("nozzle_y_m", 0.0, "nozzle LEFT of the centreline"),
+      BT::InputPort<double>("cam_timeout_s", 0.5, "window older than this: no sideways thrust"),
+      BT::InputPort<double>("face_timeout_s", 3.0, "square-up older than this: hold the last"),
+      BT::InputPort<double>("range_check_m", 0.5,
+        "LiDAR vs camera disagreement that stops the keep; 0 = off"),
+      BT::InputPort<double>("face_setback_m", 0.0,
+        "the face stands this far behind the edge the LiDAR ranges"),
+      BT::InputPort<double>("deadband_range_m", 0.05, ""),
+      BT::InputPort<double>("deadband_lat_m", 0.04, ""),
+      BT::InputPort<double>("deadband_yaw_deg", 3.0, "loose: strafing aims, not the heading"),
+      BT::InputPort<double>("kp_fwd", 90.0, "us per m"),
+      BT::InputPort<double>("kd_fwd", 60.0, "us per m/s"),
+      BT::InputPort<double>("kp_lat", 90.0, "us per m"),
+      BT::InputPort<double>("kd_lat", 30.0, "us per m/s"),
+      BT::InputPort<double>("kp_yaw", 4.0, "us per deg"),
+      BT::InputPort<double>("kd_yaw", 3.0, "us per deg/s"),
+      BT::InputPort<double>("min_us", 30.0, "added to every correction: the ESC deadband"),
+      BT::InputPort<double>("max_us", 120.0, "deflection cap (the bridge caps it too)"),
+      BT::InputPort<double>("slew_us_s", 200.0, "per axis"),
+      BT::InputPort<double>("min_range_m", 1.5, "never push ahead inside this"),
+      BT::InputPort<double>("square_first_deg", 10.0, "further off square: turn only"),
+      BT::InputPort<double>("ki_fwd", 20.0, "us per m.s (holds against a current)"),
+      BT::InputPort<double>("ki_lat", 30.0, "us per m.s"),
+      BT::InputPort<double>("i_max_us", 80.0, "integral cap"),
+    };
+  }
+
+  BT::NodeStatus tick() override
+  {
+    fire::StrafeParams sp;
+    auto in = [this](const char * k, double d) {return getInput<double>(k).value_or(d);};
+    sp.fire_range_m = in("fire_range_m", sp.fire_range_m);
+    sp.deadband_range_m = in("deadband_range_m", sp.deadband_range_m);
+    sp.deadband_lat_m = in("deadband_lat_m", sp.deadband_lat_m);
+    sp.deadband_yaw_deg = in("deadband_yaw_deg", sp.deadband_yaw_deg);
+    sp.kp_fwd = in("kp_fwd", sp.kp_fwd); sp.kd_fwd = in("kd_fwd", sp.kd_fwd);
+    sp.kp_lat = in("kp_lat", sp.kp_lat); sp.kd_lat = in("kd_lat", sp.kd_lat);
+    sp.kp_yaw = in("kp_yaw", sp.kp_yaw); sp.kd_yaw = in("kd_yaw", sp.kd_yaw);
+    sp.ki_fwd = in("ki_fwd", sp.ki_fwd); sp.ki_lat = in("ki_lat", sp.ki_lat);
+    sp.i_max_us = in("i_max_us", sp.i_max_us);
+    sp.min_us = in("min_us", sp.min_us); sp.max_us = in("max_us", sp.max_us);
+    sp.slew_us_s = in("slew_us_s", sp.slew_us_s);
+    sp.min_range_m = in("min_range_m", sp.min_range_m);
+    sp.square_first_deg = in("square_first_deg", sp.square_first_deg);
+    const int widx = std::clamp(getInput<int>("window_index").value_or(0), 0, 1);
+    const double bias = in("lateral_bias_m", 0.0), noz_y = in("nozzle_y_m", 0.0);
+    const double cam_to = in("cam_timeout_s", 0.5), face_to = in("face_timeout_s", 3.0);
+    const double check = in("range_check_m", 0.5), setback = in("face_setback_m", 0.0);
+
+    fire::StrafeCmd cmd;
+    fire::StrafeInputs si;
+    bool publish = false;
+    double heading_now = fire::kNaN;
+    std::string block;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      const double now = ctx_->now_s;
+      heading_now = ctx_->heading_deg;
+      si.range_m = ctx_->wall.range(now);
+      si.range_rate = ctx_->wall.rate(now);
+      const bool fresh = ctx_->fire_win_y[widx].age(now) <= cam_to;
+      const double wx = fresh ? ctx_->fire_win_x[widx].median(now, 0.6) : fire::kNaN;
+      const double wy = fresh ? ctx_->fire_win_y[widx].median(now, 0.6) : fire::kNaN;
+      if (fresh) {
+        si.lat_err_m = wy - noz_y - bias;
+        si.lat_rate = ctx_->fire_win_y[widx].slope(now, 0.8);
+      }
+      if (ctx_->face_heading.age(now) <= face_to) {
+        ctx_->face_target = ctx_->face_heading.median(now, 2.0);
+      }
+      if (std::isfinite(ctx_->face_target) && std::isfinite(heading_now)) {
+        si.yaw_err_deg = fire::wrap180(ctx_->face_target - heading_now);
+      }
+      si.yaw_rate_dps = ctx_->yaw_rate_dps;
+      // the camera's distance to the face against the LiDAR's to the edge
+      // (no LiDAR range - water in the air - is not a disagreement)
+      if (std::isfinite(wx) && std::isfinite(si.range_m) &&
+        !fire::rangesAgree(si.range_m + setback, wx, check))
+      {
+        char buf[112];
+        std::snprintf(buf, sizeof(buf),
+          "LiDAR says %.2f m to the dock, the camera %.2f m (wall fit on the fingers?)",
+          si.range_m, wx - setback);
+        block = buf;
+      }
+      const double dt = ctx_->last_strafe_t < 0 ? 0.1 :
+        std::max(0.0, now - ctx_->last_strafe_t);
+      ctx_->last_strafe_t = now;
+      if (!block.empty()) {
+        cmd.why = block;                        // hold still: every stick at zero
+      } else {
+        cmd = fire::strafeKeep(sp, si, ctx_->strafe_state, dt);
+        if (ctx_->wall.blanked(now)) {          // water in the air: hold still
+          cmd.sticks = fire::Sticks{};
+          cmd.why = "shot in the air";
+        }
+      }
+      ctx_->strafe_state.prev = cmd.sticks;
+      ctx_->strafe = cmd;
+      ctx_->strafe_in = si;
+      ctx_->strafe_block = block;
+      // "quiet" = not being moved: a steady holding push against a current
+      // (the integrators alone) does not rock the hull, a correction does
+      ctx_->steady.feed_cmd(now, cmd.correcting ? 1.0 : 0.0);
+      publish = ctx_->publish_setpoints;
+      if (publish) {ctx_->sticks_commanded = true;}
+      if (ctx_->task3_phase.rfind("LINE UP", 0) != 0 && ctx_->task3_phase != "FIRE") {
+        ctx_->task3_phase = "STRAFE: " + cmd.why;
+      }
+    }
+    if (publish && ctx_->sticks) {
+      ctx_->sticks(cmd.sticks.fwd_us, cmd.sticks.lat_us, cmd.sticks.yaw_us);
+    }
+    if (ctx_->node) {
+      RCLCPP_INFO_THROTTLE(log(), *ctx_->node->get_clock(), 1000,
+        "strafe: range %.2f m, window %+.2f m left, square %+.1f deg | sticks fwd %+.0f "
+        "lat %+.0f yaw %+.0f us (%s)%s",
+        si.range_m, si.lat_err_m, si.yaw_err_deg, cmd.sticks.fwd_us, cmd.sticks.lat_us,
+        cmd.sticks.yaw_us, cmd.why.c_str(),
+        publish ? "" : " [shadow: publish_setpoints is off]");
+    }
+    return BT::NodeStatus::SUCCESS;
+  }
+};
+
+/// Wait until the strafe keep has held the spot for hold_s: range, window on
+/// the line, square, the camera fresh, the hull still, the sticks quiet, the
+/// last shot's water down. RUNNING until then; FAILURE on timeout, saying
+/// which never held.
+class AwaitStrafeSolution : public CrusaderAction
+{
+public:
+  AwaitStrafeSolution(const std::string & n, const BT::NodeConfig & c) : CrusaderAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<double>("range_tol_m", 0.06, "+- about fire_range_m"),
+      BT::InputPort<double>("lat_tol_m", 0.05, "+- the window off the nozzle's line"),
+      BT::InputPort<double>("yaw_tol_deg", 5.0, "+- off square (loose: see StrafeKeep)"),
+      BT::InputPort<double>("fire_range_m", 3.22, "= StrafeKeep's"),
+      BT::InputPort<double>("hold_s", 1.0, "everything true for this long"),
+      BT::InputPort<double>("gap_s", 2.0, "from the last burst's end"),
+      BT::InputPort<double>("timeout_s", 60.0, "give up after this"),
+    };
+  }
+
+  BT::NodeStatus onStart() override
+  {
+    gate_.hold_s = getInput<double>("hold_s").value_or(1.0);
+    gate_.reset();
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    t0_ = ctx_->now_s;
+    return BT::NodeStatus::RUNNING;
+  }
+
+  BT::NodeStatus onRunning() override
+  {
+    const double rtol = getInput<double>("range_tol_m").value_or(0.06);
+    const double ltol = getInput<double>("lat_tol_m").value_or(0.05);
+    const double ytol = getInput<double>("yaw_tol_deg").value_or(5.0);
+    const double target = getInput<double>("fire_range_m").value_or(3.22);
+    const double gap = getInput<double>("gap_s").value_or(2.0);
+    const double timeout = getInput<double>("timeout_s").value_or(60.0);
+    std::string why;
+    bool held = false;
+    double now = 0.0;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      now = ctx_->now_s;
+      const fire::StrafeInputs & si = ctx_->strafe_in;
+      const fire::SteadyStatus st = ctx_->steady.status(now);
+      char buf[96];
+      if (!ctx_->strafe_block.empty()) {
+        why = ctx_->strafe_block;
+      } else if (ctx_->wall.blanked(now)) {
+        why = "water still in the air";
+      } else if (!ctx_->bursts.ready(now, gap)) {
+        why = "gap after the last burst";
+      } else if (!std::isfinite(si.lat_err_m)) {
+        why = "window not in view";
+      } else if (!std::isfinite(si.yaw_err_deg)) {
+        why = "no face angle yet";
+      } else if (!fire::inBand(si.range_m, target, rtol)) {
+        std::snprintf(buf, sizeof(buf), "range %.2f, want %.2f +-%.2f", si.range_m, target, rtol);
+        why = buf;
+      } else if (std::fabs(si.lat_err_m) > ltol) {
+        std::snprintf(buf, sizeof(buf), "window %+.2f m off the line", si.lat_err_m);
+        why = buf;
+      } else if (std::fabs(si.yaw_err_deg) > ytol) {
+        std::snprintf(buf, sizeof(buf), "%+.1f deg off square", si.yaw_err_deg);
+        why = buf;
+      } else if (!st.steady) {
+        why = "not steady: " + st.why;
+      }
+      held = gate_.update(now, why.empty());
+      ctx_->task3_phase = why.empty() ? "LINE UP: holding" : "LINE UP: " + why;
+    }
+    if (held) {
+      RCLCPP_INFO(log(), "firing solution held %.1f s", gate_.held(now));
+      return BT::NodeStatus::SUCCESS;
+    }
+    if (now - t0_ > timeout) {
+      RCLCPP_WARN(log(), "no firing solution in %.0f s: %s", timeout, why.c_str());
+      return BT::NodeStatus::FAILURE;
+    }
+    if (ctx_->node && !why.empty()) {
+      RCLCPP_INFO_THROTTLE(log(), *ctx_->node->get_clock(), 2000, "lining up: %s", why.c_str());
+    }
+    return BT::NodeStatus::RUNNING;
+  }
+
+  void onHalted() override {gate_.reset();}
+
+private:
+  fire::SolutionGate gate_;
+  double t0_ = 0.0;
+};
+
 /// Speed zero, heading held. The runner also stops the boat on every exit;
 /// this is the tree saying so when it means to.
 class StopBoat : public CrusaderSyncAction
@@ -526,6 +769,8 @@ void registerFireNodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<AwaitFiringSolution>("AwaitFiringSolution");
   factory.registerNodeType<FireBurst>("FireBurst");
   factory.registerNodeType<StopBoat>("StopBoat");
+  factory.registerNodeType<StrafeKeep>("StrafeKeep");
+  factory.registerNodeType<AwaitStrafeSolution>("AwaitStrafeSolution");
 }
 
 }  // namespace crusader_bt
