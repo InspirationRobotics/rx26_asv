@@ -16,7 +16,7 @@ ARDUROVER, AS REMEMBERED (verify in SITL before trusting; docs/G1 records it):
 WHAT THIS ADDS ON TOP, because 3 s at 0.3 m/s is 0.9 m next to a dock:
   * TWO interlocks, both independent of us: the flight MODE (the pilot's SC
     switch; ArduPilot also ignores this message outside GUIDED) and the
-    autonomy-drop LATCH (the pilot's SE switch on ch9);
+    autonomy-drop LATCH (ch9: a drop switch, SD proposed - none is wired yet);
   * a speed clamp here, whatever the tree asks for;
   * a dead-man: commands stop for deadman_s -> ONE zero-speed command, sent by
     the bridge itself. So does a latch trip.

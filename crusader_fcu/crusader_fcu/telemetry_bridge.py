@@ -110,7 +110,7 @@ from crusader_common.node_main import run_node
 from crusader_common.param_utils import declare_from_config
 from crusader_common.stream_cache import StreamCache
 
-from crusader_fcu import guided_hs_core, pump_core
+from crusader_fcu import guided_hs_core, override_core, pump_core
 
 # MAVLink 2 is REQUIRED, and must be selected before pymavlink is first
 # imported anywhere in this process: mavutil binds its dialect module at
@@ -178,6 +178,16 @@ PARAM_SPEC = {
                             description="the autopilot's WP_SPEED: thrust 1.0 = this"),
     "hs_deadman_s": dict(read_only=True, lo=0.1, hi=3.0,
                          description="s without a heading+speed command -> stop"),
+    "override_channels": dict(read_only=True,
+                              description="the ONLY RC channels /crsd/rc_override may "
+                                          "take (steer, throttle, lateral); the rest "
+                                          "stay the pilot's"),
+    "override_max_us": dict(read_only=True, lo=10, hi=500,
+                            description="override deflection cap about 1500 us"),
+    "override_deadman_s": dict(read_only=True, lo=0.1, hi=3.0,
+                               description="s without an override -> release the sticks"),
+    "override_modes": dict(read_only=True,
+                           description="flight modes in which overrides are forwarded"),
     "estop_threshold": dict(read_only=True, lo=800, hi=2200,
                             description="us; below = e-stop (or RC lost)"),
 }
@@ -300,6 +310,9 @@ class TelemetryBridge(Node):
         # thread), and threading.Lock is not re-entrant.
         self.hs = guided_hs_core.HsGate(guided_hs_core.HsParams.from_dict(p))
         self._hs_lock = threading.Lock()
+        # RC overrides (software on the sticks, MANUAL): override_core's rules.
+        # Shares _hs_lock: both are "our motion", released together on a trip.
+        self.ov = override_core.OverrideGate(override_core.OverrideParams.from_dict(p))
         self._pump_seq = 0
         self._pump_result = pump_core.RESULT_NONE
         self._pump_reason = ""
@@ -486,6 +499,16 @@ class TelemetryBridge(Node):
                 self.get_logger().warn(
                     f"guided heading+speed: no command for >{self.hs.p.deadman_s:.1f}s "
                     "-- stop sent")
+            with self._lock:
+                status = self._status.get(t)
+            mode = "UNKNOWN" if status is None else str(status[0])
+            with self._hs_lock:
+                rel = self.ov.tick(t, mode)
+            if rel is not None:
+                self._send_override(rel)
+                self.get_logger().warn(
+                    f"rc override: quiet >{self.ov.p.deadman_s:.1f}s or mode {mode} "
+                    "-- sticks released to the pilot")
         except Exception as e:          # never let the pump take telemetry down
             self.get_logger().error(f"pump tick failed: {e}",
                                     throttle_duration_sec=5.0)
@@ -608,9 +631,26 @@ class TelemetryBridge(Node):
     # ---------- override TX (the enforcement point) ----------
 
     def _override_cb(self, msg: RcChannels):
-        if not self.latch.allowed:
-            return                   # dropped/startup: overrides die here
-        self._send_override(list(msg.channels[:8]))
+        """Software on the sticks: only in override_modes (MANUAL), only the
+        override_channels, clamped, and released on silence (override_core).
+        Never raises: this executor also carries force-disarm."""
+        try:
+            t = time.monotonic()
+            with self._lock:
+                status = self._status.get(t)
+                allowed = self.latch.allowed
+            mode = "UNKNOWN" if status is None else str(status[0])
+            with self._hs_lock:
+                ok, why, out = self.ov.on_command(t, list(msg.channels), mode, allowed)
+            if out is not None:
+                self._send_override(out)
+            if not ok:
+                self.get_logger().warning(f"rc override DROPPED -- {why}",
+                                          throttle_duration_sec=5.0)
+            elif why not in ("ok", "release"):
+                self.get_logger().warn(f"rc override: {why}", throttle_duration_sec=2.0)
+        except Exception as e:
+            self.get_logger().error(f"rc override failed: {e}")
 
     def _send_override(self, ch8):
         self.conn.mav.rc_channels_override_send(
@@ -738,6 +778,8 @@ class TelemetryBridge(Node):
             f"AUTONOMY DROP: {self.latch.trip_reason} — releasing RC overrides")
         for _ in range(RELEASE_FRAMES):
             self._send_override([0] * 8)
+        with self._hs_lock:
+            self.ov.on_trip()                  # released above; forget we held them
         # And stop anything WE were driving in GUIDED: the latch gates new
         # heading+speed commands, but the last one would otherwise stand for 3 s.
         with self._hs_lock:

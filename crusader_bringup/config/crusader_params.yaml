@@ -80,11 +80,11 @@ telemetry_bridge:
     # DO NOT set drop_channel back to 7. Channel 7 is the SB arm/e-stop switch
     # (OPERATIONS.md §6: down ~994 e-stop, up ~1995 arm) and the latch trips at
     # >= drop_threshold, so ARMING THE BOAT tripped it and blocked every
-    # override. Found 2026-09-05. Channel 9 (SE) is the intended switch and is
-    # not yet built. It was NOT unused until 2026-09-25: the water pump sat on
-    # ch9 (~2000 when squirting), so every squirt tripped this latch. The pump
-    # moves to ch10 (pump_rc_channel below; docs/G7_pump_bench.md) and SE is
-    # mixed to ch9. An unmapped ch9 reads ~1500 (never trips); a missing one 0.
+    # override. Found 2026-09-05. Channel 9 is the drop channel and NO switch
+    # is mapped to it yet (SE is the water pump; SD is the proposed drop
+    # switch, OPERATIONS.md 6): an unmapped ch9 reads ~1500 and NEVER TRIPS, so
+    # today the latch is not a kill - SC (mode) and SB (e-stop) are. It was not
+    # unused until 2026-09-25: the pump sat on ch9 and every squirt tripped it.
     # The GUIDED path is gated on the MODE instead and does not depend on this
     # latch at all.
     drop_channel: 9                        # [RO] autonomy-drop RC channel (1..18)
@@ -116,6 +116,16 @@ telemetry_bridge:
     hs_wp_speed_mps: 1.0                   # [RO] = WP_SPEED: thrust 1.0 means this
                                            #      (check_config pins it to the baseline)
     hs_deadman_s: 0.5                      # [RO] s without a command -> one stop
+    # /crsd/rc_override (software on the sticks, MANUAL - the fixed-nozzle shot
+    # strafes, and only MANUAL strafes on this OmniX hull): forwarded only in
+    # override_modes, only on override_channels (the rest - SB ch7, SC ch8, the
+    # pump - stay the pilot's), clamped, released after override_deadman_s of
+    # silence. crusader_fcu/override_core.py. dp_hold's map: 1 steer, 3 throttle,
+    # 4 lateral.
+    override_channels: [1, 3, 4]           # [RO] steer, throttle, lateral
+    override_max_us: 150                   # [RO] us about 1500 (dp_hold ran 120)
+    override_deadman_s: 0.5                # [RO] s without an override -> release
+    override_modes: ["MANUAL"]             # [RO]
     estop_channel: 7                       # [RO] = pixhawk_led_status_node's:
     estop_threshold: 1200                  # [RO]   SB, below = e-stop or RC lost.
                                            #        The e-stop stops MOTORS, not a
@@ -1218,6 +1228,12 @@ bt_runner_node:
                                             #      asks for the pump. A separate
                                             #      switch from publish_setpoints:
                                             #      moving is G1, water is G7.
+    # The sticks for the MANUAL fire tree (StrafeKeep -> /crsd/rc_override), in
+    # the order [ahead, lateral, yaw]: dp_hold's map and its measured neutrals.
+    # G1 row O9 checks each DIRECTION; flip one with stick_reverse.
+    stick_channels: [3, 4, 1]               # [RO] throttle, lateral, steer
+    stick_neutral_us: [1495, 1495, 1489]    # [RO] = RC3/RC4/RC1_TRIM
+    stick_reverse: [false, false, false]    # [RO]
     task_token: "TASK_SAFE_PASSAGE"         # [RO] = safe_passage_server.task_token;
                                             #      an RxTask name, gated by
                                             #      check_config against

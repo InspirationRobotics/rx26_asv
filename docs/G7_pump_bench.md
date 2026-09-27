@@ -37,9 +37,10 @@ latch.**
    baseline is stale.
    - n = ____, MAIN or AUX: ____ (a MAIN output sits behind the IO safety switch)
 2. **Transmitter (Pocket, EdgeTX mixer).**
-   - Move the pump switch from CH9 to **CH10**.
-   - Mix **SE → CH9** for the drop switch.
-   - Check in the RC monitor: ch10 is ~1000 off / ~2000 on, and ch9 follows SE.
+   - Move the pump switch (SE) from CH9 to **CH10**.
+   - Later: mix a drop switch (SD proposed) to **CH9**. Until then ch9 reads
+     ~1500 and the drop latch never trips.
+   - Check in the RC monitor: ch10 is ~1000 off / ~2000 on with SE.
 3. **Autopilot params.** Then reboot:
 
    | Param | Value | Why |

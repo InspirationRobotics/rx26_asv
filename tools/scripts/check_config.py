@@ -479,6 +479,27 @@ def check_pump():
             problems.append(f"telemetry_bridge.hs_wp_speed_mps {hs_wp} != baseline "
                             f"WP_SPEED {wp}: every heading+speed command would be "
                             f"scaled by {wp / hs_wp:.2f}")
+    # RC overrides: software may take the sticks, NEVER the pilot's e-stop, mode
+    # switch, pump or drop switch - those are how the pilot takes the boat back.
+    try:
+        ov = [int(c) for c in tb["override_channels"]]
+    except KeyError as e:
+        problems.append(f"telemetry_bridge missing {e}")
+    else:
+        mode_ch = 8
+        try:
+            base = pg.load_param_file(PARAMS_BASELINE) if PARAMS_BASELINE.exists() else {}
+            mode_ch = int(base.get("MODE_CH", 8))
+        except NameError:
+            pass
+        guarded = {estop: "the SB e-stop", mode_ch: "the mode switch (MODE_CH)",
+                   ch: "the pump", drop: "autonomy-drop"}
+        bad = [f"ch{c} ({guarded[c]})" for c in ov if c in guarded]
+        if bad:
+            problems.append("override_channels includes " + ", ".join(bad))
+        if [str(m).upper() for m in tb["override_modes"]] != ["MANUAL"]:
+            problems.append(f"override_modes {tb['override_modes']} is not [MANUAL]: "
+                            "overrides in an autopilot mode fight the autopilot")
     if problems:
         fail("pump path", "; ".join(problems))
     else:
