@@ -94,7 +94,7 @@ that trips the drop latch; the Autopilot selector is SC (MANUAL / HOLD / GUIDED)
 |---|---|---|
 | `build.py test` | `test_nav_math` (140), `test_dock_math` (136), `test_fire_math` (117), stdlib only | 3 s |
 | `test_world.py` | the simulated world on its own: build-guide geometry, numbering, boat, lights, camera view, judge; the nozzle, LiDAR, heading+speed, bridge, pump and sea | < 1 s |
-| `test_e2e.py` | the real trees against 34 scenarios, half the cores + 1 at a time, **real time** (`test_e2e.py fire` = the 20 fire ones; `-j N` to choose) | ~15 min on 4 cores |
+| `test_e2e.py` | the real trees against 35 scenarios, half the cores + 1 at a time, **real time** (`test_e2e.py fire` = the 21 fire ones; `-j N` to choose) | ~15 min on 4 cores |
 
 REAL TIME means an overloaded machine is a slower boat and a staler camera to the tree: a run
 that fell behind says so (`[sim fell N s behind real time]`), and is not a controller result.
@@ -121,7 +121,7 @@ And the fixed-nozzle shot, MANUAL (`task3_fire_manual.xml`) unless it says GUIDE
 | `fire_calm` `fire_close_start` | window out | the approach; backing out from inside the slip (2 m), where the upper window is not in view |
 | `fire_offset_left` `fire_offset_right` | window out | 0.4 m off either way: it SLIDES onto the window (camera window y) |
 | `fire_yawed` | window out | 8° off square: squares up from the camera's two windows |
-| `fire_current` | window out | 5 cm/s across: the integrator builds the steady push that holds the line |
+| `fire_current` `fire_current_strong` | window out | 5 and 12 cm/s across: the integrator (on whenever the boat stalls within 1 m) builds the steady push that holds the line |
 | `fire_rocking` | window out, later | waits for a calm spell (sea 2) |
 | `fire_rough` | **no burst** | never calls sea 3 steady |
 | `fire_beyond_lidar` | **no burst**, at once | from 5 m the LiDAR (r_max 4 m) cannot see the dock |

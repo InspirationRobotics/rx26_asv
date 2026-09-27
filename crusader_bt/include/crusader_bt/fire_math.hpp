@@ -591,12 +591,13 @@ struct StrafeParams
   double kp_lat = 90.0, kd_lat = 30.0;
   double kp_yaw = 4.0, kd_yaw = 3.0;       // us per deg, us per deg/s
   // I on range and lateral: a steady current or wind needs a steady push, and
-  // P alone only gives one at an error - 0.5 m of it for 5 cm/s. Integrated
-  // only NEAR the target and NEARLY STILL - held off, not arriving - so the
-  // approach does not wind it up into an overshoot. Capped.
+  // P alone only gives one at an error - 0.65 m of it for 12 cm/s (the sim).
+  // Integrated only when STALLED - within i_zone_m and nearly still: held off,
+  // not arriving - so the approach does not wind it up into an overshoot.
+  // Capped.
   double ki_fwd = 20.0, ki_lat = 30.0;     // us per m.s
   double i_max_us = 80.0;
-  double i_zone_m = 0.5;
+  double i_zone_m = 1.0;
   double i_rate_mps = 0.03;
   double min_us = 30.0;          // ADDED to every correction: the ESC deadband (+-25) and a bit
   double max_us = 120.0;

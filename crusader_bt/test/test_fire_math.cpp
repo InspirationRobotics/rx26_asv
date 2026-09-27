@@ -332,7 +332,9 @@ int main()
     in.yaw_err_deg = 0.0; in.yaw_rate_dps = 0.0;
     StrafeState big; big.prev.fwd_us = 200; big.prev.lat_us = -200;
     StrafeCmd c = strafeKeep(p, in, big, 1.0);
-    chk_near("too far: ahead, offset + P on 0.78 m", c.sticks.fwd_us, p.min_us + 90.0 * 0.78, 1e-6);
+    // stalled 0.78 m out for 1 s: offset + P, and the integrator has started
+    chk_near("too far and stalled: ahead, offset + P + I", c.sticks.fwd_us,
+      p.min_us + 90.0 * 0.78 + p.ki_fwd * 0.78 * 1.0, 1e-6);
     chk("window LEFT: slide left (lat -)", c.sticks.lat_us < -15.0);
     chk("square: no yaw", c.sticks.yaw_us == 0.0);
     chk("not on the spot", !c.range_ok && !c.lat_ok && c.yaw_ok);

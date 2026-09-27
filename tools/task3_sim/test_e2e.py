@@ -99,6 +99,8 @@ SCENARIOS = {
     "fire_yawed":       ({"start_heading": 8.0}, "fire_out", 90, FIRE),
     # 5 cm/s across the slip: strafing holds the line against it.
     "fire_current":     ({"current_mps": 0.05, "current_to_deg": 90.0}, "fire_out", 90, FIRE),
+    # 12 cm/s: P stalls 0.65 m off; the integrator (on when stalled) breaks it free.
+    "fire_current_strong": ({"current_mps": 0.12, "current_to_deg": 90.0}, "fire_out", 120, FIRE),
     # Starts 2.0 m out, between the fingers: backs out to the firing range.
     "fire_close_start": ({"start_n": 18.0}, "fire_out", 90, FIRE),
     # 5 m out the LiDAR cannot see the dock (wall_range_node.r_max 4 m): the
