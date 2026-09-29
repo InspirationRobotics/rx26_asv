@@ -28,7 +28,8 @@ SRC=$WS/src/rx26_asv
 CFG=$WS/install/crusader_bringup/share/crusader_bringup/config/crusader_params.yaml
 SIMSHARE=$WS/install/crusader_sim/share/crusader_sim
 BT=$WS/install/crusader_bt/share/crusader_bt/behavior_trees
-TREE="${TREE:-$BT/task1_disruptive.xml}"
+TREE="${TREE:-task1_disruptive.xml}"
+case "$TREE" in */*) ;; *) TREE="$BT/$TREE" ;; esac     # a bare name means crusader_bt's
 export GZ_PARTITION=crusader_sim
 export RX26_SRC=$SRC
 

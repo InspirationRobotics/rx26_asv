@@ -17,44 +17,18 @@ Then prints the tree's feedback (phase, progress, buoys) until the result.
 """
 import argparse
 import math
-import os
 import sys
-import time
 
-os.environ.setdefault("MAVLINK20", "1")
+import rclpy
+from rclpy.action import ActionClient
+from rclpy.node import Node
+from std_msgs.msg import String
 
-import rclpy  # noqa: E402
-from rclpy.action import ActionClient  # noqa: E402
-from rclpy.node import Node  # noqa: E402
-from std_msgs.msg import String  # noqa: E402
-
-from crusader_msgs.action import SafePassage  # noqa: E402
-from crusader_sim import course as C  # noqa: E402
+from crusader_msgs.action import SafePassage
+from crusader_sim import course as C
+from crusader_sim.operator_tools import arm, set_mode
 
 TIERS = {"core": 0, "advanced": 1, "disruptive": 2}
-
-
-def arm(endpoint="udpin:127.0.0.1:14550", timeout_s=60.0):
-    from pymavlink import mavutil
-    m = mavutil.mavlink_connection(endpoint, source_system=255)
-    if m.wait_heartbeat(timeout=20) is None:
-        return False, "no HEARTBEAT on " + endpoint
-    t_end = time.time() + timeout_s
-    last = ""
-    while time.time() < t_end:
-        m.arducopter_arm()
-        t_ack = time.time() + 3
-        while time.time() < t_ack:
-            msg = m.recv_match(type=["COMMAND_ACK", "STATUSTEXT"], blocking=True, timeout=0.5)
-            if msg is None:
-                continue
-            if msg.get_type() == "STATUSTEXT":
-                last = msg.text
-            elif msg.command == mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM:
-                if msg.result == 0:
-                    return True, "armed"
-                break
-    return False, "arm refused: " + last
 
 
 def approach_point(course):
@@ -98,9 +72,7 @@ def main():
 
     rclpy.init()
     op = Operator()
-    for _ in range(3):                    # latched by nobody: say it a few times
-        op.mode_pub.publish(String(data="GUIDED"))
-        rclpy.spin_once(op, timeout_sec=0.3)
+    set_mode(op, op.mode_pub, "GUIDED")
     print("[operator] mode -> GUIDED", flush=True)
 
     if not op.client.wait_for_server(timeout_sec=20.0):

@@ -127,7 +127,8 @@ else
     "cd /root/robotx_ws && source install/setup.bash && colcon build --packages-select crusader_sim 2>&1 | tail -1" \
     | sed 's/^/  /'
 fi
-docker exec "$CONTAINER" bash -lc \
+# docker exec does not inherit this shell's environment: TREE crosses explicitly
+docker exec -e TREE="${TREE:-}" "$CONTAINER" bash -lc \
   "bash /root/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_rig_up.sh $COURSE $UAV_ARG" 2>&1 | sed 's/^/  /'
 
 cat <<EOF

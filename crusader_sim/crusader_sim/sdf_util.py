@@ -58,7 +58,10 @@ def visual(name, geometry, colour, p="", emissive=0.0, alpha=1.0, flags=None):
 
 
 def collision(name, geometry, p=""):
-    return f'<collision name="{name}">{p}{geometry}</collision>'
+    """Suffixed, so a builder can give a part's visual and collision the same
+    name: SDF wants every name in a link unique across BOTH (gz sim loads it
+    anyway, `gz sdf -k` rejects it)."""
+    return f'<collision name="{name}_col">{p}{geometry}</collision>'
 
 
 def box_inertia(m, sx, sy, sz):

@@ -36,6 +36,7 @@ setup(
             # plain processes
             "sim_uav = crusader_sim.sim_uav:main",
             "task1_goal = crusader_sim.task1_goal:main",
+            "manual_drive = crusader_sim.manual_drive:main",
             "sim_transmitter = crusader_sim.sim_transmitter:main",
             "check_motion = crusader_sim.check_motion:main",
             "gen_crusader = crusader_sim.gen_crusader:main",
