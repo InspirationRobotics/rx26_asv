@@ -86,8 +86,13 @@ echo "== $ver  (the boat runs ArduRover V4.6.3) =="
 stop
 cd "$AP"
 echo "== starting SITL: frame $FRAME, home $HOME_LL =="
+# SITL_EXTRA_ARGS: extra sim_vehicle.py flags, word-split on purpose. Empty for
+# the headless rig. crusader_sim/scripts/gz_sim_up.sh uses it to put this SAME
+# autopilot and port map behind Gazebo:
+#   --model JSON --use-dir <dir> -w --add-param-file=<crusader_gz.parm>
+# shellcheck disable=SC2086
 nohup python3 Tools/autotest/sim_vehicle.py -v Rover -f "$FRAME" \
-  --no-rebuild --no-mavproxy -l "$HOME_LL" \
+  --no-rebuild --no-mavproxy -l "$HOME_LL" ${SITL_EXTRA_ARGS:-} \
   > /tmp/sitl.log 2>&1 &
 sleep 10
 

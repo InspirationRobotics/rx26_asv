@@ -1,0 +1,43 @@
+# sitl_overlay.parm — applied ON TOP of the boat's baseline
+# (params/working_crusader.params, filtered by sitl_params.py). Every line here
+# is a place where the sim DIFFERS from the boat, and says why. Keep it short:
+# the point of the Gazebo sim is to fly the boat's own parameters.
+
+# --- heading: the boat runs COMPASS_USE=0 and takes yaw from a Unicore
+# moving-baseline pair (GPS1_TYPE=25). SITL cannot emit Unicore's heading
+# sentences, but its NMEA GPS can emit HDT, which ArduPilot's NMEA driver turns
+# into GPS yaw. Same behaviour (yaw from GPS, no compass), different wire.
+GPS1_TYPE 5
+SIM_GPS_TYPE 5
+SIM_GPS_HDG 1
+EK3_SRC1_YAW 2
+COMPASS_USE 0
+COMPASS_USE2 0
+COMPASS_USE3 0
+
+# --- the ROS gateway expects 5 Hz HEARTBEAT etc.; MAVProxy's --streamrate=-1
+# leaves SR0_* alone, exactly as on the boat. Nothing to set.
+
+# --- IMU calibration, as ArduPilot's own gazebo-*.parm files do it. The gyros
+# calibrate at boot while the simulated hull is still settling on the water, the
+# two SITL IMUs catch different motion, and arming fails "Gyros inconsistent"
+# (first run, 2026-09-29). The real Pixhawk boots on a stationary dock.
+INS_GYR_CAL 0
+INS_ACCOFFS_X 0.001
+INS_ACCOFFS_Y 0.001
+INS_ACCOFFS_Z 0.001
+INS_ACCSCAL_X 1.001
+INS_ACCSCAL_Y 1.001
+INS_ACCSCAL_Z 1.001
+INS_ACC2OFFS_X 0.001
+INS_ACC2OFFS_Y 0.001
+INS_ACC2OFFS_Z 0.001
+INS_ACC2SCAL_X 1.001
+INS_ACC2SCAL_Y 1.001
+INS_ACC2SCAL_Z 1.001
+
+# --- safety switch: SITL has no hardware safety button.
+BRD_SAFETY_DEFLT 0
+
+# --- logs: keep SITL dataflash small and on disarm only.
+LOG_DISARMED 0

@@ -1,0 +1,122 @@
+# crusader_hull.yaml — Crusader's physical description for the Gazebo sim.
+#
+# Every number is tagged:
+#   MEASURED  taken on the real boat (cite where)
+#   TEAM      a team estimate, not measured
+#   SPEC      a manufacturer's datasheet value
+#   GUESS     a placeholder chosen by the sim author — REPLACE when known
+#
+# Sensor mounts are NOT here. gen_crusader.py reads them out of
+# crusader_bringup/config/crusader_params.yaml (lidar_x/y/z, cam_x/y/z,
+# cam_yaw_deg, cam_pitch_deg) — the SAME numbers the boat's own nodes use, so the
+# simulated extrinsics cannot drift away from the real ones.
+#
+# Frame: model origin = the "geometry centre" at the HULL-BOTTOM DATUM, the
+# datum Resources.md and lidar_z/cam_z are quoted against. REP-103 axes:
+# x forward, y left (port), z up.
+#
+# What to send to replace the GUESSes: crusader_sim/MODEL_REQUEST.md.
+
+hull:
+  length_m: 1.0              # TEAM   tools/task3_sim/world.py:398 "rough, from the team"
+  beam_m: 0.6                # TEAM   same
+  depth_m: 0.45              # GUESS  hull bottom to deck
+  draft_m: 0.24              # MEASURED 2026-09-05, Resources.md:71 (= lidar water_z)
+  mass_kg: 30.0              # GUESS  weigh the boat, fully loaded, battery in
+  cg_z_m: 0.22               # GUESS  CG height above hull bottom
+  # Buoyancy is carried by two pontoon boxes. Their UNDERWATER width is derived
+  # so that mass_kg floats at exactly draft_m — the one thing that fixes where
+  # the LiDAR and camera sit above the water, which perception cares about more
+  # than anything else here. The visual width below is cosmetic.
+  pontoon_centre_y_m: 0.24   # GUESS  pontoon centreline offset from the keel line
+  buoyancy_segments: 8       # sim-only: boxes per pontoon, see gen_crusader._hull_links
+  pontoon_visual_width_m: 0.12  # GUESS  cosmetic
+  # Optional CAD mesh (Collada .dae or .stl, metres, origin at the datum above).
+  # When set it REPLACES the box visuals; collisions stay boxes.
+  visual_mesh: ""            # e.g. "meshes/crusader.dae" (relative to the model dir)
+
+# Hydrodynamic damping (gz-sim Hydrodynamics system, Fossen notation, body frame,
+# positive numbers here -> negative coefficients in the SDF). GUESSES, sized so:
+#   * 50 % throttle on all four -> ~2 m/s   (CRUISE_SPEED 2.0 @ CRUISE_THROTTLE 50)
+#   * full throttle            -> ~3 m/s
+#   * full yaw                 -> ~100 deg/s (ATC_STR_RAT_MAX is 90)
+# Tune against a real log: a straight run at fixed throttle gives X, a spin gives N.
+damping:
+  x_u: 8.0       # surge, linear      N/(m/s)
+  x_uu: 10.0     # surge, quadratic   N/(m/s)^2
+  y_v: 20.0      # sway
+  y_vv: 40.0
+  z_w: 150.0     # heave (settles the float)
+  z_ww: 0.0
+  k_p: 15.0      # roll
+  k_pp: 2.0
+  m_q: 25.0      # pitch
+  m_qq: 5.0
+  n_r: 15.0      # yaw
+  n_rr: 15.0
+
+# Four Blue Robotics T200s in ArduRover's OmniX layout (FRAME_CLASS=2,
+# FRAME_TYPE=2). The corner each motor sits at is not a choice: it is forced by
+# AP_MotorsUGV.cpp's OmniX factors (Rover-4.6.3, lines 638-643):
+#     Motor1 (+thr, -steer, -lat)  front-right, thrust forward-LEFT  (+45 deg)
+#     Motor2 (+thr, -steer, +lat)  rear-right,  thrust forward-RIGHT (-45 deg)
+#     Motor3 (+thr, +steer, -lat)  rear-left,   thrust forward-LEFT  (+45 deg)
+#     Motor4 (+thr, +steer, +lat)  front-left,  thrust forward-RIGHT (-45 deg)
+# (yaw_deg is the thrust axis in REP-103: + = toward port.)
+#
+# servo: which SERVOn output drives it, from params/working_crusader.params
+# (SERVO1=36 Motor4, SERVO2=35 Motor3, SERVO3=33 Motor1, SERVO4=34 Motor2).
+#
+# pwm_sense: which way the PHYSICAL thruster pushes, along its axis, for PWM
+# ABOVE 1500. The boat runs SERVO1_REVERSED=1 and SERVO4_REVERSED=1 and drives
+# correctly, which is only possible if those two thrusters push BACKWARD along
+# their axis for PWM>1500 — so they are -1 here, and the sim runs the boat's
+# params unmodified. If a bench test says otherwise, change it HERE, never in
+# the params (the same rule as the boat: fix inversion in SERVOx_*).
+thrusters:
+  max_thrust_n: 40.0         # SPEC-ish: T200 ~5 kgf fwd / ~4 kgf rev @16 V; modelled
+                             # symmetric (MOT_THST_ASYM=1). Cell count is unresolved
+                             # (crusader-battery skill) — at 12 V it is ~35 N.
+  pwm_min: 1100              # = SERVOn_MIN
+  pwm_max: 1900              # = SERVOn_MAX
+  z_m: 0.06                  # GUESS  thruster axis height above hull bottom
+  prop_diameter_m: 0.076     # SPEC   T200
+  units:
+    - {name: fr, motor: 1, servo: 3, x_m:  0.40, y_m: -0.24, yaw_deg:  45.0, pwm_sense:  1}
+    - {name: rr, motor: 2, servo: 4, x_m: -0.40, y_m: -0.24, yaw_deg: -45.0, pwm_sense: -1}
+    - {name: rl, motor: 3, servo: 2, x_m: -0.40, y_m:  0.24, yaw_deg:  45.0, pwm_sense:  1}
+    - {name: fl, motor: 4, servo: 1, x_m:  0.40, y_m:  0.24, yaw_deg: -45.0, pwm_sense: -1}
+
+sensors:
+  mid360:
+    # SPEC Livox MID-360: 360 deg x (-7..+52 deg) in its OWN frame, 10 Hz,
+    # ~200k pts/s -> ~20k per scan, 0.1-40 m @10 % reflectivity, <=2 cm noise.
+    # Mounted upside down (roll 180) — the pose comes from lidar_* params, and
+    # the raw frame this produces is x fwd, y STARBOARD, z DOWN, like the real one.
+    rate_hz: 10.0
+    h_samples: 600
+    v_samples: 34
+    v_min_deg: -7.0
+    v_max_deg: 52.0
+    range_min_m: 0.1
+    range_max_m: 40.0
+    noise_sd_m: 0.02
+  oak_d_lr:
+    # What the boat runs today (crusader_params.yaml): oak_detector takes COLOUR at
+    # full sensor res (rgb_isp_denominator: 1 -> 1920x1200) and DEPTH at 1/3
+    # (isp_denominator: 3 -> 640x400, the stereo engine's native width). Two gz
+    # sensors at one pose, because gz's rgbd_camera forces one resolution on both.
+    # If WSL rendering can't hold 15 fps at 1920x1200, drop rgb_* here for a run —
+    # but every pixel-space threshold in oak_detector scales with it.
+    # HFOV ~82 deg per Luxonis — VERIFY against the device's calibration
+    # (depthai readCalibration) and put the measured value here.
+    rate_hz: 15.0            # = oakd_publisher.fps / oak_detector fps
+    rgb_width: 1920
+    rgb_height: 1200
+    depth_width: 640
+    depth_height: 400
+    hfov_deg: 82.0
+    depth_min_m: 0.5
+    depth_max_m: 30.0
+  imu:
+    rate_hz: 1000.0          # what ArduPilotPlugin needs for lockstep

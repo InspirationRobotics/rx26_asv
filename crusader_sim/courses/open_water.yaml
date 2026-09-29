@@ -1,0 +1,10 @@
+# Open water with two buoys for reference — bring-up, thruster/mixer checks,
+# tuning the damping in crusader_hull.yaml against real logs.
+name: open_water
+origin: {lat: 1.28060, lon: 103.85570}
+draft_m: 0.24
+depth_m: 5.0
+boat_start: {x: 0.0, y: 0.0, yaw_deg: 0.0}
+elements:
+  - {type: robobuoy, name: ref_red,   x: 15.0, y: -3.0, beacon: flash_red}
+  - {type: robobuoy, name: ref_green, x: 15.0, y:  3.0, beacon: flash_green}

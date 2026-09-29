@@ -32,6 +32,7 @@ mapfile -t FILES < <(
                   -o -name '*.xml' -o -name '*.yaml' -o -name '*.sh' \
                   -o -name '*.msg' -o -name '*.action' -o -name '*.srv' \
                   -o -name '*.txt' -o -name '*.md' \
+                  -o -name '*.parm' -o -name '*.params' -o -name '*.Dockerfile' \
                   -o -name 'setup.cfg' -o -path '*/resource/*' \) -print \
   | sed 's|^\./||' | sort
 )

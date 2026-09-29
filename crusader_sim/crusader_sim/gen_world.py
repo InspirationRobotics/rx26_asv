@@ -1,0 +1,301 @@
+"""gen_world — write a Gazebo world from a course YAML (courses/*.yaml).
+
+    python3 -m crusader_sim.gen_world courses/task1_core.yaml --out <dir>
+
+World frame: ENU, metres, origin = the course's `origin` lat/lon, which is ALSO
+the SITL home (gz_sim_up.sh passes it to sim_vehicle.py -l). Keep them one value:
+ArduPilot's lat/lon comes from the JSON position relative to that home, so a
+mismatch would silently shift every GPS fix against the buoys.
+
+Every task element is a STATIC model built from primitives. Geometry, with
+sources, is in the builder docstrings; "image only" values are estimates
+(handbook text has no number) and say so.
+"""
+import argparse
+import math
+import os
+
+import yaml
+
+from crusader_sim import sdf_util as S
+from crusader_sim.paths import generated_dir
+
+WATER_FLAG = 2          # visibility bit the MID360 is masked against (gen_crusader)
+
+# Beacon states (3.3.2:9). The driver node flashes them; the world starts each
+# in its colour so a static render is already right.
+BEACON_COLOUR = {
+    "off": None,
+    "flash_red": "red", "flash_green": "green", "flash_blue": "blue",
+    "steady_blue": "blue",
+}
+
+
+def _rot(x, y, yaw):
+    c, s = math.cos(yaw), math.sin(yaw)
+    return x * c - y * s, x * s + y * c
+
+
+# ------------------------------------------------------------------ RoboBuoy
+
+def robobuoy(e):
+    """RoboBuoy + light beacon (robobuoy-build-guide.md, light-beacon-specifications.md).
+
+    Body: 3/4" PVC square frame, footprint ~0.43 m (RB:9,23, estimated from the
+    17" panel), four white 17x12" (0.432 x 0.305 m) panels (RB:9,77), floated on
+    pool noodles round the base (RB:51-55) — modelled with the base AT the
+    waterline. Marking: diamond (Task 1), circle (Task 2), or none; ~8" (0.203 m)
+    tall, centred, from 2.5" (0.064 m) up (RB:65). Marking colour is image only:
+    black here.
+    Beacon (NEW 2026-09-14 design, LB:9,19): 3" PVC, OD 3.5" (0.0889 m), 5"
+    (0.127 m) long, on top; LED band ~4 wraps (~0.055 m, estimate) outside = the
+    SIDE beacon; reflector cone inside = the UPWARD beacon; 10" (0.254 m) black
+    sun hat on top (LB:23).
+    """
+    name = e["name"]
+    x, y = e["x"], e["y"]
+    yaw = math.radians(e.get("yaw_deg", 0.0))
+    W, H, z0 = 0.432, 0.305, 0.0
+    marking = e.get("marking", "diamond")
+    state = e.get("beacon", "off")
+    side_on = e.get("side_beacon", True)
+    up_on = e.get("up_beacon", True)
+    col = BEACON_COLOUR[state]
+
+    v = []
+    # body + panels (one box: the LiDAR and camera see a white box, which is
+    # what a RoboBuoy is)
+    v.append(S.visual("body", S.box(W, W, H), "white", S.pose(0, 0, z0 + H / 2)))
+    # noodle float ring (cosmetic)
+    for i, (dx, dy, l, ya) in enumerate(((W / 2, 0, W, math.pi / 2), (-W / 2, 0, W, math.pi / 2),
+                                         (0, W / 2, W, 0.0), (0, -W / 2, W, 0.0))):
+        v.append(S.visual(f"noodle{i}", S.cylinder(0.038, l), "yellow",
+                          S.pose(dx, dy, 0.0, 0, math.pi / 2, ya)))
+    # markings on all four faces
+    if marking in ("diamond", "circle", "letter"):
+        mz = z0 + 0.064 + 0.1015
+        for i in range(4):
+            a = i * math.pi / 2
+            fx, fy = _rot(W / 2 + 0.002, 0, a)
+            if marking == "diamond":
+                g = S.box(0.004, 0.1435, 0.1435)       # 0.203 m point-to-point
+                p = S.pose(fx, fy, mz, math.pi / 4, 0, a)
+            elif marking == "circle":
+                g = S.cylinder(0.1015, 0.004)
+                p = S.pose(fx, fy, mz, 0, math.pi / 2, a)
+            else:
+                g = S.box(0.004, 0.12, 0.203)
+                p = S.pose(fx, fy, mz, 0, 0, a)
+            v.append(S.visual(f"mark{i}", g, "black", p))
+    # beacon pipe, LED band (side beacon), sun hat, upward glow
+    pz = z0 + H
+    v.append(S.visual("beacon_pipe", S.cylinder(0.04445, 0.127), "white",
+                      S.pose(0, 0, pz + 0.0635)))
+    side_c = col if (col and side_on) else "black"
+    v.append(S.visual("beacon_side", S.cylinder(0.047, 0.055), side_c,
+                      S.pose(0, 0, pz + 0.127 - 0.0275 - 0.01),
+                      emissive=1.0 if side_c != "black" else 0.0))
+    v.append(S.visual("sun_hat", S.cylinder(0.127, 0.0048), "black",
+                      S.pose(0, 0, pz + 0.127 + 0.0024)))
+    up_c = col if (col and up_on) else "black"
+    v.append(S.visual("beacon_up", S.cylinder(0.035, 0.003), up_c,
+                      S.pose(0, 0, pz + 0.127 + 0.006),
+                      emissive=1.0 if up_c != "black" else 0.0))
+    coll = S.collision("body", S.box(W, W, H + 0.13), S.pose(0, 0, z0 + (H + 0.13) / 2))
+    return (f'<model name="{name}"><static>true</static>{S.pose(x, y, 0, 0, 0, yaw)}'
+            f'<link name="link">{coll}{"".join(v)}</link></model>')
+
+
+# ------------------------------------------------------------------ Task 3 dock
+
+def dock(e):
+    """Docking cubes + one Docking Bay Structure per bay.
+
+    Geometry mirrors tools/task3_sim/world.py so the Task 3 tree sees the same
+    course in both sims (W:192-198, 268-279): 0.5 m cubes; three 1.5 m slips
+    between 0.5 m fingers 2.0 m long; a main deck 1.0 m deep; deck 0.3 m above
+    the water (ASSUMED there too). Each bay's structure is a 1.0 x 1.0 m white
+    face on the deck's front edge, facing into the slip, with two windows —
+    upper-left 210 x 290 mm, lower-right ~230 x 310 mm — and a 160 mm indicator
+    at the bottom centre. Handbook: window 25 cm square (3.3.4:9) or 210 x 280 mm
+    (docking-bay-structure.md:72) — the dimensions conflict; W's are used.
+
+    Frame: (x, y) = centre of the BACK edge of the main deck; facing_deg =
+    compass-style ENU yaw the faces point OUT (0 = +x/east, 90 = north).
+    Bays are numbered 1..3 LEFT to right as seen from the water (DB:9).
+    """
+    name = e["name"]
+    ox, oy = e["x"], e["y"]
+    face_yaw = math.radians(e.get("facing_deg", 180.0))
+    slip, fing, flen, deck_d, dz = 1.5, 0.5, 2.0, 1.0, 0.3
+    width = 4 * fing + 3 * slip
+    green_bay = int(e.get("green_bay", 2))
+    lit = e.get("lit_window", {"bay": green_bay, "slot": 0, "colour": "red"})
+
+    # Dock-local frame = the model frame: x = u, out toward the water; y = r, the
+    # viewer's RIGHT when looking at the faces from the water (bays 1..3 run
+    # along +r). The viewer faces -u, so their right is u rotated +90 deg — which
+    # is exactly local +y under a model yaw of face_yaw.
+    v, c = [], []
+
+    def block(nm, u, r, su, sr, sz, zc, colour="dock"):
+        g = S.box(su, sr, sz)
+        p = S.pose(u, r, zc)
+        v.append(S.visual(nm, g, colour, p))
+        c.append(S.collision(nm, g, p))
+
+    # main deck (cubes 0.5 m tall, 0.3 m above water)
+    block("deck", deck_d / 2, 0, deck_d, width, 0.5, dz - 0.25)
+    # fingers
+    for i in range(4):
+        r = -width / 2 + fing / 2 + i * (fing + slip)
+        block(f"finger{i}", deck_d + flen / 2, r, flen, fing, 0.5, dz - 0.25)
+    # bay structures
+    windows = (("UL", -0.220, +0.250, 0.105, 0.145), ("LR", +0.230, +0.010, 0.115, 0.155))
+    for b in (1, 2, 3):
+        r0 = -width / 2 + fing + slip / 2 + (b - 1) * (fing + slip)
+        fu = deck_d - 0.05                       # face stands at the deck's front edge
+        fz = dz + 0.5                            # face centre height
+        block(f"bay{b}_face", fu, r0, 0.03, 1.0, 1.0, fz, "white")
+        for si, (slot, wr, wu, hw, hh) in enumerate(windows):
+            on = (lit and int(lit["bay"]) == b and int(lit["slot"]) == si)
+            colour = lit["colour"] if on else "black"
+            # border then the LED area, both on the water side of the face
+            v.append(S.visual(f"bay{b}_win{si}_border", S.box(0.004, 2 * hw + 0.03, 2 * hh + 0.03),
+                              "black", S.pose(fu + 0.017, r0 + wr, fz + wu)))
+            v.append(S.visual(f"bay{b}_win{si}", S.box(0.004, 2 * hw, 2 * hh), colour,
+                              S.pose(fu + 0.020, r0 + wr, fz + wu),
+                              emissive=1.0 if on else 0.0))
+        ind = "green" if b == green_bay else "red"
+        v.append(S.visual(f"bay{b}_indicator", S.box(0.004, 0.16, 0.16), ind,
+                          S.pose(fu + 0.020, r0, fz - 0.42), emissive=0.8))
+    return (f'<model name="{name}"><static>true</static>'
+            f"{S.pose(ox, oy, 0, 0, 0, face_yaw)}"
+            f'<link name="link">{"".join(c)}{"".join(v)}</link></model>')
+
+
+# ------------------------------------------------------------------ platforms
+
+def platform(e):
+    """UAV delivery platform (3.3.3:13,19; 3.3.4:11): ~2 m square, grey #CCCED0,
+    one 60-70 cm circle in R/G/B. Floating in reality; static here, 0.15 m
+    freeboard (GUESS)."""
+    name, x, y = e["name"], e["x"], e["y"]
+    yaw = math.radians(e.get("yaw_deg", 0.0))
+    fb = 0.15
+    circle = e.get("circle", "red")
+    v = [S.visual("deck", S.box(2.0, 2.0, 0.2), "grey", S.pose(0, 0, fb - 0.1)),
+         S.visual("circle", S.cylinder(0.325, 0.004), circle, S.pose(0, 0, fb + 0.002))]
+    c = [S.collision("deck", S.box(2.0, 2.0, 0.2), S.pose(0, 0, fb - 0.1))]
+    return (f'<model name="{name}"><static>true</static>{S.pose(x, y, 0, 0, 0, yaw)}'
+            f'<link name="link">{"".join(c)}{"".join(v)}</link></model>')
+
+
+def launch_pad(e):
+    """UAV launch pad (3.5 BS:69): 2 x 2 m grey, 3 black concentric circles.
+    Location is image only."""
+    name, x, y = e["name"], e["x"], e["y"]
+    fb = 0.15
+    v = [S.visual("deck", S.box(2.0, 2.0, 0.2), "grey", S.pose(0, 0, fb - 0.1))]
+    for i, r in enumerate((0.9, 0.6, 0.3)):
+        v.append(S.visual(f"ring{i}", S.cylinder(r, 0.003), "black", S.pose(0, 0, fb + 0.001 + i * 0.001)))
+        v.append(S.visual(f"gap{i}", S.cylinder(r - 0.05, 0.003), "grey", S.pose(0, 0, fb + 0.0015 + i * 0.001)))
+    c = [S.collision("deck", S.box(2.0, 2.0, 0.2), S.pose(0, 0, fb - 0.1))]
+    return (f'<model name="{name}"><static>true</static>{S.pose(x, y, 0)}'
+            f'<link name="link">{"".join(c)}{"".join(v)}</link></model>')
+
+
+BUILDERS = {"robobuoy": robobuoy, "dock": dock, "platform": platform,
+            "launch_pad": launch_pad}
+
+
+# ------------------------------------------------------------------ world
+
+def world_sdf(course, world_name="crusader_sim"):
+    o = course["origin"]
+    elems = "".join(BUILDERS[e["type"]](e) for e in course.get("elements", []))
+    b = course.get("boat_start", {"x": 0, "y": 0, "yaw_deg": 90})
+    boat = (f"<include><uri>model://crusader</uri><name>crusader</name>"
+            f"{S.pose(b['x'], b['y'], -float(course.get('draft_m', 0.24)), 0, 0, math.radians(b['yaw_deg']))}"
+            f"</include>")
+    water = (
+        '<model name="water"><static>true</static><link name="link">'
+        + S.visual("surface", "<geometry><plane><normal>0 0 1</normal><size>600 600</size></plane></geometry>",
+                   "water", "", alpha=0.85, flags=WATER_FLAG)
+        + S.visual("seabed", "<geometry><plane><normal>0 0 1</normal><size>600 600</size></plane></geometry>",
+                   (0.35, 0.32, 0.25), S.pose(0, 0, -float(course.get("depth_m", 5.0))))
+        + "</link></model>")
+    return f"""<?xml version="1.0"?>
+<sdf version="1.9">
+<world name="{world_name}">
+  <physics name="1ms" type="ignored">
+    <max_step_size>0.001</max_step_size>
+    <real_time_factor>1.0</real_time_factor>
+  </physics>
+  <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+  <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+  <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+  <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+    <render_engine>ogre2</render_engine>
+  </plugin>
+  <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+  <plugin filename="gz-sim-buoyancy-system" name="gz::sim::systems::Buoyancy">
+    <graded_buoyancy>
+      <default_density>1000</default_density>
+      <density_change><above_depth>0</above_depth><density>1</density></density_change>
+    </graded_buoyancy>
+  </plugin>
+  <spherical_coordinates>
+    <surface_model>EARTH_WGS84</surface_model>
+    <world_frame_orientation>ENU</world_frame_orientation>
+    <latitude_deg>{o['lat']}</latitude_deg>
+    <longitude_deg>{o['lon']}</longitude_deg>
+    <elevation>0</elevation>
+    <heading_deg>0</heading_deg>
+  </spherical_coordinates>
+  <scene>
+    <ambient>0.6 0.6 0.6 1</ambient>
+    <background>0.62 0.78 0.92 1</background>
+    <shadows>false</shadows>
+    <grid>false</grid>
+  </scene>
+  <light type="directional" name="sun">
+    <cast_shadows>false</cast_shadows>
+    <pose>0 0 50 0 0 0</pose>
+    <diffuse>1.0 1.0 0.95 1</diffuse>
+    <specular>0.3 0.3 0.3 1</specular>
+    <direction>-0.3 0.2 -0.9</direction>
+  </light>
+  {water}
+  {boat}
+  {elems}
+</world>
+</sdf>
+"""
+
+
+def write_world(course_path, out_dir=None):
+    with open(course_path, encoding="utf-8") as f:
+        course = yaml.safe_load(f)
+    out_dir = out_dir or os.path.join(generated_dir(), "worlds")
+    os.makedirs(out_dir, exist_ok=True)
+    name = course.get("name") or os.path.splitext(os.path.basename(course_path))[0]
+    path = os.path.join(out_dir, f"{name}.sdf")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(world_sdf(course))
+    return path, course
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("course")
+    ap.add_argument("--out", default=None)
+    a = ap.parse_args()
+    path, course = write_world(a.course, a.out)
+    o = course["origin"]
+    print(path)
+    print(f"home {o['lat']},{o['lon']}")
+
+
+if __name__ == "__main__":
+    main()

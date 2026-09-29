@@ -1,0 +1,36 @@
+# Task 1 Safe Passage — ILLUSTRATIVE layout.
+#
+# The handbook gives the course only as an image (3.3.2:7): ten beacon buoys, no
+# spacings in the text. So this is a plausible passage, not THE course. Edit
+# freely; nothing else depends on these numbers.
+#
+# Rules encoded (3.3.2:9-33):
+#   flash_blue  = ENTRY, circle it CLOCKWISE
+#   steady_blue = EXIT,  circle it COUNTER-clockwise
+#   flash_red   = keep to STARBOARD      flash_green = keep to PORT
+#   off         = "BLACK", an obstacle — pass either side
+# Flashing = 1 s on / 1 s off (the beacon_driver node does the flashing).
+# Core tier: SIDE beacons lit, UAV optional. Advanced/Disruptive: UPWARD beacons
+# only (only the UAV can see the route) — see task1_advanced.yaml.
+#
+# World frame: ENU metres from `origin` (x east, y north). The boat starts at the
+# origin heading east, so starboard is SOUTH (-y) — red buoys sit on -y.
+
+name: task1_core
+origin: {lat: 1.28060, lon: 103.85570}   # = tools/sitl/start_sitl.sh SITL_HOME
+draft_m: 0.24
+depth_m: 5.0
+boat_start: {x: 0.0, y: 0.0, yaw_deg: 0.0}
+tier: core
+
+elements:
+  - {type: robobuoy, name: entry,  x: 12.0, y:  3.0, beacon: flash_blue,  up_beacon: false}
+  - {type: robobuoy, name: g1_red, x: 22.0, y: -3.0, beacon: flash_red,   up_beacon: false}
+  - {type: robobuoy, name: g1_grn, x: 22.0, y:  3.0, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: g2_red, x: 32.0, y: -1.0, beacon: flash_red,   up_beacon: false}
+  - {type: robobuoy, name: g2_grn, x: 32.0, y:  5.0, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: g3_red, x: 42.0, y: -4.0, beacon: flash_red,   up_beacon: false}
+  - {type: robobuoy, name: g3_grn, x: 42.0, y:  2.0, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: exit,   x: 52.0, y:  0.0, beacon: steady_blue, up_beacon: false}
+  - {type: robobuoy, name: black1, x: 27.0, y:  8.0, beacon: "off"}
+  - {type: robobuoy, name: black2, x: 37.0, y: -9.0, beacon: "off"}
