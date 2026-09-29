@@ -57,7 +57,7 @@
 
       <StrafeKeep fire_range_m="1.0" window_index="0" lateral_bias_m="0.0" nozzle_y_m="0.0"
                   cam_timeout_s="0.5" face_timeout_s="3.0"
-                  range_check_m="0.5" face_setback_m="0.0"
+                  range_check_m="0" face_setback_m="0.0"
                   deadband_range_m="0.05" deadband_lat_m="0.04" deadband_yaw_deg="3.0"
                   kp_fwd="90" kd_fwd="60" kp_lat="90" kd_lat="30" kp_yaw="4" kd_yaw="3"
                   ki_fwd="20" ki_lat="30" i_max_us="80"
