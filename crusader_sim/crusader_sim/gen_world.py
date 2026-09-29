@@ -238,7 +238,9 @@ def world_sdf(course, world_name="crusader_sim"):
   </physics>
   <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
   <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
-  <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+  <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster">
+    <state_hertz>30</state_hertz>
+  </plugin>
   <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
     <render_engine>ogre2</render_engine>
   </plugin>

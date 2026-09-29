@@ -10,7 +10,12 @@ boat's params file.
 
 **Status (2026-09-29):**
 - **Task 1 runs end to end.** `task1_disruptive.xml` finished `task1_core` with
-  outcome SUCCESS, 10/10 buoys classified, in 176 s.
+  outcome SUCCESS, 10/10 buoys classified, in 142 s at real-time factor 1.0 with
+  the GUI open.
+- **The independent referee gave PASS**: ENTRY circled clockwise, all three
+  gates with red to starboard, EXIT counter-clockwise, no contact. The tree's own
+  `buoys_passed_correctly` read 0 on the same run, so that counter isn't being
+  filled. It's a tree issue for the team; the boat's path was correct.
 - **MANUAL** (`/crsd/rc_override`) and **GUIDED** (setpoints) both drive the hull
   correctly. `check_motion` passes all four checks.
 - **The hull is a placeholder** until the team sends CAD and a weight. See
@@ -66,6 +71,15 @@ tree's phases until the result. Use `--tier core|advanced|disruptive` to overrid
 the course's tier. To run a different tree, put
 `TREE=task1_safe_passage.xml` in front of `gz_sim_up.sh`; a bare name means
 `crusader_bt/behavior_trees/`.
+
+Every run is also scored by **`task1_judge`**, an independent referee that sees
+only the boat's *true* path (Gazebo ground truth) and the course file. It checks
+that red was kept to starboard, green to port, ENTRY was circled clockwise, EXIT
+counter-clockwise, and that no buoy was touched. The tree's own
+`buoys_passed_correctly` is the tree grading itself; this referee can disagree
+with it, which is the point. It also runs standalone:
+`python3 -m crusader_sim.task1_judge --course task1_core` (Ctrl-C for the
+verdict; live JSON on `/sim/task1_judge`).
 
 ### GUIDED and MANUAL, and switching between them
 
@@ -161,6 +175,7 @@ manual, spins in AUTO". Fix it in the YAML, never in the params.
 | `crusader_sim/sim_uav.py` | `crsd-sim` | Ekko's Task 1 radio, from the course's truth |
 | `crusader_sim/sim_transmitter.py` | WSL | the RC transmitter |
 | `crusader_sim/task1_goal.py`, `manual_drive.py`, `check_motion.py` | `crsd-sim` / WSL | operator tools |
+| `crusader_sim/task1_judge.py` | `crsd-sim` | independent Task 1 referee, from ground truth |
 | `docker/crsd-sim.Dockerfile` | WSL | the x86 stand-in for the boat's `asv` image |
 | `setup/install_wsl.sh` | WSL | Gazebo, ArduPilot `Rover-4.6.3`, ardupilot_gazebo (`apt` stage as root, `user` stage as you) |
 
@@ -168,6 +183,7 @@ manual, spins in AUTO". Fix it in the YAML, never in the params.
 
 | Symptom | Cause |
 |---|---|
+| Real-time factor ~0.2, "fcu_status stale", the tree aborts with OUTCOME_NOT_AUTONOMOUS | **Rendering on the CPU.** WSLg's Mesa defaults to `llvmpipe` on this PC (`glxinfo -B`: "Accelerated: no"). `gz_sim_up.sh` sets `GALLIUM_DRIVER=d3d12 MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA`, which gives "D3D12 (NVIDIA GeForce RTX 5060 Ti)". If a driver update breaks that, `GZ_GPU=cpu` forces software rendering: slow, but it runs |
 | Arms, but motors sit at neutral; "Motors Emergency Stopped" | SITL's default RC holds ch7 (SB, `RC7_OPTION=165`) at 1000 µs = e-stop, and ArduPilot latches it at boot. `sim_transmitter set estop on`, then `off` |
 | "PreArm: Gyros inconsistent" for ~10–20 s after boot | normal; `check_motion`/`task1_goal` retry. Don't arm the instant SITL starts |
 | An override is silently ignored | `RC_CHANNELS_OVERRIDE` is only accepted from sysid 255 (`SYSID_MYGCS`) |

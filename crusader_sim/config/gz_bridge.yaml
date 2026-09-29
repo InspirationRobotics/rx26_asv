@@ -3,6 +3,11 @@
 # The /sim/* topics are raw simulator output; the shims (livox_shim,
 # sim_camera) turn them into the topics and formats the BOAT's drivers publish.
 # Nothing in the boat's stack should ever subscribe to /sim/*.
+#
+# The camera entries are LAZY: the bridge subscribes to gz only while a ROS
+# node subscribes, and gz renders a camera only while someone subscribes to
+# it. A permanent subscription rendered + shipped 1920x1200 at 15 Hz nobody
+# read, and with the GUI up the sim fell to RTF 0.2 (2026-09-29).
 
 - ros_topic_name: /sim/mid360/points
   gz_topic_name: /crusader/mid360/points
@@ -11,18 +16,21 @@
   direction: GZ_TO_ROS
 
 - ros_topic_name: /sim/oak/rgb/image
+  lazy: true
   gz_topic_name: /crusader/oak/rgb/image
   ros_type_name: sensor_msgs/msg/Image
   gz_type_name: gz.msgs.Image
   direction: GZ_TO_ROS
 
 - ros_topic_name: /sim/oak/rgb/camera_info
+  lazy: true
   gz_topic_name: /crusader/oak/rgb/camera_info
   ros_type_name: sensor_msgs/msg/CameraInfo
   gz_type_name: gz.msgs.CameraInfo
   direction: GZ_TO_ROS
 
 - ros_topic_name: /sim/oak/depth/image
+  lazy: true
   gz_topic_name: /crusader/oak/depth/image
   ros_type_name: sensor_msgs/msg/Image
   gz_type_name: gz.msgs.Image

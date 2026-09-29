@@ -97,17 +97,33 @@ class SimCamera(Node):
         self.det_pub = self.create_publisher(Detection3DArray, "crsd/oak/detections", 10)
         self.rgb_pub = self.create_publisher(Image, "oak/rgb", qos_profile_sensor_data)
         self.depth_pub = self.create_publisher(Image, "oak/depth", qos_profile_sensor_data)
-        self.create_subscription(Image, "/sim/oak/rgb/image", self._on_rgb, qos_profile_sensor_data)
-        self.create_subscription(Image, "/sim/oak/depth/image", self._on_depth,
-                                 qos_profile_sensor_data)
+        # Frames are subscribed upstream ONLY while someone downstream wants
+        # them: the bridge entries are lazy, and gz renders a camera only while
+        # it has a subscriber, so an idle oak/rgb costs no rendering at all.
+        # (Always-on frames at 1920x1200 took the sim to RTF 0.2 with the GUI up.)
+        self._frame_subs = {"rgb": None, "depth": None}
+        self.create_timer(1.0, self._manage_frame_subs)
         self.create_timer(1.0 / float(g("rate_hz")), self._tick)
         self.get_logger().info(f"course {g('course')}: {len(self.buoys)} buoys; "
                                f"camera {self.W}x{self.H}, fx {self.fx:.0f} px")
 
     # ---------------------------------------------------------------- frames
+    def _manage_frame_subs(self):
+        for key, pub, topic, cb in (("rgb", self.rgb_pub, "/sim/oak/rgb/image", self._on_rgb),
+                                    ("depth", self.depth_pub, "/sim/oak/depth/image",
+                                     self._on_depth)):
+            want = pub.get_subscription_count() > 0
+            have = self._frame_subs[key]
+            if want and have is None:
+                self._frame_subs[key] = self.create_subscription(
+                    Image, topic, cb, qos_profile_sensor_data)
+                self.get_logger().info(f"{key} frames: a consumer appeared, rendering on")
+            elif not want and have is not None:
+                self.destroy_subscription(have)
+                self._frame_subs[key] = None
+                self.get_logger().info(f"{key} frames: no consumer, rendering off")
+
     def _on_rgb(self, msg):
-        if self.rgb_pub.get_subscription_count() == 0:
-            return
         img = np.frombuffer(msg.data, np.uint8).reshape(msg.height, msg.width, 3)
         out = Image(header=msg.header, height=msg.height, width=msg.width,
                     encoding="bgr8", is_bigendian=0, step=msg.width * 3)
@@ -116,9 +132,7 @@ class SimCamera(Node):
         self.rgb_pub.publish(out)
 
     def _on_depth(self, msg):
-        if self.depth_pub.get_subscription_count() == 0:
-            return
-        d = np.frombuffer(msg.data, np.float32).reshape(msg.height, msg.width)
+        d =np.frombuffer(msg.data, np.float32).reshape(msg.height, msg.width)
         mm = np.where(np.isfinite(d), np.clip(d * 1000.0, 0, 65535), 0).astype(np.uint16)
         out = Image(header=msg.header, height=msg.height, width=msg.width,
                     encoding="16UC1", is_bigendian=0, step=msg.width * 2)

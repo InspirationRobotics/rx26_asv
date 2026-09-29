@@ -150,7 +150,9 @@ def main():
         return 2
     rclpy.init()
     node = Driver()
-    set_mode(node, node.mode_pub, "MANUAL")
+    if not set_mode(node, node.mode_pub, "MANUAL"):
+        print("MANUAL never confirmed on /crsd/fcu_status — overrides would be refused")
+        return 2
     t_end = time.time() + 10
     while node.odom is None and time.time() < t_end:
         rclpy.spin_once(node, timeout_sec=0.2)

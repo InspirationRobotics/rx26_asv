@@ -39,11 +39,35 @@ def arm(endpoint=TOOLING_ENDPOINT, timeout_s=60.0):
         m.close()
 
 
-def set_mode(node, publisher, name, spins=3):
-    """Ask telemetry_bridge for a mode via /crsd/set_mode (its own path).
-    Nobody latches that topic, so say it a few times."""
+def set_mode(node, publisher, name, timeout_s=15.0):
+    """Ask telemetry_bridge for a mode via /crsd/set_mode (its own path) and
+    WAIT until /crsd/fcu_status reports it. Returns True once confirmed.
+
+    Fire-and-forget is not enough, and it failed once (2026-09-29): a fresh
+    publisher's first messages can be dropped before DDS has matched it to the
+    bridge's subscription, and even a delivered request only shows up in the
+    next HEARTBEAT. A goal sent in that gap meets a tree that still sees HOLD
+    and refuses (OUTCOME_NOT_AUTONOMOUS). So: re-request every 0.5 s until the
+    autopilot says so."""
+    import time
+
     import rclpy
     from std_msgs.msg import String
-    for _ in range(spins):
-        publisher.publish(String(data=name))
-        rclpy.spin_once(node, timeout_sec=0.3)
+    from crusader_msgs.msg import FcuStatus
+
+    if not hasattr(node, "_fcu_mode"):
+        node._fcu_mode = None
+
+        def _on_status(msg):
+            node._fcu_mode = msg.mode
+        node.create_subscription(FcuStatus, "/crsd/fcu_status", _on_status, 10)
+    t_end = time.time() + timeout_s
+    next_req = 0.0
+    while time.time() < t_end:
+        if node._fcu_mode == name:
+            return True
+        if time.time() >= next_req:
+            publisher.publish(String(data=name))
+            next_req = time.time() + 0.5
+        rclpy.spin_once(node, timeout_sec=0.1)
+    return False

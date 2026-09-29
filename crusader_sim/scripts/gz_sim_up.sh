@@ -46,6 +46,21 @@ export GZ_PARTITION=crusader_sim
 export GZ_SIM_SYSTEM_PLUGIN_PATH="$APGZ/build${GZ_SIM_SYSTEM_PLUGIN_PATH:+:$GZ_SIM_SYSTEM_PLUGIN_PATH}"
 export GZ_SIM_RESOURCE_PATH="$GEN/models${GZ_SIM_RESOURCE_PATH:+:$GZ_SIM_RESOURCE_PATH}"
 
+# RENDERING ON THE GPU. WSLg's Mesa defaults to llvmpipe on this machine —
+# `glxinfo -B` says "llvmpipe ... Accelerated: no" — so every camera, LiDAR
+# and GUI frame was rendered on the CPU, the sim fell to RTF ~0.2, SITL's
+# HEARTBEAT went stale in wall-clock terms and the tree (rightly) refused to
+# keep going. Naming the adapter selects the RTX through Mesa's d3d12 driver:
+# "D3D12 (NVIDIA GeForce RTX 5060 Ti)". GZ_GPU=cpu forces software rendering
+# back on — slow, but it works if a driver update ever breaks the GPU path.
+GZ_GPU="${GZ_GPU:-NVIDIA}"
+if [ "$GZ_GPU" = cpu ]; then
+  export LIBGL_ALWAYS_SOFTWARE=1
+else
+  export GALLIUM_DRIVER=d3d12
+  export MESA_D3D12_DEFAULT_ADAPTER_NAME="$GZ_GPU"
+fi
+
 step() { printf '\n=== %s ===\n' "$1"; }
 die()  { printf '\n*** FAILED: %s\n' "$1" >&2; exit 2; }
 

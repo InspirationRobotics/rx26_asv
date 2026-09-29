@@ -24,9 +24,12 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from std_msgs.msg import String
 
+from nav_msgs.msg import Odometry
+
 from crusader_msgs.action import SafePassage
 from crusader_sim import course as C
 from crusader_sim.operator_tools import arm, set_mode
+from crusader_sim.task1_judge import Task1Judge, format_verdict
 
 TIERS = {"core": 0, "advanced": 1, "disruptive": 2}
 
@@ -47,10 +50,16 @@ def approach_point(course):
 
 
 class Operator(Node):
-    def __init__(self):
+    """The operator, plus an independent referee watching the TRUE path
+    (task1_judge) — the tree's own 'passed correctly' is the tree grading itself."""
+
+    def __init__(self, judge):
         super().__init__("sim_operator")
         self.mode_pub = self.create_publisher(String, "/crsd/set_mode", 10)
         self.client = ActionClient(self, SafePassage, "/crsd/safe_passage")
+        self.create_subscription(
+            Odometry, "/sim/crusader/odometry",
+            lambda m: judge.update(m.pose.pose.position.x, m.pose.pose.position.y), 10)
 
 
 def main():
@@ -71,9 +80,12 @@ def main():
         return 2
 
     rclpy.init()
-    op = Operator()
-    set_mode(op, op.mode_pub, "GUIDED")
-    print("[operator] mode -> GUIDED", flush=True)
+    judge = Task1Judge(course)
+    op = Operator(judge)
+    if not set_mode(op, op.mode_pub, "GUIDED"):
+        print("[operator] GUIDED never confirmed on /crsd/fcu_status — is telemetry_bridge up?")
+        return 2
+    print("[operator] mode GUIDED (confirmed by the autopilot)", flush=True)
 
     if not op.client.wait_for_server(timeout_sec=20.0):
         print("[operator] no /crsd/safe_passage server (is bt_runner up?)")
@@ -106,9 +118,11 @@ def main():
     print(f"[result] outcome {r.outcome}  {r.detail}\n"
           f"         classified {r.buoys_classified}, passed correctly "
           f"{r.buoys_passed_correctly}, {r.elapsed_s:.0f} s", flush=True)
+    v = judge.verdict()
+    print(format_verdict(v), flush=True)
     op.destroy_node()
     rclpy.shutdown()
-    return 0 if r.outcome == SafePassage.Result.OUTCOME_SUCCESS else 1
+    return 0 if (r.outcome == SafePassage.Result.OUTCOME_SUCCESS and v["pass"]) else 1
 
 
 if __name__ == "__main__":
