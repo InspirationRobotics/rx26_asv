@@ -34,8 +34,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # while ament_cmake_export_libraries looks in lib/: without this link
 # find_package(behaviortree_cpp) fails, saying nothing about paths. (Same fix
 # as ../Dockerfile.)
-RUN ln -sf "/opt/ros/humble/lib/$(uname -m)-linux-gnu/libbehaviortree_cpp.so" \
-           /opt/ros/humble/lib/libbehaviortree_cpp.so
+# ONLY when needed: newer packages (4.9.1 on 2026-09-28) already install it in
+# lib/, and an unconditional `ln -sf` REPLACES that real library with a link
+# to a file that does not exist.
+RUN L=/opt/ros/humble/lib; A="$L/$(uname -m)-linux-gnu/libbehaviortree_cpp.so"; \
+    if [ ! -e "$L/libbehaviortree_cpp.so" ] && [ -e "$A" ]; then ln -s "$A" "$L/libbehaviortree_cpp.so"; fi
 
 # Fail the BUILD, not the boat, if CMake still cannot find it.
 RUN test -f /opt/ros/humble/share/behaviortree_cpp/cmake/behaviortree_cppConfig.cmake \

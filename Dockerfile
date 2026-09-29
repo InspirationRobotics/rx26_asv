@@ -70,7 +70,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # find_package(behaviortree_cpp) fails with "exports the library
 # 'behaviortree_cpp' which couldn't be found" and says nothing about paths.
 # Arch-generic so it is right on the Jetson (aarch64) and a laptop (x86_64).
-RUN ln -sf "/opt/ros/humble/lib/$(uname -m)-linux-gnu/libbehaviortree_cpp.so"            /opt/ros/humble/lib/libbehaviortree_cpp.so
+# ONLY when needed: newer packages (4.9.1 on 2026-09-28) already install it in
+# lib/, and an unconditional `ln -sf` REPLACES that real library with a link to
+# a file that does not exist.
+RUN L=/opt/ros/humble/lib; A="$L/$(uname -m)-linux-gnu/libbehaviortree_cpp.so"; \
+    if [ ! -e "$L/libbehaviortree_cpp.so" ] && [ -e "$A" ]; then ln -s "$A" "$L/libbehaviortree_cpp.so"; fi
 
 # behaviortree_cpp is 4.x from apt, which is what crusader_bt's XML declares
 # (BTCPP_format="4"). Note it is the CORE library only: behaviortree_ros2, the
