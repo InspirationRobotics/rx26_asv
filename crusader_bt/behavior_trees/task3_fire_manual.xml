@@ -21,9 +21,11 @@
                        on the compass between frames
   The LiDAR's wall angle is not used: the wall may not be flat, the face is.
 
-  THE NUMBERS come from tools/squirt_cal at the pool on 2026-09-25 (fire_range_m
-  3.22, the upper-left window's top edge) and from dp_hold's tune on this hull
-  (gains, 120 us cap). Re-calibrate on the real dock.
+  THE NUMBERS: fire_range_m 1.0 is squirt_cal on 2026-09-28 with the nozzle at
+  30 deg (upper-left window; the lower-right wanted ~0.8 m, and the old 45 deg
+  nozzle 3.22 m). min_range_m 0.6 so the floor sits below the firing range.
+  Gains and the 120 us cap are dp_hold's tune on this hull. Re-calibrate on the
+  real dock.
 
   HOW TO RUN IT. bt_runner_node with tree_file pointing here, the boat in
   MANUAL, then the SafePassage goal as for every tree. In the sim:
@@ -53,20 +55,20 @@
       <WallRangeAlive max_age_s="1.0"/>
       <AttitudeAlive max_age_s="0.5"/>
 
-      <StrafeKeep fire_range_m="3.22" window_index="0" lateral_bias_m="0.0" nozzle_y_m="0.0"
+      <StrafeKeep fire_range_m="1.0" window_index="0" lateral_bias_m="0.0" nozzle_y_m="0.0"
                   cam_timeout_s="0.5" face_timeout_s="3.0"
                   range_check_m="0.5" face_setback_m="0.0"
                   deadband_range_m="0.05" deadband_lat_m="0.04" deadband_yaw_deg="3.0"
                   kp_fwd="90" kd_fwd="60" kp_lat="90" kd_lat="30" kp_yaw="4" kd_yaw="3"
                   ki_fwd="20" ki_lat="30" i_max_us="80"
                   min_us="30" max_us="120" slew_us_s="200"
-                  min_range_m="1.5" square_first_deg="10"/>
+                  min_range_m="0.6" square_first_deg="10"/>
 
       <Sequence name="shots">
         <ForceSuccess>
           <RetryUntilSuccessful num_attempts="5">
             <Sequence name="one_shot">
-              <AwaitStrafeSolution fire_range_m="3.22" range_tol_m="0.06" lat_tol_m="0.05"
+              <AwaitStrafeSolution fire_range_m="1.0" range_tol_m="0.06" lat_tol_m="0.05"
                                    yaw_tol_deg="5.0" hold_s="1.0" gap_s="2.0" timeout_s="60.0"/>
               <FireBurst burst_s="0.5" flight_s="0.8" ack_timeout_s="1.5"/>
               <!-- FAILURE until the window reads GREEN long enough, which
