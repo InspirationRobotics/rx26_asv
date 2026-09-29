@@ -791,12 +791,24 @@ class TelemetryBridge(Node):
     # ---------- reset service ----------
 
     def _reset_cb(self, request, response):
-        ok, reason = self.latch.reset(time.monotonic())
-        response.success = ok
-        response.message = reason
-        (self.get_logger().warn if ok else self.get_logger().error)(
-            f"autonomy-drop reset: {reason}")
-        self._publish_drop_state()
+        """Never raises: an exception in a service callback kills the whole
+        bridge (and with it telemetry and the force-disarm gateway). It did,
+        on the water 2026-09-28: one call site switching between .warn and
+        .error is a ValueError in rclpy ("Logger severity cannot be changed
+        between calls"), so the first REFUSED reset after an accepted one took
+        the bridge down. One severity per call site."""
+        try:
+            ok, reason = self.latch.reset(time.monotonic())
+            response.success = ok
+            response.message = reason
+            if ok:
+                self.get_logger().warn(f"autonomy-drop reset: {reason}")
+            else:
+                self.get_logger().error(f"autonomy-drop reset refused: {reason}")
+            self._publish_drop_state()
+        except Exception as e:
+            response.success = False
+            response.message = f"reset failed: {e}"
         return response
 
     # ---------- teardown ----------
