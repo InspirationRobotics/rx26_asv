@@ -22,7 +22,13 @@ KEEP = re.compile(
     r"^(FRAME_|SERVO[1-4]_|MOT_|ATC_|PSC_|CRUISE_|WP_|TURN_|NAVL1_|LOIT_|PILOT_|"
     r"MODE\d|MODE_CH$|INITIAL_MODE$|SPEED_|ACRO_|MANUAL_|GUID_|RTL_|SAIL_|"
     r"FS_|ARMING_(CHECK|REQUIRE|RUDDER)$|RC\d+_OPTION$|AVOID_|PRX1_TYPE$|"
-    r"EK3_SRC1_|AHRS_EKF_TYPE$|BAL_|SYSID_THISMAV$|STICK_MIXING$|OA_)")
+    r"EK3_SRC1_|AHRS_EKF_TYPE$|BAL_|SYSID_THISMAV$|STICK_MIXING$|OA_|"
+    # SR0_*: the stream rates the ROS side is built around (ATTITUDE at 30 Hz,
+    # telemetry_bridge's docstring). MAVProxy connects to SITL's SERIAL0 as it
+    # does to the Pixhawk's USB, and --streamrate=-1 leaves these alone. Left
+    # out, SITL's defaults gave /crsd/attitude 1.4 Hz and target_tracker
+    # refused every observation as stale (2026-09-29).
+    r"SR0_)")
 
 
 def baseline_path():

@@ -1,0 +1,6 @@
+# pkill -f patterns for the sim-only processes gz_rig_up.sh starts, on top of
+# tools/sitl/rig_processes.txt (the boat nodes). One per line.
+ros_gz_bridge/parameter_bridge
+crusader_sim/lib
+crusader_sim.sim_uav
+crusader_perception/lib/crusader_perception/lidar_cluster_node

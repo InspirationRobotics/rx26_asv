@@ -40,6 +40,21 @@ RUN L="/opt/ros/humble/lib/$(uname -m)-linux-gnu/libbehaviortree_cpp.so"; \
 
 RUN pip3 install --no-cache-dir "pymavlink==2.4.49" pyserial future "pyyaml==6.0.3"
 
+# The Gazebo -> ROS bridge lives IN HERE, so every ROS message stays inside one
+# container the way it does on the boat, and only gz-transport crosses to the
+# WSL host (host network). Harmonic's bridge for Humble comes from OSRF.
+# GZ_PARTITION must match the host's: gz-transport's default partition is
+# "hostname:username", and root in here != chaser out there — the two would
+# never discover each other and nothing would say so.
+RUN curl -fsSL https://packages.osrfoundation.org/gazebo.gpg \
+        -o /usr/share/keyrings/pkgs-osrf-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/pkgs-osrf-archive-keyring.gpg] http://packages.osrfoundation.org/gazebo/ubuntu-stable jammy main" \
+        > /etc/apt/sources.list.d/gazebo-stable.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        ros-humble-ros-gzharmonic-bridge \
+    && rm -rf /var/lib/apt/lists/*
+ENV GZ_PARTITION=crusader_sim
+
 RUN echo "source /opt/ros/humble/setup.bash" >> /root/.bashrc \
     && echo "[ -f /root/robotx_ws/install/setup.bash ] && source /root/robotx_ws/install/setup.bash" >> /root/.bashrc
 

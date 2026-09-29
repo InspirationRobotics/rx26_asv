@@ -49,7 +49,15 @@ CMakeLists.txt  text eol=lf
 # Docs get read on the boat over SSH as often as on a laptop.
 *.md        text eol=lf
 
+# crusader_sim: Dockerfiles are read by docker in WSL; .cmd launchers are read
+# by cmd.exe, whose label jumps misbehave on bare LF.
+*.Dockerfile text eol=lf
+*.sdf       text eol=lf
+*.cmd       text eol=crlf
+
 # Binary — never touch these.
+*.glb       binary
+*.stl       binary
 *.engine    binary
 *.tlog      binary
 *.raw       binary

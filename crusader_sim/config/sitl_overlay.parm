@@ -15,8 +15,13 @@ COMPASS_USE 0
 COMPASS_USE2 0
 COMPASS_USE3 0
 
-# --- the ROS gateway expects 5 Hz HEARTBEAT etc.; MAVProxy's --streamrate=-1
-# leaves SR0_* alone, exactly as on the boat. Nothing to set.
+# --- stream rates. MAVProxy's --streamrate=-1 leaves SR0_* alone, as on the
+# boat, so these ARE the ROS-side rates. The baseline file says SR0_EXTRA1 4,
+# but the newest real dump (QGC params/2026-09-07_crusader_ardurover463.params)
+# says 10, and docs/G7_pump_bench.md asks for 30. The last value MEASURED on the
+# boat wins here; at the baseline's 4 Hz /crsd/attitude ran ~3 Hz and
+# target_tracker dropped observations as stale. Team: settle the baseline.
+SR0_EXTRA1 10
 
 # --- IMU calibration, as ArduPilot's own gazebo-*.parm files do it. The gyros
 # calibrate at boot while the simulated hull is still settling on the water, the

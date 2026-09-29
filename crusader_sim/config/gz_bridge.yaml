@@ -1,0 +1,44 @@
+# ros_gz_bridge map: Gazebo -> ROS, nothing the other way.
+# Runs in the crsd-sim container (GZ_PARTITION=crusader_sim on both sides).
+# The /sim/* topics are raw simulator output; the shims (livox_shim,
+# sim_camera) turn them into the topics and formats the BOAT's drivers publish.
+# Nothing in the boat's stack should ever subscribe to /sim/*.
+
+- ros_topic_name: /sim/mid360/points
+  gz_topic_name: /crusader/mid360/points
+  ros_type_name: sensor_msgs/msg/PointCloud2
+  gz_type_name: gz.msgs.PointCloudPacked
+  direction: GZ_TO_ROS
+
+- ros_topic_name: /sim/oak/rgb/image
+  gz_topic_name: /crusader/oak/rgb/image
+  ros_type_name: sensor_msgs/msg/Image
+  gz_type_name: gz.msgs.Image
+  direction: GZ_TO_ROS
+
+- ros_topic_name: /sim/oak/rgb/camera_info
+  gz_topic_name: /crusader/oak/rgb/camera_info
+  ros_type_name: sensor_msgs/msg/CameraInfo
+  gz_type_name: gz.msgs.CameraInfo
+  direction: GZ_TO_ROS
+
+- ros_topic_name: /sim/oak/depth/image
+  gz_topic_name: /crusader/oak/depth/image
+  ros_type_name: sensor_msgs/msg/Image
+  gz_type_name: gz.msgs.Image
+  direction: GZ_TO_ROS
+
+# the boat's TRUE pose (OdometryPublisher on the model). Not dynamic_pose/info:
+# its Pose_V -> TFMessage conversion drops the entity names, so the boat's
+# entry cannot be picked out of it.
+- ros_topic_name: /sim/crusader/odometry
+  gz_topic_name: /model/crusader/odometry
+  ros_type_name: nav_msgs/msg/Odometry
+  gz_type_name: gz.msgs.Odometry
+  direction: GZ_TO_ROS
+
+- ros_topic_name: /clock
+  gz_topic_name: /world/crusader_sim/clock
+  ros_type_name: rosgraph_msgs/msg/Clock
+  gz_type_name: gz.msgs.Clock
+  direction: GZ_TO_ROS

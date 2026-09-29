@@ -17,6 +17,7 @@ each PWM becomes a thrust in newtons on one gz Thruster.
 import argparse
 import math
 import os
+import shutil
 
 import yaml
 
@@ -24,6 +25,9 @@ from crusader_sim import sdf_util as S
 from crusader_sim.paths import default_hull_yaml, default_params_yaml
 
 RHO_WATER = 1000.0
+# visibility bit the MID360's mask excludes (= gen_world.WATER_FLAG): visuals
+# carrying ONLY this bit are invisible to the LiDAR, visible to the camera
+LIDAR_HIDDEN = 2
 
 
 def _sensor_mounts(params_path):
@@ -77,8 +81,12 @@ def _hull_links(h, n_thrusters):
 
     mesh = h.get("visual_mesh") or ""
     if mesh:
-        out.append(f'<visual name="hull_mesh"><geometry><mesh><uri>{mesh}</uri>'
-                   f"</mesh></geometry></visual>")
+        # write_model() copies the file into the generated model dir
+        s = float(h.get("visual_mesh_scale", 1.0))
+        o = h.get("visual_mesh_offset_m", [0.0, 0.0, 0.0])
+        out.append(f'<visual name="hull_mesh">{S.pose(*o)}<geometry><mesh>'
+                   f"<uri>model://crusader/meshes/{os.path.basename(mesh)}</uri>"
+                   f"<scale>{s} {s} {s}</scale></mesh></geometry></visual>")
     else:
         wv = h["pontoon_visual_width_m"]
         for side, y in (("port", yc), ("stbd", -yc)):
@@ -197,7 +205,7 @@ def _sensors(s, mounts):
         f"<range><min>{mid['range_min_m']}</min><max>{mid['range_max_m']}</max>"
         "<resolution>0.01</resolution></range>"
         f"<noise><type>gaussian</type><mean>0</mean><stddev>{mid['noise_sd_m']}</stddev></noise>"
-        "<visibility_mask>4294967293</visibility_mask>"   # ~0x2: ignore the water plane
+        f"<visibility_mask>{0xFFFFFFFF & ~LIDAR_HIDDEN}</visibility_mask>"
         "</lidar></sensor>")
     rgb = (
         '<sensor name="oak_rgb" type="camera">'
@@ -227,11 +235,18 @@ def _sensors(s, mounts):
         '<pose degrees="true">0 0 0 180 0 0</pose>'
         f"<always_on>1</always_on><update_rate>{s['imu']['rate_hz']}</update_rate>"
         "</sensor>")
+    # The sensor's own housing (and the camera mast, 5 cm from it) are hidden
+    # from the LiDAR with the water's visibility bit: rays start INSIDE the
+    # housing visual, and with it visible 10006 of ~10200 points a scan were
+    # "near" returns off the sensor itself. The hull, deck and thrusters stay
+    # visible — the real self-returns lidar_cluster_node's near/FOV gates exist
+    # for.
     visuals = (
-        S.visual("mid360_v", S.cylinder(0.0325, 0.06), "black", S.pose(lx, ly, lz))
+        S.visual("mid360_v", S.cylinder(0.0325, 0.06), "black", S.pose(lx, ly, lz),
+                 flags=LIDAR_HIDDEN)
         + S.visual("oak_v", S.box(0.05, 0.16, 0.045), "metal", S.pose(cx, cy, cz, 0, cpitch, cyaw))
         + S.visual("mast_v", S.cylinder(0.015, cz - 0.45), "metal",
-                   S.pose(cx - 0.04, cy, 0.45 + (cz - 0.45) / 2.0))
+                   S.pose(cx - 0.04, cy, 0.45 + (cz - 0.45) / 2.0), flags=LIDAR_HIDDEN)
     )
     return lidar + rgb + depth + imu, visuals
 
@@ -262,6 +277,13 @@ def build(hull_path, params_path):
         f"{inertial}{hull_geo}{sensor_vis}{sensors}</link>"
         f"{th_links}"
         f"{_hydrodynamics(cfg['damping'])}{th_plugins}{_ardupilot_plugin(controls)}"
+        # ground truth for the sim's own nodes (sim_camera's oracle) ONLY —
+        # the boat's stack never sees it; it gets /crsd/pose from SITL's EKF
+        '<plugin filename="gz-sim-odometry-publisher-system" '
+        'name="gz::sim::systems::OdometryPublisher">'
+        "<odom_frame>world</odom_frame><robot_base_frame>crusader</robot_base_frame>"
+        "<odom_publish_frequency>50</odom_publish_frequency><dimensions>3</dimensions>"
+        "</plugin>"
         "</model></sdf>\n")
     return sdf, {"buoyant_pontoon_width_m": round(w_buoy, 4), **mounts}
 
@@ -272,6 +294,12 @@ def write_model(out_dir, hull_path=None, params_path=None):
     sdf, info = build(hull_path, params_path)
     mdir = os.path.join(out_dir, "crusader")
     os.makedirs(mdir, exist_ok=True)
+    with open(hull_path, encoding="utf-8") as f:
+        mesh = (yaml.safe_load(f)["hull"].get("visual_mesh") or "")
+    if mesh:
+        src = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(hull_path))), mesh)
+        os.makedirs(os.path.join(mdir, "meshes"), exist_ok=True)
+        shutil.copy2(src, os.path.join(mdir, "meshes", os.path.basename(mesh)))
     with open(os.path.join(mdir, "model.sdf"), "w", encoding="utf-8") as f:
         f.write(sdf)
     with open(os.path.join(mdir, "model.config"), "w", encoding="utf-8") as f:

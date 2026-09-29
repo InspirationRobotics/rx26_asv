@@ -222,8 +222,12 @@ def world_sdf(course, world_name="crusader_sim"):
         '<model name="water"><static>true</static><link name="link">'
         + S.visual("surface", "<geometry><plane><normal>0 0 1</normal><size>600 600</size></plane></geometry>",
                    "water", "", alpha=0.85, flags=WATER_FLAG)
+        # the seabed is hidden from the LiDAR too: a real MID360 does not see
+        # through water, and with only the surface hidden every downward ray
+        # came back off the bottom (8155 "water" points a scan, 0 clusters)
         + S.visual("seabed", "<geometry><plane><normal>0 0 1</normal><size>600 600</size></plane></geometry>",
-                   (0.35, 0.32, 0.25), S.pose(0, 0, -float(course.get("depth_m", 5.0))))
+                   (0.35, 0.32, 0.25), S.pose(0, 0, -float(course.get("depth_m", 5.0))),
+                   flags=WATER_FLAG)
         + "</link></model>")
     return f"""<?xml version="1.0"?>
 <sdf version="1.9">

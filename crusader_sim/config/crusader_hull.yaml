@@ -31,9 +31,12 @@ hull:
   pontoon_centre_y_m: 0.24   # GUESS  pontoon centreline offset from the keel line
   buoyancy_segments: 8       # sim-only: boxes per pontoon, see gen_crusader._hull_links
   pontoon_visual_width_m: 0.12  # GUESS  cosmetic
-  # Optional CAD mesh (Collada .dae or .stl, metres, origin at the datum above).
-  # When set it REPLACES the box visuals; collisions stay boxes.
-  visual_mesh: ""            # e.g. "meshes/crusader.dae" (relative to the model dir)
+  # Optional CAD mesh from Onshape (.glb preferred, .stl ok) — see MODEL_REQUEST.md
+  # §3. Path is relative to crusader_sim/. When set it REPLACES the box visuals;
+  # collisions and buoyancy stay the boxes above.
+  visual_mesh: ""            # e.g. "meshes/crusader.glb"
+  visual_mesh_scale: 1.0     # 0.001 if the export came out in millimetres
+  visual_mesh_offset_m: [0.0, 0.0, 0.0]   # where the export's origin sits from the datum
 
 # Hydrodynamic damping (gz-sim Hydrodynamics system, Fossen notation, body frame,
 # positive numbers here -> negative coefficients in the SDF). GUESSES, sized so:
