@@ -33,9 +33,11 @@ gated on FrameBuffer.has_clients, so with no browser attached it decodes nothing
 and encodes no JPEG. That is the same optimisation buoy_detector uses, and the
 same reason its health line reads ~0 fps with viewers=0.
 
-THE LIDAR NOW GATES ARMING, and that is worth knowing before it surprises anyone
-on a dock. With PRX1_TYPE=2 the autopilot expects a MAVLink proximity source and
-refuses to arm without one:
+THE LIDAR GATES ARMING ONLY IF THE AUTOPILOT HAS PRX1_TYPE=2 (the baseline,
+params/working_crusader.params:544, is 0, where it does not; the live value is
+unverified, check it with tools/scripts/param_guard.py). It is worth knowing before
+it surprises anyone on a dock. With PRX1_TYPE=2 the autopilot expects a MAVLink
+proximity source and refuses to arm without one:
 
     PreArm: PRX1: No Data
 

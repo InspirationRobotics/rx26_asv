@@ -38,6 +38,10 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/PumpState.msg"
   "msg/WallRange.msg"
   "msg/GuidedHeadingSpeed.msg"
+  # Nav2 avoidance: the known-hazard set bt_runner publishes for the costmap's
+  # HazardLayer (crusader_nav_layers). Hazard must precede HazardArray.
+  "msg/Hazard.msg"
+  "msg/HazardArray.msg"
   # Actions. Same rule as above: a file not listed here is silently not
   # generated, and the import fails at node start, on the boat.
   "action/SafePassage.action"

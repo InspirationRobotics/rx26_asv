@@ -1,0 +1,7 @@
+<class_libraries>
+  <library path="crusader_nav_layers">
+    <class type="crusader_nav_layers::HazardLayer" base_class_type="nav2_costmap_2d::Layer">
+      <description>Known hazards (HazardArray) drawn LETHAL at their physical size plus keepout.</description>
+    </class>
+  </library>
+</class_libraries>

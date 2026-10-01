@@ -1,0 +1,138 @@
+# Crusader Nav2: planner_server + global costmap only. No bt_navigator, no controller.
+# This spec is docs/nav2_avoidance_spec.md. Frames: docs section 2. Never set use_sim_time
+# (the sim runs on wall clock).
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 2.0          # warn if one plan takes >0.5 s
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "nav2_smac_planner/SmacPlanner2D"
+      tolerance: 0.5                         # m; only used when the exact goal is unreachable
+      downsample_costmap: false
+      downsampling_factor: 1
+      allow_unknown: true                    # open water is never "seen free" by a LiDAR
+      max_iterations: 1000000
+      max_on_approach_iterations: 1000
+      max_planning_time: 0.5                 # s, search + smoothing. BT times out at 1.0
+      cost_travel_multiplier: 2.0            # Humble code default 1.0; docs advise 2.0
+      use_final_approach_orientation: false
+      smoother:
+        max_iterations: 1000
+        w_smooth: 0.3
+        w_data: 0.2
+        tolerance: 1.0e-10
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      global_frame: map
+      robot_base_frame: base_footprint
+      rolling_window: true
+      width: 80                              # m (int). BT clips goals to 35 m
+      height: 80
+      resolution: 0.1
+      # 0.82 * cos(pi/16) = 0.804 m INSCRIBED radius: Nav2 makes the circle a
+      # 16-gon (footprint.cpp makeFootprintFromRadius / calculateMinAndMaxDistances).
+      # This IS the "0.8 m hard" clearance from an obstacle surface. check_config
+      # asserts it against bt_runner_node.nav_hard_m.
+      robot_radius: 0.82
+      footprint_padding: 0.0
+      track_unknown_space: false
+      update_frequency: 5.0
+      publish_frequency: 1.0
+      always_send_full_costmap: false
+      transform_tolerance: 0.5
+      plugins: ["hazard_layer", "stvl_layer", "inflation_layer"]
+      hazard_layer:
+        plugin: "crusader_nav_layers::HazardLayer"
+        enabled: true
+        topic: "/crsd/nav/hazards"
+        max_age_s: 5.0                       # bt_runner publishes at 2 Hz
+      stvl_layer:
+        plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
+        enabled: true
+        voxel_decay: 30.0                    # s, linear: OUT-OF-VIEW memory
+        decay_model: 0
+        voxel_size: 0.1                      # = resolution
+        track_unknown_space: false
+        max_obstacle_height: 5.0
+        mark_threshold: 0
+        update_footprint_enabled: false      # never erase a real return near the hull
+        combination_method: 1                # max: never lowers HazardLayer's LETHAL
+        obstacle_range: 40.0
+        origin_z: 0.0
+        publish_voxel_map: false
+        transform_tolerance: 0.5
+        mapping_mode: false
+        map_save_duration: 60.0
+        observation_sources: lidar_mark lidar_clear
+        lidar_mark:
+          data_type: PointCloud2
+          topic: /crsd/nav/obstacle_cloud
+          marking: true
+          clearing: false
+          min_obstacle_height: 0.0           # cloud is already water-gated upstream
+          max_obstacle_height: 5.0
+          expected_update_rate: 1.0          # s; silence -> costmap not current -> no plans
+          observation_persistence: 0.0
+          inf_is_valid: false
+          clear_after_reading: true
+          filter: "passthrough"              # downsampled upstream
+          voxel_min_points: 0
+        lidar_clear:
+          enabled: true
+          data_type: PointCloud2
+          topic: /crsd/nav/obstacle_cloud
+          marking: false
+          clearing: true
+          model_type: 1                      # 3D lidar (hourglass frustum)
+          horizontal_fov_angle: 3.14         # rad: the 180 deg forward sector
+          vertical_fov_angle: 1.82           # rad: +/-52 deg covers the inverted MID360's -52..+7
+          vertical_fov_padding: 0.3          # m
+          min_z: 0.5                         # m, = lidar_cluster_node r_min
+          max_z: 20.0                        # m: in-view decay only where a 0.3 m buoy is reliably seen
+          decay_acceleration: 5.0            # 1/s^2: in-view & unseen -> gone in ~3 s
+          # 0 = no staleness check on THIS source. Measured 2026-10-01 (crsd-sim:nav2, STVL 2.3.4):
+          # with 1.0 here this buffer is never marked updated, warns "buffer updated in Ns" at 5 Hz
+          # and the costmap stays non-current forever, so every plan hangs. lidar_mark carries the
+          # same topic and DOES update, so silence is still caught there.
+          expected_update_rate: 0.0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        enabled: true
+        inflation_radius: 2.0                # "2 m soft", from the obstacle surface
+        cost_scaling_factor: 2.0             # cost 208@0.9 m, 170@1.0, 114@1.2, 63@1.5, 23@2.0
+        inflate_unknown: false
+        inflate_around_unknown: false
+
+lifecycle_manager_crsd_nav:
+  ros__parameters:
+    autostart: true
+    node_names: ["planner_server"]
+    bond_timeout: 4.0
+    attempt_respawn_reconnection: true
+    bond_respawn_max_duration: 10.0
+
+# FALLBACK if STVL misbehaves: replace "stvl_layer" in `plugins` with "obstacle_layer" and
+# add the block below under global_costmap.global_costmap.ros__parameters. VERIFIED in the
+# sim 2026-10-01: with this block a LiDAR-sized cluster is marked LETHAL at the right lat/lon
+# (costmap_probe). Marks then never decay; only the BT's blocked-recovery clear removes them.
+# ObstacleLayer per-source max_obstacle_height defaults to 0.0 [H] - it MUST be set.
+# NOT VERIFIED for STVL in the same rig: the same cloud produced no lethal cells under
+# stvl_layer (cause not found), so run acceptance test N3 (spec 10.1) before trusting it.
+#      obstacle_layer:
+#        plugin: "nav2_costmap_2d::ObstacleLayer"
+#        enabled: true
+#        footprint_clearing_enabled: false
+#        combination_method: 1
+#        observation_sources: lidar_mark
+#        lidar_mark:
+#          topic: /crsd/nav/obstacle_cloud
+#          data_type: PointCloud2
+#          marking: true
+#          clearing: false
+#          min_obstacle_height: 0.0
+#          max_obstacle_height: 5.0
+#          obstacle_max_range: 40.0
+#          observation_persistence: 0.0
+#          expected_update_rate: 1.0

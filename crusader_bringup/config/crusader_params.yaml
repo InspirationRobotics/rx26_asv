@@ -392,6 +392,32 @@ lidar_cluster_node:
     pose_timeout_s: 1.0                    # [DYN] stale -> single sweep, no
                                            #       accumulation (cannot compensate)
     health_period_s: 5.0                   # [DYN] JSON stats publish period
+    # -- navigation cloud: the Nav2 costmap's LiDAR input (docs/nav2_avoidance_spec.md
+    #    section 6). Every point in a cluster of >= min_points, levelled and voxel-
+    #    thinned, INCLUDING clusters over max_extent_m: a dock, a platform or a
+    #    shoreline is not a trackable object but a hull still must not hit it. --
+    nav_cloud_enable: true                 # [DYN] THE POOL SWITCH. false publishes
+                                           #       EMPTY clouds: the costmap stays
+                                           #       current and marks nothing.
+                                           #       POOL / INDOOR PROFILE: set false
+                                           #       together with r_max 10 above.
+                                           #       Pool walls are real returns, so
+                                           #       with the cloud on they are marked
+                                           #       lethal and goals near them become
+                                           #       unreachable (the study's risk).
+                                           #       ros2 param set /lidar_cluster_node
+                                           #           nav_cloud_enable false
+                                           #       (or the GCS Tuning tab). Open
+                                           #       water: true, r_max 25-40.
+    nav_cloud_topic: "/crsd/nav/obstacle_cloud"  # [RO] PointCloud2 out, sensor-data QoS
+    nav_cloud_frame: "base_footprint"      # [RO] = nav_frames_node.base_frame: levelled
+                                           #      REP-103 axes, origin at the hull-
+                                           #      bottom datum. Stamped with RECEIPT
+                                           #      time, and WITHHELD while
+                                           #      attitude is stale (costmap goes
+                                           #      non-current, planned legs hold)
+    nav_cloud_leaf_m: 0.10                 # [DYN] voxel edge, one centroid each;
+                                           #       0.05-0.5. Costmap resolution is 0.1
 
 # ---- World model: target_tracker — detections + pose -> earth-anchored targets ----
 # Consumes oak/detections (camera_link), crsd/lidar_clusters (base_link),
@@ -410,7 +436,12 @@ lidar_cluster_node:
 # the angles stop being an assumption. It is [RO] for the LiDAR's reason —
 # retuning the mounting geometry live silently invalidates every target already
 # on the map.
-# proximity_bridge feeds the AUTOPILOT's avoidance, not ours. It is the missing
+# proximity_bridge feeds the AUTOPILOT's avoidance. It is OPTIONAL, and it is NOT the
+# mechanism: the tree's planner is (Nav2 planner_server + costmap, called from
+# bt_runner; docs/nav2_avoidance_spec.md). ArduPilot's simple avoidance is at most a
+# backstop and is off in the baseline (PRX1_TYPE 0, working_crusader.params:544).
+# DO NOT turn it on to "help" the planner: with AVOID_MARGIN 2.0 ArduRover STOPS the
+# boat inside the planner's 0.8-2 m band and in the Task 3 berth. It is the missing
 # half of AVOID_ENABLE=3 / AVOID_MARGIN=2.0, which have been set with PRX1_TYPE=0
 # (no proximity source) — avoidance switched on with nothing feeding it.
 #
@@ -454,6 +485,34 @@ proximity_bridge:
                                            #      Repeating the last map claims
                                            #      the world still looks like that
     health_period_s: 5.0                   # [RO]
+
+# ---- Nav2 avoidance: nav_frames_node — the datum, and TF map -> base_footprint ----
+# docs/nav2_avoidance_spec.md section 2. The TF frame `map`, bt_runner's east/north
+# frame and every HazardArray coordinate are ONE equirectangular ENU plane centred
+# on one datum, and this node is the only place the datum is chosen. It publishes
+# /crsd/datum (latched) and bt_runner adopts it. Started by crusader_nav's
+# nav.launch.py, by hand, before bt_runner; NOT in core.launch.py.
+#
+# datum_source "param" is restart-stable: use it in competition and in the sim
+# (nav.launch.py: datum_source:=param datum_lat:=.. datum_lon:=..). "first_fix"
+# pins the first /crsd/pose fix and is NOT respawned, because a restart would
+# pick a different datum and shift the map under a running bt_runner. Which one
+# competition day uses is open decision D1 in the spec.
+nav_frames_node:
+  ros__parameters:
+    datum_source: "first_fix"              # [RO] "param" or "first_fix"
+    datum_lat: 0.0                         # [RO] used when datum_source is "param".
+                                           #      (0, 0) is a CONFIG ERROR there: the
+                                           #      default is not a datum
+    datum_lon: 0.0                         # [RO]
+    pose_topic: "/crsd/pose"               # [RO] LatLonHead in
+    datum_topic: "/crsd/datum"             # [RO] = bt_runner_node.nav_datum_topic
+    map_frame: "map"                       # [RO] = nav2 global_costmap global_frame
+    base_frame: "base_footprint"           # [RO] = nav2 robot_base_frame and
+                                           #      lidar_cluster_node.nav_cloud_frame.
+                                           #      Levelled base_link at the hull-bottom
+                                           #      datum (REP-120 note in the README)
+    health_period_s: 1.0                   # [DYN] /crsd/nav/frames_health JSON
 
 target_tracker:
   ros__parameters:
@@ -630,6 +689,15 @@ ground_station:
                                            #      window is ~0.5 s and a 1 s
                                            #      budget would flap.
     obstacle_timeout_s: 2.0                # [RO] proximity_bridge sends at 5 Hz
+    nav_leg_topic: "/crsd/nav/leg_status"  # [RO] = bt_runner's leg status (String,
+                                           #      JSON, docs/nav2_avoidance_spec.md
+                                           #      4.3). The planned path, carrot and
+                                           #      goal are drawn on the map from it.
+    nav_leg_timeout_s: 2.0                 # [DYN] stale -> the path is BLANK, never
+                                           #       the last one. bt_runner publishes
+                                           #       at up to 2 Hz while a leg runs and
+                                           #       once per change when idle, so an
+                                           #       idle boat's path disappears here.
     tools_dir: "/root/robotx_ws/src/rx26_asv/tools"   # [RO] where the viewer
                                            #      scripts live INSIDE the asv
                                            #      container. Wrong path = the

@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>crusader_nav</name>
+  <version>0.5.0</version>
+  <description>
+    Nav2 obstacle avoidance for Crusader: nav_frames_node owns the datum and the
+    map to base_footprint transform, nav.launch.py starts planner_server (global
+    costmap, SmacPlanner2D) under a lifecycle manager, and costmap_probe prints
+    what the costmap thinks is lethal. Pure Python; the Nav2 packages are
+    runtime dependencies only, so a workspace without them still builds. Spec:
+    docs/nav2_avoidance_spec.md.
+  </description>
+  <maintainer email="brandont3927@gmail.com">Team Inspiration</maintainer>
+  <license>MIT</license>
+  <url type="repository">https://github.com/InspirationRobotics/rx26_asv</url>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2_ros_py</depend>
+  <depend>crusader_msgs</depend>
+  <depend>crusader_common</depend>
+  <exec_depend>crusader_nav_layers</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>map_msgs</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <!-- Nav2. Python builds do not look these up, so an image without them still
+       builds; they are needed only to RUN nav.launch.py. -->
+  <exec_depend>nav2_planner</exec_depend>
+  <exec_depend>nav2_smac_planner</exec_depend>
+  <exec_depend>nav2_costmap_2d</exec_depend>
+  <exec_depend>nav2_lifecycle_manager</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
+  <exec_depend>spatio_temporal_voxel_layer</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

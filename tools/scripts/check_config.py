@@ -30,8 +30,16 @@ What it guards, and why each one is here:
    reads a QGC dump as ~900 copies of a parameter called "1". param_guard would
    then diff that empty-in-practice map against the live vehicle and report a
    clean PASS — a preflight gate that cannot fail is worse than no gate.
+
+4. The Nav2 avoidance stack's numbers must agree across the three files that each
+   hold one half of them (crusader_params.yaml, crusader_nav's nav2_params.yaml,
+   the autopilot baseline). None of these fail loudly when they drift: the BT
+   plans a 0.8 m clearance the costmap does not enforce, or publishes hazards on
+   a topic the layer is not listening to, and the boat looks healthy throughout.
+   See check_nav.
 """
 import importlib.util
+import math
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -40,6 +48,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 PARAMS_YAML = REPO / "crusader_bringup" / "config" / "crusader_params.yaml"
 PARAMS_BASELINE = REPO / "params" / "working_crusader.params"
+NAV2_PARAMS = REPO / "crusader_nav" / "config" / "nav2_params.yaml"
 
 # Every node that reads crusader_params.yaml. A section for a node that no longer
 # exists is a parameter set nobody reviews, and it reads as a capability the boat
@@ -66,9 +75,17 @@ CONFIG_DRIVEN_NODES = set("""
     safe_passage_server
     bt_runner_node
     rxl_link_node
+    nav_frames_node
     wall_range_node
     squirt_cal
 """.split())
+
+# Packages that are deliberately NOT in crusader_bringup's closure: they run on the
+# laptop (in WSL) and must never be built on the boat. Without this the
+# reachability check below reports them as orphans, which reads as "silently not
+# built" and is exactly what is wanted for these. crusader_sim says so itself:
+# "Sim only: nothing here runs on the boat".
+SIM_ONLY_PACKAGES = {"crusader_sim"}
 
 # Topic names that two sections must agree on, as (producer, param) ->
 # (consumer, param). A producer and a consumer that disagree about a topic name
@@ -95,6 +112,12 @@ TOPIC_PAIRS = (
     # squirt_cal logs every shot against the wall range; listening to the wrong
     # topic it would log "no range" forever while the node publishes fine.
     (("wall_range_node", "wall_topic"), ("squirt_cal", "wall_range_topic")),
+    # Nav2 avoidance (docs/nav2_avoidance_spec.md). bt_runner draws the leg on
+    # the ground station through this topic; a mismatch is a blank map, not an
+    # error. The datum pair is the frame: bt_runner adopting the wrong topic
+    # waits for a datum nobody sends, and holds every planned leg.
+    (("bt_runner_node", "nav_leg_topic"), ("ground_station", "nav_leg_topic")),
+    (("nav_frames_node", "datum_topic"), ("bt_runner_node", "nav_datum_topic")),
 )
 
 # Ports that must stay distinct: two servers cannot bind one socket, and the
@@ -508,6 +531,175 @@ def check_pump():
                                                else "no pump output yet (G7)"))
 
 
+# --------------------------------------------------------- nav2 avoidance
+
+def _baseline_params():
+    """The saved autopilot baseline as {name: value}, or {} when it is absent
+    (check_param_baseline reports that on its own)."""
+    if not PARAMS_BASELINE.exists():
+        return {}
+    spec = importlib.util.spec_from_file_location(
+        "param_guard", Path(__file__).parent / "param_guard.py")
+    pg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pg)
+    return pg.load_param_file(PARAMS_BASELINE)
+
+
+def _ensure(check, problem, detail=""):
+    """Report one check: `problem` is the failure text, or empty when it holds."""
+    if problem:
+        fail(check, problem)
+    else:
+        ok(check, detail)
+
+
+def _same(check, left, right, why):
+    """One equality cross-check. `left` and `right` are (label, value) pairs."""
+    (ln, lv), (rn, rv) = left, right
+    _ensure(check, lv != rv and f"{ln} = {lv!r} but {rn} = {rv!r} — {why}",
+            f"{ln} = {rn} = {lv!r}")
+
+
+def check_nav():
+    """Nav2 avoidance cross-checks (docs/nav2_avoidance_spec.md sections 3.5, 5.8, 6, 10).
+
+    Reads crusader_params.yaml, crusader_nav/config/nav2_params.yaml and the
+    autopilot baseline. A key one of them lacks is a FAILURE, like every other
+    cross-check here: a producer and a consumer that cannot be compared are not
+    known to agree.
+    """
+    import yaml
+    try:
+        cfg = yaml.safe_load(PARAMS_YAML.read_text(encoding="utf-8"))
+        nav2_text = NAV2_PARAMS.read_text(encoding="utf-8")
+        nav2 = yaml.safe_load(nav2_text)
+    except (OSError, yaml.YAMLError) as e:
+        fail("nav2 params readable", f"{NAV2_PARAMS}: {e}")
+        return
+
+    # planner_server is launched with this file, so rcl parses it: the same
+    # no-anchors rule as crusader_params.yaml. use_sim_time must not appear: the
+    # sim runs on wall clock, and a stray true here stops every plan waiting for
+    # a /clock that nothing publishes.
+    anchored = [n for n, line in enumerate(nav2_text.splitlines(), 1)
+                if "&" in line.split("#", 1)[0] or "*" in line.split("#", 1)[0]]
+    uses_sim_time = any("use_sim_time" in line.split("#", 1)[0]
+                        for line in nav2_text.splitlines())
+    _ensure("nav2 params: no anchors/aliases, no use_sim_time",
+            (anchored and f"anchors or aliases on lines {anchored}")
+            or (uses_sim_time and "use_sim_time is set: the sim runs on wall clock"))
+
+    try:
+        cm = nav2["global_costmap"]["global_costmap"]["ros__parameters"]
+        planner = nav2["planner_server"]["ros__parameters"]
+        lifecycle = nav2["lifecycle_manager_crsd_nav"]["ros__parameters"]
+        hazard_topic = cm["hazard_layer"]["topic"]
+        bt = cfg["bt_runner_node"]["ros__parameters"]
+        frames = cfg["nav_frames_node"]["ros__parameters"]
+        lidar = cfg["lidar_cluster_node"]["ros__parameters"]
+        inscribed = cm["robot_radius"] * math.cos(math.pi / 16)
+        half_window = min(cm["width"], cm["height"]) / 2.0
+        hard, soft, clip = bt["nav_hard_m"], bt["nav_soft_m"], bt["nav_clip_radius_m"]
+    except (KeyError, TypeError) as e:
+        fail("nav2 cross-checks", f"missing key {e}")
+        return
+
+    # Clearance. Nav2 builds a radius footprint as a 16-gon, so the circle it
+    # really enforces has radius r*cos(pi/16), not r.
+    _ensure("nav_hard_m within the inscribed radius",
+            hard > inscribed + 1e-9 and
+            f"bt_runner_node.nav_hard_m {hard} > robot_radius {cm['robot_radius']} * "
+            f"cos(pi/16) = {inscribed:.4f}: the BT promises a clearance the costmap "
+            "does not enforce", f"{hard} <= {inscribed:.4f}")
+    _same("nav_soft_m is the inflation radius",
+          ("bt_runner_node.nav_soft_m", soft),
+          ("inflation_layer.inflation_radius", cm["inflation_layer"]["inflation_radius"]),
+          "the BT soft band and the planner soft band disagree")
+    # Smac is not bounds-checked for a goal off the window, so the BT clips
+    # goals inside it, with 5 m kept for the inflation band and the carrot.
+    _ensure("nav_clip_radius_m inside the window",
+            clip > half_window - 5.0 and
+            f"{clip} > half the costmap ({half_window}) - 5: a goal can land off the "
+            "window, where SmacPlanner2D behaviour is undefined",
+            f"{clip} <= {half_window} - 5")
+
+    # Topics and frames: each pair silently does nothing when it disagrees.
+    _same("hazard topic bt_runner -> HazardLayer",
+          ("bt_runner_node.nav_hazards_topic", bt["nav_hazards_topic"]),
+          ("hazard_layer.topic", hazard_topic),
+          "the layer subscribes to a topic nobody publishes, the costmap goes "
+          "non-current and every plan hangs")
+    for src in ("lidar_mark", "lidar_clear"):
+        _same(f"obstacle cloud lidar_cluster_node -> stvl {src}",
+              ("lidar_cluster_node.nav_cloud_topic", lidar["nav_cloud_topic"]),
+              (f"{src}.topic", cm["stvl_layer"][src]["topic"]),
+              "STVL listens to a topic nobody publishes")
+    _same("nav_cloud_frame is the TF child frame",
+          ("lidar_cluster_node.nav_cloud_frame", lidar["nav_cloud_frame"]),
+          ("nav_frames_node.base_frame", frames["base_frame"]),
+          "the cloud is stamped in a frame TF does not publish, so STVL drops it")
+    _same("costmap robot_base_frame is the TF child frame",
+          ("global_costmap.robot_base_frame", cm["robot_base_frame"]),
+          ("nav_frames_node.base_frame", frames["base_frame"]),
+          "planner_server never gets a robot pose and stays in configuring")
+    _same("costmap global_frame is the TF parent frame",
+          ("global_costmap.global_frame", cm["global_frame"]),
+          ("nav_frames_node.map_frame", frames["map_frame"]),
+          "the plan and the hazards are in different frames")
+    _same("hazard frame is the costmap frame",
+          ("bt_runner_node.nav_map_frame", bt["nav_map_frame"]),
+          ("global_costmap.global_frame", cm["global_frame"]),
+          "HazardLayer refuses a HazardArray in any other frame")
+    _same("STVL voxel size is the costmap resolution",
+          ("stvl_layer.voxel_size", cm["stvl_layer"]["voxel_size"]),
+          ("global_costmap.resolution", cm["resolution"]), "a voxel is a cell")
+
+    # bt_runner calls the names Nav2 gives its servers, which come from the node
+    # names nav.launch.py sets. A different one is a planner that "is not
+    # available" forever.
+    nav2_names = {"nav_planner_action": "/compute_path_to_pose",
+                  "nav_valid_service": "/is_path_valid",
+                  "nav_clear_service": "/global_costmap/clear_entirely_global_costmap"}
+    wrong = {k: (bt.get(k), v) for k, v in nav2_names.items() if bt.get(k) != v}
+    _ensure("bt_runner_node planner endpoints", wrong and f"(have, want) {wrong}",
+            "match planner_server")
+    _ensure("nav_planner_id is a configured plugin",
+            bt["nav_planner_id"] not in planner["planner_plugins"] and
+            f"{bt['nav_planner_id']!r} not in planner_plugins {planner['planner_plugins']}",
+            bt["nav_planner_id"])
+    _ensure("lifecycle manager owns planner_server",
+            "planner_server" not in lifecycle["node_names"] and
+            f"node_names {lifecycle['node_names']}: it would never leave unconfigured")
+
+    # A dead bt_runner must make the costmap non-current: the layer max age has
+    # to cover at least two publishes, or a healthy one flaps it.
+    period = 1.0 / bt["nav_hazard_rate_hz"]
+    max_age = cm["hazard_layer"]["max_age_s"]
+    _ensure("hazard max_age_s covers two publishes",
+            max_age < 2.0 * period and
+            f"max_age_s {max_age} < 2 x {period:.2f} s (1 / nav_hazard_rate_hz)",
+            f"{max_age} s vs {period:.2f} s period")
+
+    # The autopilot idea of "reached": the carrot logic is built around it.
+    wp_radius = _baseline_params().get("WP_RADIUS")
+    if wp_radius is None:
+        fail("nav_wp_radius_m", "WP_RADIUS missing from the baseline")
+    else:
+        _same("nav_wp_radius_m is the autopilot WP_RADIUS",
+              ("bt_runner_node.nav_wp_radius_m", float(bt["nav_wp_radius_m"])),
+              ("baseline WP_RADIUS", float(wp_radius)),
+              "the carrot arrival test disagrees with the autopilot")
+
+    # The datum: a 'param' datum of (0, 0) is the default, not a datum.
+    source, dlat, dlon = frames["datum_source"], frames["datum_lat"], frames["datum_lon"]
+    _ensure("nav_frames_node datum",
+            (source not in ("param", "first_fix") and
+             f"datum_source {source!r} is not param or first_fix")
+            or (source == "param" and (dlat, dlon) == (0.0, 0.0) and
+                "datum_source is 'param' but the datum is (0, 0)"),
+            f"source {source}")
+
+
 # ------------------------------------------------------------ param baseline
 
 def check_param_baseline():
@@ -603,7 +795,7 @@ def check_packages():
         reachable.add(pkg)
         stack.extend(deps[pkg])
 
-    orphans = sorted(set(names) - reachable)
+    orphans = sorted(set(names) - reachable - SIM_ONLY_PACKAGES)
     if orphans:
         fail("every package is reachable from crusader_bringup",
              f"{orphans} — nothing depends on it, so it is silently NOT BUILT "
@@ -668,6 +860,7 @@ def main():
     print(f"repo: {REPO}")
     check_params_yaml()
     check_pump()
+    check_nav()
     check_packages()
     check_interfaces()
     check_param_baseline()

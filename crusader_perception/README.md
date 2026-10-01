@@ -7,7 +7,7 @@ and everything that turns its frames into positioned objects.
 |---|---|---|
 | `oakd_publisher` | OAK-D LR (depthai) | `oak/rgb` (`bgr8`), `oak/depth` (`16UC1`, mm, aligned) |
 | `buoy_detector` | OAK-D LR + TensorRT engine | `oak/detections` (`crusader_msgs/Detection3DArray`, `camera_link`) |
-| `lidar_cluster_node` | `/livox/lidar` + `/crsd/attitude` + `/crsd/pose` | `crsd/lidar_clusters` (`crusader_msgs/Cluster3DArray`, `base_link`) |
+| `lidar_cluster_node` | `/livox/lidar` + `/crsd/attitude` + `/crsd/pose` | `crsd/lidar_clusters` (`crusader_msgs/Cluster3DArray`, `base_link`); `/crsd/nav/obstacle_cloud` (`sensor_msgs/PointCloud2`, `base_footprint`) |
 
 Code that is device-coupled, model-coupled, frame-coupled or calibration-coupled goes
 here. Anything that could be checked with made-up numbers and no camera belongs in
@@ -366,10 +366,56 @@ of returns are water or ground. The `water_z` gate therefore does real work, and
 **`water_z` is currently a placeholder of 0.10 m** — measure it floating (G2 step 4) before
 trusting the filter.
 
+### The navigation cloud: `/crsd/nav/obstacle_cloud`
+
+The Nav2 costmap's LiDAR input (`docs/nav2_avoidance_spec.md` section 6). The same window that
+is clustered also yields this cloud, from `lidar_cluster_core.process_body_nav`:
+
+- **What is in it.** Every point whose DBSCAN cluster has at least `min_points` members,
+  **whatever its extent**. `max_extent_m` decides what is worth *tracking*; it has no say in
+  what is worth *not hitting*, so a dock, a platform or a shoreline is here although it is
+  not in `crsd/lidar_clusters`. DBSCAN noise and the water, sky and range gates still apply.
+- **Frame.** `base_footprint`: the points are **levelled** (roll and pitch removed, yaw kept),
+  REP-103 axes, origin at the hull-bottom datum that `lidar_x/y/z` are measured from, so the
+  waterline is at z = +0.24. This is *not* the body frame the clusters use: a costmap wants
+  true vertical.
+- **Thinning.** One centroid per `nav_cloud_leaf_m` voxel (0.10 m), `float32` x/y/z, `is_dense`.
+- **Rate and QoS.** One cloud per processed window (10 Hz), **also when empty**, sensor-data
+  QoS (best effort, volatile, depth 5). The stamp is **receipt time**, not the Livox driver's:
+  TF is stamped on the host clock and the driver's clock is not proven to be it.
+- **Withheld while `/crsd/attitude` is stale.** An unlevelled water gate is a guess, and an
+  empty cloud would claim "all clear". Silence makes the costmap go non-current, which is what
+  makes planned legs hold. The node logs `attitude stale: nav cloud withheld; ...` at most every
+  10 s. Clustering carries on (unlevelled), as before.
+
+| Param | Default | | |
+|---|---|---|---|
+| `nav_cloud_enable` | `true` | DYN | **The pool switch.** `false` publishes **empty** clouds: the costmap stays current and marks nothing |
+| `nav_cloud_topic` | `/crsd/nav/obstacle_cloud` | RO | |
+| `nav_cloud_frame` | `base_footprint` | RO | must equal `nav_frames_node.base_frame` |
+| `nav_cloud_leaf_m` | `0.10` | DYN, 0.05-0.5 | |
+
+**Pool and indoor testing:** `ros2 param set /lidar_cluster_node nav_cloud_enable false` (or
+the GCS Tuning tab), together with `r_max 10`. Pool walls are real returns; with the cloud on
+they are marked lethal and goals near them become unreachable.
+
+**Checking it in the sim** (inside `crsd-sim`, with the sim rig up):
+
+| Check | How | Expect |
+|---|---|---|
+| Rate and frame | `ros2 topic hz /crsd/nav/obstacle_cloud`; `ros2 topic echo --once --field header.frame_id /crsd/nav/obstacle_cloud` | ~10 Hz; `base_footprint` |
+| Position | a buoy placed 8 m dead ahead; read the cloud points near it (`ros2 topic echo --once /crsd/nav/obstacle_cloud`, decode x/y/z, or look at `n_nav` in `crsd/lidar_cluster_health`) | x = 8.0 +/- 0.3, y ~ 0, z above 0.39 |
+| Attitude loss | stop whatever feeds `/crsd/attitude` (telemetry_bridge or the sim's bridge) | the cloud topic goes silent after `attitude_timeout_s` (1 s) and the WARN appears |
+| Pool switch | `ros2 param set /lidar_cluster_node nav_cloud_enable false` | still ~10 Hz, every cloud has `width: 0` |
+
+`test/test_lidar_nav_cloud.py` covers the same four against synthetic upside-down-frame clouds
+(core tests run anywhere; the node tests skip without rclpy and a built `crusader_msgs`).
+
 ### Health
 
 `crsd/lidar_cluster_health` carries JSON: how many points each stage dropped, sweeps in the
-window, whether the cloud was compensated and levelled. A stage silently eating the whole
+window, whether the cloud was compensated and levelled, `n_nav` (points in the navigation
+cloud) and `nav_cloud` (`published`, `empty` or `withheld`). A stage silently eating the whole
 cloud is indistinguishable from a dead sensor downstream, so the node also logs loudly when
 it produces zero clusters from a non-empty cloud.
 
@@ -389,4 +435,6 @@ lesson about the MID360's 360° field of view voting a shoreline over a buoy.
 | `frame_id` | anything doing TF lookups against the camera |
 | topic names / QoS | every subscriber — a QoS change is silent, not an error |
 | the pipeline (sync, alignment, `setOutputSize`) | re-verify `depth[v, u]` against a known-distance target before trusting any range downstream |
+| `nav_cloud_frame` / `nav_cloud_topic` | `nav_frames_node.base_frame` and STVL's `observation_sources` in `nav2_params.yaml` (`check_config.py` pins the frame) |
+| `max_extent_m`, `min_points`, `water_margin` | the nav cloud changes with them too: `n_nav` in `crsd/lidar_cluster_health` |
 | the `camera_link` axis convention | `crusader_common.geo.body_to_world_ypr`, and anything mapping detections into the world |

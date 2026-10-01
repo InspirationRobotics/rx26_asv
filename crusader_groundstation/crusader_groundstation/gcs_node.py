@@ -54,6 +54,7 @@ from collections import deque
 from rclpy.node import Node
 
 from rcl_interfaces.msg import Log
+from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 from crusader_msgs.msg import (Attitude, Cluster3DArray, FcuStatus,
@@ -96,6 +97,12 @@ PARAM_SPEC = {
                                        "receives it"),
     "clusters_timeout_s": dict(read_only=True, lo=0.2, hi=30.0),
     "obstacle_timeout_s": dict(read_only=True, lo=0.2, hi=30.0),
+    "nav_leg_topic": dict(read_only=True,
+                          description="bt_runner's planned-leg status (String "
+                                      "JSON) in, for the path on the map"),
+    "nav_leg_timeout_s": dict(read_only=False, lo=0.5, hi=30.0,
+                              description="a leg status older than this is "
+                                          "blank, never the last path"),
     "tools_dir": dict(read_only=True,
                       description="where tools/*.py live, for the viewers"),
     "power_socket": dict(read_only=True,
@@ -169,6 +176,9 @@ class GroundStation(Node):
         # sixty clusters into every /state for every client is what costs.
         self._clusters = StreamCache(p["clusters_timeout_s"])
         self._obstacles = StreamCache(p["obstacle_timeout_s"])
+        # bt_runner's planned leg (docs/nav2_avoidance_spec.md 4.3), parsed once on
+        # arrival. It is not a layer: a few hundred bytes, in every /state.
+        self._nav_leg = StreamCache(p["nav_leg_timeout_s"])
 
         self._origin = None
         self._trail = deque(maxlen=int(p["trail_length"]) or 1)
@@ -233,6 +243,8 @@ class GroundStation(Node):
                                  self._on_clusters, 10)
         self.create_subscription(ObstacleDistance, p["obstacle_topic"],
                                  self._on_obstacles, 10)
+        self.create_subscription(String, p["nav_leg_topic"],
+                                 self._on_nav_leg, 10)
 
         self.server = GcsServer(render_page(p["poll_period_s"] * 1000.0),
                                 self._snapshot, self._action,
@@ -268,6 +280,8 @@ class GroundStation(Node):
         if "trail_length" in changes:
             self._trail = deque(self._trail,
                                 maxlen=int(changes["trail_length"]) or 1)
+        if "nav_leg_timeout_s" in changes:
+            self._nav_leg.timeout_s = float(changes["nav_leg_timeout_s"])
         self.p.update(changes)
 
     # ---------- inputs ----------
@@ -299,6 +313,19 @@ class GroundStation(Node):
 
     def _on_obstacles(self, msg: ObstacleDistance):
         self._obstacles.set(msg, time.monotonic())
+
+    def _on_nav_leg(self, msg: String):
+        try:
+            leg = json.loads(msg.data)
+        except ValueError:
+            leg = None
+        if not isinstance(leg, dict):
+            # a line that is not a JSON object is dropped; the cache then ages
+            # out to a blank rather than keep showing the previous leg
+            self.get_logger().warn("nav leg status is not a JSON object; ignored",
+                                   throttle_duration_sec=10.0)
+            return
+        self._nav_leg.set(leg, time.monotonic())
 
     def _scan_graph(self):
         """Which registry nodes are present in the ROS graph right now.
@@ -509,6 +536,7 @@ class GroundStation(Node):
                         "age": _round(self._targets.age(now)),
                         "items": self._target_items(targets)},
             "trail": [[round(x, 2), round(y, 2)] for x, y in self._trail],
+            "nav": self._nav_state(now),
             "nodes": {
                 "groups": [{"id": g, "label": lbl, "hint": hint}
                            for g, lbl, hint in reg.GROUPS],
@@ -664,6 +692,41 @@ class GroundStation(Node):
                                          "confirm the vehicle is disarmed")
         return {"available": ok, "reason": why, "locked": locked,
                 "lock_reason": lock_reason, "hostname": self._hostname}
+
+    def _xy(self, latlon):
+        """A [lat, lon] pair as [x, y] in the trail's frame, 2 dp. None when there
+        is no origin yet, or the pair is missing or not two finite numbers."""
+        try:
+            lat, lon = float(latlon[0]), float(latlon[1])
+        except (TypeError, ValueError, IndexError):
+            return None
+        if self._origin is None or not (math.isfinite(lat) and math.isfinite(lon)):
+            return None
+        x, y = geo.latlon_to_xy(lat, lon, self._origin)
+        return [round(x, 2), round(y, 2)]
+
+    def _nav_state(self, now):
+        """The planned leg for the map: path, carrot ("target") and goal in the
+        trail's own frame, so they sit where the trail does. A leg status that
+        has gone stale is a BLANK, never the last path: bt_runner publishes at
+        2 Hz while a leg runs, so silence means no leg or no bt_runner."""
+        leg = self._nav_leg.get(now)
+        out = {"ok": leg is not None, "age": _round(self._nav_leg.age(now)),
+               "state": None, "why": "", "blocked_s": None, "mode": None,
+               "path": [], "target": None, "goal": None}
+        if leg is None:
+            return out
+        try:
+            blocked = _round(float(leg["blocked_s"]), 1)
+        except (KeyError, TypeError, ValueError):
+            blocked = None
+        path = leg.get("path")
+        points = [self._xy(pt) for pt in (path if isinstance(path, list) else [])]
+        out.update(state=leg.get("state"), why=str(leg.get("why") or ""),
+                   blocked_s=blocked, mode=leg.get("mode"),
+                   path=[pt for pt in points if pt is not None],
+                   target=self._xy(leg.get("target")), goal=self._xy(leg.get("goal")))
+        return out
 
     def _target_items(self, msg):
         if msg is None or self._origin is None:

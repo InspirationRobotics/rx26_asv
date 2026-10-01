@@ -41,6 +41,14 @@
        for the same reason as the rest, because a package nothing depends on is
        silently not built. -->
   <exec_depend>crusader_link</exec_depend>
+  <!-- Nav2 obstacle avoidance (docs/nav2_avoidance_spec.md). Not in
+       core.launch.py: nav.launch.py is started by hand until it has run on the
+       water. Both build without Nav2 (the layer installs nothing and the
+       Python package only needs it to run), so the boat can take them before
+       its container is recreated. Listed for the same reason as the rest: a
+       package nothing depends on is silently not built. -->
+  <exec_depend>crusader_nav</exec_depend>
+  <exec_depend>crusader_nav_layers</exec_depend>
   <exec_depend>ros2launch</exec_depend>
 
   <export>

@@ -443,8 +443,8 @@ struct Fused
 ///
 /// A tracked contact that matches nothing in the plan is NOT a passage buoy. It
 /// goes to `obstacles` with Beacon::Unknown so it can never be chosen as one
-/// half of a gate. The tree does no avoidance anyway -- that is the autopilot's
-/// OA params -- so these exist for the report and the log.
+/// half of a gate. It is still an obstacle: obstacles become hazards for the
+/// planned legs (path::buildHazards) and the costmap.
 ///
 /// Association is GLOBAL greedy nearest-pair, not per-buoy nearest. Per-buoy
 /// lets one contact be claimed twice, which puts two gate buoys on the same

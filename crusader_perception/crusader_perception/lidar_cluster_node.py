@@ -7,6 +7,8 @@ Subscribes:
 Publishes:
   crsd/lidar_clusters       crusader_msgs/Cluster3DArray  (base_link, every window)
   crsd/lidar_cluster_health std_msgs/String (JSON)        — where the points went
+  /crsd/nav/obstacle_cloud  sensor_msgs/PointCloud2       (base_footprint, every
+                            window) — the Nav2 costmap's LiDAR input, see below
 
 All the geometry lives in lidar_cluster_core, which has no ROS imports and is
 exercised against invented clouds. This file is I/O and parameter plumbing only,
@@ -28,6 +30,19 @@ beats a denser one that is smeared, and silently accumulating uncompensated
 would make every cluster drift with speed in a way that looks like bad
 calibration.
 
+THE NAVIGATION CLOUD (docs/nav2_avoidance_spec.md section 6). The same window that
+is clustered also yields /crsd/nav/obstacle_cloud: every point that landed in a
+dense-enough cluster, LEVELLED, voxel-downsampled, in `base_footprint` (REP-103
+axes, no roll or pitch, origin at the hull-bottom datum). It is deliberately not
+the cluster list. max_extent_m throws away docks, platforms and shorelines as
+OBJECTS, and those are exactly what a hull must not hit. It is published
+whenever a window is processed, EMPTY when `nav_cloud_enable` is false (the pool
+switch: an empty cloud keeps the costmap current and marks nothing), and
+WITHHELD while /crsd/attitude is stale, because an unlevelled water gate is a
+guess and a costmap that goes non-current makes planned legs hold. Stamped with
+RECEIPT time, not the driver's: TF is stamped on the host clock and the Livox
+driver's clock is not proven to be it.
+
 WHY NOT IN core.launch.py. Nothing here has run on the boat yet. It also has no
 device of its own — it consumes the livox container's topic — so it is safe to
 start by hand alongside the core stack.
@@ -40,7 +55,7 @@ import numpy as np
 
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import PointCloud2, PointField
 from std_msgs.msg import String
 
 from crusader_msgs.msg import Attitude, Cluster3D, Cluster3DArray, LatLonHead
@@ -93,6 +108,15 @@ PARAM_SPEC = {
     "attitude_timeout_s": dict(read_only=False, lo=0.05, hi=5.0),
     "pose_timeout_s": dict(read_only=False, lo=0.05, hi=5.0),
     "health_period_s": dict(read_only=False, lo=0.5, hi=60.0),
+    # --- navigation cloud (docs/nav2_avoidance_spec.md section 6) ---
+    "nav_cloud_enable": dict(read_only=False,
+                             description="False publishes EMPTY nav clouds: the "
+                             "costmap stays current and nothing is marked"),
+    "nav_cloud_topic": dict(read_only=True, description="PointCloud2 out"),
+    "nav_cloud_frame": dict(read_only=True, description="= nav_frames_node."
+                            "base_frame: levelled body axes, hull-bottom origin"),
+    "nav_cloud_leaf_m": dict(read_only=False, lo=0.05, hi=0.5,
+                             description="voxel edge of the nav cloud [m]"),
 }
 DYNAMIC_RANGES = {k: (v["lo"], v["hi"]) for k, v in PARAM_SPEC.items()
                   if not v["read_only"] and "lo" in v}
@@ -122,6 +146,23 @@ def pointcloud2_to_xyz(msg: PointCloud2) -> np.ndarray:
     return xyz[np.isfinite(xyz).all(axis=1)]
 
 
+def xyz_to_pointcloud2(pts: np.ndarray, frame_id: str, stamp) -> PointCloud2:
+    """(N,3) -> a packed little-endian float32 x/y/z PointCloud2. N = 0 is a
+    valid, empty cloud: that is what keeps a costmap's observation current."""
+    pts = np.ascontiguousarray(pts, dtype="<f4").reshape(-1, 3)
+    msg = PointCloud2()
+    msg.header.stamp = stamp
+    msg.header.frame_id = frame_id
+    msg.height, msg.width = 1, int(pts.shape[0])
+    msg.fields = [PointField(name=n, offset=4 * i, datatype=PointField.FLOAT32,
+                             count=1) for i, n in enumerate("xyz")]
+    msg.is_bigendian = False
+    msg.point_step = 12
+    msg.row_step = 12 * msg.width
+    msg.is_dense = True                     # no NaNs: the core never emits one
+    msg.data = pts.tobytes()
+    return msg
+
 
 class LidarClusterNode(Node):
 
@@ -133,6 +174,9 @@ class LidarClusterNode(Node):
         self.accumulate = int(p["accumulate_sweeps"])
         self.frame_id = p["frame_id"]
         self.health_period_s = p["health_period_s"]
+        self.nav_enable = bool(p["nav_cloud_enable"])
+        self.nav_leaf = p["nav_cloud_leaf_m"]
+        self.nav_frame = p["nav_cloud_frame"]
 
         self._att = StreamCache(p["attitude_timeout_s"])    # (roll, pitch)
         self._pose = StreamCache(p["pose_timeout_s"])       # (e, n, heading_rad)
@@ -144,6 +188,8 @@ class LidarClusterNode(Node):
         self.pub = self.create_publisher(Cluster3DArray, p["clusters_topic"], 10)
         self.health_pub = self.create_publisher(String,
                                                 "crsd/lidar_cluster_health", 10)
+        self.nav_pub = self.create_publisher(PointCloud2, p["nav_cloud_topic"],
+                                             qos_profile_sensor_data)
         self.create_subscription(PointCloud2, p["cloud_topic"], self._on_cloud,
                                  qos_profile_sensor_data)
         self.create_subscription(Attitude, "/crsd/attitude", self._on_att, 10)
@@ -156,7 +202,9 @@ class LidarClusterNode(Node):
             f"clustering {p['cloud_topic']} -> {p['clusters_topic']} "
             f"[sign_y={self.params.sign_y:+.0f} sign_z={self.params.sign_z:+.0f} "
             f"fov={self.params.fov_deg:.0f} r_min={self.params.r_min:.2f} "
-            f"accumulate={self.accumulate}]")
+            f"accumulate={self.accumulate}]; nav cloud -> {p['nav_cloud_topic']} "
+            f"[{self.nav_frame}, leaf={self.nav_leaf:.2f} m, "
+            f"{'on' if self.nav_enable else 'OFF: empty clouds'}]")
 
     # ---------- dynamic params ----------
 
@@ -167,6 +215,10 @@ class LidarClusterNode(Node):
                 del self._window[:-1]           # shrink now, do not wait it out
             elif k == "health_period_s":
                 self.health_period_s = v
+            elif k == "nav_cloud_enable":
+                self.nav_enable = bool(v)
+            elif k == "nav_cloud_leaf_m":
+                self.nav_leaf = v
             elif k == "attitude_timeout_s":
                 self._att.timeout_s = v
             elif k == "pose_timeout_s":
@@ -194,6 +246,7 @@ class LidarClusterNode(Node):
     # ---------- the work ----------
 
     def _on_cloud(self, msg: PointCloud2):
+        t_rx = self.get_clock().now()           # FIRST: the nav cloud's stamp
         now = time.monotonic()
         pts = pointcloud2_to_xyz(msg)
         sweep_n = pts.shape[0]
@@ -233,8 +286,12 @@ class LidarClusterNode(Node):
         # of already-filtered points.
         st = core.ClusterStats(n_in=int(allpts.shape[0]))
         st.n_near, st.n_fov = n_near, n_fov
-        clusters, st = core.process_body(allpts, self.params, roll, pitch,
-                                         levelled=att is not None, st=st)
+        # The nav cloud is only worked out when it will be published: not in
+        # the pool profile (empty cloud), and not while attitude is stale.
+        nav_leaf = self.nav_leaf if self.nav_enable and att is not None else None
+        clusters, st, nav_pts = core.process_body_nav(
+            allpts, self.params, roll, pitch, levelled=att is not None, st=st,
+            nav_leaf=nav_leaf)
         st.dropped = {"sweep_points": int(sweep_n),
                       "sweeps": len(self._window),
                       "compensated": pose is not None,
@@ -251,9 +308,30 @@ class LidarClusterNode(Node):
             m3.range = c.range_m
             out.clusters.append(m3)
         self.pub.publish(out)                   # EVERY window, empty or not
+        st.dropped["nav_cloud"] = self._publish_nav(nav_pts, att is not None,
+                                                    t_rx)
 
         self._last_stats = st
         self._n_windows += 1
+
+    def _publish_nav(self, nav_pts, levelled, t_rx):
+        """Publish the navigation cloud; returns what was done, for the health JSON.
+
+        Withheld, not empty, when attitude is stale: an empty cloud would keep
+        the costmap current and say "all clear" about a water gate that could
+        not be levelled. Silence is what makes it go non-current, and that is
+        what makes planned legs hold. The pool profile is the opposite case on
+        purpose: `nav_pts` is empty there, and an EMPTY cloud keeps the costmap
+        current while marking nothing.
+        """
+        if not levelled:
+            self.get_logger().warn(
+                "attitude stale: nav cloud withheld; the costmap goes "
+                "non-current and planned legs hold", throttle_duration_sec=10.0)
+            return "withheld"
+        self.nav_pub.publish(
+            xyz_to_pointcloud2(nav_pts, self.nav_frame, t_rx.to_msg()))
+        return "published" if self.nav_enable else "empty"
 
     # ---------- health ----------
 

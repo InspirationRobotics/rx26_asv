@@ -125,6 +125,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
    flex-wrap:wrap;justify-content:flex-end;max-width:70%}
  #maplegend{position:absolute;top:8px;left:8px;z-index:5;font-size:11px;
    color:var(--dim);line-height:1.7;pointer-events:none;white-space:pre}
+ #navbadge{font-weight:600}
  .viewer{flex:1;display:flex;align-items:center;justify-content:center;
    flex-direction:column;gap:10px;padding:20px}
  .viewer img{max-width:100%;max-height:100%;object-fit:contain}
@@ -189,7 +190,7 @@ try{ if(localStorage.getItem('crsd-theme') === 'day')
  OBSTACLE_DISTANCE sectors as the autopilot receives them">PRX1</button>
      <button onclick="post('/trail/clear',{})">clear trail</button>
     </div>
-    <div id="maplegend"></div></div>
+    <div id="maplegend"><div id="navbadge"></div><span id="maplegendtxt"></span></div></div>
   </div>
   <div class="pane" id="p-tune"></div>
   <div class="pane" id="p-rec"></div>
@@ -1855,8 +1856,57 @@ function nearestCluster(){
   return {r: best.r, brg: ((Math.atan2(-best.y, best.x)*180/Math.PI)+360)%360};
 }
 
+/* The planned leg from bt_runner (S.nav, built from /crsd/nav/leg_status). The
+   server already converted it into the trail's own frame, and blanks it when the
+   status is stale, so ok:false means draw nothing, not the last path. Colour is
+   the leg's state: FOLLOWING green, BLOCKED red, PLANNING/DEGRADED yellow,
+   STRAIGHT (a leg that never touches the costmap) muted; FAILED is red too. */
+function navColour(state){
+  if(state === 'FOLLOWING') return PAL.green;
+  if(state === 'BLOCKED' || state === 'FAILED') return PAL.red;
+  if(state === 'PLANNING' || state === 'DEGRADED') return PAL.yellow;
+  return PAL.muted;
+}
+
+/* Start a new canvas path through pts, [[x, y], ...] in world metres; the caller
+   strokes it. The trail and the planned path are both drawn this way. */
+function tracePath(pts){
+  cx.beginPath();
+  pts.forEach(function(q, i){
+    var p = px(q[0], q[1]);
+    if(i === 0) cx.moveTo(p[0], p[1]); else cx.lineTo(p[0], p[1]);
+  });
+}
+
+function drawNav(){
+  var n = S.nav, badge = el('navbadge');
+  if(!n || !n.ok){ if(badge) badge.textContent = ''; return; }
+  var col = navColour(n.state), path = n.path || [];
+  cx.strokeStyle = col; cx.lineWidth = 2;
+  if(path.length > 1){
+    cx.setLineDash([6,4]); tracePath(path); cx.stroke(); cx.setLineDash([]);
+  }
+  if(n.target){                                   /* the carrot the boat is steering at */
+    var t = px(n.target[0], n.target[1]);
+    cx.beginPath(); cx.arc(t[0], t[1], 5, 0, 6.2832); cx.stroke();
+  }
+  if(n.goal){                                     /* where the leg really ends */
+    var g = px(n.goal[0], n.goal[1]);
+    cx.beginPath();
+    cx.moveTo(g[0]-5, g[1]-5); cx.lineTo(g[0]+5, g[1]+5);
+    cx.moveTo(g[0]-5, g[1]+5); cx.lineTo(g[0]+5, g[1]-5);
+    cx.stroke();
+  }
+  if(badge){
+    badge.style.color = col;
+    badge.textContent = 'NAV ' + (n.state || '?')
+      + (n.blocked_s > 0 ? ' ' + n.blocked_s.toFixed(1) + 's' : '')
+      + (n.why ? ' ' + n.why : '');
+  }
+}
+
 function paintLegend(nClusters, nSectors){
-  var g = el('maplegend');
+  var g = el('maplegendtxt');
   if(!g) return;
   var lines = [];
   if(layers.clusters){
@@ -1898,14 +1948,10 @@ function draw(){
   }
   var tr = S.trail;
   if(tr && tr.length>1){
-    cx.strokeStyle = PAL.trail; cx.lineWidth = 2; cx.beginPath();
-    var t0 = px(tr[0][0], tr[0][1]);
-    cx.moveTo(t0[0], t0[1]);
-    for(var i=1;i<tr.length;i++){
-      var tp = px(tr[i][0], tr[i][1]); cx.lineTo(tp[0], tp[1]);
-    }
-    cx.stroke();
+    cx.strokeStyle = PAL.trail; cx.lineWidth = 2;
+    tracePath(tr); cx.stroke();
   }
+  drawNav();      /* over the trail, under the clusters and targets */
   /* Under the targets on purpose: these are the raw input, and the tracker's
      answer is what a mission acts on, so the answer stays on top. */
   var nClusters = layers.clusters ? drawClusters(b) : 0;

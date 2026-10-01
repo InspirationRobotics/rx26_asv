@@ -311,6 +311,58 @@ from anything and any number can run at once. It cannot share port 8080 with
 > camera, so which runs is an operator choice per session. World-model nodes are
 > not there either: that package is still scaffolded and empty (§13).
 
+### Obstacle avoidance (Nav2)
+
+NOT in `core.launch.py`, and not run on the water yet. Spec: `docs/nav2_avoidance_spec.md`.
+The tree's `NavigateTo` and `CircleBuoy` plan around hazards through Nav2's `planner_server`
+and a costmap; ArduPilot still flies the boat (GUIDED position setpoints). **Avoidance is not a
+safety system. The RC e-stop is.** It needs the `asv` container to have Nav2, which means the
+container recreation in `setup/README.md` ("Recreating the asv container"), done once.
+
+**Start order**, in `asv` over ssh, after `source /opt/ros/humble/setup.bash && source /root/robotx_ws/install/setup.bash`:
+
+```bash
+ros2 launch crusader_nav nav.launch.py datum_source:=param datum_lat:=<lat> datum_lon:=<lon>
+```
+
+then bt_runner with `-p nav_mode:=shadow` (or `on`). The nav stack comes first because
+`planner_server` stays in *configuring* until a pose with a **finite heading** has produced the
+TF `map -> base_footprint`; check `ros2 lifecycle get /planner_server` says `active`, and
+`ros2 topic echo /crsd/nav/frames_health --once` shows `tf_hz` above 5 and the datum.
+
+**`nav_mode`** (bt_runner_node parameter): `off` is the legacy straight legs and the boat default;
+`shadow` plans and displays but still drives the legacy legs, which is the first thing to run on
+the water; `on` drives the planned path. A leg that cannot plan never drives blind: it holds.
+
+**What you see.** The ground station map draws the planned path as a dashed line (green
+FOLLOWING, red BLOCKED, yellow PLANNING/DEGRADED, grey STRAIGHT), the carrot as a ring, the goal
+as a cross, and a top-left badge `NAV <STATE> <seconds> <why>`. The same JSON is on
+`ros2 topic echo /crsd/nav/leg_status`.
+
+| State | Meaning, and what to do |
+|---|---|
+| `STRAIGHT` | A leg that never touches the costmap (the gate crossing, the Task 3 predock and berth). Normal. |
+| `PLANNING` | No path yet. Normal for a second; BLOCKED follows if no plan arrives. |
+| `FOLLOWING` | Steering at the carrot 3 to 5 m ahead on the path. |
+| `BLOCKED` | No valid path, or the planner is unavailable. The boat has been told to **hold** once. At 5 s the costmap is cleared and replanned, at 15 s the leg FAILS and the tree decides. `why` says which: `planner_server not available` means the nav stack is not up or not active. |
+| `DEGRADED` | Pose stale, heading NaN, or no datum. The boat holds; nothing is requested and nothing fails. It resumes by itself. Look at `/crsd/nav/frames_health` and the GPS heading. |
+| `FAILED` | The blocked timeout expired. |
+
+**`costmap_probe`**, read-only, in `asv`: `ros2 run crusader_nav costmap_probe` prints each lethal
+blob within 40 m as lat/lon, range and bearing once a second. It is the check that the costmap holds
+what you can see on the water, and the bench check for yaw sign errors: turn the boat by hand
+through 4 x 90 degrees near a fixed post and its lat/lon must stay within 0.3 m.
+
+**The pool switch.** A pool's walls are obstacles the planner cannot plan around, and goals near
+them become unreachable. Before pool work: `ros2 param set /lidar_cluster_node nav_cloud_enable false`
+(publishes empty clouds: the costmap stays current and marks nothing, known hazards still count) and
+`ros2 param set /lidar_cluster_node r_max 10`. The ground station Tuning tab sets the same
+parameters.
+
+If ArduPilot has `PRX1_TYPE 2` with `AVOID_MARGIN 2.0` (check with `tools/scripts/param_guard.py`),
+its own simple avoidance stops the boat inside the planner's 0.8 to 2 m band: see
+`docs/G5_obstacle_avoidance.md`.
+
 ### Laptop side
 
 Mission Planner: connection dropdown (top right) → **UDP**, port **14550**, Connect.

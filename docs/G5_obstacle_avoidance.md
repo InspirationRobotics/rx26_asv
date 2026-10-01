@@ -8,6 +8,18 @@ one expecting the behaviour of another.
 of them are frequently confused. Getting this wrong produces a boat that either refuses to
 enter a gate or drives through a buoy, with no error either way.
 
+> **Superseded as the avoidance mechanism, 2026-09-30.** Avoidance is now the behaviour
+> tree's: `NavigateTo` and `CircleBuoy` plan around hazards through Nav2's `planner_server`
+> (`bt_runner_node.nav_mode`), see `docs/nav2_avoidance_spec.md`. ArduPilot's simple
+> avoidance below is at most an optional backstop. This page still explains what the three
+> margins mean, which is unchanged.
+>
+> **The `PRX1_TYPE=2` claimed in section 1 contradicts the baseline**
+> (`params/working_crusader.params:544` is `PRX1_TYPE 0`), and the live value is
+> **unverified**: check it with `tools/scripts/param_guard.py` before any run. If it is 2
+> with `AVOID_MARGIN 2.0`, ArduPilot **stops** the boat inside the planner's 0.8 to 2 m band
+> and inside the Task 3 berth, so the two fight. `OA_TYPE` stays 0.
+
 Established 2026-09-08 against ArduRover 4.6.3 (checkout tag `Rover-4.6.3`).
 
 > **STATUS: the `OA_TYPE` change in §5 is NOT YET APPLIED.** It was blocked because the

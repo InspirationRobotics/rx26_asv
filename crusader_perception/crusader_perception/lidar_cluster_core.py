@@ -22,6 +22,10 @@ THE PIPELINE, in order, and the order matters:
   5. cluster — voxel-grid DBSCAN, in the levelled frame so the distance metric
      is isotropic and "0.4 m apart" means the same thing at any attitude.
 
+  6. nav cloud (process_body_nav) — the levelled points of every cluster of at
+     least min_points, extent or not, voxel-thinned: the costmap's input. A
+     dock wall is not a trackable object (max_extent_m) but it is an obstacle.
+
 Cluster centroids are reported back in BODY frame, not levelled: the camera is
 bolted to the same hull, so `oak/detections` are body-frame too, and fusion
 compares the two directly. Whoever projects into the world applies attitude
@@ -107,6 +111,7 @@ class ClusterStats:
     n_clustered: int = 0            # survived into a published cluster
     n_noise: int = 0                # DBSCAN noise, or a cluster below min_points
     n_clusters: int = 0
+    n_nav: int = 0                  # voxel points in the navigation cloud
     levelled: bool = True           # False when attitude was stale
     dropped: dict = field(default_factory=dict)
 
@@ -225,6 +230,19 @@ def compensate(pts_body: np.ndarray, pose_then, pose_now) -> np.ndarray:
 
 # ------------------------------------------------------------------ clustering
 
+def _voxel_keys(pts: np.ndarray, leaf: float):
+    """Pack every point's voxel index into one int64 key.
+
+    Returns (keys, inside). `inside` masks the points within the key space, and
+    `keys` has one entry per INSIDE point, in order. Shared by the clustering and
+    the nav-cloud downsample so the two can never disagree about what a voxel is.
+    """
+    idx = np.floor(pts / leaf).astype(np.int64)
+    inside = (np.abs(idx) < _VOX_OFFSET).all(axis=1)
+    idx = idx[inside] + _VOX_OFFSET
+    return (idx[:, 0] * _VOX_STRIDE + idx[:, 1]) * _VOX_STRIDE + idx[:, 2], inside
+
+
 class _UnionFind:
     __slots__ = ("parent",)
 
@@ -286,15 +304,12 @@ def dbscan_voxel(pts: np.ndarray, p: ClusterParams):
     if n == 0:
         return np.empty(0, dtype=np.int64)
 
-    idx = np.floor(pts / p.leaf_size).astype(np.int64)
-    inside = (np.abs(idx) < _VOX_OFFSET).all(axis=1)
+    keys, inside = _voxel_keys(pts, p.leaf_size)
     labels = np.full(n, -1, dtype=np.int64)
     if not inside.any():
         return labels                       # everything beyond the key space
-    idx, sub = idx[inside], np.flatnonzero(inside)
+    sub = np.flatnonzero(inside)
 
-    keys = ((idx[:, 0] + _VOX_OFFSET) * _VOX_STRIDE
-            + (idx[:, 1] + _VOX_OFFSET)) * _VOX_STRIDE + (idx[:, 2] + _VOX_OFFSET)
     ukeys, inverse, counts = np.unique(keys, return_inverse=True,
                                        return_counts=True)
     nv = ukeys.size
@@ -370,11 +385,72 @@ def clusters_from_labels(pts_body: np.ndarray, labels: np.ndarray,
     return out, n_noise
 
 
+def dense_label_mask(labels: np.ndarray, min_points: int) -> np.ndarray:
+    """True for every point whose DBSCAN label has at least `min_points` members.
+
+    The size half of `clusters_from_labels`'s gate WITHOUT its extent half: this
+    is what a navigation cloud keeps. A dock wall, a platform or a shoreline is
+    too big to be a trackable object (max_extent_m) and every bit as solid as a
+    buoy to a hull that has to go around it.
+    """
+    keep = np.zeros(labels.shape[0], dtype=bool)
+    got = labels >= 0
+    if not got.any():
+        return keep
+    _, inverse, counts = np.unique(labels[got], return_inverse=True,
+                                   return_counts=True)
+    keep[got] = counts[inverse] >= min_points
+    return keep
+
+
+def voxel_downsample(pts: np.ndarray, leaf: float) -> np.ndarray:
+    """One point per occupied voxel of edge `leaf`: the centroid, as (M, 3) float32.
+
+    Bounds what a consumer is handed. A 20 m wall is thousands of returns on the
+    same square metre, and a costmap marks cells, not points, so everything past
+    one point per voxel is cost with no information.
+
+    Points beyond the packed key space (+/-1638 m at a 0.05 m leaf, far outside
+    any gate this node applies) are dropped rather than allowed to collide into
+    another voxel's key.
+    """
+    if pts.shape[0] == 0:
+        return np.empty((0, 3), dtype=np.float32)
+    keys, inside = _voxel_keys(pts, leaf)
+    pts = pts[inside]
+    _, inverse, counts = np.unique(keys, return_inverse=True, return_counts=True)
+    out = np.empty((counts.size, 3), dtype=np.float32)
+    for axis in range(3):
+        out[:, axis] = np.bincount(inverse, weights=pts[:, axis]) / counts
+    return out
+
+
 # --------------------------------------------------------------------- driver
 
-def process_body(pts_body: np.ndarray, p: ClusterParams, roll: float = 0.0,
-                 pitch: float = 0.0, levelled: bool = True, st=None):
-    """BODY-frame cloud -> (clusters, ClusterStats): level, gate, cluster.
+def _level_and_gate(pts_body, p: ClusterParams, roll, pitch, levelled, st):
+    """Level a BODY cloud, then apply the water/sky/range gates.
+
+    Returns (lvl, body): the surviving points in the levelled frame and in the
+    body frame, row for row. Records what each gate dropped on `st`.
+    """
+    body = np.asarray(pts_body, dtype=np.float64).reshape(-1, 3)
+    lvl = level(body, roll, pitch) if levelled else body
+
+    z, r = lvl[:, 2], np.hypot(lvl[:, 0], lvl[:, 1])
+    below = z < (p.water_z + p.water_margin)
+    above = z > p.z_ceiling
+    far = r > p.r_max
+    st.n_water = int(below.sum())
+    st.n_sky = int((above & ~below).sum())
+    st.n_far = int((far & ~below & ~above).sum())
+    keep = ~(below | above | far)
+    return lvl[keep], body[keep]
+
+
+def process_body_nav(pts_body: np.ndarray, p: ClusterParams, roll: float = 0.0,
+                     pitch: float = 0.0, levelled: bool = True, st=None,
+                     nav_leaf=None):
+    """BODY-frame cloud -> (clusters, ClusterStats, nav_pts): level, gate, cluster.
 
     Split out from `process` because the node applies the sensor-frame filters
     and the body transform ONCE PER SWEEP, then accumulates several sweeps and
@@ -387,27 +463,45 @@ def process_body(pts_body: np.ndarray, p: ClusterParams, roll: float = 0.0,
     stale. Clustering still runs — a stale attitude must not blind the boat —
     but the water gate is then only as good as the boat is flat, and the stat
     says so rather than leaving it to be inferred.
+
+    `nav_pts` is the navigation obstacle cloud, (M, 3) float32, in the LEVELLED
+    frame (REP-103 axes, no roll or pitch, origin at the body origin): not the
+    body frame the clusters are reported in, because the consumer is a costmap
+    that wants true vertical. It holds every point that landed in a cluster of at
+    least `min_points`, WHATEVER ITS EXTENT. `max_extent_m` decides what is
+    worth TRACKING; it has no say in what is worth NOT HITTING, so docks,
+    platforms and shorelines are in here although they are not in `clusters`.
+    Points are voxel-downsampled to one centroid per `nav_leaf` voxel.
+
+    `nav_leaf=None` skips all of it and returns an empty (0, 3) cloud: the work
+    is not done for a caller that will not publish it. With `levelled=False` the
+    points are still produced, in the unlevelled frame — whether to publish an
+    unlevelled water gate is the caller's call, and the node's answer is no.
     """
     st = st or ClusterStats(n_in=int(pts_body.shape[0]))
     st.levelled = levelled
-    body = np.asarray(pts_body, dtype=np.float64).reshape(-1, 3)
-    lvl = level(body, roll, pitch) if levelled else body
-
-    z, r = lvl[:, 2], np.hypot(lvl[:, 0], lvl[:, 1])
-    below = z < (p.water_z + p.water_margin)
-    above = z > p.z_ceiling
-    far = r > p.r_max
-    st.n_water = int(below.sum())
-    st.n_sky = int((above & ~below).sum())
-    st.n_far = int((far & ~below & ~above).sum())
-    keep = ~(below | above | far)
-    lvl, body = lvl[keep], body[keep]
+    lvl, body = _level_and_gate(pts_body, p, roll, pitch, levelled, st)
 
     labels = dbscan_voxel(lvl, p)
     clusters, n_noise = clusters_from_labels(body, labels, p)
     st.n_noise = n_noise
     st.n_clustered = int(sum(c.n_points for c in clusters))
     st.n_clusters = len(clusters)
+
+    if nav_leaf is None:
+        nav_pts = np.empty((0, 3), dtype=np.float32)
+    else:
+        nav_pts = voxel_downsample(lvl[dense_label_mask(labels, p.min_points)],
+                                   nav_leaf)
+    st.n_nav = int(nav_pts.shape[0])
+    return clusters, st, nav_pts
+
+
+def process_body(pts_body: np.ndarray, p: ClusterParams, roll: float = 0.0,
+                 pitch: float = 0.0, levelled: bool = True, st=None):
+    """BODY-frame cloud -> (clusters, ClusterStats). `process_body_nav` without
+    the navigation cloud; `lidar_view.py` and the tests call this one."""
+    clusters, st, _ = process_body_nav(pts_body, p, roll, pitch, levelled, st)
     return clusters, st
 
 

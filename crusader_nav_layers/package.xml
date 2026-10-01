@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>crusader_nav_layers</name>
+  <version>0.5.0</version>
+  <description>
+    Nav2 costmap layer for Crusader: HazardLayer draws the BT's known hazards
+    (crusader_msgs/HazardArray) LETHAL at their physical size. Builds and
+    installs nothing when the image has no Nav2, so the boat can take this
+    package before its container is recreated. See the package README.
+  </description>
+  <maintainer email="brandont3927@gmail.com">Team Inspiration</maintainer>
+  <license>MIT</license>
+  <url type="repository">https://github.com/InspirationRobotics/rx26_asv</url>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>crusader_msgs</depend>
+  <!-- Optional at build time: CMake looks for these with QUIET and skips the
+       plugin when they are absent. -->
+  <depend>rclcpp</depend>
+  <depend>pluginlib</depend>
+  <depend>nav2_costmap_2d</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
