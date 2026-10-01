@@ -35,6 +35,7 @@ setup(
             # ROS nodes (crsd-sim container)
             "livox_shim = crusader_sim.livox_shim:main",
             "sim_camera = crusader_sim.sim_camera:main",
+            "panel_feed = crusader_sim.panel_feed:main",
             # plain processes
             "sim_uav = crusader_sim.sim_uav:main",
             "task1_goal = crusader_sim.task1_goal:main",

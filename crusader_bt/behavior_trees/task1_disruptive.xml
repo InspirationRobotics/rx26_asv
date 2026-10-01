@@ -58,10 +58,15 @@
   report before the USV may transit" gate, AND the dead-link stop.
 
   TIMEOUT AND CANCEL live in bt_runner_node, not here.
-  OBSTACLE AVOIDANCE LIVES HERE NOW, not in the autopilot. ArduRover's OA_TYPE
-  is a black box that cannot be watched on the tree view or tested in a pool;
-  AvoidObstacles makes a detour an ordinary waypoint. It is local and reactive,
-  one blocker at a time, recomputed every tick, and is not a planner.
+
+  OBSTACLE AVOIDANCE LIVES IN THE TREE, not in the autopilot. NavigateTo and
+  CircleBuoy plan around every known object (the aircraft's buoys, the LiDAR's
+  tracks, the dock) through Nav2's planner_server, and hold when they cannot
+  plan: bt_runner_node's nav_mode, docs/nav2_avoidance_spec.md. A leg that stays
+  blocked FAILS after 15 s and this tree decides what happens next: a Retry for
+  an orbit, the ForceSuccess around the leg for a gate. The one place it does NOT
+  plan is the gate crossing, which is driven straight on purpose (see there).
+  ArduRover's own avoidance is at most a backstop and is off in the baseline.
 -->
 <root BTCPP_format="4" main_tree_to_execute="SafePassageDisruptive">
   <BehaviorTree ID="SafePassageDisruptive">
@@ -78,7 +83,11 @@
 
         <!-- The entry buoy is known from the field the moment it arrives, so
              this drives straight at it instead of loitering to spot it. -->
-        <CircleBuoy anchor="entry" radius="6.0" points="5" direction="cw"/>
+        <!-- A hop that cannot be driven FAILS after 15 s and the Retry starts
+             the orbit again, from wherever the boat is. -->
+        <RetryUntilSuccessful num_attempts="3">
+          <CircleBuoy anchor="entry" radius="6.0" points="8" direction="cw"/>
+        </RetryUntilSuccessful>
 
         <!-- CONFIRM BEFORE THE TRANSIT STARTS, not only after each gate.
              Circling the entry is the last thing the boat does on a field
@@ -114,31 +123,32 @@
                   <Sequence>
                     <SelectNextGate/>
 
-                    <!-- The run up to the gate is where the black buoys are,
-                         so it is the leg that gets avoidance. AvoidObstacles
-                         reads the LiDAR clusters by way of the tracker, plus
-                         every passage buoy that is not this gate's own pair.
-
-                         THE ReactiveSequence IS LOAD-BEARING. A plain Sequence
-                         ticks AvoidObstacles once and then leaves NavigateTo
-                         RUNNING for the rest of the leg, so the detour would be
-                         computed from the boat's position at the START of the
-                         run-in and never revised. Reactive re-ticks both every
-                         tick: the detour follows the boat, and NavigateTo
-                         re-sends the setpoint when it has moved far enough. -->
+                    <!-- The run up to the gate is where the black buoys are, so
+                         it is a PLANNED leg: NavigateTo plans around every known
+                         object (the LiDAR tracks, and every passage buoy,
+                         this gate's own pair included, since the approach point
+                         is 8 m short of it and well clear of both) and follows a
+                         carrot along the path. It re-plans as the field changes
+                         and HOLDS if it cannot. Blocked for 15 s it FAILS, which
+                         fails the leg Sequence below, and the ForceSuccess around
+                         the leg restarts it against the SAME gate. -->
                     <GateWaypoint point="approach" standoff="6.0" approach="8.0" out="{goal}"/>
-                    <ReactiveSequence name="run_in">
-                      <AvoidObstacles in="{goal}" out="{steer}" clearance="5.0" margin="2.0"/>
-                      <NavigateTo target="port" goal="{steer}" tolerance="3.0"/>
-                    </ReactiveSequence>
+                    <NavigateTo target="port" goal="{goal}" tolerance="3.0"/>
 
                     <!-- The crossing itself is driven STRAIGHT, deliberately.
-                         It is about 14 m between two buoys the boat must pass
-                         on given sides, and a detour computed there could take
-                         it round the wrong side of one of them. Water inside a
-                         gate is the one place on this course meant to be clear. -->
+                         It is between two buoys the boat must pass on given
+                         sides, and a path planned there could take it round the
+                         wrong side of one of them; and the pair itself, or a
+                         LiDAR track on either buoy, would block the very gap
+                         the leg is meant to drive through. avoid="false" never
+                         asks the planner or the costmap. exempt="gate" is this
+                         gate's own two buoys: ANY OTHER known object on the line
+                         still holds the boat, and 15 s of that fails the leg.
+                         Water inside a gate is the one place on this course
+                         meant to be clear (handbook 3.3.1). -->
                     <GateWaypoint point="through" standoff="6.0" approach="8.0" out="{goal}"/>
-                    <NavigateTo target="port" goal="{goal}" tolerance="2.5"/>
+                    <NavigateTo target="port" goal="{goal}" tolerance="2.5"
+                                avoid="false" exempt="gate"/>
                     <MarkGateCleared/>
 
                     <!-- "Is the next pair still where you said it was?" The
@@ -194,7 +204,9 @@
         <!-- From the aircraft's field, not from perception. Fails only if the
              aircraft never sent an exit at all. -->
         <ExitResolved/>
-        <CircleBuoy anchor="exit" radius="6.0" points="5" direction="ccw"/>
+        <RetryUntilSuccessful num_attempts="3">
+          <CircleBuoy anchor="exit" radius="6.0" points="8" direction="ccw"/>
+        </RetryUntilSuccessful>
 
       </Sequence>
     </ReactiveSequence>

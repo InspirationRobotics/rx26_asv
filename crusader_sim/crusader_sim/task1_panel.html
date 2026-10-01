@@ -5,7 +5,11 @@
      Sensor views poll /api/sensor/<view>.jpg (panel_sensors.py) only while
      toggled on, on screen and the tab is visible: the server unsubscribes a
      view ~5 s after its last request, and an unsubscribed gz camera is not
-     rendered, so a paused view costs the sim nothing. -->
+     rendered, so a paused view costs the sim nothing.
+     Map layers (planned path, the boat's camera tracks, its fused passage) come
+     from S.feed in /api/state, which task1_panel.py fills from panel_feed.py's
+     udp stream: a layer older than 2 s arrives with its age and NO data, and is
+     drawn as nothing (blanks over guesses). -->
 <style>
 :root{--bg:#0C141C;--panel:#131F2A;--line:#25384a;--ink:#DFE8EF;--dim:#7C8FA0;
   --ok:#45BCA0;--warn:#E0A245;--bad:#E0736A;--accent:#4EAFD2}
@@ -35,6 +39,10 @@ button.tog{min-width:44px;padding:2px 8px;font-size:12px}button.tog.on{backgroun
 .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:10px}
 .card h3{margin:0 0 8px;font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
 canvas{width:100%;height:62vh;display:block;background:#0a1a26;border-radius:8px;cursor:crosshair}
+.mapwrap{position:relative}
+#navbadge{position:absolute;left:10px;top:10px;max-width:70%;padding:2px 10px;border-radius:10px;
+  background:#0a1a26cc;font:600 12px monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none}
+.lay{display:inline-flex;gap:6px;align-items:center;margin-right:14px}
 button{background:#1d3042;color:var(--ink);border:1px solid var(--line);border-radius:5px;
   padding:5px 10px;cursor:pointer;font:inherit}
 button:hover:not(:disabled){border-color:var(--accent)}button:disabled{opacity:.4;cursor:default}
@@ -66,9 +74,14 @@ pre{margin:0;white-space:pre-wrap;font:12px/1.4 monospace}
 </div>
 <main>
   <section>
-    <canvas id="map"></canvas>
+    <div class="mapwrap"><canvas id="map"></canvas><div id="navbadge" style="display:none"></div></div>
     <div class="row sub"><button onclick="fit=true;draw()">Fit</button>
       <span id="hint"></span><span id="cursor" style="margin-left:auto"></span></div>
+    <div class="row sub" id="layers" title="the boat's own picture, from panel_feed (a node in crsd-sim)"></div>
+    <div class="sub" id="layerkey">path: dashed, coloured by the leg's state (green FOLLOWING, red BLOCKED, yellow PLANNING/DEGRADED,
+      grey STRAIGHT), ring = the carrot, &times; = the goal &middot; hollow square = a track the boat made from its own camera
+      (dashed = tentative, fades with time since seen) &middot; diamond = the boat's fused passage: the UAV's colour, at the tracker's position where a track matched (else the UAV's) &middot;
+      a layer older than 2 s is blank and says so</div>
     <div class="card logs">
       <div class="tabs row" id="tabs"></div>
       <pre id="logview"></pre>
@@ -137,6 +150,14 @@ var ORDER=['flash_red','flash_green','flash_blue','steady_blue','off'];
 var S=null, pick='flash_red', selIdx=-1, fit=true, view={cx:25,cy:0,s:10};
 var layout=[], rev=-1, drag=null, logs={sim:[],radio:[],mission:[],judge:[]}, seq={sim:0,radio:0,mission:0,judge:0};
 var tab='sim', trail=[], tgen=-1;
+// the boat's own picture: layers drawn from S.feed (panel_feed.py -> task1_panel.py), each toggled, default on
+var LAYS=[{k:'path',t:'Planned path',tip:'/crsd/nav/leg_status: the leg bt_runner is driving'},
+  {k:'tracks',t:"Boat's camera tracks",tip:"/crsd/world_targets: what the boat's tracker believes (hollow squares)"},
+  {k:'fused',t:"Boat's fused passage",tip:'/crsd/safe_passage_report: the UAV field matched to the tracks (diamonds); published only while a run is going'}];
+var LAYSRC={path:'leg',tracks:'tracks',fused:'passage'}, LAY_KEY='task1_panel.layers';
+var layOn={path:true,tracks:true,fused:true}, layDrawn={path:0,tracks:0,fused:0};
+try{var _lo=JSON.parse(localStorage.getItem(LAY_KEY)||'{}');LAYS.forEach(function(d){if(_lo[d.k]===false)layOn[d.k]=false})}catch(e){}
+function laySave(){try{localStorage.setItem(LAY_KEY,JSON.stringify(layOn))}catch(e){}}
 function $(i){return document.getElementById(i)}
 function val(i){return $(i).value}
 function esc(s){return String(s).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c]})}
@@ -169,6 +190,10 @@ function S2W(u,v){return[view.cx+(u-cv.width/2)/view.s, view.cy-(v-cv.height/2)/
 function autofit(){
   var pts=[[0,0]].concat(buoys().map(function(b){return[b.x,b.y]}),buoys().map(function(b){return[b.ux,b.uy]}),trail);
   if(S&&S.boat)pts.push([S.boat.x,S.boat.y]);
+  var lp=layData('path'),lt=layData('tracks'),lf=layData('fused');
+  if(lp){pts=pts.concat(lp.path);if(lp.goal)pts.push(lp.goal)}
+  if(lt)lt.items.forEach(function(t){pts.push([t.x,t.y])});
+  if(lf)lf.buoys.forEach(function(b){pts.push([b.x,b.y])});
   var x0=1e9,x1=-1e9,y0=1e9,y1=-1e9;
   pts.forEach(function(p){x0=Math.min(x0,p[0]);x1=Math.max(x1,p[0]);y0=Math.min(y0,p[1]);y1=Math.max(y1,p[1])});
   x0-=5;x1+=5;y0-=5;y1+=5; if(x1-x0<30){x1=x0+30}
@@ -194,6 +219,7 @@ function draw(){
       if(!a||!b)return;var res=S.judge.gates_detail[k],p=W2S(a.x,a.y),q=W2S(b.x,b.y);
       g.setLineDash([6*dpr,4*dpr]);g.lineWidth=1.5*dpr;g.strokeStyle=res==='correct'?'#45BCA0':res==='not crossed'?'#7C8FA0':'#E0736A';
       g.beginPath();g.moveTo(p[0],p[1]);g.lineTo(q[0],q[1]);g.stroke();g.setLineDash([])})}
+  drawPath(dpr);
   buoys().forEach(function(bu){   // what the UAV says: hollow, joined to the truth by a thin line
     if(Math.hypot(bu.ux-bu.x,bu.uy-bu.y)<0.05)return;
     var p=W2S(bu.x,bu.y), q=W2S(bu.ux,bu.uy), rad=Math.max(7*dpr,0.5*view.s), jr=S&&S.uav?S.uav.jitter_m*view.s:0;
@@ -212,7 +238,83 @@ function draw(){
     g.fillStyle='#DFE8EF'; g.fillText('b'+i+(bu.staged==='flash_blue'?' ENTRY':bu.staged==='steady_blue'?' EXIT':''),p[0]+rad+4,p[1]-rad);
     if(bu.staged!==bu.sent){g.fillStyle='#E0A245';g.fillText('was '+LBL[bu.sent],p[0]+rad+4,p[1]+rad+8*dpr)}
   });
+  drawTracks(dpr); drawFused(dpr);
   if(S&&S.boat){arrowAt(S.boat.x,S.boat.y,S.boat.yaw,S.boat.age>5?'#666':'#fff')}
+}
+// ---- the boat's layers. layData() is the ONLY way a layer's data reaches a draw call: it is null unless the
+// layer is on AND the server called it fresh, so a stale feed draws nothing (blanks over guesses)
+function layData(k){var f=S&&S.feed?S.feed[LAYSRC[k]]:null;return layOn[k]&&f&&f.status==='fresh'?f.data:null}
+function pathColour(st){return st==='FOLLOWING'?'#45BCA0':(st==='BLOCKED'||st==='FAILED')?'#E0736A':
+  (st==='PLANNING'||st==='DEGRADED')?'#F2D14B':'#7C8FA0'}
+function drawPath(dpr){                       // the ground station's conventions (gcs_page.py drawNav)
+  var d=layData('path');layDrawn.path=0;if(!d)return;
+  g.strokeStyle=pathColour(d.state);g.lineWidth=2*dpr;
+  if(d.path.length>1){g.setLineDash([6*dpr,4*dpr]);g.beginPath();
+    d.path.forEach(function(q,i){var s=W2S(q[0],q[1]);i?g.lineTo(s[0],s[1]):g.moveTo(s[0],s[1])});g.stroke();g.setLineDash([])}
+  if(d.target){var t=W2S(d.target[0],d.target[1]);g.beginPath();g.arc(t[0],t[1],5*dpr,0,7);g.stroke()}   // the carrot
+  if(d.goal){var q=W2S(d.goal[0],d.goal[1]),k=5*dpr;g.beginPath();                                       // the goal
+    g.moveTo(q[0]-k,q[1]-k);g.lineTo(q[0]+k,q[1]+k);g.moveTo(q[0]-k,q[1]+k);g.lineTo(q[0]+k,q[1]-k);g.stroke()}
+  layDrawn.path=d.path.length;
+}
+// the boat's own colour call, as bt_runner's beaconFromLabel makes it: red/green/blue substrings, flash = ENTRY, steady = EXIT
+function labelState(l){l=(l||'').toLowerCase();
+  if(l.indexOf('red')>=0)return 'flash_red';if(l.indexOf('green')>=0)return 'flash_green';
+  if(l.indexOf('blue')>=0)return l.indexOf('flash')>=0?'flash_blue':(l.indexOf('steady')>=0||l.indexOf('solid')>=0)?'steady_blue':'blue';
+  if(l.indexOf('black')>=0||l.indexOf('off')>=0)return 'off';return null}
+function stateCol(s){return s==='off'?'#9ab':s==='blue'?'#3E8BFF':s&&COL[s]?COL[s]:'#7C8FA0'}
+function drawTracks(dpr){                     // hollow squares: what the boat BELIEVES, not the truth (solid circles)
+  var d=layData('tracks');layDrawn.tracks=0;if(!d)return;
+  d.items.forEach(function(t){
+    var p=W2S(t.x,t.y),r=Math.max(7*dpr,0.5*view.s)+5*dpr,col=stateCol(labelState(t.label)),un=t.unseen==null?0:t.unseen;
+    g.globalAlpha=Math.max(0.3,1-un/30);g.strokeStyle=col;g.lineWidth=2*dpr;
+    g.setLineDash(t.confirmed?[]:[4*dpr,3*dpr]);g.strokeRect(p[0]-r,p[1]-r,2*r,2*r);g.setLineDash([]);
+    g.lineWidth=1*dpr;g.beginPath();g.moveTo(p[0]-3*dpr,p[1]);g.lineTo(p[0]+3*dpr,p[1]);   // the estimate itself
+    g.moveTo(p[0],p[1]-3*dpr);g.lineTo(p[0],p[1]+3*dpr);g.stroke();
+    g.fillStyle='#DFE8EF';g.textAlign='right';
+    g.fillText('#'+t.id+' '+(t.label||'lidar only'),p[0]-r-3*dpr,p[1]+r+8*dpr);
+    if(un>2)g.fillText('seen '+un.toFixed(0)+' s ago',p[0]-r-3*dpr,p[1]+r+8*dpr+12*dpr);
+    g.textAlign='left';g.globalAlpha=1;layDrawn.tracks++});
+}
+function drawFused(dpr){                      // a diamond in the UAV's colour, at the tracker's position where a track matched (else the UAV's)
+  var d=layData('fused');layDrawn.fused=0;if(!d)return;
+  d.buoys.forEach(function(b){var p=W2S(b.x,b.y),k=5*dpr;
+    g.fillStyle=stateCol(b.state);g.strokeStyle='#DFE8EF';g.lineWidth=1*dpr;g.beginPath();
+    g.moveTo(p[0],p[1]-k);g.lineTo(p[0]+k,p[1]);g.lineTo(p[0],p[1]+k);g.lineTo(p[0]-k,p[1]);g.closePath();g.fill();g.stroke();
+    layDrawn.fused++});
+}
+// ---- the layer row under the map: a toggle and one honest line of status per layer, and the NAV badge
+LAYS.forEach(function(d){
+  var w=document.createElement('span');w.className='lay';
+  w.innerHTML='<button class="tog" id="lay_'+d.k+'" title="'+esc(d.tip)+'"></button><span class="sub" id="laySt_'+d.k+'"></span>';
+  $('layers').appendChild(w);
+  $('lay_'+d.k).onclick=function(){layOn[d.k]=!layOn[d.k];laySave();layPaint();draw()};
+});
+function layText(k){
+  var F=S&&S.feed;if(!F)return 'this panel server has no feed: restart the panel';
+  if(F.error)return F.error;
+  var f=F[LAYSRC[k]],dn=S.sim.state==='down'||S.sim.state==='failed';
+  if(f.status==='offline')return dn?'sim is down':F.packets?'panel_feed silent '+fmtAge(F.silent_s)+
+    (f.age!=null?' (its last data is '+fmtAge(f.age)+' old, not drawn)':''):'panel_feed not heard (no rig up, or one that predates panel_feed)';
+  if(f.status==='none')return k==='fused'?'not published yet: the tree sends it only while a run is going':'not published yet';
+  if(f.status==='stale')return 'STALE '+fmtAge(f.age)+', not drawn';
+  var d=f.data,age=' \u00b7 '+fmtAge(f.age);
+  if(k==='path')return (d.state||'?')+(d.path.length?' \u00b7 '+d.path.length+' pts':' \u00b7 no path')+(d.why?' \u00b7 '+d.why:'')+age;
+  if(k==='tracks')return d.items.length+(d.items.length===1?' track':' tracks')+' ('+d.items.filter(function(t){return t.confirmed}).length+' confirmed)'+
+    (d.skipped?' \u00b7 '+d.skipped+' without a position':'')+age;
+  return d.buoys.length+(d.buoys.length===1?' buoy':' buoys')+(d.skipped?' \u00b7 '+d.skipped+' without a position':'')+age;
+}
+function layPaint(){
+  LAYS.forEach(function(d){var b=$('lay_'+d.k);b.textContent=d.t+': '+(layOn[d.k]?'on':'off');b.className='tog'+(layOn[d.k]?' on':'');
+    var st=$('laySt_'+d.k),f=S&&S.feed?S.feed[LAYSRC[d.k]]:null;st.textContent=S?layText(d.k)+(layOn[d.k]?'':' (hidden)'):'';
+    st.className='sub'+(f&&(f.status==='stale'||f.status==='offline')&&S.sim.state==='up'?' w':'')});
+  var b=$('navbadge'),F=S&&S.feed,f=F&&F.leg;
+  if(!layOn.path||!f||S.sim.state!=='up'){b.style.display='none';b.textContent='';return}
+  b.style.display='';
+  b.title='bt_runner publishes the leg at up to 2 Hz while a leg runs, and once when it goes IDLE: silence means no leg is running, or no bt_runner';
+  if(f.status==='fresh'){var d=f.data;b.style.color=pathColour(d.state);
+    b.textContent='NAV '+(d.state||'?')+(d.blocked_s>0?' '+d.blocked_s.toFixed(1)+'s':'')+(d.why?' '+d.why:'')+(d.hops>0&&d.hop!=null?' hop '+d.hop+'/'+d.hops:'')}
+  else{b.style.color='#7C8FA0';
+    b.textContent='NAV '+(f.status==='stale'?'stale '+fmtAge(f.age):f.status==='none'?'no data':'feed offline')}
 }
 function arrowAt(x,y,yaw,c){var p=W2S(x,y),k=Math.max(10,1.0*view.s);g.save();g.translate(p[0],p[1]);g.rotate(-yaw);
   g.fillStyle=c;g.beginPath();g.moveTo(k,0);g.lineTo(-k*.6,k*.45);g.lineTo(-k*.6,-k*.45);g.closePath();g.fill();g.restore()}
@@ -304,6 +406,7 @@ function render(){
   var c=S.checkpoint; $('ask').style.display=c?'':'none';
   if(c){$('askText').textContent='Boat asks: checkpoint '+c.seq+' — '+c.label+' (waiting '+c.waiting_s.toFixed(0)+' s, re-asked '+(c.asks-1)+(c.asks===2?' time)':' times)');
     $('askSend').disabled=!run||!run.unsent||!!run.problem}
+  layPaint();
   $('cps').innerHTML=S.checkpoints.map(function(r){var t=new Date(r.asked*1000).toLocaleTimeString();
     return'<tr><td>'+r.seq+'</td><td>'+esc(r.label)+'</td><td>'+t+'</td><td>'+(r.reply?esc(r.reply)+' +'+(r.answered-r.asked).toFixed(0)+'s':'<b class="w">waiting</b>')+
       '</td><td>'+r.asks+'</td></tr>'}).join('');

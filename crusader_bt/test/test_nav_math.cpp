@@ -366,65 +366,6 @@ int main()
       std::fabs(fusePassage(plan, tracked, 0.0).passage[0].p.y - 20.0) < 1e-9);
   }
 
-  // --------------------------------------------------------- avoidObstacles
-  //
-  // Collision avoidance lives in the tree now, not in the autopilot: OA_TYPE is
-  // a black box that cannot be watched on the tree view or tested in a pool.
-  {
-    // Due north, 40 m. Port is WEST (-x), starboard is EAST (+x).
-    const Vec2 from{0, 0}, to{0, 40};
-    const double clear = 5.0, margin = 2.0;
-
-    chk("clear water returns the goal untouched",
-      !avoidObstacles(from, to, {}, clear, margin).detoured);
-
-    std::vector<Buoy> abeam{{7, {12, 20}, Beacon::Off, false}};
-    chk("something well off the track is not in the way",
-      !avoidObstacles(from, to, abeam, clear, margin).detoured);
-
-    std::vector<Buoy> behind{{7, {0, -10}, Beacon::Off, false}};
-    chk("something astern is never in the way",
-      !avoidObstacles(from, to, behind, clear, margin).detoured);
-
-    std::vector<Buoy> beyond{{7, {0, 60}, Beacon::Off, false}};
-    chk("something past the goal is not in the way either",
-      !avoidObstacles(from, to, beyond, clear, margin).detoured);
-
-    // Sitting to PORT of the track: pass it to starboard, so the detour goes
-    // east of it.
-    std::vector<Buoy> to_port{{7, {-2, 20}, Beacon::Off, false}};
-    Detour d = avoidObstacles(from, to, to_port, clear, margin);
-    chk("a blocker to port forces a detour", d.detoured && d.around_id == 7);
-    chk("...and the boat passes it to starboard", d.wp.x > -2.0);
-    chk_near("...by clearance + margin", d.wp.x - (-2.0), clear + margin, 1e-6);
-    chk_near("...abeam of the obstacle", d.wp.y, 20.0, 1e-6);
-    chk_near("...and reports how close the line came", d.miss_m, 2.0, 1e-6);
-
-    std::vector<Buoy> to_stbd{{7, {2, 20}, Beacon::Off, false}};
-    Detour e = avoidObstacles(from, to, to_stbd, clear, margin);
-    chk("a blocker to starboard is passed to port", e.detoured && e.wp.x < 2.0);
-
-    // Dead ahead has no favoured side. Break the tie to starboard: the
-    // give-way side, and what a human driver expects.
-    std::vector<Buoy> ahead{{7, {0, 20}, Beacon::Off, false}};
-    Detour f = avoidObstacles(from, to, ahead, clear, margin);
-    chk("dead ahead still forces a detour", f.detoured);
-    chk("...and the tie breaks to starboard", f.wp.x > 0.0);
-
-    // The FIRST blocker along the path, not the nearest to the boat. The one
-    // at 30 m is closer to the track, but the boat meets the 10 m one first.
-    std::vector<Buoy> two{
-      {8, {3.0, 30}, Beacon::Off, false},
-      {9, {-4.0, 10}, Beacon::Off, false}};
-    Detour g = avoidObstacles(from, to, two, clear, margin);
-    chk("the first blocker along the path wins", g.detoured && g.around_id == 9);
-
-    chk("a zero-length leg cannot be blocked",
-      !avoidObstacles(from, from, ahead, clear, margin).detoured);
-    chk("zero clearance disables avoidance",
-      !avoidObstacles(from, to, ahead, 0.0, margin).detoured);
-  }
-
   // ------------------------------------------------------------ planPassage
   //
   // The boat does the path planning now: the aircraft sends ten buoys with

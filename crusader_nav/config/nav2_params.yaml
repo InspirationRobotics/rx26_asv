@@ -105,13 +105,15 @@ global_costmap:
         inflate_unknown: false
         inflate_around_unknown: false
 
-lifecycle_manager_crsd_nav:
+# crusader_nav/nav_lifecycle.py replaces nav2_lifecycle_manager (2026-10-01): Humble's manager
+# calls change_state with no timeout and hung forever on one reply Fast DDS dropped. Floats stay
+# floats here: rcl will not take 3 for a double.
+nav_lifecycle:
   ros__parameters:
-    autostart: true
-    node_names: ["planner_server"]
-    bond_timeout: 4.0
-    attempt_respawn_reconnection: true
-    bond_respawn_max_duration: 10.0
+    node_names: ["planner_server"]           # configured, activated, and again after a respawn
+    check_period_s: 1.0                      # get_state this often; one call at a time
+    call_timeout_s: 3.0                      # an unanswered call is dropped and asked again
+    recreate_after_timeouts: 3               # in a row -> new service clients (fresh discovery)
 
 # FALLBACK if STVL misbehaves: replace "stvl_layer" in `plugins` with "obstacle_layer" and
 # add the block below under global_costmap.global_costmap.ros__parameters. VERIFIED in the

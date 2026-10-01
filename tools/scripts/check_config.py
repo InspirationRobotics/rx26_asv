@@ -533,6 +533,14 @@ def check_pump():
 
 # --------------------------------------------------------- nav2 avoidance
 
+def _load_module(name, path):
+    """Import one source file by path, for a module with no ROS in it."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _baseline_params():
     """The saved autopilot baseline as {name: value}, or {} when it is absent
     (check_param_baseline reports that on its own)."""
@@ -592,7 +600,7 @@ def check_nav():
     try:
         cm = nav2["global_costmap"]["global_costmap"]["ros__parameters"]
         planner = nav2["planner_server"]["ros__parameters"]
-        lifecycle = nav2["lifecycle_manager_crsd_nav"]["ros__parameters"]
+        lifecycle = nav2["nav_lifecycle"]["ros__parameters"]
         hazard_topic = cm["hazard_layer"]["topic"]
         bt = cfg["bt_runner_node"]["ros__parameters"]
         frames = cfg["nav_frames_node"]["ros__parameters"]
@@ -667,9 +675,15 @@ def check_nav():
             bt["nav_planner_id"] not in planner["planner_plugins"] and
             f"{bt['nav_planner_id']!r} not in planner_plugins {planner['planner_plugins']}",
             bt["nav_planner_id"])
-    _ensure("lifecycle manager owns planner_server",
+    _ensure("nav_lifecycle drives planner_server",
             "planner_server" not in lifecycle["node_names"] and
             f"node_names {lifecycle['node_names']}: it would never leave unconfigured")
+    # The node ignores a key it does not declare and dies on a wrong type (rcl takes
+    # no int for a double), so ask the node's own validator, which is pure.
+    core = _load_module("lifecycle_core", REPO / "crusader_nav" / "crusader_nav" /
+                        "lifecycle_core.py")
+    _ensure("nav_lifecycle parameters", core.params_error(lifecycle) or "",
+            f"{sorted(lifecycle)}")
 
     # A dead bt_runner must make the costmap non-current: the layer max age has
     # to cover at least two publishes, or a healthy one flaps it.

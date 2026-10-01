@@ -151,10 +151,17 @@
                 <NavigateTo target="port" goal="{goal}" tolerance="1.0"/>
               </ReactiveSequence>
             </Fallback>
+            <!-- Planned legs (the looks and the lead-in above) end OUTSIDE the
+                 fingers, and the dock is a hazard for them. The line-up and the
+                 berth stay STRAIGHT (avoid="false" exempt="dock"): the slip has
+                 0.45 m per side, which is inside the 0.8 m hard clearance, so a
+                 planned leg could never enter it. The BT still holds if anything
+                 OTHER than the dock is on the line. -->
             <ReactiveSequence name="line_up">
               <ChosenBaySafe min_ema="0.3"/>
               <DockWaypoint point="predock" predock_m="3.0" berth_m="1.25" lead_m="2.0" out="{goal}"/>
-              <NavigateTo target="port" goal="{goal}" tolerance="0.4" resend_m="0.2"/>
+              <NavigateTo target="port" goal="{goal}" tolerance="0.4" resend_m="0.2"
+                          avoid="false" exempt="dock"/>
             </ReactiveSequence>
 
           </Sequence>
@@ -173,7 +180,8 @@
         <ReactiveSequence name="enter">
           <ChosenBaySafe min_ema="0.3"/>
           <DockWaypoint point="berth" predock_m="3.0" berth_m="1.25" lead_m="2.0" out="{goal}"/>
-          <NavigateTo target="port" goal="{goal}" tolerance="0.25" resend_m="0.2"/>
+          <NavigateTo target="port" goal="{goal}" tolerance="0.25" resend_m="0.2"
+                      avoid="false" exempt="dock"/>
         </ReactiveSequence>
 
         <!-- WAIT UNTIL DOCKED, up to 10 s: the boat arrives inside tolerance

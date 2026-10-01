@@ -8,16 +8,24 @@
 //
 // FOUR BEHAVIOURS, picked once at start() from (Mode, LegConfig::avoid):
 //
-//   A  Off, or Shadow with avoid=false   the legacy NavigateTo: send the goal,
+//   A  Shadow with avoid=false           the legacy NavigateTo: send the goal,
 //                                        resend when it moves, arrive on tolerance.
-//   B  On, avoid=false                   A, plus a guard: hold if the straight
-//                                        segment crosses a known hazard (minus the
-//                                        exemptions). No planner calls, ever.
+//   B  Off (avoid or not), or            A, plus a guard: hold if the straight
+//      On with avoid=false               segment crosses a known hazard (minus the
+//                                        exemptions); resume only once the line has
+//                                        stayed clear for unblock_reset_s. No
+//                                        planner calls, ever.
 //   C  On, avoid=true                    plan, follow a carrot, re-plan, hold when
 //                                        blocked, fail only after blocked_timeout_s.
 //   D  Shadow, avoid=true                C run completely, every port call real, but
 //                                        what is SENT is A's. Never a hold, never a
 //                                        Failure: it shows what C would have done.
+//
+// OFF IS B, NOT A (2026-10-01, spec 5.5). Off is the boat's default until the asv
+// container has Nav2, and the old run-in detour is gone, so an Off leg that merely
+// drove the straight line would go through any black buoy or track on it. Off has
+// no planner to go round a hazard with, so it HOLDS in front of one and FAILS after
+// blocked_timeout_s: it never drives through. It needs no Nav2.
 //
 // THE RULES THAT MATTER MOST, because they are the ones that keep the boat off a
 // buoy when something upstream is wrong:
@@ -171,6 +179,7 @@ private:
     bool have_fresh = false, have_sent = false, have_target = false, degraded = false;
 
     std::vector<Vec2> path;
+    Vec2 path_goal;            // the true goal the ADOPTED path was planned for
     std::size_t closest = 0;
     bool path_clipped = false;
     bool escape = false;
@@ -186,6 +195,8 @@ private:
     int invalid_streak = 0;
 
     double blocked_s = 0.0, follow_s = 0.0, plan_ms = -1.0;
+    double clear_since = 0.0;                 // a guarded leg: when its line was first seen clear
+    bool have_clear = false;
     bool cleared = false;
     std::string why, last_fail_logged;
   };
@@ -202,11 +213,11 @@ private:
   /// How far the last-sent point may sit from the end of the path before the end is sent.
   static constexpr double kEndResendM = 0.3;
 
-  /// Which of A, B, C, D (see the header). `avoid` is meaningless in Off mode, and
-  /// the straight guard (B) exists only when it is both ON and asked for.
+  /// Which of A, B, C, D (see the header). Off has no planner, so `avoid` cannot ask
+  /// it for anything and every Off leg is the guarded straight one (B).
   Kind classify(const LegConfig & c) const
   {
-    if (mode_ == Mode::Off) {return Kind::Straight;}
+    if (mode_ == Mode::Off) {return Kind::Guard;}
     if (c.avoid) {return Kind::Planned;}
     return mode_ == Mode::On ? Kind::Guard : Kind::Straight;      // Shadow: A, guard logged only
   }
@@ -311,6 +322,17 @@ private:
 
   // ------------------------------------------------------------ A and B
 
+  static constexpr const char * kLineBlocked = "a known hazard is on the line to the goal";
+
+  /// The straight segment to the goal crosses a known hazard (minus the exemptions).
+  bool lineBlocked(const LegInputs & in) const
+  {
+    return !segmentClear(
+      in.boat, r_.drive_goal,
+      exempt(in.hazards, r_.cfg.exempt_buoys, r_.cfg.exempt_dock, p_.exempt_radius_m),
+      p_.hard_m - p_.local_check_tol_m);
+  }
+
   void straightTick(const LegInputs & in, Tick & t, LegOutput & o)
   {
     Run & r = r_;
@@ -319,32 +341,57 @@ private:
       finish(o, LegState::Arrived, Result::Success, "");
       return;
     }
-    if ((r.kind == Kind::Guard || r.shadow) && in.pose_fresh) {
-      const bool blocked = !segmentClear(
-        in.boat, r.drive_goal,
-        exempt(in.hazards, r.cfg.exempt_buoys, r.cfg.exempt_dock, p_.exempt_radius_m),
-        p_.hard_m - p_.local_check_tol_m);
-      if (r.kind != Kind::Guard) {                      // Shadow: say so, never act
-        r.why = blocked ? "shadow: would HOLD (a known hazard is on the line to the goal)" : "";
-      } else if (blocked) {
-        if (r.state != LegState::Blocked) {
-          enterBlocked(o, in.boat, "a known hazard is on the line to the goal");
-        } else {
-          r.blocked_s += t.dt;
-        }
-        if (reached(r.blocked_s, r.cfg.blocked_timeout_s)) {
-          finish(o, LegState::Failed, Result::Failure, "blocked: " + r.why);
-        }
-        return;
-      } else if (r.state == LegState::Blocked) {        // the line cleared: carry on
+    if (!in.pose_fresh) {
+      r.have_clear = false;               // a stale pose has seen nothing: no clear time banked
+    } else if (r.kind == Kind::Guard) {
+      if (guardHolds(in, t, o, lineBlocked(in))) {return;}
+    } else if (r.shadow) {                // Shadow: say so, never act
+      r.why = lineBlocked(in) ? std::string("shadow: would HOLD (") + kLineBlocked + ")" : "";
+    }
+    if (due && r.state != LegState::Blocked) {sendTo(o, r.drive_goal);}
+  }
+
+  /// B's guard, once per tick with a fresh pose. True = the leg is held (or has
+  /// failed) this tick and sends nothing more.
+  ///
+  /// A held leg resumes only when the line has stayed clear for unblock_reset_s, the
+  /// same rule a planned leg lives by: a track that flickers on and off the line must
+  /// not make the boat lurch at it on every clear tick. blocked_s counts for as long
+  /// as the leg is BLOCKED, the line clear or not (the boat is held either way), and
+  /// only the resume zeroes it, so a flicker still ends in FAILURE at blocked_timeout_s.
+  bool guardHolds(const LegInputs & in, const Tick & t, LegOutput & o, bool blocked)
+  {
+    Run & r = r_;
+    if (blocked) {
+      r.have_clear = false;
+      if (r.state != LegState::Blocked) {
+        enterBlocked(o, in.boat, kLineBlocked);
+      } else {
+        r.blocked_s += t.dt;
+        r.why = kLineBlocked;
+      }
+    } else if (r.state == LegState::Blocked) {
+      if (!r.have_clear) {
+        r.have_clear = true;
+        r.clear_since = t.now;
+      }
+      r.blocked_s += t.dt;
+      if (reached(t.now - r.clear_since, p_.unblock_reset_s)) {     // clear long enough: carry on
         r.state = LegState::Straight;
         r.why.clear();
         r.blocked_s = 0.0;
+        r.have_clear = false;
         sendTo(o, r.drive_goal);
-        return;
+        return true;
       }
+      r.why = "the line is clear; holding until it has stayed clear";
+    } else {
+      return false;                       // clear, and not held
     }
-    if (due && r.state != LegState::Blocked) {sendTo(o, r.drive_goal);}
+    if (reached(r.blocked_s, r.cfg.blocked_timeout_s)) {
+      finish(o, LegState::Failed, Result::Failure, std::string("blocked: ") + kLineBlocked);
+    }
+    return true;
   }
 
   // ---------------------------------------------------------------- C and D
@@ -479,16 +526,29 @@ private:
     }
   }
 
-  /// The path in hand is worth keeping: valid against the known field, and not a
-  /// window-clipped path that is nearly used up. THE SECOND TEST IS NOT IN THE SPEC
-  /// AND IS NEEDED: for a goal beyond clip_radius, the plan after the boat has
-  /// advanced is exactly as long (path + |end - goal|) as the one it replaces, so
-  /// preferNew would never take it and the boat would stop at the end of the first
-  /// window. A spent window path is replaced by the next plan, whatever it measures.
+  /// How far the goal may move from the one the adopted path was planned for before
+  /// that path stops being "the path to the goal". The SMALLER of goal_replan_m and the
+  /// tolerance: a path that ends within the tolerance of the goal still arrives, and
+  /// one that does not must be replaced however the hysteresis scores the two.
+  double retargetM() const {return std::min(p_.goal_replan_m, r_.cfg.tolerance);}
+
+  /// The path in hand is worth keeping: valid against the known field, planned for the
+  /// goal we have NOW, and not a window-clipped path that is nearly used up. THE
+  /// SECOND AND THIRD TESTS ARE NOT IN THE SPEC AND ARE NEEDED.
+  /// Goal: preferNew measures both paths to the CURRENT goal, and an old-goal path
+  /// followed to its end scores |old end - goal| = d against a fresh plan's ~d, so the
+  /// new plan would never win and the leg would sit at the old end, d from a goal it
+  /// can never arrive at, until the mission timeout. Hysteresis is there to stop a good
+  /// path to THIS goal being swapped for a marginally better one, nothing more.
+  /// Window: for a goal beyond clip_radius, the plan after the boat has advanced is
+  /// exactly as long (path + |end - goal|) as the one it replaces, so preferNew would
+  /// never take it and the boat would stop at the end of the first window. A spent
+  /// window path is replaced by the next plan, whatever it measures.
   bool pathWorthKeeping(const LegInputs & in) const
   {
     const Run & r = r_;
     if (r.path.empty()) {return false;}
+    if (nav::norm(r.path_goal - r.goal) > retargetM()) {return false;}
     const std::vector<Vec2> rest = ahead(in);
     if (detail::pathBlocked(rest, in.hazards, tol())) {return false;}
     return !(r.path_clipped && pathLength(rest) < p_.lookahead_m);
@@ -516,6 +576,7 @@ private:
       if (!preferNew(true, cur, now, p_.hysteresis_frac, p_.hysteresis_m)) {return;}
     }
     r.path = std::move(cand);
+    r.path_goal = r.req_goal;
     r.closest = 0;
     r.path_clipped = r.req_clipped;
     r.escape = r.req_escape;

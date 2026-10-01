@@ -18,13 +18,14 @@ setup(
     zip_safe=False,
     maintainer="Team Inspiration",
     maintainer_email="brandont3927@gmail.com",
-    description="Crusader navigation: the shared map frame, and the Nav2 planner stack launch",
+    description="Crusader navigation: the shared map frame, the Nav2 planner stack launch, and its lifecycle driver",
     url="https://github.com/InspirationRobotics/rx26_asv",
     license="MIT",
     entry_points={
         "console_scripts": [
             "nav_frames_node = crusader_nav.nav_frames_node:main",
             "costmap_probe = crusader_nav.costmap_probe:main",
+            "nav_lifecycle = crusader_nav.nav_lifecycle:main",
         ],
     },
 )

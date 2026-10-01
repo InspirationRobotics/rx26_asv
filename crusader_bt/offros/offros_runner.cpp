@@ -22,14 +22,27 @@
 //                       FAILURE-means-not-autonomous-or-tree-failed split
 //   refreshFreshness()  pose and dock observations age out; a dead HEARTBEAT
 //                       is not permission
-//   onPose()            the origin is pinned ONCE, at the first fix
+//   onPose()            the origin is pinned ONCE, at the first fix - unless
+//                       nav_mode is shadow or on, when it comes from the datum
 //
 // What a DockObservation MEANS is NOT copied: both runners hand a dock::Frame
-// to ingestDockObservation() in context.hpp.
+// to ingestDockObservation() in context.hpp. The frame rule is NOT copied either:
+// onPose and onDatum are one call each into ingestPose() and applyDatum() there,
+// and the leg status JSON is legStatusJson()'s, so the two runners cannot differ.
+//
+// OBSTACLE AVOIDANCE (docs/nav2_avoidance_spec.md 5.7). `--nav-mode off|shadow|on`,
+// default off: tools/task3_sim/test_e2e.py runs against off and is unchanged. With
+// shadow or on the planner is path::StraightPlannerPort - an instant straight
+// [start, goal] path, not a planner - so the REAL PlannedLeg state machine and the
+// real leaves run with no Nav2 around; the leg's own "plan crosses a known hazard"
+// rejection is what makes it refuse a line through the dock. With shadow or on the
+// origin is NOT pinned at the first fix: it waits for a "datum" line, as
+// bt_runner_node waits for /crsd/datum.
 //
 // STDIN, one JSON object per line ("type" says which):
 //   status        {mode, armed}                           /crsd/fcu_status
 //   pose          {lat, lon, heading|null}                /crsd/pose
+//   datum         {lat, lon}                              /crsd/datum
 //   dock_obs      DockObservation's fields, stamp in s    dock/observations
 //   ocs_command   {data: {...}}                           /crsd/ocs_command
 //   mount         {x, y, yaw_deg, pitch_deg, face_dz}     bt_runner_node params
@@ -42,7 +55,11 @@
 // STDOUT: ready, setpoint, task, autonomy, docking_report, firefighting_report,
 //   resource_request, uav_request, cannon, bt, book, feedback, result,
 //   heading_speed {heading_deg, speed_mps}, pump {duration_s, seq, source},
-//   avoidance {enable}.
+//   avoidance {enable},
+//   leg {t, leaf, name, mode, avoid, state, why, blocked_s, goal, target, path,
+//        plan_ms, [hop, hops]}   /crsd/nav/leg_status (spec 4.3), on change,
+//   hazards {n}                  how many hazards /crsd/nav/hazards would carry, 2 Hz,
+//                                only once the origin IS the datum.
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -158,6 +175,7 @@ public:
     bool publish_setpoints = false;
     bool fire_pump = false;        ///< bt_runner_node's fire_pump: FireBurst may squirt
     bool verbose_tree = false;
+    path::Mode nav_mode = path::Mode::Off;   ///< bt_runner_node's nav_mode
   };
 
   explicit Runner(const Params & p)
@@ -167,6 +185,10 @@ public:
     ctx_->node = &node_;
     ctx_->publish_setpoints = p_.publish_setpoints;
     ctx_->fire_pump = p_.fire_pump;
+    ctx_->nav_mode = p_.nav_mode;
+    if (ctx_->nav_mode != path::Mode::Off) {
+      ctx_->planner = std::make_shared<path::StraightPlannerPort>();
+    }
     t0_ = Clock::now();
     wireContext();
   }
@@ -189,6 +211,8 @@ public:
         onStatus(j);
       } else if (type == "pose") {
         onPose(j);
+      } else if (type == "datum") {
+        onDatum(j);
       } else if (type == "dock_obs") {
         onDock(j);
       } else if (type == "ocs_command") {
@@ -231,7 +255,8 @@ public:
   void missionLoop()
   {
     emit({{"type", "ready"}, {"tree", p_.tree_file},
-        {"publish_setpoints", p_.publish_setpoints}, {"fire_pump", p_.fire_pump}});
+        {"publish_setpoints", p_.publish_setpoints}, {"fire_pump", p_.fire_pump},
+        {"nav_mode", navModeName(ctx_->nav_mode)}});
     publishTask(kTaskNone);
     while (!stop_) {
       json goal;
@@ -264,21 +289,51 @@ private:
     have_status_ = true;
   }
 
+  /// The frame rule (spec 2) is ingestPose's, shared with bt_runner_node.
   void onPose(const json & j)
   {
     std::lock_guard<std::mutex> lk(ctx_->mu);
     const double lat = num(j, "lat", dock::kNaN), lon = num(j, "lon", dock::kNaN);
-    if (!std::isfinite(lat) || !std::isfinite(lon)) {return;}
-    if (!ctx_->origin_set) {
-      // Pinned ONCE, at the first fix, exactly as bt_runner_node does.
-      ctx_->origin = {lat, lon};
-      ctx_->origin_set = true;
-      RCLCPP_INFO(node_.get_logger(), "local frame origin pinned at %.7f, %.7f", lat, lon);
+    // null heading = GPS yaw unresolved
+    switch (ingestPose(*ctx_, {lat, lon}, num(j, "heading", dock::kNaN))) {
+      case PoseEvent::Bad:
+        return;
+      case PoseEvent::Pinned:
+        RCLCPP_INFO(node_.get_logger(), "local frame origin pinned at %.7f, %.7f (no /crsd/datum: "
+          "pinned at the first fix; nav_mode off, frame not shared)", lat, lon);
+        break;
+      case PoseEvent::Waiting:
+        RCLCPP_WARN_THROTTLE(node_.get_logger(), *node_.get_clock(), 5000,
+          "waiting for a datum line (nav_mode %s does not pin the frame at the first fix)",
+          navModeName(ctx_->nav_mode));
+        break;
+      case PoseEvent::Tracked:
+        break;
     }
-    ctx_->boat = nav::toLocal({lat, lon}, ctx_->origin);
-    ctx_->heading_deg = num(j, "heading", dock::kNaN);   // null = GPS yaw unresolved
     pose_t_ = Clock::now();
     have_pose_ = true;
+  }
+
+  /// {"type":"datum","lat":..,"lon":..}: the frame origin, as /crsd/datum is for
+  /// bt_runner_node. The rule is applyDatum's.
+  void onDatum(const json & j)
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    const double lat = num(j, "lat", dock::kNaN), lon = num(j, "lon", dock::kNaN);
+    switch (applyDatum(*ctx_, {lat, lon})) {
+      case DatumEvent::Adopted:
+        RCLCPP_INFO(node_.get_logger(), "local frame origin adopted from the datum: %.7f, %.7f",
+          lat, lon);
+        break;
+      case DatumEvent::Mismatch:
+        RCLCPP_ERROR(node_.get_logger(), "datum %.7f, %.7f differs from the origin in use "
+          "(%.7f, %.7f): datum changed, restart the runner. Planned legs hold until then.",
+          lat, lon, ctx_->origin.lat, ctx_->origin.lon);
+        break;
+      case DatumEvent::Unchanged:
+      case DatumEvent::Ignored:
+        break;
+    }
   }
 
   void onDock(const json & j)
@@ -453,6 +508,44 @@ private:
     emit(out);
   }
 
+  /// /crsd/nav/leg_status: the pacing and the JSON are context.hpp's, so this
+  /// is byte for byte what bt_runner_node publishes, plus the "type" tag.
+  void emitLeg(double elapsed_s)
+  {
+    std::string text;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      if (!leg_pacer_.due(*ctx_, ctx_->now_s, 1.0 / kLegStatusHz)) {return;}
+      text = legStatusJson(*ctx_, elapsed_s);
+    }
+    json j = json::parse(text);
+    j["type"] = "leg";
+    emit(j);
+  }
+
+  /// A new mission, or the end of one: no leg is running.
+  void resetLeg(double elapsed_s)
+  {
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      clearLeg(*ctx_);
+    }
+    emitLeg(elapsed_s);
+  }
+
+  /// How many hazards the costmap would be told about (bt_runner_node's hazard
+  /// publisher, minus the message): only once the origin IS the datum.
+  void emitHazards()
+  {
+    std::size_t n;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      if (!hazardsPublishable(*ctx_)) {return;}
+      n = knownHazards(*ctx_).size();
+    }
+    emit({{"type", "hazards"}, {"n", n}});
+  }
+
   /// CALL UNDER ctx_->mu.
   void fillBook(json & out)
   {
@@ -542,6 +635,8 @@ private:
       ctx_->home = ctx_->boat;
       ctx_->have_home = ctx_->pose_fresh;
     }
+    leg_pacer_ = LegStatusPacer{};
+    resetLeg(0.0);
 
     int outcome = OUTCOME_FAULT;
     std::string detail;
@@ -586,6 +681,7 @@ private:
         refreshFreshness();
         st = tree.tickOnce();
         stopIfSilent(false);
+        emitLeg(elapsed);
 
         if (p_.verbose_tree) {
           const std::string frame = view.renderIfChanged(false);
@@ -604,7 +700,10 @@ private:
           emit({{"type", "feedback"}, {"phase", phase},
               {"progress", std::min(1.0, elapsed / timeout_s)}, {"elapsed_s", elapsed}});
         }
-        if (tick++ % 5 == 0) {emitBook();}
+        if (tick++ % 5 == 0) {
+          emitBook();
+          emitHazards();                   // 2 Hz at 10 Hz ticks, as the node's timer
+        }
 
         if (st != BT::NodeStatus::RUNNING) {
           if (st == BT::NodeStatus::SUCCESS) {
@@ -647,9 +746,10 @@ private:
     }
     emit({{"type", "result"}, {"outcome", outcome}, {"detail", detail}, {"elapsed_s", el}});
     // Every exit path: the cannon off, the boat stopped, avoidance back on,
-    // the task stood down, the light off.
+    // the task stood down, the light off, no leg running.
     if (ctx_->cannon) {ctx_->cannon(false, 0.0, 0.0, 0.0);}
     stopIfSilent(true);
+    resetLeg(el);
     emit({{"type", "avoidance"}, {"enable", true}});
     publishTask(kTaskNone);
     emit({{"type", "autonomy"}, {"active", false}});
@@ -673,6 +773,8 @@ private:
   bool have_pose_ = false, have_status_ = false, have_dock_ = false;
   bool have_att_ = false, have_pump_ = false;
   Clock::time_point t0_{};                   // the clock ctx.now_s counts from
+  LegStatusPacer leg_pacer_;                 // the mission thread only
+  static constexpr double kLegStatusHz = 2.0;   // bt_runner_node's nav_status_hz default
   bool hs_active_ = false;                   // motion was commanded last tick
   bool sticks_active_ = false;               // the sticks were commanded last tick
   std::string goal_mode_;                    // the mode when this goal started
@@ -709,6 +811,11 @@ int main(int argc, char ** argv)
       p.fire_pump = true;
     } else if (a == "--verbose-tree") {
       p.verbose_tree = true;
+    } else if (a == "--nav-mode") {
+      if (!crusader_bt::parseNavMode(next("--nav-mode"), p.nav_mode)) {
+        std::fprintf(stderr, "--nav-mode must be off, shadow or on\n");
+        return 2;
+      }
     } else {
       std::fprintf(stderr, "unknown argument %s\n", a.c_str());
       return 2;

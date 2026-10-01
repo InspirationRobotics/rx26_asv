@@ -106,9 +106,8 @@ ensure_container() {
       if [ "$RECREATE" = 1 ]; then
         echo "  $CONTAINER is on an older image: recreating it from $IMAGE"
         docker rm -f "$CONTAINER" >/dev/null || die "cannot remove $CONTAINER"
-        for d in build install; do
-          rm -rf "$HOME/robotx_ws/$d/crusader_bt" "$HOME/robotx_ws/$d/crusader_nav_layers"
-        done
+        # the dirs are root-owned (the container builds as root), so they are removed
+        # from INSIDE the new container below; an rm from this shell is Permission denied
         FULL_BUILD=1
       else
         echo "  *** $CONTAINER was made from an older image than $IMAGE and keeps it: Nav2 may be missing (the rig then runs nav_mode off and says so)."
@@ -121,6 +120,10 @@ ensure_container() {
     docker run -d --name "$CONTAINER" --net=host --ipc=host \
       -v "$HOME/robotx_ws:/root/robotx_ws" "$IMAGE" sleep infinity >/dev/null \
       || die "docker run $IMAGE (build it: see crusader_sim/docker/crsd-sim.Dockerfile)"
+    if [ "$FULL_BUILD" = 1 ]; then
+      docker exec "$CONTAINER" bash -c 'cd /root/robotx_ws && rm -rf build/crusader_bt install/crusader_bt build/crusader_nav_layers install/crusader_nav_layers' \
+        || die "cannot remove the old crusader_bt / crusader_nav_layers build dirs"
+    fi
   fi
 }
 
@@ -202,15 +205,15 @@ if [ "$FULL_BUILD" = 1 ] || ! docker exec "$CONTAINER" bash -c \
   # a plain build made is a colcon error on the next build
   echo "  full colcon build (first run, new image or new packages: a few minutes)"
   docker exec "$CONTAINER" bash -lc \
-    "cd /root/robotx_ws && source /opt/ros/humble/setup.bash && colcon build 2>&1 | tail -5" \
+    "cd /root/robotx_ws && source /opt/ros/humble/setup.bash && flock /root/robotx_ws/.colcon.lock colcon build 2>&1 | tail -5" \
     | sed 's/^/  /'
 else
-  # the sim, nav and ground-station packages every run (seconds; nodes run from
-  # install/, so a GCS edit needs this). crusader_bt, crusader_perception and
-  # crusader_msgs still need a manual rebuild after a change, as before. Only the
-  # packages the checkout has: --packages-select refuses an unknown name.
+  # every package a sim run exercises, every run: nodes run from install/, and a stale
+  # crusader_bt silently ignores nav_mode and runs legacy legs (the review of
+  # 2026-10-01). Unchanged packages cost seconds; a changed crusader_bt about 40 s.
+  # Only the packages the checkout has: --packages-select refuses an unknown name.
   docker exec "$CONTAINER" bash -lc \
-    "cd /root/robotx_ws && source install/setup.bash && P=''; for p in crusader_sim crusader_nav crusader_nav_layers crusader_groundstation; do [ -d src/rx26_asv/\$p ] && P=\"\$P \$p\"; done; colcon build --packages-select \$P 2>&1 | tail -2" \
+    "cd /root/robotx_ws && source install/setup.bash && P=''; for p in crusader_msgs crusader_bt crusader_perception crusader_sim crusader_nav crusader_nav_layers crusader_groundstation; do [ -d src/rx26_asv/\$p ] && P=\"\$P \$p\"; done; flock /root/robotx_ws/.colcon.lock colcon build --packages-select \$P 2>&1 | tail -2" \
     | sed 's/^/  /'
 fi
 # docker exec does not inherit this shell's environment: TREE and NAV_MODE cross explicitly

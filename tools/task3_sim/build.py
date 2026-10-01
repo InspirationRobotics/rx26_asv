@@ -2,7 +2,7 @@
 """build.py — compile the Task 3 tree OFF-ROS, with nothing but g++ and Python.
 
     python tools/task3_sim/build.py            # fetch-check, BT.CPP, tests, runner
-    python tools/task3_sim/build.py test       # the two stdlib-only math tests
+    python tools/task3_sim/build.py test       # the stdlib-only math and leg tests
     python tools/task3_sim/build.py runner     # the off-ROS runner the sim drives
     python tools/task3_sim/build.py --clean    # forget every object file
 
@@ -167,7 +167,8 @@ def run_test(name):
     src = os.path.join(BT_PKG, "test", f"{name}.cpp")
     exe = os.path.join(BUILD, name + EXE)
     headers = [os.path.join(BT_PKG, "include", "crusader_bt", h)
-               for h in ("nav_math.hpp", "dock_math.hpp", "fire_math.hpp")]
+               for h in ("nav_math.hpp", "dock_math.hpp", "fire_math.hpp",
+                         "path_math.hpp", "planner_port.hpp", "planned_leg.hpp")]
     stale = newer(src, exe) or any(os.path.isfile(h) and newer(h, exe) for h in headers)
     if stale:
         os.makedirs(BUILD, exist_ok=True)
@@ -253,6 +254,8 @@ def main():
         run_test("test_nav_math")
         run_test("test_dock_math")
         run_test("test_fire_math")
+        run_test("test_path_math")
+        run_test("test_planned_leg")
     if a.what == "btcpp":
         btcpp()
     if a.what in ("all", "runner"):

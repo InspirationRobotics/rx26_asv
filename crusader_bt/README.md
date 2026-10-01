@@ -14,7 +14,8 @@ behavior_trees/task1_safe_passage.xml   the mission. Editable without a compiler
 src/leaves.cpp                          11 primitives: read a port, call
         |                               nav_math, publish, poll
 include/crusader_bt/nav_math.hpp        ALL the geometry. stdlib only.
-                                        (dock_math.hpp: the same, for Task 3)
+                                        (dock_math.hpp: the same, for Task 3;
+                                        path_math.hpp + planned_leg.hpp: avoidance)
 ```
 
 ## The one thing to know before changing anything
@@ -29,7 +30,7 @@ about a second:
 g++ -std=c++17 -O2 -I include -o /tmp/t test/test_nav_math.cpp && /tmp/t
 ```
 
-57 checks. That loop is the difference between finding a mirrored side rule at a
+125 checks. That loop is the difference between finding a mirrored side rule at a
 desk and finding it by watching the boat pass a buoy on the wrong side, once, on
 the water. If a leaf in `src/leaves.cpp` grows a formula, the formula belongs in
 `nav_math.hpp` with a test, and the leaf keeps only the plumbing.
@@ -58,14 +59,101 @@ asserts against hand-worked cases with the compass directions spelled out.
 | `EntryResolved` / `ExitResolved` | condition | SUCCESS once that buoy is classified |
 | `NearExit` | condition | SUCCESS within `radius` of the exit — **ends the transit** |
 | `SetTask` | action | publishes the task token; the course lights its beacons on this |
-| `NavigateTo` | action | publish a setpoint, poll for arrival |
-| `CircleBuoy` | action | `points` waypoints once around, `cw` or `ccw` |
+| `NavigateTo` | action | drive to a target and poll for arrival: planned around hazards, or straight (`avoid`), see *Planned legs* |
+| `CircleBuoy` | action | one explicit hop onto the ring, then `points` waypoints once around, `cw` or `ccw`; each hop is a leg |
+| `AvoidObstacles` | compute | **deprecated pass-through**: `out` = `in`. `NavigateTo` avoids by itself |
 | `HoldStation` | action | **always RUNNING** — a Timeout or a sibling ends it |
 | `NextWaypoint` | compute | **FAILURE = nothing left**, the loop's secondary exit |
 
 The two "always SUCCESS" contracts are load-bearing. They sit in the reactive
 guard band that is re-ticked ten times a second, and a FAILURE there propagates
 to the root and ends the mission.
+
+## Planned legs — obstacle avoidance
+
+Avoidance lives in the tree, not in the autopilot. `NavigateTo` and `CircleBuoy`
+plan around every known hazard through Nav2's `planner_server` and a costmap, and
+**hold** when they cannot plan; ArduRover still flies the boat, from GUIDED
+position setpoints (a carrot 3 to 5 m ahead on the path). ArduPilot's own simple
+avoidance is an optional backstop, off in the baseline (`PRX1_TYPE` 0).
+**Avoidance is not a safety system. The RC e-stop is.** Spec:
+`docs/nav2_avoidance_spec.md`; operator view: `docs/OPERATIONS.md`.
+
+```
+include/crusader_bt/path_math.hpp       hazards, clearance, carrot, orbit ring, escape.
+                                        stdlib only, test_path_math.cpp
+include/crusader_bt/planner_port.hpp    the PlannerPort seam; StraightPlannerPort (a stub)
+include/crusader_bt/planned_leg.hpp     the leg state machine. stdlib only,
+                                        test_planned_leg.cpp, against a scripted fake planner
+src/ros_planner_port.cpp                the ROS side: planner_server's action and services
+src/leaves.cpp                          NavigateTo / CircleBuoy drive one PlannedLeg each
+```
+
+**`nav_mode`** (bt_runner_node, read at startup): `off | shadow | on`.
+
+| Mode | What the legs do |
+|---|---|
+| `off` | Straight legs **with a guard**: every leg, `avoid` or not, drives the straight line to its goal, but **holds** (one hold, then FAILURE at `blocked_timeout_s`) if that line crosses a known hazard, and resumes only after the line has stayed clear for `nav_unblock_reset_s`. It never drives through. No planner, no Nav2 needed. **The boat default**: the `asv` image has no Nav2 until it is recreated. |
+| `shadow` | The planner runs for real and the map shows its path and state, but the boat is driven by the unguarded legacy leg: **the goal setpoints are the legacy ones**, never a hold, never a failure (the state says `would HOLD`). The first thing to run on the water. |
+| `on` | The planned path drives the boat. The sim rig passes this. |
+
+`-p nav_mode:=on` and `-p nav_mode:=off` work as written: the command line parses a
+bare on/off as a YAML boolean, and the node accepts that as the mode it spells.
+A build **without `nav2_msgs`** (an image without Nav2) compiles a stub port and
+refuses to start with anything but `off`. To check that on a machine that has Nav2:
+`colcon build --packages-select crusader_bt --build-base /tmp/b_nonav --install-base /tmp/i_nonav --cmake-args -DCMAKE_DISABLE_FIND_PACKAGE_nav2_msgs=TRUE`.
+
+**Ports.**
+
+| Leaf | Port | Default | Meaning |
+|---|---|---|---|
+| `NavigateTo` | `avoid` | `true` | plan around hazards; `false` = a straight leg |
+| | `exempt` | `""` | with `avoid="false"` only: `gate` (the pair being driven), `dock`, or both comma separated. With `avoid="true"` it logs a WARN and is ignored |
+| | `blocked_timeout_s` | `15.0` | FAILURE after being blocked this long |
+| `CircleBuoy` | `points` | `8` (was 5) | waypoints on the ring, after one explicit hop onto it |
+| | `avoid`, `blocked_timeout_s` | `true`, `15.0` | per hop |
+
+**What a planned leg does** (`nav_mode on`, `avoid` true). Clearance is 0.8 m hard
+and 2.0 m soft from a hazard's surface. The goal is pushed out of any hazard and
+clipped into the 80 m costmap window; arrival is judged on the **true** goal.
+
+| State | Meaning |
+|---|---|
+| `STRAIGHT` | A leg that never touches the costmap: every `off` leg, the gate crossing and the Task 3 predock and berth (`avoid="false"`), and the legacy leg under `shadow`. A straight leg whose line is blocked shows `BLOCKED`. |
+| `PLANNING` | No path yet. BLOCKED follows after `nav_first_plan_wait_s`. |
+| `FOLLOWING` | Steering at the carrot. Re-planned at up to 2 Hz; a new path replaces a valid one only if shorter by 20 % **and** 3 m. |
+| `BLOCKED` | No valid path, or the planner is blind (`planner_server not available`, a timeout). **One hold**, the costmap cleared once at 5 s, **FAILURE at 15 s**. The 15 s only resets after 3 s of continuous FOLLOWING, so flip-flopping still times out. |
+| `DEGRADED` | Stale pose, a NaN heading, or a changed datum. One hold, nothing requested, **never a failure** (the mission timeout is the backstop). Resumes by itself. |
+| `ARRIVED` / `FAILED` | Terminal. |
+
+The leg status is JSON on `/crsd/nav/leg_status` (`bt_runner_node.nav_leg_topic`),
+drawn by the ground station; `/crsd/nav/hazards` is the known field the costmap
+is drawn from. Both are built by the same two functions the leaves use
+(`knownHazards`, `legStatusJson` in `context.hpp`), so the map, the costmap and the
+leg's own checks cannot disagree about the field. A halted leg (a
+reactive guard, a cancel) and the end of the mission reset the status to `IDLE`.
+
+**Straight legs.** The gate crossing is `avoid="false" exempt="gate"`, and the Task 3
+line-up and berth are `avoid="false" exempt="dock"`: those legs drive *through* a
+pair or a slip that is itself a hazard, so they never ask the planner. They still
+**hold** when anything else known is on the line.
+
+**The frame.** The costmap's `map`, the tree's local plane and every hazard
+coordinate are one ENU plane around one datum, owned by `nav_frames_node`
+(`/crsd/datum`). With `shadow` or `on` the tree **waits for the datum** and does not
+pin its origin at the first fix (a goal sent before it arrives fails at once: no fresh
+pose, target not available); with `off` it pins at the first fix as it always did. A datum that later differs by more than 1 cm is never
+adopted: planned legs go `DEGRADED` ("datum changed: restart bt_runner").
+
+**`AvoidObstacles`** is a deprecated pass-through (`out` = `in`, once-per-run WARN):
+`NavigateTo` avoids by itself. It stays registered so an old local XML still loads.
+
+**Off-ROS.** `offros_runner --nav-mode off|shadow|on` (default `off`, so
+`tools/task3_sim/test_e2e.py` is unchanged) swaps the planner for
+`StraightPlannerPort`, an instant straight path. It is not a planner: it exists to
+run the real `PlannedLeg` and the real leaves. With `shadow` or `on` the runner waits
+for a `{"type":"datum","lat":..,"lon":..}` line, as the node waits for `/crsd/datum`.
+It prints `{"type":"leg",...}` and `{"type":"hazards","n":k}`.
 
 ## Task 3 — Coordinated Logistics (`task3_disruptive.xml`)
 
@@ -204,8 +292,11 @@ With both off the fire tree is a shadow that logs every solution it would act on
 
 ## What is not here
 
-- **Obstacle avoidance.** It runs in the autopilot (`PRX1_TYPE=2`,
-  `AVOID_ENABLE`) and keeps working whether or not any of this is healthy.
+- **Autopilot avoidance as the mechanism.** Avoidance is the tree's (*Planned
+  legs*). ArduPilot's simple avoidance is an optional backstop, off in the baseline
+  (`PRX1_TYPE` 0), and `OA_TYPE` stays 0: BendyRuler must never run alongside the
+  planner. Where the tree cannot plan it holds; it does not hand the boat to the
+  autopilot.
 - **The mission timeout and cancel.** They are in `bt_runner_node`, not the XML,
   so a tree that somehow never terminates still cannot strand the boat.
 - **`behaviortree_ros2`.** Not released for Humble, and not needed: the leaves

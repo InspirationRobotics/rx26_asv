@@ -21,10 +21,14 @@
 #ifndef CRUSADER_BT__CONTEXT_HPP_
 #define CRUSADER_BT__CONTEXT_HPP_
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -36,6 +40,8 @@
 #include "crusader_bt/dock_math.hpp"
 #include "crusader_bt/fire_math.hpp"
 #include "crusader_bt/nav_math.hpp"
+#include "crusader_bt/path_math.hpp"
+#include "crusader_bt/planned_leg.hpp"
 
 namespace crusader_bt
 {
@@ -250,6 +256,43 @@ struct Context
   // ---- posture ----
   bool publish_setpoints = false;             ///< false = this tree cannot move the boat
 
+  // ---- obstacle avoidance (path_math.hpp, planned_leg.hpp) ----
+  // Spec: docs/nav2_avoidance_spec.md sections 2 and 5.4. Written by the runner,
+  // read by NavigateTo and CircleBuoy; every runner-side rule that touches the
+  // frame lives in ingestPose / applyDatum below so the ROS runner and the
+  // off-ROS one cannot disagree about it.
+  path::Mode nav_mode = path::Mode::Off;
+  path::NavParams nav;                          ///< bt_runner_node's nav_* params
+  std::shared_ptr<path::PlannerPort> planner;   ///< null when nav_mode is off (or no Nav2 build)
+  /// The latest raw fix, kept so a datum that arrives after the first pose can
+  /// still place the boat in it.
+  nav::LatLon fix;
+  bool have_fix = false;
+  /// `origin` came from /crsd/datum, i.e. it IS the TF frame `map`. A first-fix
+  /// origin is not: hazards are published only when this is set (hazardsPublishable).
+  bool datum_from_topic = false;
+  /// A different datum arrived after one was adopted. The origin never moves
+  /// mid-run (the DockBook, home and the gate bookkeeping hold local coordinates),
+  /// so every planned leg holds and the hazard publisher stops.
+  bool datum_mismatch = false;
+
+  /// What the running leg reports; the runner turns it into /crsd/nav/leg_status.
+  struct LegStatus
+  {
+    std::string leaf, name, state = "IDLE", why;
+    bool avoid = false;
+    double blocked_s = 0.0;
+    bool have_goal = false;
+    nav::Vec2 goal;
+    bool have_target = false;
+    nav::Vec2 target;
+    std::vector<nav::Vec2> path;
+    double plan_ms = -1.0;                      ///< -1 = unknown (a blank, not a zero)
+    int hop = -1, hops = 0;                     ///< CircleBuoy only; hop < 0 = not an orbit
+  };
+  LegStatus leg;
+  std::uint32_t leg_seq = 0;                    ///< bumped by a leaf whenever it writes `leg`
+
   // ---- outputs the runner wires up ----
   std::function<void(nav::LatLon)> send_setpoint;
   std::function<void(const std::string &)> set_task;
@@ -287,6 +330,243 @@ struct Context
 };
 
 using ContextPtr = std::shared_ptr<Context>;
+
+// ------------------------------------------------------------ the shared frame
+//
+// Spec section 2. The TF frame `map`, ctx.origin and every HazardArray
+// coordinate are ONE local ENU plane, centred on one datum that nav_frames_node
+// owns and publishes on /crsd/datum. These two functions are the whole of how a
+// runner learns it, and BOTH runners call them (bt_runner_node.cpp and
+// offros_runner.cpp): the rule lives here, not in two copies that drift.
+
+/// What one /crsd/pose did to the frame.
+enum class PoseEvent
+{
+  Tracked,   ///< the origin was already set; the boat moved
+  Pinned,    ///< nav_mode off: this first fix became the origin (the legacy behaviour)
+  Waiting,   ///< nav_mode shadow/on and no datum yet: the boat is NOT placed
+  Bad        ///< a non-finite lat/lon: ignored entirely
+};
+
+/// One /crsd/pose. CALL UNDER ctx.mu.
+///
+/// With nav_mode off the origin is pinned at the first fix, as it always was. With
+/// shadow or on it is NOT: a first-fix origin is not the TF frame, so the planner
+/// would be handed coordinates in a plane the costmap does not share, and the
+/// error is a silent offset. The boat is left unplaced until the datum arrives
+/// (applyDatum places it from the fix kept here); pose_fresh stays false until
+/// then because it requires origin_set.
+inline PoseEvent ingestPose(Context & c, nav::LatLon fix, double heading_deg)
+{
+  if (!std::isfinite(fix.lat) || !std::isfinite(fix.lon)) {return PoseEvent::Bad;}
+  c.fix = fix;
+  c.have_fix = true;
+  c.heading_deg = heading_deg;        // NaN when GPS yaw is unresolved
+  PoseEvent ev = PoseEvent::Tracked;
+  if (!c.origin_set) {
+    if (c.nav_mode != path::Mode::Off) {return PoseEvent::Waiting;}
+    c.origin = fix;
+    c.origin_set = true;
+    ev = PoseEvent::Pinned;
+  }
+  c.boat = nav::toLocal(fix, c.origin);
+  return ev;
+}
+
+/// What a /crsd/datum did to the frame.
+enum class DatumEvent
+{
+  Adopted,    ///< it is now the origin (it came before any pose pinned one)
+  Unchanged,  ///< the same datum as the origin, to 1 cm
+  Mismatch,   ///< a DIFFERENT datum, the first time: datum_mismatch is now set
+  Ignored     ///< non-finite, a mismatch already reported, or nav_mode off
+};
+
+/// A datum arrived (/crsd/datum, or the offros "datum" line). CALL UNDER ctx.mu.
+///
+/// NEVER RE-PINS MID-RUN. A datum that differs from the adopted origin by more than
+/// 0.01 m sets datum_mismatch instead: the DockBook, `home` and the gate
+/// bookkeeping all hold local coordinates, and moving the origin under them would
+/// teleport the field. The leg holds until bt_runner is restarted.
+///
+/// NOT IN OFF: off pins the origin at the first fix, as it always did, and shares its
+/// frame with no costmap, so a datum is none of its business. Without this a boat in
+/// off whose container merely runs nav_frames_node would log a "datum changed,
+/// restart bt_runner" ERROR against a pin nobody asked to be the datum.
+inline DatumEvent applyDatum(Context & c, nav::LatLon datum)
+{
+  if (c.nav_mode == path::Mode::Off) {return DatumEvent::Ignored;}
+  if (!std::isfinite(datum.lat) || !std::isfinite(datum.lon)) {return DatumEvent::Ignored;}
+  if (!c.origin_set) {
+    c.origin = datum;
+    c.origin_set = true;
+    c.datum_from_topic = true;
+    // A pose that arrived first was held back (ingestPose, Waiting): place it now.
+    if (c.have_fix) {c.boat = nav::toLocal(c.fix, c.origin);}
+    return DatumEvent::Adopted;
+  }
+  if (nav::norm(nav::toLocal(datum, c.origin)) <= 0.01) {
+    c.datum_from_topic = true;          // a first-fix pin that equals the datum IS the frame
+    return DatumEvent::Unchanged;
+  }
+  if (c.datum_mismatch) {return DatumEvent::Ignored;}
+  c.datum_mismatch = true;
+  return DatumEvent::Mismatch;
+}
+
+/// The costmap's frame is the BT's frame only when the origin came from the datum.
+/// CALL UNDER ctx.mu.
+inline bool hazardsPublishable(const Context & c)
+{
+  return c.origin_set && c.datum_from_topic && !c.datum_mismatch;
+}
+
+/// Everything the BT knows to be in the water: plan buoys, unmatched confirmed
+/// tracks and the dock. CALL UNDER ctx.mu.
+///
+/// THE ONE FUNCTION both the hazard publisher and the leaves call, so the costmap
+/// and the BT's own local checks can never disagree about the known field.
+inline std::vector<path::Hazard> knownHazards(const Context & c)
+{
+  return path::buildHazards(c.buoys, c.obstacles, c.dock, c.dock_min_obs, c.nav);
+}
+
+// ------------------------------------------------------------------ nav_mode
+
+/// "off" | "shadow" | "on". False for anything else, so a typo in the YAML is an
+/// error and never a silent fall-back to a mode the operator did not ask for.
+inline bool parseNavMode(const std::string & s, path::Mode & out)
+{
+  if (s == "off") {
+    out = path::Mode::Off;
+  } else if (s == "shadow") {
+    out = path::Mode::Shadow;
+  } else if (s == "on") {
+    out = path::Mode::On;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+inline const char * navModeName(path::Mode m)
+{
+  switch (m) {
+    case path::Mode::Off: return "off";
+    case path::Mode::Shadow: return "shadow";
+    case path::Mode::On: return "on";
+  }
+  return "off";
+}
+
+// ----------------------------------------------------------------- leg status
+//
+// /crsd/nav/leg_status (spec 4.3) is JSON, built here once so the ROS runner and
+// the off-ROS one send byte-identical text. A blank is `null`, never a number
+// that looks like a measurement.
+
+inline std::string jsonQuote(const std::string & s)
+{
+  std::string o = "\"";
+  for (const unsigned char ch : s) {
+    switch (ch) {
+      case '"': o += "\\\""; break;
+      case '\\': o += "\\\\"; break;
+      case '\n': o += "\\n"; break;
+      case '\r': o += "\\r"; break;
+      case '\t': o += "\\t"; break;
+      default:
+        if (ch < 0x20) {
+          char b[8];
+          std::snprintf(b, sizeof(b), "\\u%04x", static_cast<unsigned>(ch));
+          o += b;
+        } else {
+          o += static_cast<char>(ch);
+        }
+    }
+  }
+  return o + "\"";
+}
+
+/// A JSON number with `digits` decimals; `null` for NaN/inf (NaN is not JSON).
+inline std::string jsonNum(double v, int digits)
+{
+  if (!std::isfinite(v)) {return "null";}
+  char b[48];
+  std::snprintf(b, sizeof(b), "%.*f", digits, v);
+  return b;
+}
+
+/// `[lat, lon]` of a local point, or `null` when there is none (or no origin).
+inline std::string jsonLatLon(const Context & c, bool have, nav::Vec2 p)
+{
+  if (!have || !c.origin_set) {return "null";}
+  const nav::LatLon ll = nav::toLatLon(p, c.origin);
+  return "[" + jsonNum(ll.lat, 7) + "," + jsonNum(ll.lon, 7) + "]";
+}
+
+/// The leg status as one JSON object, `path` decimated to at most `max_path`
+/// points (first and last kept). CALL UNDER ctx.mu. `t_s` is the mission clock.
+inline std::string legStatusJson(const Context & c, double t_s, std::size_t max_path = 60)
+{
+  const Context::LegStatus & s = c.leg;
+  std::string o = "{\"t\":" + jsonNum(t_s, 1);
+  if (s.state == "IDLE") {return o + ",\"state\":\"IDLE\"}";}   // no leg running
+  o += ",\"leaf\":" + jsonQuote(s.leaf) + ",\"name\":" + jsonQuote(s.name) +
+    ",\"mode\":\"" + navModeName(c.nav_mode) + "\",\"avoid\":" + (s.avoid ? "true" : "false") +
+    ",\"state\":" + jsonQuote(s.state) + ",\"why\":" + jsonQuote(s.why) +
+    ",\"blocked_s\":" + jsonNum(s.blocked_s, 1) +
+    ",\"goal\":" + jsonLatLon(c, s.have_goal, s.goal) +
+    ",\"target\":" + jsonLatLon(c, s.have_target, s.target) + ",\"path\":[";
+  const std::size_t n = s.path.size();
+  const std::size_t m = std::min(n, std::max<std::size_t>(max_path, 2));
+  for (std::size_t k = 0; k < m; ++k) {
+    const std::size_t i = m == 1 ? 0 : k * (n - 1) / (m - 1);
+    o += (k == 0 ? "" : ",") + jsonLatLon(c, true, s.path[i]);
+  }
+  o += "],\"plan_ms\":" + (s.plan_ms >= 0.0 ? jsonNum(s.plan_ms, 1) : std::string("null"));
+  if (s.hop >= 0) {
+    o += ",\"hop\":" + std::to_string(s.hop) + ",\"hops\":" + std::to_string(s.hops);
+  }
+  return o + "}";
+}
+
+/// Decides WHEN the leg status goes out: when the leg's state changes (always), and
+/// otherwise at most every `period_s` after a leaf wrote it. A leg that ended
+/// (ARRIVED or FAILED) is shown once; if no leaf has started another by the next
+/// tick the status goes back to IDLE, so the map never keeps drawing a finished
+/// leg's path (blanks over guesses). One per runner, on the tick thread.
+struct LegStatusPacer
+{
+  std::uint32_t seq = 0;
+  std::string state;                   ///< "" until the first publish, so the first call is due
+  double sent_s = -1e18;
+  bool terminal = false;
+
+  /// CALL UNDER ctx.mu. True = publish legStatusJson(c, ...) now.
+  bool due(Context & c, double now_s, double period_s)
+  {
+    if (terminal && c.leg_seq == seq) {
+      c.leg = Context::LegStatus{};
+      ++c.leg_seq;
+    }
+    const bool state_changed = c.leg.state != state;
+    const bool written = c.leg_seq != seq;
+    if (!state_changed && !(written && now_s - sent_s >= period_s)) {return false;}
+    seq = c.leg_seq;
+    state = c.leg.state;
+    sent_s = now_s;
+    terminal = state == "ARRIVED" || state == "FAILED";
+    return true;
+  }
+};
+
+/// Back to "no leg running". CALL UNDER ctx.mu.
+inline void clearLeg(Context & c)
+{
+  c.leg = Context::LegStatus{};
+  ++c.leg_seq;
+}
 
 /// Fold one DockObservation into the context. CALL UNDER ctx.mu.
 ///

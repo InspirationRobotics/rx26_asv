@@ -27,8 +27,13 @@
   The mission timeout and cancel are NOT here. They live in bt_runner_node, so a
   tree that somehow never terminates still cannot strand the boat.
 
-  Obstacle avoidance is deliberately absent: it runs in the autopilot
-  (PRX1_TYPE=2, AVOID_ENABLE) and keeps working whether or not this is healthy.
+  Obstacle avoidance lives in the tree, not in the autopilot: NavigateTo and
+  CircleBuoy plan around every known object through Nav2's planner_server
+  (bt_runner_node's nav_mode, docs/nav2_avoidance_spec.md) and HOLD when they
+  cannot plan. A leg that stays blocked FAILS after 15 s, so the transit leg is
+  wrapped in ForceSuccess (a blocked leg is skipped and the next waypoint is
+  chosen) and the others in RetryUntilSuccessful. ArduRover's own avoidance is at
+  most a backstop and is off in the baseline (PRX1_TYPE 0).
 -->
 <root BTCPP_format="4" main_tree_to_execute="SafePassage">
   <BehaviorTree ID="SafePassage">
@@ -47,7 +52,9 @@
              the waypoint is a hint about where to look, not a place to touch. -->
         <ReactiveFallback name="approach">
           <EntryResolved/>
-          <NavigateTo target="approach" tolerance="4.0"/>
+          <RetryUntilSuccessful num_attempts="3">
+            <NavigateTo target="approach" tolerance="4.0"/>
+          </RetryUntilSuccessful>
         </ReactiveFallback>
 
         <!-- Hold station until it resolves, or give up. HoldStation never
@@ -60,7 +67,9 @@
         </ReactiveFallback>
 
         <!-- Core Tier: a FULL circle of the ENTRY buoy, CLOCKWISE. -->
-        <CircleBuoy anchor="entry" radius="6.0" points="5" direction="cw"/>
+        <RetryUntilSuccessful num_attempts="3">
+          <CircleBuoy anchor="entry" radius="6.0" points="8" direction="cw"/>
+        </RetryUntilSuccessful>
 
         <!-- The gate count is unknown, so it is not in this file.
 
@@ -79,7 +88,14 @@
               </Inverter>
               <Sequence>
                 <NextWaypoint offset="4.0"/>
-                <NavigateTo target="waypoint" tolerance="2.5"/>
+                <!-- THE ForceSuccess IS LOAD-BEARING. A blocked leg FAILS, and
+                     without it that FAILURE would end the transit through
+                     KeepRunningUntilFailure and skip every gate. With it the
+                     Sequence succeeds, the loop comes round, and NextWaypoint
+                     chooses again. -->
+                <ForceSuccess>
+                  <NavigateTo target="waypoint" tolerance="2.5"/>
+                </ForceSuccess>
               </Sequence>
             </ReactiveSequence>
           </KeepRunningUntilFailure>
@@ -95,7 +111,9 @@
 
         <!-- Core Tier: a FULL circle of the EXIT buoy, COUNTERCLOCKWISE.
              This is what completes the task. -->
-        <CircleBuoy anchor="exit" radius="6.0" points="5" direction="ccw"/>
+        <RetryUntilSuccessful num_attempts="3">
+          <CircleBuoy anchor="exit" radius="6.0" points="8" direction="ccw"/>
+        </RetryUntilSuccessful>
 
       </Sequence>
     </ReactiveSequence>

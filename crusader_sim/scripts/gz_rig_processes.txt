@@ -1,14 +1,15 @@
 # pkill -f patterns for the sim-only processes gz_rig_up.sh starts, on top of
 # tools/sitl/rig_processes.txt (the boat nodes). One per line.
 #
-# ORDER MATTERS for the nav stack: nav.launch.py respawns planner_server
-# (respawn=True), so the launch itself goes FIRST, then its children.
+# ORDER MATTERS for the nav stack: nav.launch.py respawns planner_server and
+# nav_lifecycle (respawn=True), so the launch itself goes FIRST, then its children.
 ros2 launch crusader_nav
 crusader_nav/nav_frames_node
 crusader_nav/costmap_probe
 nav2_planner/planner_server
-nav2_lifecycle_manager/lifecycle_manager
+crusader_nav/nav_lifecycle
 ros_gz_bridge/parameter_bridge
 crusader_sim/lib
+crusader_sim/lib/crusader_sim/panel_feed
 crusader_sim.sim_uav
 crusader_perception/lib/crusader_perception/lidar_cluster_node

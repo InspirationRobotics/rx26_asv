@@ -32,7 +32,7 @@ Source tags used below:
 | Frames | **One local ENU frame.** TF `map`, the BT's east/north frame and the hazard map are the same frame. `nav_frames_node` owns the datum and publishes `/crsd/datum` latched. bt_runner adopts it. TF is `map -> base_footprint` only: no `odom`, no `base_link` in TF. |
 | Planned legs | One pure helper, `path::PlannedLeg`, used by NavigateTo, every CircleBuoy hop and the Task 3 legs. It drives a **carrot 3-5 m ahead** on the path and judges arrival on the **true goal**. Blocked: hold once, keep replanning, clear the costmap at 5 s, FAILURE at 15 s. Stale pose or NaN heading: hold, no FAILURE. |
 | Straight legs | Gate crossing: `avoid="false" exempt="gate"`. Task 3 predock and berth: `avoid="false" exempt="dock"`. Straight setpoints, plus a BT-side check of the segment against known hazards minus the exempt ones. They never touch the costmap. |
-| Rollout | `bt_runner_node.nav_mode`: `off` (the legacy straight legs), `shadow` (plans and displays, but drives legacy), `on`. Boat default `off`, sim `on`. Everything **builds without Nav2**, so the boat can take this code before its container is recreated. |
+| Rollout | `bt_runner_node.nav_mode`: `off` (straight legs with the known-hazard guard, no planner; §5.5, 2026-10-01), `shadow` (plans and displays, but drives legacy), `on`. Boat default `off`, sim `on`. Everything **builds without Nav2**, so the boat can take this code before its container is recreated. |
 
 ## 1. Architecture and data flow
 
@@ -54,7 +54,7 @@ Source tags used below:
         │                                                            │ │  action /compute_path_to_pose ◄────────────────────────┼── bt_runner (≤2 Hz, + on invalid)
         │                                                            │ │  srv    /is_path_valid ◄───────────────────────────────┼── bt_runner (≤10 Hz)
         │                                                            │ │  srv    /global_costmap/clear_entirely_global_costmap ◄┼── bt_runner (once per blocked episode)
-        │                                                            │ └── managed by lifecycle_manager_crsd_nav (autostart) ───┘
+        │                                                            │ └── managed by nav_lifecycle (our own, with timeouts) ───┘
         │◄── /crsd/guided_setpoint (GuidedSetpoint: carrot / hold / straight goal) ── bt_runner
         └──► SET_POSITION_TARGET_GLOBAL_INT (GUIDED, position only) ──► ArduRover
  bt_runner ── /crsd/nav/leg_status (String JSON, ≤2 Hz + on change) ──► ground_station map (path, carrot, state)
@@ -164,7 +164,7 @@ mismatch, and holds (§5.3). It times out plan requests at 1.0 s, and treats a t
 
 | Package | Build type | Files |
 |---|---|---|
-| `crusader_nav` | ament_python | `package.xml`, `setup.py`, `setup.cfg`, `resource/crusader_nav`, `crusader_nav/__init__.py`, `crusader_nav/frames_core.py`, `crusader_nav/nav_frames_node.py`, `crusader_nav/costmap_probe.py`, `launch/nav.launch.py`, `config/nav2_params.yaml`, `test/test_frames_core.py`, `README.md` |
+| `crusader_nav` | ament_python | `package.xml`, `setup.py`, `setup.cfg`, `resource/crusader_nav`, `crusader_nav/__init__.py`, `crusader_nav/frames_core.py`, `crusader_nav/nav_frames_node.py`, `crusader_nav/costmap_probe.py`, `crusader_nav/lifecycle_core.py`, `crusader_nav/nav_lifecycle.py`, `launch/nav.launch.py`, `config/nav2_params.yaml`, `test/test_frames_core.py`, `test/test_lifecycle_core.py`, `README.md` |
 | `crusader_nav_layers` | ament_cmake | `package.xml`, `CMakeLists.txt`, `hazard_layer_plugin.xml`, `include/crusader_nav_layers/raster.hpp` (pure), `include/crusader_nav_layers/hazard_layer.hpp`, `src/hazard_layer.cpp`, `test/test_raster.cpp`, `README.md` |
 
 **Build without Nav2.** The boat's `asv` image lacks Nav2 until it is recreated.
@@ -225,6 +225,49 @@ to `/global_costmap/costmap` (OccupancyGrid, where a value ≥ 99 means LETHAL o
 INSCRIBED once scaled), `/crsd/datum` and `/crsd/pose`. At 1 Hz it prints each
 connected blob of lethal cells within 40 m as `lat, lon, range m, bearing deg, size m`.
 No ROS params; argparse takes `--max-range`.
+
+**`lifecycle_core.py` and `nav_lifecycle.py`** (node name `nav_lifecycle`) replace
+`nav2_lifecycle_manager`. *Note 2026-10-01 (why):* in the full sim rig the manager asked
+planner_server to configure, planner_server did, and rmw_fastrtps 6.2.10 logged
+`failed to send response to /planner_server/change_state (timeout): client will not
+receive response`. Fast DDS had not matched the server's response writer with the new
+client's response reader within 100 ms, so the reply was dropped. Humble 1.1.20's manager
+calls `change_state` with **no timeout**, so it waited for ever, planner_server stayed
+`inactive [2]`, and every planned leg held and FAILed. It depends on load and discovery
+timing (WP3's isolated test never hit it), and it can happen on the boat at boot.
+
+`lifecycle_core.py` is pure (no rclpy; `test/test_lifecycle_core.py`): `next_action(state_id)`
+gives `configure` for 1 (unconfigured), `activate` for 2 (inactive), `none` for 3 (active) and
+4 (finalized), and `wait` for 10..15 (transitions), 0/None (no answer) and any other id;
+`TimeoutPolicy` says "recreate the clients" on every Nth consecutive timeout;
+`RepeatGate` lets a log line through once and then at most every 30 s.
+
+| Param | Type | Default | RO/DYN | Meaning |
+|---|---|---|---|---|
+| `node_names` | string[] | `["planner_server"]` | RO | lifecycle nodes to configure and activate |
+| `check_period_s` | double | 1.0 | RO | period of the `get_state` check |
+| `call_timeout_s` | double | 3.0 | RO | a call unanswered after this is dropped and asked again |
+| `recreate_after_timeouts` | int | 3 | RO | consecutive timeouts before the two clients are rebuilt |
+
+Behaviour: one timer, one call in flight per node, never a blocking call. Each period it
+asks `/<node>/get_state`; on an answer it applies `next_action` through
+`/<node>/change_state` (transition 1 configure, 3 activate), each call with a
+`call_timeout_s` deadline. A call that misses it is dropped
+(`Client.remove_pending_request`), counted, and `get_state` is asked again on the next
+period; after `recreate_after_timeouts` in a row the node's two clients are destroyed and
+created again (fresh discovery) and a WARN is logged. A missing service (process down or
+respawning) is logged once and checked again every period. It never exits, so a
+planner_server respawned by `nav.launch.py` is configured and activated again with no
+other help. INFO on every state it sees change, then `planner_server active`; a repeated
+condition is logged once and then at most every 30 s. planner_server waits in `activating`
+(not `configuring`) for TF map to base_footprint, so calls to it time out while it waits;
+that is expected and harmless.
+
+*Bond.* Nav2's lifecycle nodes call `createBond()` on activate. Humble 1.1.20 has no
+parameter to switch it off (`nav2_util/lifecycle_node.hpp` and the strings of
+`libnav2_util_core.so` have none), and with no manager the bond never connects. Measured in `crsd-sim:nav2`: after the `Creating bond`
+line nothing follows (no log, no deactivate) through 50 s of idle, past the bond's 10 s
+connect timeout, so nothing is set in `nav2_params.yaml` for it.
 
 ### 3.3 Known hazards into the costmap: options and choice
 
@@ -394,13 +437,12 @@ global_costmap:
         inflate_unknown: false
         inflate_around_unknown: false
 
-lifecycle_manager_crsd_nav:
+nav_lifecycle:                               # replaces lifecycle_manager_crsd_nav, 3.2
   ros__parameters:
-    autostart: true
     node_names: ["planner_server"]
-    bond_timeout: 4.0
-    attempt_respawn_reconnection: true
-    bond_respawn_max_duration: 10.0
+    check_period_s: 1.0
+    call_timeout_s: 3.0                      # floats stay floats: rcl takes no int for a double
+    recreate_after_timeouts: 3
 
 # FALLBACK if STVL misbehaves (unverified decay on empty clouds, CPU): replace
 # "stvl_layer" in `plugins` with "obstacle_layer" and add:
@@ -451,17 +493,19 @@ The launch arguments are `nav2_params` (default `<share crusader_nav>/config/nav
    Set `respawn = (effective datum_source == "param")`: a respawn with `first_fix`
    would move the datum.
 2. `nav2_planner/planner_server`, name `planner_server`. Parameters: `[nav2_params]`,
-   with `respawn=True` and `respawn_delay=2.0`. The lifecycle manager reconnects it
-   within 10 s ([H:nav2_lifecycle_manager/src/lifecycle_manager.cpp]
-   `attempt_respawn_reconnection`).
-3. `nav2_lifecycle_manager/lifecycle_manager`, name `lifecycle_manager_crsd_nav`.
-   Parameters: `[nav2_params]`.
+   with `respawn=True` and `respawn_delay=2.0`. `nav_lifecycle` configures and activates a
+   respawned one again (measured 2026-10-01: `kill -9`, active again 7 s later).
+3. `crusader_nav/nav_lifecycle`, name `nav_lifecycle`. Parameters: `[nav2_params]`, with
+   `respawn=True` and `respawn_delay=2.0`. It replaces `nav2_lifecycle_manager/lifecycle_manager`
+   (`lifecycle_manager_crsd_nav`) *as of 2026-10-01*: Humble's manager hung for ever on one
+   lost `change_state` reply; see 3.2.
 
 All three use `output='screen'`.
 
-**Startup.** `planner_server` stays in *configuring* until TF `map -> base_footprint`
-exists. That needs a fix **with a finite heading**, because the costmap's on_configure
-loops on `canTransform` at 2 Hz [H:costmap_2d_ros.cpp]. Check it with
+**Startup.** `planner_server` stays in *activating* until TF `map -> base_footprint`
+exists (measured 2026-10-01: configure returns at once, `Activating` then waits for the
+first transform). That needs a fix **with a finite heading**, because the costmap loops on
+`canTransform` at 2 Hz [H:costmap_2d_ros.cpp]. Check it with
 `ros2 lifecycle get /planner_server`, run in the same container.
 
 **Where it is launched.**
@@ -691,21 +735,25 @@ class PlannedLeg {
 **Leg behaviour.** This is the contract the unit tests pin. It is specified per tick;
 `dt` is the time since the last step.
 
-**A. Off mode, or Straight in Shadow mode.**
+**A. Straight in Shadow mode.** (Off mode was A until 2026-10-01. It is **B** now: see the
+decision at the end of §5.5.)
 - This is **exactly the legacy NavigateTo** (leaves.cpp:241-305). `start` sends the
   goal. `step` resends when the goal has moved more than `resend_m`. With a fresh
   pose and `|goal - boat| <= tolerance`, the result is Success. With a stale pose,
   Running.
 - The state is STRAIGHT.
 
-**B. On mode with `avoid=false`: a straight leg with a guard.**
+**B. On mode with `avoid=false`, and Off mode with any `avoid`: a straight leg with a guard.**
 1. Send exactly as in A.
 2. Each tick, take `guard = exempt(hazards, exempt_buoys, exempt_dock, exempt_radius_m)`
    and check `segmentClear(boat, goal, guard, hard_m - local_check_tol_m)`.
 3. If the check fails, enter BLOCKED: send a **hold** (`setpoint = boat`) once and
-   accumulate `blocked_s`. When the segment clears, resend the goal and return to
-   STRAIGHT. FAILURE at `blocked_timeout_s`. A straight leg makes no planner calls
-   and no costmap clears.
+   accumulate `blocked_s`. When the segment has stayed clear for `unblock_reset_s`
+   (3 s, the rule a planned leg uses; so a track that flickers on and off the line
+   cannot make the boat lurch at it), resend the goal and return to STRAIGHT.
+   `blocked_s` counts while the leg is held, clear or not, and only that resume zeroes
+   it, so a flicker still ends in FAILURE at `blocked_timeout_s`. A straight leg makes
+   no planner calls and no costmap clears.
 4. The heading is not needed, so there is no DEGRADED here. A stale pose returns
    Running, as legacy does.
 5. In Shadow mode, the same check is logged as `would hold`, and nothing more.
@@ -931,6 +979,27 @@ The new ports:
 On the first tick it logs `WARN AvoidObstacles is deprecated and does nothing: NavigateTo avoids by itself`
 once. It stays registered (line 1126), so an old local XML still loads. `nav::avoidObstacles`
 is deleted (WP1).
+
+**Decision, 2026-10-01: in `nav_mode off` every leg is a guarded straight leg.**
+Behaviour A (the unguarded legacy leg) now exists only for `shadow` with `avoid=false`. In
+Off, a `NavigateTo` or `CircleBuoy` hop with `avoid=true` behaves as B: if the straight line
+to the goal crosses a known hazard it holds once, accumulates `blocked_s`, resumes only after
+`unblock_reset_s` of clear line, and FAILS at `blocked_timeout_s` (15 s). `avoid=false` legs,
+which are straight in every mode, get the same guard in Off with their `exempt` lists.
+- *Why.* Off is the boat's default until the `asv` container has Nav2. The run-in's
+  `AvoidObstacles` ReactiveSequence has been removed from `task1_disruptive.xml` and
+  `AvoidObstacles` is a pass-through, as this section specifies, so an Off leg that only
+  drove its line would go straight through any black buoy or LiDAR track on it. Putting the
+  legacy detour back is not the answer: it was removed per this spec, and it also caused the
+  2026-09-30 collision, through the 3 m `run_in` tolerance. With no planner to steer round
+  a hazard, **holding is safer than driving through**, and the tree then decides what a
+  failed leg means, exactly as for a blocked planned leg.
+- *What it costs.* A hazard the boat could have steered round now stops it until the line
+  clears or the leg fails. The leg makes no planner call and no costmap clear (so the clear
+  step at `clear_after_s` does not exist in Off), and builds and runs without `nav2_msgs`.
+  The leg status says STRAIGHT or BLOCKED honestly, and a hold is labelled as one in the log.
+- *Unchanged.* Shadow still sends the legacy goal and only logs `would HOLD`; On is as above;
+  a stale pose is still Running, as legacy. Tests: `test_planned_leg.cpp` sections 18 and 19.
 
 **Why no costmap exemption is needed.** Every leg that comes near its own pair or
 the dock is `avoid=false`. Those legs never consult the costmap, so a 2 m gate's
@@ -1472,7 +1541,7 @@ The bt_runner line (71-73) gains `-p nav_mode:=$NAV_MODE`.
   as today.
 
 **`gz_rig_down.sh` and `gz_rig_processes.txt`:** add `planner_server`,
-`lifecycle_manager`, `nav_frames_node` and `ros2 launch crusader_nav`.
+`nav_lifecycle` (was `lifecycle_manager`), `nav_frames_node` and `ros2 launch crusader_nav`.
 
 **Sim-only acceptance checks for the nav stack:**
 - **N1:** `ros2 lifecycle get /planner_server` reports active.

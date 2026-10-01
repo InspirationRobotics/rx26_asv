@@ -84,6 +84,25 @@ change: with jitter > 0 the periodic 5 s resend is therefore a send_plan of a
 freshly jittered field, not uav_link's resend() — and the boat replans every 5 s.
 Re-roll = a new random seed; allowed whenever no run is going.
 
+THE BOAT'S OWN PICTURE (map layers, each toggled in the page, default on). The
+panel has no ROS, so panel_feed.py (a node in crsd-sim, started by gz_rig_up.sh)
+subscribes the boat's topics and sends compact JSON to udp 127.0.0.1:14556
+(--feed-port); a thread here (panel_feed.FeedReceiver) keeps the newest packet.
+    planned path   /crsd/nav/leg_status: the leg bt_runner is driving, dashed by
+                   state like the ground station (green FOLLOWING, red BLOCKED,
+                   yellow PLANNING/DEGRADED, grey STRAIGHT), the carrot as a
+                   ring, the goal as a cross, and a NAV <state> badge
+    boat's tracks  /crsd/world_targets: what target_tracker believes from the
+                   boat's camera — hollow squares, the track's colour, "#id
+                   label", faded by time since seen. Not the true buoys (solid)
+                   and not the UAV's report (hollow circles)
+    fused passage  /crsd/safe_passage_report: the tree's association of the UAV
+                   field to those tracks (the UAV's colour, at the tracker's
+                   position where a track matched, else the UAV's) — small
+                   diamonds. Published only while a run is going
+A layer whose topic is older than 2 s is STALE: the server returns its age and no
+data, and the page draws nothing and says so. Never the last value.
+
 HTTP (ThreadingHTTPServer, like tools/bt_view.py). Beacon states are the course
 file's strings: off flash_red flash_green flash_blue(ENTRY) steady_blue(EXIT).
 POSTs take a JSON object and return {"ok": bool, "error": str?}.
@@ -91,7 +110,8 @@ POSTs take a JSON object and return {"ok": bool, "error": str?}.
     GET  /                           the page (task1_panel.html beside this file)
     GET  /api/state?log=sim:N,radio:N,mission:N,judge:N&trail=GEN:N
                                      everything the page draws, incl. the judge's
-                                     live verdict and the sensor views' status;
+                                     live verdict, the sensor views' status and
+                                     `feed` (the boat's layers, with ages);
                                      logs and the trail come back from N onward
     GET  /api/sensor/<rgb|depth|lidar>.jpg
                                      the view's latest JPEG, age in X-Frame-Age;
@@ -115,10 +135,10 @@ POSTs take a JSON object and return {"ok": bool, "error": str?}.
                                      offsets and sends the new field at once
     POST /api/reroll                 a new random seed, same rules
 
-Test hooks: --rxl-endpoint and --port (keep a test clear of a real run's 14555
-and 8095); --dry-run (every child process is a harmless stub, the mission a
---dry-run-mission-s long printout); GZ_PARTITION and CRUSADER_SIM_GEN in the
-environment keep a test's gz traffic and panel.yaml away from a live sim's.
+Test hooks: --rxl-endpoint, --feed-port and --port (keep a test clear of a real
+run's 14555, 14556 and 8095); --dry-run (every child process is a harmless stub,
+the mission a --dry-run-mission-s long printout); GZ_PARTITION and CRUSADER_SIM_GEN
+in the environment keep a test's gz traffic and panel.yaml away from a live sim's.
 """
 import argparse
 import json
@@ -137,6 +157,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from crusader_sim import course as C
+from crusader_sim.panel_feed import FEED_PORT, FeedReceiver
 from crusader_sim.paths import _SRC_PKG, _SRC_REPO, courses_dir, generated_dir
 from crusader_sim.sim_uav import plan_from_course
 from crusader_sim.task1_judge import Task1Judge, format_verdict
@@ -488,6 +509,7 @@ class Panel:
             self.gz, self._Odometry = Node(), Odometry
         except Exception as e:                 # noqa: BLE001 -- the page shows it
             self.errors["gz"] = "gz-transport unavailable (%s): no boat pose" % e
+        self.feed = FeedReceiver(a.feed_port)      # started in main(), like the sensors
         self.sensors = None
         try:
             # its own import: numpy/cv2 are the only non-stdlib needs, and a host
@@ -1049,6 +1071,7 @@ class Panel:
             except ValueError:
                 logs[k] = buf.since(0)
         now = time.time()
+        feed = self.feed.view()                  # its own leaf lock, never under self.lock
         with self.lock:
             errs, warns = check_layout(self.layout)
             tg, tn = (q.get("trail", ["-1:0"])[0] + ":0").split(":")[:2]
@@ -1079,7 +1102,8 @@ class Panel:
             # copies: the JSON is built after this lock is released, while the
             # poll thread may still be counting re-asks into these records
             return {
-                "dry_run": self.a.dry_run, "errors": dict(self.errors),
+                "dry_run": self.a.dry_run,
+                "errors": dict(self.errors, **({"feed": feed["error"]} if feed["error"] else {})),
                 "sim": {"state": self.sim, "step": self.sim_step, "detail": self.sim_detail,
                         "alive": alive, "odom_age": odom_age},
                 "layout": {"rev": self.layout_rev, "buoys": self.layout, "note": self.layout_note,
@@ -1098,6 +1122,7 @@ class Panel:
                 # colour change re-pair the gates the moment it goes on the air
                 "judge": None if self.judge is None else self.judge.verdict(),
                 "sensors": None if self.sensors is None else self.sensors.status(),
+                "feed": feed,
                 "boat": None if self.boat is None else {
                     "x": self.boat[0], "y": self.boat[1], "yaw": self.boat[2], "age": odom_age},
                 "trail": {"gen": self.trail_gen, "from": start, "pts": self.trail[start:]},
@@ -1121,6 +1146,7 @@ class Panel:
         _safe(self._radio_down)
         if self.sensors is not None:
             self.sensors.stop()
+        self.feed.stop()
 
 
 def _names(d):
@@ -1210,6 +1236,9 @@ def main():
                     help="clear of 8090 ground station, 8085 bt_view, 8080/8081 viewers")
     ap.add_argument("--rxl-endpoint", default="udpout:127.0.0.1:14555",
                     help="rxl_link_node's rxl_endpoint, from the aircraft's side")
+    ap.add_argument("--feed-port", type=int, default=FEED_PORT,
+                    help="udp port panel_feed (in crsd-sim) sends the boat's map layers to; "
+                         "a test panel needs its own, as with --port")
     ap.add_argument("--container", default=os.environ.get("RX26_CONTAINER", "crsd-sim"))
     ap.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--dry-run-mission-s", type=float, default=20.0, help=argparse.SUPPRESS)
@@ -1222,6 +1251,7 @@ def main():
     threading.Thread(target=panel.loop, daemon=True).start()
     if panel.sensors is not None:
         panel.sensors.start()
+    panel.feed.start()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: panel.quit.set())
     print("task1_panel on http://localhost:%d%s" % (a.port, " (DRY RUN)" if a.dry_run else ""),

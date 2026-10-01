@@ -326,13 +326,14 @@ ros2 launch crusader_nav nav.launch.py datum_source:=param datum_lat:=<lat> datu
 ```
 
 then bt_runner with `-p nav_mode:=shadow` (or `on`). The nav stack comes first because
-`planner_server` stays in *configuring* until a pose with a **finite heading** has produced the
+`planner_server` stays in *activating* (`nav_lifecycle` drives it there and retries) until a pose with a **finite heading** has produced the
 TF `map -> base_footprint`; check `ros2 lifecycle get /planner_server` says `active`, and
 `ros2 topic echo /crsd/nav/frames_health --once` shows `tf_hz` above 5 and the datum.
 
-**`nav_mode`** (bt_runner_node parameter): `off` is the legacy straight legs and the boat default;
-`shadow` plans and displays but still drives the legacy legs, which is the first thing to run on
-the water; `on` drives the planned path. A leg that cannot plan never drives blind: it holds.
+**`nav_mode`** (bt_runner_node parameter): `off` is straight legs with a known-hazard guard (a leg
+holds, then fails after 15 s, rather than drive through a hazard on its line) and the boat default;
+`shadow` plans and displays but still drives the unguarded legacy legs, which is the first thing
+to run on the water; `on` drives the planned path. A leg that cannot plan never drives blind: it holds.
 
 **What you see.** The ground station map draws the planned path as a dashed line (green
 FOLLOWING, red BLOCKED, yellow PLANNING/DEGRADED, grey STRAIGHT), the carrot as a ring, the goal

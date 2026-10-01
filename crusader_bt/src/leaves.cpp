@@ -2,7 +2,7 @@
 //
 // That is the design working. All the geometry that can be silently wrong lives
 // in nav_math.hpp, which compiles and tests on a laptop in a second
-// (test/test_nav_math.cpp, 57 checks). What is left here is: read a port, call
+// (test/test_nav_math.cpp, 125 checks). What is left here is: read a port, call
 // nav_math, publish, poll. If a leaf in this file grows a formula, move the
 // formula to nav_math and test it.
 //
@@ -20,6 +20,7 @@
 #include <cmath>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,8 @@
 
 #include "crusader_bt/context.hpp"
 #include "crusader_bt/nav_math.hpp"
+#include "crusader_bt/path_math.hpp"
+#include "crusader_bt/planned_leg.hpp"
 
 // NOTE ON PORTS. BT::InputPort has two overloads: (name, description) and
 // (name, default_value, description). There is NO (name, default_value) form —
@@ -40,6 +43,164 @@ namespace
 {
 
 using nav::Vec2;
+
+// ------------------------------------------------- setpoints and planned legs
+//
+// What NavigateTo, CircleBuoy and HoldStation have in common. Each used to carry
+// its own copy of "convert, publish if allowed, log" (spec 5.5), and the two legs
+// now also share one PlannedLeg driver, so there is exactly one place that turns a
+// leg's output into a setpoint, a log line and a status for the map.
+
+/// Send `p` as the GUIDED setpoint when publish_setpoints allows it, and log
+/// "<what> lat, lon", marked [NOT SENT] when it did not go out. `what` empty =
+/// no log line. The local point is converted under the lock; the publish is not.
+void sendSetpoint(
+  Context & c, const rclcpp::Logger & lg, Vec2 p, const std::string & what)
+{
+  nav::LatLon ll;
+  {
+    std::lock_guard<std::mutex> lk(c.mu);
+    ll = nav::toLatLon(p, c.origin);
+  }
+  const bool sent = c.publish_setpoints && c.send_setpoint;
+  if (sent) {c.send_setpoint(ll);}
+  if (!what.empty()) {
+    RCLCPP_INFO(
+      lg, "%s %.7f, %.7f%s", what.c_str(), ll.lat, ll.lon,
+      sent ? "" : "  [NOT SENT: publish_setpoints is false]");
+  }
+}
+
+/// The world a PlannedLeg needs this tick, read under ONE lock: the clock, the
+/// pose and its freshness, the datum verdict and the known hazards (the same
+/// knownHazards() the costmap is drawn from).
+path::LegInputs legInputs(Context & c, bool goal_ok, Vec2 goal)
+{
+  std::lock_guard<std::mutex> lk(c.mu);
+  path::LegInputs in;
+  in.now_s = c.now_s;
+  in.pose_fresh = c.pose_fresh;
+  in.boat = c.boat;
+  in.heading_deg = c.heading_deg;
+  in.goal_ok = goal_ok;
+  in.goal = goal;
+  in.datum_ok = !c.datum_mismatch;
+  in.hazards = knownHazards(c);
+  return in;
+}
+
+/// The LegConfig fields NavigateTo and CircleBuoy share, from their same-named ports.
+path::LegConfig legConfigFromPorts(const BT::TreeNode & node)
+{
+  path::LegConfig cfg;
+  cfg.avoid = node.getInput<bool>("avoid").value_or(true);
+  cfg.tolerance = node.getInput<double>("tolerance").value_or(2.0);
+  cfg.blocked_timeout_s = node.getInput<double>("blocked_timeout_s").value_or(15.0);
+  return cfg;
+}
+
+/// One PlannedLeg and what is done with its output: the setpoint it asks for, its
+/// log lines, and the status the runner publishes. NavigateTo owns one for its
+/// whole life; CircleBuoy restarts one per hop.
+class LegDriver
+{
+public:
+  LegDriver(Context & c, std::string leaf, std::string name)
+  : c_(c), leaf_(std::move(leaf)), name_(std::move(name)) {}
+
+  /// A new leg towards `goal`. `label` prefixes the setpoint log lines ("NavigateTo
+  /// port", "  orbit 3/9"). hop/hops are for CircleBuoy's status (-1 = not an orbit).
+  BT::NodeStatus start(
+    const path::LegConfig & cfg, Vec2 goal, const std::string & label,
+    const rclcpp::Logger & lg, int hop = -1, int hops = 0)
+  {
+    cfg_ = cfg;
+    goal_ = goal;
+    hop_ = hop;
+    hops_ = hops;
+    sent_ = false;
+    leg_ = std::make_unique<path::PlannedLeg>(c_.nav, c_.nav_mode, c_.planner.get());
+    return apply(leg_->start(cfg, legInputs(c_, true, goal)), label, lg);
+  }
+
+  /// One tick. `goal_ok` false = the goal could not be re-resolved: the leg keeps the last.
+  BT::NodeStatus step(bool goal_ok, Vec2 goal, const std::string & label, const rclcpp::Logger & lg)
+  {
+    if (!leg_) {return BT::NodeStatus::FAILURE;}
+    if (goal_ok) {goal_ = goal;}
+    return apply(leg_->step(legInputs(c_, goal_ok, goal_)), label, lg);
+  }
+
+  /// Forget the leg and tell the map there is none. Safe at any time.
+  void halt()
+  {
+    leg_.reset();
+    std::lock_guard<std::mutex> lk(c_.mu);
+    clearLeg(c_);
+  }
+
+private:
+  /// The suffix that says what this setpoint IS. Shadow sends the legacy goal and
+  /// never holds, so it names neither a hold nor a carrot; Off holds (its legs are
+  /// guarded straight ones) but has no carrot; On names both.
+  std::string sendLabel(const path::LegOutput & out, const std::string & label)
+  {
+    const char * how = "";
+    if (c_.nav_mode != path::Mode::Shadow &&
+      (out.state == path::LegState::Blocked || out.state == path::LegState::Degraded))
+    {
+      how = " hold";
+    } else if (c_.nav_mode == path::Mode::On && cfg_.avoid) {
+      how = " carrot";
+    } else if (sent_) {
+      how = " moved";
+    }
+    sent_ = true;
+    return label + how + " ->";
+  }
+
+  BT::NodeStatus apply(
+    const path::LegOutput & out, const std::string & label, const rclcpp::Logger & lg)
+  {
+    if (out.send) {sendSetpoint(c_, lg, out.setpoint, sendLabel(out, label));}
+    for (const std::string & line : out.log) {RCLCPP_INFO(lg, "nav: %s", line.c_str());}
+    writeStatus(out);
+    if (out.result == path::Result::Failure) {
+      RCLCPP_WARN(lg, "nav: leg FAILED: %s", out.why.c_str());
+      return BT::NodeStatus::FAILURE;
+    }
+    return out.result == path::Result::Success ? BT::NodeStatus::SUCCESS : BT::NodeStatus::RUNNING;
+  }
+
+  void writeStatus(const path::LegOutput & out)
+  {
+    std::lock_guard<std::mutex> lk(c_.mu);
+    Context::LegStatus & s = c_.leg;
+    s.leaf = leaf_;
+    s.name = name_;
+    s.state = path::legStateName(out.state);
+    s.why = out.why;
+    s.avoid = cfg_.avoid;
+    s.blocked_s = out.blocked_s;
+    s.have_goal = true;
+    s.goal = goal_;
+    s.have_target = leg_->hasTarget();
+    s.target = leg_->target();
+    s.path = leg_->path();
+    s.plan_ms = leg_->planMs();
+    s.hop = hop_;
+    s.hops = hops_;
+    ++c_.leg_seq;
+  }
+
+  Context & c_;
+  std::string leaf_, name_;
+  std::unique_ptr<path::PlannedLeg> leg_;
+  path::LegConfig cfg_;
+  Vec2 goal_;
+  int hop_ = -1, hops_ = 0;
+  bool sent_ = false;          ///< a setpoint has gone out on this leg already
+};
 
 // ---------------------------------------------------------------- conditions
 
@@ -204,7 +365,25 @@ public:
   }
 };
 
-/// Reads a named target out of the context, publishes it, and polls for arrival.
+/// Reads a named target out of the context, drives there, and polls for arrival.
+///
+/// The driving is path::PlannedLeg (planned_leg.hpp), picked once at start from
+/// nav_mode and the `avoid` port (docs/nav2_avoidance_spec.md 5.3):
+///   * shadow with avoid=false: THE LEGACY LEG. Publish the goal, re-send it when it
+///     moves, arrive on `tolerance`.
+///   * off (whatever `avoid` says), or on with avoid=false: that, plus a guard that
+///     holds if the straight line to the goal crosses a known hazard, resumes only
+///     once the line has stayed clear for nav_unblock_reset_s, and FAILS after
+///     `blocked_timeout_s`. Never calls the planner and needs no Nav2. Off is the boat
+///     default until its container has Nav2, with no planner to go round a hazard, so
+///     it holds in front of one: it never drives through (spec 5.5, 2026-10-01). With
+///     avoid=false this is also the gate crossing and the Task 3 predock and berth,
+///     where the hazard IS the thing driven past.
+///   * on, avoid=true (the default): plan around every known hazard through Nav2
+///     and follow a carrot 3-5 m ahead. Cannot plan = HOLD, and FAILURE only after
+///     `blocked_timeout_s`; arrival is judged on the true goal.
+///   * shadow, avoid=true: the planner runs for real and the map shows it, but the
+///     boat is driven by the legacy leg. Never holds, never fails.
 ///
 /// `target` selects WHICH position, as a string rather than a typed port, so the
 /// XML needs no custom convertFromString (see context.hpp):
@@ -220,7 +399,7 @@ class NavigateTo : public CrusaderAction
 {
 public:
   NavigateTo(const std::string & n, const BT::NodeConfig & c)
-  : CrusaderAction(n, c) {}
+  : CrusaderAction(n, c), leg_(*ctx_, "NavigateTo", n) {}
   static BT::PortsList providedPorts()
   {
     return {
@@ -235,7 +414,14 @@ public:
       BT::InputPort<double>("lon", 0.0, "with target=fix: longitude"),
       BT::InputPort<double>("tolerance", 2.0, "arrival radius, metres"),
       BT::InputPort<double>("resend_m", 1.5,
-        "re-send the setpoint when the goal moves further than this")};
+        "re-send the setpoint when the goal moves further than this"),
+      BT::InputPort<bool>("avoid", true,
+        "plan around known hazards (needs nav_mode shadow or on; in off every leg is a "
+        "guarded straight one); false = a straight leg"),
+      BT::InputPort<std::string>("exempt", "",
+        "with avoid=false only: comma list of gate | dock, hazards this leg drives past"),
+      BT::InputPort<double>("blocked_timeout_s", 15.0,
+        "FAILURE after being blocked this long")};
   }
 
   BT::NodeStatus onStart() override
@@ -245,64 +431,36 @@ public:
       RCLCPP_WARN(log(), "NavigateTo: target '%s' is not available", which.c_str());
       return BT::NodeStatus::FAILURE;
     }
-    nav::LatLon ll;
-    {
-      std::lock_guard<std::mutex> lk(ctx_->mu);
-      ll = nav::toLatLon(goal_, ctx_->origin);
-    }
-    if (ctx_->publish_setpoints && ctx_->send_setpoint) {
-      ctx_->send_setpoint(ll);
-      RCLCPP_INFO(log(), "NavigateTo %s -> %.7f, %.7f", which.c_str(), ll.lat, ll.lon);
-    } else {
-      RCLCPP_INFO(
-        log(), "NavigateTo %s -> %.7f, %.7f  [NOT SENT: publish_setpoints is false]",
-        which.c_str(), ll.lat, ll.lon);
-    }
-    return BT::NodeStatus::RUNNING;
+    return leg_.start(legConfig(), goal_, "NavigateTo " + which, log());
   }
 
   BT::NodeStatus onRunning() override
   {
-    const double tol = getInput<double>("tolerance").value_or(2.0);
-
-    // THE GOAL IS ALLOWED TO MOVE. AvoidObstacles rewrites {goal} as the boat
-    // closes on a blocker, and a leaf that published once in onStart would keep
-    // driving the original line straight through it.
+    // THE GOAL IS ALLOWED TO MOVE. A tree rewrites {goal} as the mission learns
+    // more, and a leaf that read it once in onStart would keep driving the
+    // original line. The leg re-sends only when the point has moved further than
+    // resend_m: a setpoint republished at 10 Hz is a different control mode from
+    // this one - it is a stream, ArduRover treats it as one, and the deadband is
+    // what keeps this leaf a leaf rather than a controller. resend_m 0 freezes
+    // the goal at its start value.
     //
-    // Re-sent only when the point has actually MOVED further than resend_m. A
-    // setpoint republished at 10 Hz is a different control mode from this one -
-    // it is a stream, ArduRover treats it as one, and the deadband is what
-    // keeps this leaf a leaf rather than a controller.
-    //
-    // resolve() is called outside the lock, as onStart does: it touches ctx_
-    // directly and takes no lock of its own.
-    const double resend = getInput<double>("resend_m").value_or(1.5);
+    // resolve() is called outside the lock: it touches ctx_ directly and takes
+    // no lock of its own.
     const std::string which = getInput<std::string>("target").value_or("waypoint");
-    nav::Vec2 want;
-    if (resend > 0.0 && resolve(which, want) && nav::norm(want - goal_) > resend) {
-      goal_ = want;
-      nav::LatLon ll;
-      {
-        std::lock_guard<std::mutex> lk2(ctx_->mu);
-        ll = nav::toLatLon(goal_, ctx_->origin);
-      }
-      if (ctx_->publish_setpoints && ctx_->send_setpoint) {
-        ctx_->send_setpoint(ll);
-        RCLCPP_INFO(
-          log(), "NavigateTo %s moved -> %.7f, %.7f", which.c_str(), ll.lat, ll.lon);
-      }
-    }
-
-    std::lock_guard<std::mutex> lk(ctx_->mu);
-    if (!ctx_->pose_fresh) {return BT::NodeStatus::RUNNING;}
-    if (nav::norm(goal_ - ctx_->boat) <= tol) {
+    const bool follow = getInput<double>("resend_m").value_or(1.5) > 0.0;
+    Vec2 want;
+    const bool have = follow && resolve(which, want);
+    const BT::NodeStatus st = leg_.step(have, want, "NavigateTo " + which, log());
+    if (st == BT::NodeStatus::SUCCESS) {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
       if (ctx_->consume_buoy && ctx_->waypoint_buoy_id >= 0) {
         ctx_->consume_buoy(ctx_->waypoint_buoy_id);
       }
-      return BT::NodeStatus::SUCCESS;
     }
-    return BT::NodeStatus::RUNNING;
+    return st;
   }
+
+  void onHalted() override {leg_.halt();}
 
 private:
   bool resolve(const std::string & which, Vec2 & out)
@@ -357,8 +515,44 @@ private:
     return false;
   }
 
+  /// The leg's settings from the ports. `exempt` (gate | dock) only makes sense for a
+  /// straight leg: a planned one treats every known object as a hazard.
+  path::LegConfig legConfig()
+  {
+    path::LegConfig cfg = legConfigFromPorts(*this);
+    cfg.resend_m = getInput<double>("resend_m").value_or(1.5);
+    const std::string exempt = getInput<std::string>("exempt").value_or("");
+    if (exempt.empty()) {return cfg;}
+    if (cfg.avoid) {
+      RCLCPP_WARN(
+        log(), "NavigateTo: exempt='%s' is ignored with avoid=true (set avoid=false for a "
+        "straight leg)", exempt.c_str());
+      return cfg;
+    }
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    std::size_t at = 0;
+    while (at <= exempt.size()) {
+      std::size_t comma = exempt.find(',', at);
+      if (comma == std::string::npos) {comma = exempt.size();}
+      std::string tok = exempt.substr(at, comma - at);
+      tok.erase(std::remove(tok.begin(), tok.end(), ' '), tok.end());
+      at = comma + 1;
+      if (tok == "gate") {
+        for (const int id : {ctx_->gate_red_id, ctx_->gate_green_id}) {
+          if (id >= 0) {cfg.exempt_buoys.push_back(id);}
+        }
+      } else if (tok == "dock") {
+        cfg.exempt_dock = true;
+      } else if (!tok.empty()) {
+        RCLCPP_WARN(log(), "NavigateTo: unknown exempt '%s' (gate | dock): ignored", tok.c_str());
+      }
+    }
+    return cfg;
+  }
+
   Vec2 goal_;
   std::string why_;
+  LegDriver leg_;
 };
 
 /// A stand-in for a detector: turns "something is 50 m off the bow to
@@ -420,13 +614,27 @@ public:
   }
 };
 
-/// Drives `points` waypoints once around a buoy. Core Tier: ENTRY clockwise
-/// before the transit, EXIT counterclockwise to complete the task.
+/// Drives once around a buoy: `points` waypoints on a ring, preceded by one explicit
+/// hop onto the ring. Core Tier: ENTRY clockwise before the transit, EXIT
+/// counterclockwise to complete the task.
+///
+/// THE RING STARTS ON THE BOAT'S OWN BEARING and is built by path::orbitRing, so
+/// ring[0] is the hop that gets the boat onto the circle and the sweep over
+/// ring[1..points] is +-360 whatever the start (the old orbit() measured it from
+/// the boat's position, and a far start read as a 313 degree circle). Each hop is
+/// one PlannedLeg, restarted per hop: in every nav_mode the hops are at least straight
+/// ones (in off, guarded ones that hold in front of a known hazard), so the
+/// short-circle fix does not need Nav2. A ring point
+/// within orbit_clear_m of a known hazard is pushed outward (path::adjustRing) or
+/// dropped, and the log says how many.
+///
+/// A hop that cannot be driven FAILS the leaf after its blocked_timeout_s, and the
+/// tree's RetryUntilSuccessful restarts the whole orbit.
 class CircleBuoy : public CrusaderAction
 {
 public:
   CircleBuoy(const std::string & n, const BT::NodeConfig & c)
-  : CrusaderAction(n, c) {}
+  : CrusaderAction(n, c), leg_(*ctx_, "CircleBuoy", n) {}
   static BT::PortsList providedPorts()
   {
     return {
@@ -434,9 +642,13 @@ public:
       BT::InputPort<double>("lat", 0.0, "with anchor=fix: latitude"),
       BT::InputPort<double>("lon", 0.0, "with anchor=fix: longitude"),
       BT::InputPort<double>("radius", 6.0, "orbit radius, metres"),
-      BT::InputPort<int>("points", 5, "waypoints around the circle"),
+      BT::InputPort<int>("points", 8, "waypoints around the circle"),
       BT::InputPort<std::string>("direction", "cw", "cw | ccw"),
-      BT::InputPort<double>("tolerance", 2.0, "arrival radius, metres")};
+      BT::InputPort<double>("tolerance", 2.0, "arrival radius, metres"),
+      BT::InputPort<bool>("avoid", true,
+        "plan each hop around known hazards (needs nav_mode shadow or on)"),
+      BT::InputPort<double>("blocked_timeout_s", 15.0,
+        "FAILURE after a hop has been blocked this long")};
   }
 
   BT::NodeStatus onStart() override
@@ -444,9 +656,10 @@ public:
     const std::string anchor = getInput<std::string>("anchor").value_or("entry");
     const bool cw = getInput<std::string>("direction").value_or("cw") != "ccw";
     const double radius = getInput<double>("radius").value_or(6.0);
-    const int points = getInput<int>("points").value_or(5);
+    const int points = getInput<int>("points").value_or(8);
 
     Vec2 a, from;
+    std::vector<path::Hazard> hazards;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       if (!ctx_->pose_fresh || !ctx_->origin_set) {
@@ -470,54 +683,64 @@ public:
         a = (anchor == "exit") ? ctx_->exitp : ctx_->entry;
       }
       from = ctx_->boat;
+      hazards = knownHazards(*ctx_);
     }
-    ring_ = nav::orbit(a, from, radius, points, cw);
+    const std::vector<Vec2> raw = path::orbitRing(a, from, radius, points, cw);
+    if (raw.empty()) {
+      RCLCPP_WARN(log(), "CircleBuoy: points=%d makes no ring (needs at least 1)", points);
+      return BT::NodeStatus::FAILURE;
+    }
+    int dropped = 0;
+    ring_ = path::adjustRing(raw, a, hazards, ctx_->nav, &dropped);
     i_ = 0;
     RCLCPP_INFO(
-      log(), "CircleBuoy %s: %d waypoints at %.1f m, %s (sweep %.0f deg)",
+      log(), "CircleBuoy %s: %d waypoints at %.1f m, %s (sweep %.0f deg, %d point(s) dropped "
+      "for a known hazard)",
       anchor.c_str(), points, radius, cw ? "CW" : "CCW",
-      nav::sweepDeg(a, ring_, from));
-    send();
-    return BT::NodeStatus::RUNNING;
+      nav::sweepDeg(a, std::vector<Vec2>(ring_.begin() + 1, ring_.end()), ring_.front()),
+      dropped);
+    cfg_ = legConfigFromPorts(*this);
+    return startHop();
   }
 
   BT::NodeStatus onRunning() override
   {
-    const double tol = getInput<double>("tolerance").value_or(2.0);
-    {
-      std::lock_guard<std::mutex> lk(ctx_->mu);
-      if (!ctx_->pose_fresh) {return BT::NodeStatus::RUNNING;}
-      if (nav::norm(ring_[i_] - ctx_->boat) > tol) {return BT::NodeStatus::RUNNING;}
-    }
-    if (++i_ >= ring_.size()) {
-      RCLCPP_INFO(log(), "CircleBuoy: circle complete");
-      return BT::NodeStatus::SUCCESS;
-    }
-    send();
-    return BT::NodeStatus::RUNNING;
+    const BT::NodeStatus st = leg_.step(true, ring_[i_], label(), log());
+    if (st != BT::NodeStatus::SUCCESS) {return st;}
+    ++i_;
+    return startHop();
   }
 
-  void onHalted() override {ring_.clear(); i_ = 0;}
+  void onHalted() override
+  {
+    ring_.clear();
+    i_ = 0;
+    leg_.halt();
+  }
 
 private:
-  void send()
+  std::string label() const
   {
-    if (i_ >= ring_.size()) {return;}
-    nav::LatLon ll;
-    {
-      std::lock_guard<std::mutex> lk(ctx_->mu);
-      ll = nav::toLatLon(ring_[i_], ctx_->origin);
+    return "  orbit " + std::to_string(i_ + 1) + "/" + std::to_string(ring_.size());
+  }
+
+  /// Start hop i_, or finish the orbit when there is none left. Hop 0 is the
+  /// explicit hop onto the ring; the orbit is over once the last point is reached.
+  BT::NodeStatus startHop()
+  {
+    if (i_ >= ring_.size()) {
+      RCLCPP_INFO(log(), "CircleBuoy: circle complete");
+      leg_.halt();
+      return BT::NodeStatus::SUCCESS;
     }
-    if (ctx_->publish_setpoints && ctx_->send_setpoint) {
-      ctx_->send_setpoint(ll);
-    }
-    RCLCPP_INFO(
-      log(), "  orbit %zu/%zu -> %.7f, %.7f%s", i_ + 1, ring_.size(), ll.lat, ll.lon,
-      ctx_->publish_setpoints ? "" : "  [NOT SENT]");
+    return leg_.start(cfg_, ring_[i_], label(), log(), static_cast<int>(i_),
+        static_cast<int>(ring_.size()));
   }
 
   std::vector<Vec2> ring_;
   std::size_t i_ = 0;
+  path::LegConfig cfg_;
+  LegDriver leg_;
 };
 
 /// Publishes the current position as the setpoint, and never succeeds. Whatever
@@ -534,11 +757,13 @@ public:
 
   BT::NodeStatus onStart() override
   {
-    std::lock_guard<std::mutex> lk(ctx_->mu);
-    if (!ctx_->pose_fresh) {return BT::NodeStatus::RUNNING;}
-    const nav::LatLon ll = nav::toLatLon(ctx_->boat, ctx_->origin);
-    if (ctx_->publish_setpoints && ctx_->send_setpoint) {ctx_->send_setpoint(ll);}
-    RCLCPP_INFO(log(), "HoldStation at %.7f, %.7f", ll.lat, ll.lon);
+    Vec2 here;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      if (!ctx_->pose_fresh) {return BT::NodeStatus::RUNNING;}
+      here = ctx_->boat;
+    }
+    sendSetpoint(*ctx_, log(), here, "HoldStation at");
     return BT::NodeStatus::RUNNING;
   }
 
@@ -778,25 +1003,14 @@ private:
   std::size_t last_unpaired_ = static_cast<std::size_t>(-1);
 };
 
-/// Rewrite {goal} to steer around whatever is in the way.
+/// DEPRECATED, AND NOW A PASS-THROUGH: `out` = `in`, SUCCESS.
 ///
-/// WHY THE TREE AND NOT THE AUTOPILOT. ArduRover's OA_TYPE avoidance, fed
-/// OBSTACLE_DISTANCE by proximity_bridge, is a black box: it cannot be watched
-/// on the tree view, it cannot be exercised in a pool, and when it does
-/// something surprising nothing in our logs says why. Here the detour is an
-/// ordinary waypoint, logged in the same line as every other waypoint, and
-/// NavigateTo re-sends the setpoint when it moves.
-///
-/// WHAT COUNTS AS AN OBSTACLE. Two things, and the second is easy to forget:
-///
-///   * ctx_->obstacles - tracked contacts that matched no buoy in the
-///     aircraft's field. This is where the LiDAR clustering ends up:
-///     lidar_cluster_node -> target_tracker -> world_targets -> fusePassage.
-///
-///   * every PASSAGE buoy that is not one of the two in the gate being driven.
-///     Gate 1's pair is still floating there while the boat runs to gate 2, and
-///     it will happily drive through it otherwise. Only the current red and
-///     green are exempt, because driving between those two IS the task.
+/// It used to rewrite {goal} to steer round one obstacle at a time, locally and
+/// reactively (the nav_math detour helper, since deleted). NavigateTo avoids by itself now: it
+/// plans around every known hazard through Nav2's planner_server and holds when it
+/// cannot (docs/nav2_avoidance_spec.md 5.5). The leaf stays registered ONLY so a
+/// tree that still names it - an old local XML - loads and runs; its `clearance`
+/// and `margin` ports are accepted and ignored. It says so once per run.
 class AvoidObstacles : public CrusaderSyncAction
 {
 public:
@@ -806,57 +1020,26 @@ public:
   {
     return {
       BT::InputPort<Waypoint>("in", "the goal an upstream leaf chose"),
-      BT::OutputPort<Waypoint>("out", "the same goal, or a detour short of it"),
-      BT::InputPort<double>("clearance", 5.0, "how near a thing may come, m"),
-      BT::InputPort<double>("margin", 2.0, "extra push beyond clearance, m")};
+      BT::OutputPort<Waypoint>("out", "the same goal"),
+      BT::InputPort<double>("clearance", 5.0, "ignored"),
+      BT::InputPort<double>("margin", 2.0, "ignored")};
   }
 
   BT::NodeStatus tick() override
   {
+    if (!warned_) {
+      warned_ = true;
+      RCLCPP_WARN(
+        log(), "AvoidObstacles is deprecated and does nothing: NavigateTo avoids by itself");
+    }
     const auto in = getInput<Waypoint>("in");
     if (!in) {return BT::NodeStatus::FAILURE;}
-    const double clearance = getInput<double>("clearance").value_or(5.0);
-    const double margin = getInput<double>("margin").value_or(2.0);
-
-    Waypoint w = in.value();
-    std::lock_guard<std::mutex> lk(ctx_->mu);
-    if (!ctx_->origin_set || !ctx_->pose_fresh) {
-      setOutput("out", w);                  // no pose: cannot reason, do not guess
-      return BT::NodeStatus::SUCCESS;
-    }
-
-    std::vector<nav::Buoy> hazards = ctx_->obstacles;
-    for (const nav::Buoy & b : ctx_->buoys) {
-      if (b.id == ctx_->gate_red_id || b.id == ctx_->gate_green_id) {continue;}
-      hazards.push_back(b);
-    }
-
-    const nav::Vec2 goal = nav::toLocal({w.lat, w.lon}, ctx_->origin);
-    const nav::Detour d =
-      nav::avoidObstacles(ctx_->boat, goal, hazards, clearance, margin);
-    if (d.detoured) {
-      const nav::LatLon ll = nav::toLatLon(d.wp, ctx_->origin);
-      w.lat = ll.lat;
-      w.lon = ll.lon;
-      w.why = "around buoy " + std::to_string(d.around_id) + " (" +
-        std::to_string(static_cast<int>(d.miss_m + 0.5)) + " m off track), then " +
-        in.value().why;
-      if (d.around_id != last_) {
-        last_ = d.around_id;
-        RCLCPP_INFO(
-          log(), "steering around buoy %d, %.1f m off the direct line",
-          d.around_id, d.miss_m);
-      }
-    } else if (last_ != nav::kNoBuoy) {
-      last_ = nav::kNoBuoy;
-      RCLCPP_INFO(log(), "track is clear again");
-    }
-    setOutput("out", w);
+    setOutput("out", in.value());
     return BT::NodeStatus::SUCCESS;
   }
 
 private:
-  int last_ = nav::kNoBuoy;
+  bool warned_ = false;
 };
 
 /// Point gate_red_id / gate_green_id at the first gate not yet cleared.

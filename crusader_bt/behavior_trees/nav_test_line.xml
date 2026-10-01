@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<!--
+  nav_test_line.xml - ONE planned leg to the team's approach point, for testing
+  obstacle avoidance on its own.
+
+  The sim test is a LiDAR-only object (a platform) sitting on the straight line to
+  a goal: send the goal with the approach lat/lon as the destination and watch the
+  boat plan round it.
+
+      ros2 action send_goal /crsd/safe_passage crusader_msgs/action/SafePassage \
+        "{tier: 0, timeout_s: 300, approach_latitude: 1.2806, approach_longitude: 103.8560594}"
+
+  Nothing else is in the tree on purpose: no perception, no confirmation handshake,
+  no orbit, so whatever the boat does is the planned leg. NavigateTo plans around
+  every known object, holds when it cannot, and FAILS after 15 s blocked, which
+  fails the tree and ends the mission with a clear result (NO_ENTRY). The mission
+  timeout and cancel live in bt_runner_node, not here. Run it with bt_runner's
+  nav_mode on (or shadow, to see the plan drawn and the legacy leg driven).
+
+  The IsAutonomous guard band is still here: even a test must stop when the pilot
+  takes the mode away.
+-->
+<root BTCPP_format="4" main_tree_to_execute="NavTestLine">
+  <BehaviorTree ID="NavTestLine">
+    <ReactiveSequence name="guard_band">
+
+      <IsAutonomous/>
+
+      <NavigateTo target="approach" tolerance="2.0"/>
+
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

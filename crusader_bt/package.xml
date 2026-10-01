@@ -12,6 +12,10 @@
     standard library, so the arithmetic that can be silently wrong is compiled
     and tested on a laptop rather than discovered on the water. The leaves on
     top of it read a port, call nav_math, publish and poll.
+
+    NavigateTo and CircleBuoy avoid obstacles by planning through Nav2's
+    planner_server (path_math.hpp, planned_leg.hpp; nav_mode off | shadow | on).
+    Builds without Nav2, in which case nav_mode must be off.
   </description>
   <maintainer email="brandont3927@gmail.com">Team Inspiration</maintainer>
   <license>MIT</license>
@@ -24,6 +28,13 @@
   <depend>std_msgs</depend>
   <depend>behaviortree_cpp</depend>
   <depend>crusader_msgs</depend>
+  <!-- Optional at build time: CMake looks for these with QUIET and builds a stub
+       planner port when they are absent (an image without Nav2), after which
+       bt_runner_node must run with nav_mode off. The Nav2 planner itself is
+       crusader_nav's business; this package only calls it. -->
+  <depend>nav2_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
 
   <export>
     <build_type>ament_cmake</build_type>

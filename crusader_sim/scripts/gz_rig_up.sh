@@ -12,6 +12,8 @@
 #                                         --> lidar_cluster_node (the boat's) --> crsd/lidar_clusters
 #                             /sim/*  --sim_camera-->  oak/rgb, oak/depth, crsd/oak/detections
 #     sim_uav  --RXL udp 14555-->  rxl_link_node (the boat's)
+#     panel_feed: leg_status + world_targets + safe_passage_report --udp 14556--> the Task 1
+#         panel's map layers (planned path, the boat's tracks, its fused passage). Always on; sim only
 #     nav_frames_node + Nav2 planner_server (crusader_nav, when the image has Nav2)
 #         --/crsd/nav/hazards, /crsd/nav/obstacle_cloud-->  bt_runner's planned legs
 #
@@ -107,6 +109,10 @@ fi
 up bt_view /tmp/btview.log python3 -u "$SRC/tools/bt_view.py"
 up ground_station /tmp/gcs.log \
   ros2 run crusader_groundstation ground_station --ros-args --params-file "$CFG"
+# the boat's own picture for the Task 1 panel (crusader_sim/panel_feed.py): it only subscribes and
+# sends 4 datagrams a second to udp 127.0.0.1:14556, so it costs nothing measurable. Started before
+# bt_runner so it hears the first leg status; nothing breaks if the panel is not running
+up panel_feed /tmp/panel_feed.log ros2 run crusader_sim panel_feed --ros-args -p course:="$COURSE"
 sleep 6
 up bt_runner /tmp/bt.log \
   ros2 run crusader_bt bt_runner_node --ros-args --params-file "$CFG" \
@@ -114,7 +120,7 @@ up bt_runner /tmp/bt.log \
   -p nav_mode:="$NAV_MODE"
 sleep 6
 
-# planner_server leaves 'configuring' only once TF map -> base_footprint exists,
+# planner_server leaves 'activating' only once TF map -> base_footprint exists,
 # i.e. a pose with a FINITE heading (spec 3.6). Say so if it has not, instead of
 # letting the first planned leg find out 15 s into a run.
 if [ "$NAV_MODE" != off ]; then

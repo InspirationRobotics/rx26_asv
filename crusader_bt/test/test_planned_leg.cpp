@@ -6,7 +6,10 @@
 // the test says, and Rig owns the clock: a tick is 100 ms unless a test says otherwise,
 // kept as integer milliseconds so "at 5.0 s" is not a question about floating point.
 // The numbered sections are docs/nav2_avoidance_spec.md section 5.9's list for this
-// file, in its order; 15+ are the edges that list leaves to the implementation.
+// file, in its order; 15+ are the edges that list leaves to the implementation:
+// 17 a moved goal is re-targeted (not hysteresis'd away), 18 a guarded straight leg
+// needs its line to stay CLEAR before it resumes, 19 Off mode is guarded too
+// (spec 5.5, 2026-10-01).
 //
 // What these pin is what keeps the boat off a buoy when something upstream is wrong:
 // a planner that never answers, a pose that goes stale, a heading that goes NaN, a
@@ -189,6 +192,23 @@ public:
       return;
     }
   }
+  /// One tick, then the boat flies on.
+  void advance(double speed = 3.0)
+  {
+    tick();
+    fly(speed);
+  }
+  /// Advance until `done()` (checked before each tick) or `max_ticks`; `before(i)`, if
+  /// given, edits the world ahead of tick i, as a tree rewriting {goal} would.
+  void driveUntil(
+    const std::function<bool()> & done, int max_ticks,
+    const std::function<void(int)> & before = nullptr, double speed = 3.0)
+  {
+    for (int i = 0; i < max_ticks && !done(); ++i) {
+      if (before) {before(i);}
+      advance(speed);
+    }
+  }
 
 private:
   Vec2 last_fresh_;
@@ -197,7 +217,7 @@ private:
 int main()
 {
   // ------------------------------------------- 1. Off: the legacy send sequence
-  std::printf("1. Off mode reproduces the legacy NavigateTo\n");
+  std::printf("1. Off mode, on a clear line, reproduces the legacy NavigateTo send sequence\n");
   {
     Rig r(Mode::Off);
     r.in.goal = {50, 0};
@@ -227,11 +247,11 @@ int main()
 
     Rig haz(Mode::Off);
     haz.in.goal = {50, 0};
-    haz.in.hazards = {buoy(1, 25, 0)};
+    haz.in.hazards = {buoy(1, 25, 5.0)};         // well off the line (section 19: ON the line)
     haz.start(c);
     haz.runTo(5.0);
-    chk("Off mode ignores known hazards entirely: only the goal is sent",
-      haz.sends.size() == 1 && haz.holds() == 0);
+    chk("Off mode: a hazard well off the line changes nothing, only the goal is sent",
+      haz.sends.size() == 1 && haz.holds() == 0 && haz.out.state == LegState::Straight);
     chk("a Straight leg in Off never fails on its own", haz.failures == 0);
   }
 
@@ -720,8 +740,13 @@ int main()
     chk("... still one hold after 4 s", r.holds() == 1 && r.failures == 0);
     r.in.hazards = pair;
     r.tick();
-    chk("removing it resumes: STRAIGHT, with the goal RESENT", r.out.state == LegState::Straight &&
-      r.out.send && same(r.out.setpoint, {20, 0}));
+    chk("removing it does not resume at once: the line must stay clear (section 18)",
+      r.out.state == LegState::Blocked && !r.out.send && r.holds() == 1);
+    r.runTo(13.0);                       // clear since 10.1 s: 2.9 s of it
+    chk("... still held after 2.9 s of clear line", r.out.state == LegState::Blocked && !r.out.send);
+    r.tick();
+    chk("... and after unblock_reset_s (3 s): STRAIGHT, with the goal RESENT",
+      r.out.state == LegState::Straight && r.out.send && same(r.out.setpoint, {20, 0}));
     chk("... blocked_s is back to 0", r.out.blocked_s == 0.0);
     chk("A straight leg makes no planner calls and no costmap clears",
       r.port.reqs.empty() && r.port.ready_calls == 0 && r.port.nclear == 0 && r.port.ncheck == 0);
@@ -1040,6 +1065,222 @@ int main()
     n.leg.halt();
     n.leg.start(c, n.in);
     chk("start() after halt() begins a fresh episode: blocked_s 0", n.leg.step(n.in).blocked_s == 0.0);
+  }
+
+  // ---------------- 17. A goal that moved is re-targeted, never hysteresis'd away
+  std::printf("17. A planned leg re-targets a goal that moved while FOLLOWING\n");
+  {
+    LegConfig c;
+    c.tolerance = 1.0;                       // the Task 3 lead-in (task3_disruptive.xml)
+
+    // The boat is 3 m short of the end of a path to (30, 0) when the goal moves 5 m
+    // sideways. The old path scored 3 + 5 = 8 m against the fresh plan's 5.8 m: 27 % but
+    // only 2.2 m shorter, so hysteresis refused it, and following the old path to its end
+    // made the two EQUAL (5 m each). A new plan was never adopted and the boat parked
+    // 5 m from a goal it could not arrive at.
+    Rig r(Mode::On);
+    r.in.goal = {30, 0};
+    r.start(c);
+    r.driveUntil([&] {return r.in.boat.x >= 27.0;}, 400);
+    chk("(setup) following the plan to (30, 0), the boat 3 m short of its end",
+      r.out.state == LegState::Following && r.in.boat.x >= 27.0 && r.in.boat.x < 28.0);
+    r.in.goal = {30, 5};
+    r.driveUntil([&] {return r.out.result != Result::Running;}, 400);
+    chk("the goal moved 5 m: the leg ARRIVES at the new goal", r.out.result == Result::Success);
+    chk("... on a path that was planned to the NEW goal",
+      !r.leg.path().empty() && near2(r.leg.path().back(), {30, 5}));
+    chk("... and the boat is within the tolerance of it",
+      nav::norm(r.in.boat - Vec2{30, 5}) <= 1.0 + 1e-9);
+
+    // The same thing as it happens in the lead-in: DockWaypoint rewrites {goal} every
+    // tick while the bay estimate settles, here 0.5 m/s sideways for 10 s.
+    Rig d(Mode::On);
+    d.in.goal = {30, 0};
+    d.start(c);
+    d.driveUntil(
+      [&] {return d.out.result != Result::Running;}, 600,
+      [&](int i) {d.in.goal.y = std::min(5.0, 0.05 * i);});
+    chk("a goal drifting 5 m sideways over 10 s: the leg still ARRIVES",
+      d.out.result == Result::Success && nav::norm(d.in.boat - Vec2{30, 5}) <= 1.0 + 1e-9);
+
+    // Jitter below the threshold: the path in hand is KEPT, whatever the planner offers.
+    Rig j(Mode::On);
+    j.in.goal = {30, 0};
+    j.start(c);
+    const auto jitter = [&](int i) {j.in.goal = {30, (i % 2 == 0) ? 0.4 : -0.4};};
+    j.driveUntil([] {return false;}, 60, jitter);          // the boat is at x = 18 after 6 s
+    chk("goal jitter of +-0.4 m (under goal_replan_m 1.0 and the tolerance): still FOLLOWING the "
+      "first path, planned from (0, 0)",
+      j.out.state == LegState::Following && near2(j.leg.path().front(), {0, 0}) &&
+      j.leg.path().size() == 2 && j.in.boat.x > 10.0);
+    chk("... replans kept coming (this is not a leg that stopped asking)", j.port.reqs.size() > 5);
+    j.driveUntil([&] {return j.out.result != Result::Running;}, 200, jitter);
+    chk("... and the leg arrives", j.out.result == Result::Success);
+
+    // The threshold is the SMALLER of goal_replan_m and the tolerance: a goal that moved
+    // out of a tight tolerance is not the goal the path was planned for, even though it is
+    // under goal_replan_m and would not ask for a plan by itself.
+    LegConfig tight;
+    tight.tolerance = 0.4;
+    Rig k(Mode::On);
+    k.in.goal = {30, 0};
+    k.start(tight);
+    k.driveUntil([&] {return k.in.boat.x >= 10.0;}, 400);
+    k.in.goal = {30, 0.6};                   // > tolerance 0.4, < goal_replan_m 1.0
+    k.driveUntil([] {return false;}, 15);
+    chk("(tolerance 0.4) a 0.6 m goal move is followed by a path to the new goal",
+      !k.leg.path().empty() && near2(k.leg.path().back(), {30, 0.6}));
+    k.driveUntil([&] {return k.out.result != Result::Running;}, 200);
+    chk("... and the leg ARRIVES", k.out.result == Result::Success);
+  }
+
+  // ------- 18. A guarded straight leg resumes only after a CLEAR line stays clear
+  std::printf("18. A guarded straight leg needs unblock_reset_s of clear line to resume\n");
+  {
+    LegConfig c;
+    c.avoid = false;
+    const std::vector<Hazard> on{buoy(1, 10, 0)};
+    const std::vector<Hazard> none;
+
+    // A track that flickers: on the line for 1 s, off it for 1 s, and so on.
+    auto flicker = [&](Rig & r) {r.in.hazards = (((r.ms + 100) / 1000) % 2 == 0) ? on : none;};
+    for (const Mode m : {Mode::On, Mode::Off}) {
+      const std::string tag = m == Mode::On ? "(On, avoid=false) " : "(Off) ";
+      LegConfig lc = c;
+      lc.avoid = m == Mode::On ? false : true;      // Off: the default avoid, which must not matter
+      Rig f(m);
+      f.in.goal = {20, 0};
+      f.in.hazards = on;
+      f.start(lc);
+      f.runTo(14.9, [&] {flicker(f);});
+      chk(tag + "a track flickering on the line: held the whole time, ONE hold, no resume",
+        f.out.state == LegState::Blocked && f.holds() == 1 && f.sends.size() == 1);
+      chk_near(tag + "... and blocked_s kept counting through the clear half-seconds",
+        f.out.blocked_s, 14.9, 0.05);
+      f.tick();
+      chk(tag + "FAILURE at blocked_timeout_s (15 s) all the same",
+        f.out.result == Result::Failure && f.ms == 15000);
+    }
+
+    // A track that leaves for good: the boat resumes 3.0 s after the line first CLEARED.
+    Rig g(Mode::On);
+    g.in.goal = {20, 0};
+    g.in.hazards = on;
+    g.start(c);
+    g.runTo(5.0);
+    g.in.hazards = none;
+    g.tick();                                // 5.1 s: the line is clear for the first time
+    chk("the line clears: still BLOCKED, nothing sent", g.out.state == LegState::Blocked && !g.out.send);
+    g.runTo(8.0);                            // 2.9 s of clear line
+    chk("2.9 s clear: still held, still one send (the hold)", g.out.state == LegState::Blocked &&
+      g.sends.size() == 1 && g.out.blocked_s > 0.0);
+    g.tick();                                // 8.1 s: 3.0 s clear
+    chk("3.0 s clear: STRAIGHT again, with the goal RESENT",
+      g.out.state == LegState::Straight && g.out.send && same(g.out.setpoint, {20, 0}));
+    chk("... blocked_s is back to 0", g.out.blocked_s == 0.0);
+
+    // A clear spell that is cut short starts the window over.
+    Rig h(Mode::On);
+    h.in.goal = {20, 0};
+    h.in.hazards = on;
+    h.start(c);
+    h.runTo(1.0);
+    h.in.hazards = none;
+    h.runTo(3.0);                            // clear from 1.1 s: 1.9 s of it
+    h.in.hazards = on;
+    h.tick();                                // 3.1 s: blocked again
+    h.in.hazards = none;
+    h.runTo(5.0);                            // clear from 3.2 s: 1.8 s, 3.9 s after the FIRST clear
+    chk("a clear spell cut short does not count towards the next one", h.out.state == LegState::Blocked &&
+      h.sends.size() == 1);
+    h.runTo(6.1);
+    chk("... the window is 3.0 s from the SECOND clear (3.2 + 3.0)", h.out.state == LegState::Blocked);
+    h.tick();
+    chk("... and the leg resumes then", h.out.state == LegState::Straight && h.out.send && h.ms == 6200);
+  }
+
+  // ------------- 19. Off: every leg is a guarded straight leg, avoid or not
+  std::printf("19. Off mode: a leg never drives through a known hazard\n");
+  {
+    for (const bool avoid : {true, false}) {
+      const std::string tag = avoid ? "(Off, avoid=true) " : "(Off, avoid=false) ";
+      LegConfig c;
+      c.avoid = avoid;
+      Rig r(Mode::Off);
+      r.in.goal = {50, 0};
+      r.in.hazards = {buoy(1, 25, 0)};
+      r.start(c);
+      chk(tag + "a hazard on the line: BLOCKED, one hold on the boat, the goal NOT sent",
+        r.out.state == LegState::Blocked && r.sends.size() == 1 && r.holds() == 1 &&
+        same(r.sends[0].p, {0, 0}));
+      chk(tag + "... the status says BLOCKED and why, never STRAIGHT",
+        std::string(legStateName(r.out.state)) == "BLOCKED" &&
+        r.out.why == "a known hazard is on the line to the goal");
+      r.runTo(14.9);
+      chk(tag + "... still one hold at 14.9 s, no Failure yet", r.holds() == 1 &&
+        r.sends.size() == 1 && r.failures == 0);
+      r.tick();
+      chk(tag + "FAILURE at blocked_timeout_s (15 s)", r.out.result == Result::Failure &&
+        r.out.state == LegState::Failed);
+      chk(tag + "... with no planner call and no costmap clear (no Nav2 needed)",
+        r.port.reqs.empty() && r.port.ready_calls == 0 && r.port.nclear == 0 && r.port.ncheck == 0);
+    }
+
+    // A clear line: the legacy send sequence, exactly.
+    for (const bool avoid : {true, false}) {
+      LegConfig c;
+      c.avoid = avoid;
+      Rig r(Mode::Off);
+      r.in.goal = {50, 0};
+      r.in.hazards = {buoy(1, 25, 3.0)};         // 3 m off the line: outside hard
+      LegOutput o = r.start(c);
+      chk("(Off) a hazard off the line: STRAIGHT, and the start sends the goal",
+        o.state == LegState::Straight && o.send && same(o.setpoint, {50, 0}));
+      r.in.goal = {52, 0};
+      o = r.tick();
+      chk("(Off) ... a 2.0 m goal move is resent; nothing else is", o.send && same(o.setpoint, {52, 0}) &&
+        r.sends.size() == 2 && r.holds() == 0);
+    }
+
+    // Exemptions still apply to the guard (a gate crossing driven in Off).
+    LegConfig gate;
+    gate.avoid = false;
+    gate.exempt_buoys = {1, 2};
+    Rig x(Mode::Off);
+    x.in.goal = {20, 0};
+    x.in.hazards = {buoy(1, 10, 0.9), buoy(2, 10, -0.9)};
+    x.start(gate);
+    x.runTo(3.0);
+    chk("(Off, exempt gate) the leg's own pair is ignored", x.out.state == LegState::Straight && x.holds() == 0);
+    x.in.hazards.push_back(buoy(3, 15, 0));
+    x.tick();
+    chk("(Off, exempt gate) ... a third buoy on the line holds it", x.out.state == LegState::Blocked && x.holds() == 1);
+
+    // A hazard that appears mid-leg holds the boat where it is, and the leg resumes by itself.
+    Rig m(Mode::Off);
+    m.in.goal = {50, 0};
+    m.start(LegConfig{});
+    m.in.boat = {8, 0};
+    m.in.hazards = {buoy(1, 25, 0)};
+    m.tick();
+    chk("(Off) a hazard appears mid-leg: one hold, on the boat", m.out.state == LegState::Blocked &&
+      m.sends.size() == 2 && m.holds() == 1 && same(m.sends.back().p, {8, 0}));
+    m.in.hazards.clear();
+    m.runTo(3.1);
+    chk("(Off) ... the line clears: not resumed before 3 s of it", m.out.state == LegState::Blocked && m.sends.size() == 2);
+    m.tick();
+    chk("(Off) ... then resumed with the goal resent", m.out.state == LegState::Straight &&
+      same(m.sends.back().p, {50, 0}) && m.sends.size() == 3);
+
+    // A stale pose is Running, as legacy: nothing to judge the line from.
+    Rig st(Mode::Off);
+    st.in.goal = {50, 0};
+    st.in.hazards = {buoy(1, 25, 0)};
+    st.start(LegConfig{});
+    st.in.pose_fresh = false;
+    st.runTo(40.0);
+    chk("(Off) a stale pose: Running, no growth, no Failure", st.failures == 0 && st.out.blocked_s == 0.0 &&
+      st.out.result == Result::Running);
   }
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fails);

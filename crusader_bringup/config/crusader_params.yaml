@@ -1332,6 +1332,100 @@ bt_runner_node:
     dock_topic: "dock/observations"         # [RO] DockObservation, from the
                                             #      dock detector (firefighting-cv
                                             #      specs: observations_topic)
+    # -- obstacle avoidance (docs/nav2_avoidance_spec.md 5.8; crusader_bt README) --
+    # NavigateTo and CircleBuoy plan around every known hazard through Nav2's
+    # planner_server, and hold when they cannot. ArduPilot still flies the boat
+    # (GUIDED position setpoints). Avoidance is not a safety system: the RC
+    # e-stop is.
+    nav_mode: "off"                         # [RO] off | shadow | on. THE BOAT STAYS
+                                            #      "off" until the asv container
+                                            #      has Nav2 and crusader_nav runs:
+                                            #      straight legs, no planner.
+                                            #      "shadow" plans and shows the
+                                            #      path but drives the legacy
+                                            #      legs (the first thing to run on
+                                            #      the water); "on" drives the
+                                            #      planned path. The sim rig
+                                            #      passes -p nav_mode:=on. A build
+                                            #      without nav2_msgs refuses to
+                                            #      start with anything but off.
+    nav_map_frame: "map"                    # [RO] = nav2 global_costmap
+                                            #      global_frame (check_config)
+    nav_datum_topic: "/crsd/datum"          # [RO] = nav_frames_node.datum_topic.
+                                            #      With shadow or on the BT frame
+                                            #      is NOT pinned at the first fix:
+                                            #      it waits for this datum
+    nav_hazards_topic: "/crsd/nav/hazards"  # [RO] HazardArray out = nav2_params
+                                            #      hazard_layer.topic (check_config)
+    nav_leg_topic: "/crsd/nav/leg_status"   # [RO] leg status JSON out
+                                            #      = ground_station.nav_leg_topic
+    nav_planner_action: "/compute_path_to_pose"
+                                            # [RO] planner_server's action
+    nav_valid_service: "/is_path_valid"     # [RO] ... and its path check
+    nav_clear_service: "/global_costmap/clear_entirely_global_costmap"
+                                            # [RO] ... and the costmap clear
+    nav_planner_id: "GridBased"             # [RO] a plugin in nav2_params
+                                            #      planner_plugins (SmacPlanner2D)
+    nav_hazard_rate_hz: 2.0                 # [RO] known-hazard publish rate. The
+                                            #      layer's max_age_s must cover two
+                                            #      periods (check_config)
+    nav_status_hz: 2.0                      # [RO] leg status rate, plus every
+                                            #      state change
+    nav_hard_m: 0.8                         # [RO] "0.8 m hard": never closer than
+                                            #      this to a hazard's surface. At
+                                            #      most robot_radius*cos(pi/16)
+                                            #      (check_config)
+    nav_soft_m: 2.0                         # [RO] "2 m soft" = inflation_radius
+                                            #      (check_config)
+    nav_buoy_radius_m: 0.30                 # [RO] a RoboBuoy, circumscribed: its
+                                            #      footprint is 0.432 m square
+    nav_track_radius_m: 0.30                # [RO] a LiDAR track no plan buoy claims
+    nav_exempt_radius_m: 1.0                # [RO] a track this close to an exempt
+                                            #      buoy is that buoy, not a third
+    nav_lookahead_m: 5.0                    # [RO] the carrot sits this far ahead
+    nav_lookahead_min_m: 3.0                # [RO] ... and at least this far
+    nav_max_chord_dev_m: 0.3                # [RO] the carrot's chord may cut the
+                                            #      path by this much, no more
+    nav_wp_radius_m: 2.0                    # [RO] = the autopilot's WP_RADIUS
+                                            #      (working_crusader.params,
+                                            #      check_config): an intermediate
+                                            #      carrot closer than this counts
+                                            #      as reached
+    nav_replan_period_s: 0.5                # [RO] plan at most this often
+    nav_min_request_gap_s: 0.2              # [RO] ... and never faster than this
+    nav_check_period_s: 0.1                 # [RO] is_path_valid at most this often
+    nav_plan_timeout_s: 1.0                 # [RO] no answer by then = the planner
+                                            #      cannot plan (Humble's planner
+                                            #      hangs on a costmap that is not
+                                            #      current)
+    nav_first_plan_wait_s: 1.0              # [RO] no plan yet by then = hold
+    nav_invalid_confirm: 2                  # [RO] is_path_valid must say invalid
+                                            #      this many times in a row
+    nav_hysteresis_frac: 0.2                # [RO] a new path replaces a valid one
+                                            #      only if shorter by this fraction
+    nav_hysteresis_m: 3.0                   # [RO] ... AND by this many metres
+    nav_goal_replan_m: 1.0                  # [RO] a goal that moves this far
+                                            #      forces a replan
+    nav_clip_radius_m: 35.0                 # [RO] goals are clipped to this radius
+                                            #      round the boat: inside the
+                                            #      costmap window (check_config)
+    nav_clear_after_s: 5.0                  # [RO] blocked this long = clear the
+                                            #      costmap once and replan
+    nav_unblock_reset_s: 3.0                # [RO] continuous FOLLOWING this long
+                                            #      resets the blocked clock
+    nav_escape_margin_m: 0.5                # [RO] a start inside the hard zone
+                                            #      escapes to this much beyond it
+    nav_goal_margin_m: 0.3                  # [RO] a goal inside the hard zone is
+                                            #      pushed out to this beyond it
+    nav_local_check_tol_m: 0.1              # [RO] the BT's own checks use
+                                            #      hard - this, for quantisation
+    nav_orbit_max_push_m: 3.0               # [RO] an orbit point near a hazard is
+                                            #      pushed out by at most this
+    nav_orbit_clear_m: 1.4                  # [RO] ... until it is this clear
+    nav_dock_finger_len_m: 2.0              # [RO] build guide: dock fingers
+    nav_dock_finger_w_m: 0.5                # [RO]
+    nav_dock_slip_w_m: 1.5                  # [RO]
+    nav_dock_deck_depth_m: 1.0              # [RO]
 
 # ---------------------------------------------------------------------------
 # rxl_link_node — the boat's end of the UAV link.

@@ -58,7 +58,7 @@ bash ~/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_sim_down.sh
 
 | Flag | Effect |
 |---|---|
-| `<course>` | any `courses/*.yaml`: `task1_core`, `task3`, `open_water`, and the avoidance tests `task1_blocked_exit`, `task1_entry_black`, `open_water_platform` |
+| `<course>` | any `courses/*.yaml`: `task1_core`, `task3`, `open_water`, and the avoidance tests `task1_blocked_exit`, `task1_entry_black`, `task1_boxed_in` (S8), `open_water_platform` |
 | `--no-gui` | Gazebo server only. The sim is identical, you just can't watch it |
 | `--no-uav` | no Ekko stand-in; the boat has only its own camera (Core-tier test) |
 | `--no-rig` | stop after Gazebo + SITL, for `check_motion` or your own nodes |
@@ -124,6 +124,36 @@ Sensor views, each off until toggled and rendered only while shown: RGB
 sensors themselves stay full resolution), and a LiDAR top-down view ±25 m in
 the boat frame. All three on cost no measurable real-time factor (2026-09-30).
 
+**The boat's own picture** (three map layers, default on, a toggle each under the map; the choice is
+remembered per browser). Solid circles are the true buoys and hollow circles the UAV's report, as before;
+these show what the BOAT thinks:
+
+| Layer | Topic | Drawn as |
+|---|---|---|
+| Planned path | `/crsd/nav/leg_status` | the leg dashed in the ground station's colours (green FOLLOWING, red BLOCKED, yellow PLANNING/DEGRADED, grey STRAIGHT), the carrot as a ring, the goal as a cross, and a `NAV <state> <s> <why>` badge on the map's top left |
+| Boat's camera tracks | `/crsd/world_targets` | hollow squares in the colour of the track's label, `#id label`, a cross at the estimate, dashed while tentative, fading with time since last seen (`seen N s ago` after 2 s) |
+| Boat's fused passage | `/crsd/safe_passage_report` | small diamonds in the colour the UAV gave, at the tracker's position where a track matched and at the UAV's where none did: the tree's own association of the UAV field to its tracks. The tree publishes it only while a Task 1 run is ticking, so it is empty before START. A diamond with no hollow square on it is a buoy the boat has not matched to a track |
+
+With all beacons unlit (Disruptive) the tracks read `black_buoy`: that is correct, the colours exist only in
+the UAV's report and so only in the diamonds. A hollow square sitting well away from its solid circle is
+the boat's own mapping error; one with no circle under it is a ghost track.
+
+The panel has no ROS, so `crusader_sim/panel_feed.py` (a sim-only node in `crsd-sim`, started by every
+`gz_rig_up.sh`, stopped with the rig) subscribes those topics, converts their lat/lon to course metres
+(the inverse of `course.enu_to_latlon`, from the course file's origin) and sends one JSON datagram every 0.25 s
+to **udp 127.0.0.1:14556** (`--feed-port` on the panel). 14556 because the boat owns `1455x` and 14550-14553
+and 14555 are taken (tooling, `telemetry_bridge`, `batt_watchdog`, the RFD900 shim, RXL); the panel binds it,
+so no flight-stack datagram can be stolen. A second panel on the same port says so in the error bar and
+runs without the layers. A layer older than 2 s is **stale**: the server returns its age and no data, the
+page draws nothing and the line under the map says `STALE 7.3 s, not drawn` (an empty list means "heard,
+nothing held"; no line at all means never heard). `leg_status` is sent while a leg runs and once on IDLE, so
+between legs the NAV badge reads `stale`. The same data is under `feed` in `curl localhost:8095/api/state`.
+Check the arithmetic and the staleness rules, plain python3, no ROS:
+
+```bash
+PYTHONPATH=~/robotx_ws/src/rx26_asv/crusader_sim python3 -m crusader_sim.panel_feed --selftest
+```
+
 **Found by the panel on 2026-09-30:** `CircleBuoy` drove its orbit points with no obstacle
 avoidance (`AvoidObstacles` lived only in the gate leg), so moving the EXIT so that the approach
 crosses a buoy ended in a collision. The fix is the tree's planned legs, which plan through
@@ -135,8 +165,9 @@ away can still end short of a full circle (313 degrees measured); the tests belo
 
 The boat's tree plans its legs around known hazards through Nav2's `planner_server` and a
 costmap (spec: `docs/nav2_avoidance_spec.md`). In the sim the whole stack runs in `crsd-sim`:
-`nav_frames_node` (the datum and TF `map -> base_footprint`), `planner_server`, its lifecycle
-manager, and bt_runner with `nav_mode`. It needs the Nav2 image and the nav packages built.
+`nav_frames_node` (the datum and TF `map -> base_footprint`), `planner_server`, `nav_lifecycle`
+(our own node that configures and activates it, with call timeouts; it replaced Nav2's lifecycle
+manager, which hung on one lost reply), and bt_runner with `nav_mode`. It needs the Nav2 image and the nav packages built.
 
 **1. Build the image once** (WSL; the Dockerfile copies nothing from the context, so the small
 `docker/` directory is the context). It goes to a NEW tag and touches nothing that is running:
@@ -186,12 +217,14 @@ bash ~/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_task1.sh task1_core
 
 `gz_rig_up.sh` starts `crusader_nav`'s `nav.launch.py` (datum = the course origin) before bt_runner,
 waits up to 40 s for `planner_server` to report `active` and says so if it does not, and passes
-`-p nav_mode:=$NAV_MODE` to bt_runner. `NAV_MODE=off` starts no nav stack: that is the baseline.
+`-p nav_mode:=$NAV_MODE` to bt_runner. `NAV_MODE=off` starts no nav stack and drives guarded straight legs (a leg holds, then fails at 15 s, rather than cross a known hazard): that is the baseline.
 `shadow` plans and displays but drives the legacy legs. Logs: `/tmp/nav.log` and `/tmp/bt.log`
 in `crsd-sim`. Each run's output is in `~/.cache/crusader_sim/task1_last.log`; **copy it per run**.
-`gz_sim_up.sh` also rebuilds `crusader_nav`, `crusader_nav_layers` and `crusader_groundstation`
-every run (seconds); `crusader_bt`, `crusader_perception` and `crusader_msgs` still need a manual
-`colcon build --packages-select ...` in `crsd-sim` after a change.
+`gz_sim_up.sh` also rebuilds every package a run exercises (`crusader_msgs`, `crusader_bt`,
+`crusader_perception`, `crusader_sim`, `crusader_nav`, `crusader_nav_layers`,
+`crusader_groundstation`) every run: seconds when unchanged, about 40 s after a `crusader_bt` change.
+A stale `crusader_bt` would ignore `nav_mode` and drive the legacy legs. `gz_nav_test.sh` (below) also
+checks the mode bt_runner announces and marks a run INVALID when it differs from the one asked for.
 
 **What to look at.** The ground station map (http://localhost:8090) draws the planned path dashed
 (green FOLLOWING, red BLOCKED, yellow PLANNING/DEGRADED, grey STRAIGHT), the carrot as a ring, the goal
@@ -206,7 +239,16 @@ PYTHONPATH=~/robotx_ws/src/rx26_asv/crusader_sim python3 -m crusader_sim.task1_j
 ```
 
 **The tests** (spec section 10.2). The baseline for every timing is the same commit with
-`NAV_MODE=off`; the median of 3 runs must be at most 1.2 times the baseline.
+`NAV_MODE=off`; the median of 3 runs must be at most 1.2 times the baseline. The Task 1 rows run
+unattended, N fresh runs each, with one scored line per run (result, verdict, clearance, mission
+seconds, BLOCKED count) and every log kept in `~/.cache/crusader_sim/runs/<tag>/`:
+
+```bash
+tr -d '\r' < /mnt/c/Users/Chaser/Documents/dev/RobotX_2026/Boat/rx26_asv/crusader_sim/scripts/gz_nav_test.sh > /tmp/gz_nav_test.sh && bash /tmp/gz_nav_test.sh task1_core --mode on --runs 3 --tag s1_on
+```
+
+(`--mode off|shadow|on`, `--tree X.xml`, `--no-uav`, `-- <task1_goal flags>`. It runs from a `/tmp`
+copy because its first step syncs the checkout, which rewrites changed scripts in place.)
 
 | # | Course and setup | Pass |
 |---|---|---|
@@ -217,7 +259,7 @@ PYTHONPATH=~/robotx_ws/src/rx26_asv/crusader_sim python3 -m crusader_sim.task1_j
 | S5 | the panel: move the EXIT behind an unpaired buoy mid-run | no contact, exit orbit at least 330 degrees ccw |
 | S6 | `open_water_platform`, `TREE=nav_test_line.xml`, a SafePassage goal 40 m east (`approach_latitude 1.2806, approach_longitude 103.8560594`) | arrives, platform at least 0.73 m. Read `/crsd/lidar_cluster_health` first: at the default `water_margin` 0.15 the platform's deck is AT the water gate, so it may not be seen at all, and then run `ros2 param set /lidar_cluster_node water_margin 0.08`. Run at `r_max` 10 and 30 |
 | S7 | `task3`, `TREE=task3_disruptive.xml` | as the baseline; look and lead legs at least 0.73 m from fingers and deck; predock and berth STRAIGHT |
-| S8 | the panel: ring the boat with 4 black buoys | one hold, costmap clear at 5 s, FAILURE at 15 s, never into a buoy |
+| S8 | `task1_boxed_in`: 4 black buoys 1.3 m round the start (at 2 m the planner plans out between them; see the course header) | one hold, costmap clear at 5 s, FAILURE at 15 s, never into a buoy |
 | S9 | mid-transit, `SIM_GPS_HDG 0` on SITL (WSL, not `crsd-sim`), then `1` | DEGRADED and hold, no FAILURE, resumes |
 | S10 | `NAV_MODE=shadow`, `task1_core` | setpoints identical to the baseline; leg status shows plans |
 

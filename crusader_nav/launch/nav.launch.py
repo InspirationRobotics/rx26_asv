@@ -1,5 +1,6 @@
 """nav.launch.py - the Nav2 planner stack: nav_frames_node, planner_server and
-the lifecycle manager that activates it. docs/nav2_avoidance_spec.md section 3.6.
+nav_lifecycle, the node that configures and activates it.
+docs/nav2_avoidance_spec.md section 3.6.
 
     ros2 launch crusader_nav nav.launch.py datum_source:=param datum_lat:=<lat> datum_lon:=<lon>
 
@@ -13,9 +14,14 @@ Arguments
   datum_source  param | first_fix            ('' = whatever crsd_params says)
   datum_lat, datum_lon                       used with datum_source:=param
 
-planner_server stays in `configuring` until TF map -> base_footprint exists,
+planner_server stays in `activating` until TF map -> base_footprint exists,
 which needs a pose WITH A FINITE HEADING. Check with
 `ros2 lifecycle get /planner_server` in the same container.
+
+nav_lifecycle replaces nav2_lifecycle_manager (Humble 1.1.20), whose
+change_state call has no timeout and waited forever for a reply Fast DDS had
+dropped, leaving planner_server `inactive`. nav_lifecycle times out, asks again,
+and re-activates a respawned planner_server; there is no bond to wait for.
 """
 import os
 
@@ -56,14 +62,15 @@ def _nodes(context):
     return [
         Node(package="crusader_nav", executable="nav_frames_node", name="nav_frames_node",
              output="screen", parameters=frames_params, **respawn_policy),
-        # The lifecycle manager reconnects a respawned planner within 10 s
-        # (attempt_respawn_reconnection in nav2_params.yaml).
+        # nav_lifecycle configures and activates a respawned planner_server again
+        # within a few check periods of it coming back (nav_lifecycle in nav2_params.yaml).
         Node(package="nav2_planner", executable="planner_server", name="planner_server",
              output="screen", parameters=[arg["nav2_params"]],
              respawn=True, respawn_delay=RESPAWN_DELAY_S),
-        Node(package="nav2_lifecycle_manager", executable="lifecycle_manager",
-             name="lifecycle_manager_crsd_nav", output="screen",
-             parameters=[arg["nav2_params"]]),
+        # Stateless: a respawned one just looks at the planner again.
+        Node(package="crusader_nav", executable="nav_lifecycle", name="nav_lifecycle",
+             output="screen", parameters=[arg["nav2_params"]],
+             respawn=True, respawn_delay=RESPAWN_DELAY_S),
     ]
 
 

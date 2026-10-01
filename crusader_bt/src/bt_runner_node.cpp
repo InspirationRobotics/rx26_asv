@@ -12,6 +12,7 @@
 //        /crsd/attitude      (Attitude)           ...and whether the hull is still
 //        /crsd/pump_state    (PumpState)          ...and what the bridge did with a burst
 //        /crsd/autonomy_drop (Bool, latched)      ...the drop latch (ch9)
+//        /crsd/datum         (LatLonHead, latched) the ONE frame origin (nav_frames_node)
 //   out: /crsd/guided_setpoint    (GuidedSetpoint) ONLY when publish_setpoints
 //        /crsd/current_task       (String, latched)
 //        /crsd/autonomy_active    (Bool)   turns the mast light GREEN
@@ -24,6 +25,10 @@
 //        /crsd/guided_heading_speed (GuidedHeadingSpeed) ONLY when publish_setpoints
 //        /crsd/pump_cmd           (PumpCommand)   ONLY when fire_pump
 //        /crsd/rc_override        (RcChannels)    the sticks, MANUAL, ONLY when publish_setpoints
+//        /crsd/nav/hazards        (HazardArray, latched) the known field, for the costmap
+//        /crsd/nav/leg_status     (String, JSON)  the running leg, for the ground station
+//   calls (nav_mode shadow or on): Nav2's planner_server - /compute_path_to_pose,
+//        /is_path_valid and the global costmap's clear service.
 //
 // NOTE: the Task 3 plumbing here (onDock, onOcsCommand, the five publishers)
 // has NOT been built against real ROS. It was written on a laptop with no ROS
@@ -103,6 +108,8 @@
 #include "crusader_msgs/msg/gate_pair.hpp"
 #include "crusader_msgs/msg/guided_heading_speed.hpp"
 #include "crusader_msgs/msg/guided_setpoint.hpp"
+#include "crusader_msgs/msg/hazard.hpp"
+#include "crusader_msgs/msg/hazard_array.hpp"
 #include "crusader_msgs/msg/lat_lon_head.hpp"
 #include "crusader_msgs/msg/passage_plan.hpp"
 #include "crusader_msgs/msg/pump_command.hpp"
@@ -114,6 +121,7 @@
 #include "crusader_bt/context.hpp"
 #include "crusader_bt/dock_math.hpp"
 #include "crusader_bt/nav_math.hpp"
+#include "crusader_bt/ros_planner_port.hpp"
 
 namespace crusader_bt
 {
@@ -217,6 +225,7 @@ public:
     ctx_->cam_mount.pitch_deg = declare_parameter<double>("cam_pitch_deg", 0.0);
     ctx_->dock_face_dz = declare_parameter<double>("dock_face_dz_m", 0.39);
     dock_topic_ = declare_parameter<std::string>("dock_topic", "dock/observations");
+    declareNavParams();
 
     // Latched: a subscriber that starts mid-mission must learn the current
     // value rather than sit on a default. avoidance_enable especially —
@@ -249,6 +258,11 @@ public:
     // The sticks (MANUAL): telemetry_bridge forwards them only in MANUAL, only
     // on its override_channels, clamped, and releases them on silence.
     rc_pub_ = create_publisher<crusader_msgs::msg::RcChannels>("/crsd/rc_override", 10);
+    // Obstacle avoidance. The hazards are the WHOLE known field, each message
+    // replacing the last, so a late-starting costmap must get the current one:
+    // latched, like the datum it is drawn in.
+    hazards_pub_ = create_publisher<crusader_msgs::msg::HazardArray>(nav_hazards_topic_, latched);
+    leg_pub_ = create_publisher<std_msgs::msg::String>(nav_leg_topic_, 10);
 
     status_sub_ = create_subscription<crusader_msgs::msg::FcuStatus>(
       "/crsd/fcu_status", 10,
@@ -286,6 +300,23 @@ public:
         std::lock_guard<std::mutex> lk(ctx_->mu);
         ctx_->drop_tripped = m->data;
       });
+    // The frame. Latched on nav_frames_node's side: a bt_runner restarted mid-run
+    // must learn the datum rather than wait for a publish that never comes.
+    //
+    // NOT IN OFF. Off pins the origin at the first fix, exactly as it always did and
+    // with no Nav2 around to share a frame with, so a datum could only ever disagree
+    // with that pin: a spurious "datum changed, restart bt_runner" ERROR on a boat
+    // whose container merely has nav_frames_node running. (applyDatum ignores it in
+    // Off too, so the rule does not depend on this subscription being absent.)
+    if (ctx_->nav_mode != path::Mode::Off) {
+      datum_sub_ = create_subscription<crusader_msgs::msg::LatLonHead>(
+        nav_datum_topic_, rclcpp::QoS(1).reliable().transient_local(),
+        [this](crusader_msgs::msg::LatLonHead::SharedPtr m) {onDatum(m);});
+    }
+    // The hazards go out whether or not a goal is active, so the costmap is
+    // current before the first leg needs it.
+    hazard_timer_ = create_wall_timer(
+      std::chrono::duration<double>(1.0 / nav_hazard_rate_hz_), [this] {publishHazards();});
 
     wireContext();
     publishTask(kTaskNone);
@@ -335,6 +366,12 @@ public:
         "still poll for arrival, so a human can drive the mission and the tree "
         "will follow. That is the read-only posture, not a fault.");
     }
+    RCLCPP_INFO(
+      get_logger(), "obstacle avoidance: nav_mode %s%s", navModeName(ctx_->nav_mode),
+      ctx_->nav_mode == path::Mode::Off ?
+      " (straight legs, no planner: a known hazard on the line holds the leg, then fails it)" :
+      ctx_->nav_mode == path::Mode::Shadow ? " (plans and displays, drives the legacy legs)" :
+      " (planned legs drive the boat)");
   }
 
   ~BtRunner() override {shutdown();}
@@ -387,28 +424,62 @@ private:
     have_pump_ = true;
   }
 
+  /// The frame rule (spec 2) is ingestPose's, shared with the off-ROS runner.
   void onPose(const crusader_msgs::msg::LatLonHead::SharedPtr m)
   {
     std::lock_guard<std::mutex> lk(ctx_->mu);
-    if (!ctx_->origin_set) {
-      // Pinned ONCE, at the first fix. Re-deriving it from the current position
-      // each tick would make every stored buoy drift as the boat moves.
-      ctx_->origin = {m->latitude, m->longitude};
-      ctx_->origin_set = true;
-      RCLCPP_INFO(
-        get_logger(), "local frame origin pinned at %.7f, %.7f",
-        m->latitude, m->longitude);
-      // A plan can arrive BEFORE the first fix -- rxl_link_node is up long
-      // before telemetry_bridge has a position -- and refuseLocked() bails out
-      // when there is no origin to express it in. Without this the plan sits
-      // unused until the NEXT one arrives, which at 0.2 Hz is up to 5 s, and a
-      // goal sent in that window fails with "entry buoy not available" while
-      // the guard band happily reports the plan as fresh.
-      refuseLocked();
+    switch (ingestPose(*ctx_, {m->latitude, m->longitude}, m->heading)) {
+      case PoseEvent::Bad:
+        return;
+      case PoseEvent::Pinned:
+        // Pinned ONCE, at the first fix. Re-deriving it from the current position
+        // each tick would make every stored buoy drift as the boat moves.
+        RCLCPP_INFO(
+          get_logger(), "local frame origin pinned at %.7f, %.7f (no /crsd/datum: pinned at "
+          "the first fix; nav_mode off, frame not shared)", m->latitude, m->longitude);
+        // A plan can arrive BEFORE the first fix -- rxl_link_node is up long
+        // before telemetry_bridge has a position -- and refuseLocked() bails out
+        // when there is no origin to express it in. Without this the plan sits
+        // unused until the NEXT one arrives, which at 0.2 Hz is up to 5 s, and a
+        // goal sent in that window fails with "entry buoy not available" while
+        // the guard band happily reports the plan as fresh.
+        refuseLocked();
+        break;
+      case PoseEvent::Waiting:
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 5000,
+          "waiting for /crsd/datum - is crusader_nav nav.launch.py running? "
+          "(nav_mode %s does not pin the frame at the first fix)", navModeName(ctx_->nav_mode));
+        break;
+      case PoseEvent::Tracked:
+        break;
     }
-    ctx_->boat = nav::toLocal({m->latitude, m->longitude}, ctx_->origin);
-    ctx_->heading_deg = m->heading;      // NaN when GPS yaw is unresolved
     pose_t_ = now();
+  }
+
+  /// /crsd/datum: the one frame origin (spec 2). The rule is applyDatum's.
+  void onDatum(const crusader_msgs::msg::LatLonHead::SharedPtr m)
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    switch (applyDatum(*ctx_, {m->latitude, m->longitude})) {
+      case DatumEvent::Adopted:
+        RCLCPP_INFO(
+          get_logger(), "local frame origin adopted from /crsd/datum: %.7f, %.7f",
+          m->latitude, m->longitude);
+        refuseLocked();          // a plan that arrived before the origin can be placed now
+        break;
+      case DatumEvent::Mismatch:
+        RCLCPP_ERROR(
+          get_logger(), "/crsd/datum %.7f, %.7f differs from the origin in use (%.7f, %.7f): "
+          "datum changed, restart bt_runner. Planned legs hold and hazards stop until then "
+          "(straight legs are unaffected). Never re-pinned mid-run: the DockBook, home and "
+          "the gate bookkeeping hold local coordinates.",
+          m->latitude, m->longitude, ctx_->origin.lat, ctx_->origin.lon);
+        break;
+      case DatumEvent::Unchanged:
+      case DatumEvent::Ignored:
+        break;
+    }
   }
 
   void onTargets(const crusader_msgs::msg::TrackedTargetArray::SharedPtr m)
@@ -759,6 +830,147 @@ private:
     avoid_pub_->publish(m);
   }
 
+  // ------------------------------------------------------- obstacle avoidance
+
+  /// bt_runner_node's nav_* parameters (spec 5.8), all [RO]. Every default is
+  /// path::NavParams{}'s, so the C++ and crusader_params.yaml cannot drift apart
+  /// unnoticed (check_config cross-checks the ones the costmap also depends on).
+  void declareNavParams()
+  {
+    path::NavParams & n = ctx_->nav;
+    const std::pair<const char *, double *> reals[] = {
+      {"nav_hard_m", &n.hard_m}, {"nav_soft_m", &n.soft_m},
+      {"nav_buoy_radius_m", &n.buoy_radius_m}, {"nav_track_radius_m", &n.track_radius_m},
+      {"nav_exempt_radius_m", &n.exempt_radius_m},
+      {"nav_lookahead_m", &n.lookahead_m}, {"nav_lookahead_min_m", &n.lookahead_min_m},
+      {"nav_max_chord_dev_m", &n.max_chord_dev_m}, {"nav_wp_radius_m", &n.wp_radius_m},
+      {"nav_replan_period_s", &n.replan_period_s},
+      {"nav_min_request_gap_s", &n.min_request_gap_s},
+      {"nav_check_period_s", &n.check_period_s}, {"nav_plan_timeout_s", &n.plan_timeout_s},
+      {"nav_first_plan_wait_s", &n.first_plan_wait_s},
+      {"nav_hysteresis_frac", &n.hysteresis_frac}, {"nav_hysteresis_m", &n.hysteresis_m},
+      {"nav_goal_replan_m", &n.goal_replan_m}, {"nav_clip_radius_m", &n.clip_radius_m},
+      {"nav_clear_after_s", &n.clear_after_s}, {"nav_unblock_reset_s", &n.unblock_reset_s},
+      {"nav_escape_margin_m", &n.escape_margin_m}, {"nav_goal_margin_m", &n.goal_margin_m},
+      {"nav_local_check_tol_m", &n.local_check_tol_m},
+      {"nav_orbit_max_push_m", &n.orbit_max_push_m}, {"nav_orbit_clear_m", &n.orbit_clear_m},
+      {"nav_dock_finger_len_m", &n.dock_finger_len_m},
+      {"nav_dock_finger_w_m", &n.dock_finger_w_m}, {"nav_dock_slip_w_m", &n.dock_slip_w_m},
+      {"nav_dock_deck_depth_m", &n.dock_deck_depth_m}};
+    for (const auto & kv : reals) {*kv.second = declare_parameter<double>(kv.first, *kv.second);}
+    n.invalid_confirm = static_cast<int>(
+      declare_parameter<int64_t>("nav_invalid_confirm", n.invalid_confirm));
+
+    nav_hazard_rate_hz_ = declare_parameter<double>("nav_hazard_rate_hz", 2.0);
+    nav_status_hz_ = declare_parameter<double>("nav_status_hz", 2.0);
+    if (!(nav_hazard_rate_hz_ > 0.0) || !(nav_status_hz_ > 0.0)) {
+      throw std::runtime_error("nav_hazard_rate_hz and nav_status_hz must be > 0");
+    }
+    nav_map_frame_ = declare_parameter<std::string>("nav_map_frame", "map");
+    nav_datum_topic_ = declare_parameter<std::string>("nav_datum_topic", "/crsd/datum");
+    nav_hazards_topic_ = declare_parameter<std::string>("nav_hazards_topic", "/crsd/nav/hazards");
+    nav_leg_topic_ = declare_parameter<std::string>("nav_leg_topic", "/crsd/nav/leg_status");
+    const std::string planner_action =
+      declare_parameter<std::string>("nav_planner_action", "/compute_path_to_pose");
+    const std::string valid_service =
+      declare_parameter<std::string>("nav_valid_service", "/is_path_valid");
+    const std::string clear_service = declare_parameter<std::string>(
+      "nav_clear_service", "/global_costmap/clear_entirely_global_costmap");
+    const std::string planner_id = declare_parameter<std::string>("nav_planner_id", "GridBased");
+
+    // A typo here must stop the node, never fall back to a mode nobody asked for.
+    //
+    // DYNAMICALLY TYPED, AND THAT IS THE POINT. On the command line `-p nav_mode:=on`
+    // is parsed as YAML 1.1, where a bare on / off is a BOOLEAN, so a string-typed
+    // parameter dies at startup with InvalidParameterTypeException - on exactly the
+    // spelling the sim rig and the docs use. (The YAML params file quotes "off".)
+    // Both spellings mean what they say; shadow was never ambiguous.
+    rcl_interfaces::msg::ParameterDescriptor mode_desc;
+    mode_desc.dynamic_typing = true;
+    mode_desc.description = "off | shadow | on (a bare on or off on the command line is a "
+      "YAML boolean and is accepted as that mode)";
+    const rclcpp::ParameterValue & mode_value = declare_parameter(
+      "nav_mode", rclcpp::ParameterValue(std::string("off")), mode_desc);
+    std::string mode;
+    if (mode_value.get_type() == rclcpp::ParameterType::PARAMETER_STRING) {
+      mode = mode_value.get<std::string>();
+    } else if (mode_value.get_type() == rclcpp::ParameterType::PARAMETER_BOOL) {
+      mode = mode_value.get<bool>() ? "on" : "off";
+    }
+    if (!parseNavMode(mode, ctx_->nav_mode)) {
+      // What was actually given, with its type: an integer or a double has no mode
+      // string, and "got ''" would not say which of the two the operator wrote.
+      throw std::runtime_error(
+        "nav_mode must be off, shadow or on (a bare on or off boolean is that mode); got '" +
+        rclcpp::to_string(mode_value) + "' (" + rclcpp::to_string(mode_value.get_type()) + ")");
+    }
+    if (ctx_->nav_mode == path::Mode::Off) {return;}
+    ctx_->planner = makeRosPlannerPort(
+      this, nav_map_frame_, planner_id, planner_action, valid_service, clear_service);
+    if (!ctx_->planner) {
+      throw std::runtime_error(
+        "bt_runner was built without nav2_msgs (image without Nav2); nav_mode must be off");
+    }
+  }
+
+  /// The known field, to the costmap (spec 5.4 item 4). A hazard in the wrong frame
+  /// is a lethal blob in the wrong place, so nothing goes out until the origin IS
+  /// the datum, and nothing after it stops being.
+  void publishHazards()
+  {
+    crusader_msgs::msg::HazardArray msg;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      if (!hazardsPublishable(*ctx_)) {return;}
+      for (const path::Hazard & h : knownHazards(*ctx_)) {
+        crusader_msgs::msg::Hazard m;
+        m.kind = h.kind == path::HazardKind::Circle ? crusader_msgs::msg::Hazard::CIRCLE :
+          crusader_msgs::msg::Hazard::POLYGON;
+        m.source = static_cast<uint8_t>(h.source);
+        m.id = h.id;
+        m.x = h.c.x;
+        m.y = h.c.y;
+        m.radius_m = h.r;
+        for (const nav::Vec2 & v : h.poly) {
+          m.polygon_x.push_back(v.x);
+          m.polygon_y.push_back(v.y);
+        }
+        m.keepout_m = h.keepout;
+        msg.hazards.push_back(m);
+      }
+    }
+    msg.header.frame_id = nav_map_frame_;
+    msg.header.stamp = now();
+    msg.seq = ++hazard_seq_;
+    hazards_pub_->publish(msg);
+  }
+
+  /// The running leg, to the ground station (spec 4.3, 5.4 item 5), paced by
+  /// leg_pacer_: a state change always goes out, otherwise nav_status_hz.
+  /// Called from the tick thread only.
+  void publishLegStatus(double elapsed_s)
+  {
+    std::string json;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      if (!leg_pacer_.due(*ctx_, ctx_->now_s, 1.0 / nav_status_hz_)) {return;}
+      json = legStatusJson(*ctx_, elapsed_s);
+    }
+    std_msgs::msg::String m;
+    m.data = json;
+    leg_pub_->publish(m);
+  }
+
+  /// A new mission, or the end of one: no leg is running, and the map should say so.
+  void resetLeg(double elapsed_s)
+  {
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      clearLeg(*ctx_);
+    }
+    publishLegStatus(elapsed_s);
+  }
+
   /// SafePassageReport as JSON, for ocs_client to relay.
   ///
   /// JSON rather than protobuf for the reason in ocs_link.py: the OCS
@@ -918,6 +1130,8 @@ private:
       ctx_->home = ctx_->boat;
       ctx_->have_home = ctx_->pose_fresh;
     }
+    leg_pacer_ = LegStatusPacer{};
+    resetLeg(0.0);                      // no leg is running yet, and the map should say so
 
     uint8_t outcome = SafePassage::Result::OUTCOME_FAULT;
     std::string detail;
@@ -971,6 +1185,7 @@ private:
         refreshFreshness();
         st = tree.tickOnce();
         stopIfSilent(false);
+        publishLegStatus(elapsed);
 
         if (verbose_tree_) {
           const std::string frame = view.renderIfChanged();
@@ -1066,6 +1281,7 @@ private:
     // halted, but a tree that throws never halts its leaves.
     if (ctx_->cannon) {ctx_->cannon(false, 0.0, 0.0, 0.0);}
     stopIfSilent(true);                 // the boat stopped, if we were driving it
+    resetLeg(result->elapsed_s);        // and no leg is running any more
     publishTask(kTaskNone);
     publishAvoidance(true);
     std_msgs::msg::Bool off;
@@ -1095,6 +1311,9 @@ private:
     // an operator watching it would have read buoy progress as re-tasking.
     fb->plan_version = ctx_->plan_version;
     fb->warning = ctx_->pose_fresh ? "" : "pose is stale";
+    if (ctx_->leg.state == "BLOCKED") {
+      fb->warning += std::string(fb->warning.empty() ? "" : "; ") + "nav BLOCKED " + ctx_->leg.why;
+    }
     gh->publish_feedback(fb);
   }
 
@@ -1202,6 +1421,16 @@ private:
   rclcpp::Subscription<crusader_msgs::msg::Attitude>::SharedPtr att_sub_;
   rclcpp::Subscription<crusader_msgs::msg::PumpState>::SharedPtr pump_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr drop_sub_;
+
+  // Obstacle avoidance (spec 5.4)
+  double nav_hazard_rate_hz_ = 2.0, nav_status_hz_ = 2.0;
+  std::string nav_map_frame_, nav_datum_topic_, nav_hazards_topic_, nav_leg_topic_;
+  std::uint32_t hazard_seq_ = 0;        // hazard timer thread only
+  LegStatusPacer leg_pacer_;            // tick thread only
+  rclcpp::Publisher<crusader_msgs::msg::HazardArray>::SharedPtr hazards_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr leg_pub_;
+  rclcpp::Subscription<crusader_msgs::msg::LatLonHead>::SharedPtr datum_sub_;
+  rclcpp::TimerBase::SharedPtr hazard_timer_;
 };
 
 }  // namespace crusader_bt
