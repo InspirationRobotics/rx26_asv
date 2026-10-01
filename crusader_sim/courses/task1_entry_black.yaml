@@ -1,0 +1,28 @@
+# Task 1 with a black buoy on the approach to the ENTRY (avoidance test S4,
+# docs/nav2_avoidance_spec.md 10.2). Everything is task1_core.yaml (read its header
+# for the rules and the frame) plus one buoy:
+#   - black_entry at (3.5, 0.9), beacon off: on the line from the start (0, 0) to the
+#     start of the ENTRY ring (about 6.2, 1.5), 8.5 m before the entry buoy itself.
+# The first leg of the run must plan around it, keeping >= 0.8 m (centre to surface),
+# and the clockwise ENTRY orbit must still complete. Pass: referee PASS,
+# black_entry centre-to-surface >= 0.73 m.
+
+name: task1_entry_black
+origin: {lat: 1.28060, lon: 103.85570}   # = tools/sitl/start_sitl.sh SITL_HOME
+draft_m: 0.24
+depth_m: 5.0
+boat_start: {x: 0.0, y: 0.0, yaw_deg: 0.0}
+tier: core
+
+elements:
+  - {type: robobuoy, name: entry,  x: 12.0, y:  3.0, beacon: flash_blue,  up_beacon: false}
+  - {type: robobuoy, name: g1_red, x: 22.0, y: -3.0, beacon: flash_red,   up_beacon: false}
+  - {type: robobuoy, name: g1_grn, x: 22.0, y:  3.0, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: g2_red, x: 32.0, y: -1.0, beacon: flash_red,   up_beacon: false}
+  - {type: robobuoy, name: g2_grn, x: 32.0, y:  5.0, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: g3_red, x: 42.0, y: -4.0, beacon: flash_red,   up_beacon: false}
+  - {type: robobuoy, name: g3_grn, x: 42.0, y:  2.0, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: exit,   x: 52.0, y:  0.0, beacon: steady_blue, up_beacon: false}
+  - {type: robobuoy, name: black1, x: 27.0, y:  8.0, beacon: "off"}
+  - {type: robobuoy, name: black2, x: 37.0, y: -9.0, beacon: "off"}
+  - {type: robobuoy, name: black_entry, x: 3.5, y: 0.9, beacon: "off"}

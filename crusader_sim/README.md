@@ -38,11 +38,15 @@ boat's params file.
 
 ## Run it
 
-**Windows:** double-click `crusader_sim/scripts/GZ_SIM_UP.cmd`. It syncs your
-checkout into WSL, builds the workspace in `crsd-sim` the first time (about a
-minute), starts everything, and opens the ground station (:8090) and the tree
-viewer (:8085). The Gazebo window appears on the desktop through WSLg. Stop with
-`GZ_SIM_DOWN.cmd`.
+**Windows, one click each:**
+
+| Double-click | What it does |
+|---|---|
+| `crusader_sim/scripts/GZ_SIM_UP.cmd` | syncs your checkout into WSL, builds `crsd-sim` the first time, starts everything, locks the Gazebo camera on the boat, opens the ground station (:8090) and tree viewer (:8085), then **runs Task 1 in its own window after a 20 s countdown** (press N to skip it and drive yourself). Running it again restarts from scratch, with the boat back at the start |
+| `crusader_sim/scripts/GZ_SIM_DOWN.cmd` | stops the rig and container, SITL, the transmitter and Gazebo, then releases the hidden WSL keep-alive (`gz_keepalive.sh`). WSL itself is left to idle out, because the distro is shared |
+
+The Gazebo window appears on the desktop through WSLg. The last Task 1 run's
+output is kept in `~/.cache/crusader_sim/task1_last.log` (WSL; not `/tmp`, which WSL wipes at every distro start).
 
 **WSL** (the same thing, with options):
 
@@ -54,16 +58,22 @@ bash ~/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_sim_down.sh
 
 | Flag | Effect |
 |---|---|
-| `<course>` | any `courses/*.yaml`: `task1_core`, `task3`, `open_water` |
+| `<course>` | any `courses/*.yaml`: `task1_core`, `task3`, `open_water`, and the avoidance tests `task1_blocked_exit`, `task1_entry_black`, `open_water_platform` |
 | `--no-gui` | Gazebo server only. The sim is identical, you just can't watch it |
 | `--no-uav` | no Ekko stand-in; the boat has only its own camera (Core-tier test) |
 | `--no-rig` | stop after Gazebo + SITL, for `check_motion` or your own nodes |
+| `--recreate-container` | remove the `crsd-sim` container if it was made from a different image than `RX26_IMAGE` and make a new one. Only with the sim down; see "Nav2 avoidance in the sim" |
+
+Environment, set in front of the command: `NAV_MODE=off`, `shadow` or `on` (the tree's planning, below), `TREE=<xml>` (a name in `crusader_bt/behavior_trees` or a path), `RX26_IMAGE` (the image a *new* container is made from; default `crsd-sim:nav2` when it exists, else `crsd-sim:humble`).
 
 ### Task 1
 
 ```bash
-docker exec -it crsd-sim bash -lc "python3 -m crusader_sim.task1_goal --course task1_core"
+bash ~/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_task1.sh task1_core
 ```
+
+(which is `python3 -m crusader_sim.task1_goal --course task1_core` in `crsd-sim`,
+with its output also written to `~/.cache/crusader_sim/task1_last.log`)
 
 It arms, switches to GUIDED through the bridge's `/crsd/set_mode`, and sends the
 `SafePassage` goal (approach point = 6 m short of ENTRY). It then prints the
@@ -80,6 +90,164 @@ counter-clockwise, and that no buoy was touched. The tree's own
 with it, which is the point. It also runs standalone:
 `python3 -m crusader_sim.task1_judge --course task1_core` (Ctrl-C for the
 verdict; live JSON on `/sim/task1_judge`).
+
+### Task 1 Disruptive: you are the UAV (the panel)
+
+Double-click `scripts/TASK1_PANEL.cmd` (desktop shortcut "Crusader Task 1
+panel"). It starts `task1_panel` hidden in WSL and opens http://localhost:8095.
+The panel is the UAV: in the Disruptive tier the colours are visible only from
+the air, so every beacon in the world is unlit and the colours exist only here.
+
+1. **Setup.** Pick a state (RED, GREEN, ENTRY, EXIT, BLACK), click the water to
+   place a buoy, drag to move, or edit the table; or load the `task1_core`
+   template. Save and load layouts (kept in `~/.cache/crusader_sim/panel/`).
+   Exactly one ENTRY and one EXIT are needed.
+2. **LAUNCH SIM** builds the world from the layout (`gz_sim_up.sh --course-file
+   ... --no-uav`: no auto-acking stand-in) and starts sending your field over
+   RXL: the whole field, resent every 5 s, because the boat aborts the mission
+   if it is more than 15 s old.
+3. **START TASK 1** runs `task1_goal --no-judge`. The boat then asks at each
+   checkpoint: **1 = ENTRY orbit done** (asked after the clockwise circle, not
+   before), **k+1 = gate k cleared**. Answer ACK, or click buoys to change their
+   state (staged until sent) and SEND CHANGES + ACK. A changed field makes the
+   boat replan; auto-ACK answers every checkpoint for you.
+4. **There is no EXIT checkpoint** in the boat's tree: it uses the EXIT in the
+   latest field when it starts its exit orbit, so move the EXIT at the last
+   gate's checkpoint at the latest.
+5. The referee is the panel's own `task1_judge`, which grades each gate with
+   the colours in force when it was crossed.
+6. **STOP SIM** stops the sim and keeps the panel (and layout); `GZ_SIM_DOWN.cmd`
+   stops everything, panel included. Log: `/tmp/task1_panel.log` (WSL).
+
+Sensor views, each off until toggled and rendered only while shown: RGB
+480x300 and depth 320x200 from preview cameras at the OAK-D's pose (the OAK-D
+sensors themselves stay full resolution), and a LiDAR top-down view ±25 m in
+the boat frame. All three on cost no measurable real-time factor (2026-09-30).
+
+**Found by the panel on 2026-09-30:** `CircleBuoy` drove its orbit points with no obstacle
+avoidance (`AvoidObstacles` lived only in the gate leg), so moving the EXIT so that the approach
+crosses a buoy ended in a collision. The fix is the tree's planned legs, which plan through
+Nav2: `docs/nav2_avoidance_spec.md`, run and tested as "Nav2 avoidance in the sim" below, with
+`task1_blocked_exit` and `task1_entry_black` as the reproductions. An orbit entered from far
+away can still end short of a full circle (313 degrees measured); the tests below require 330 or more.
+
+### Nav2 avoidance in the sim
+
+The boat's tree plans its legs around known hazards through Nav2's `planner_server` and a
+costmap (spec: `docs/nav2_avoidance_spec.md`). In the sim the whole stack runs in `crsd-sim`:
+`nav_frames_node` (the datum and TF `map -> base_footprint`), `planner_server`, its lifecycle
+manager, and bt_runner with `nav_mode`. It needs the Nav2 image and the nav packages built.
+
+**1. Build the image once** (WSL; the Dockerfile copies nothing from the context, so the small
+`docker/` directory is the context). It goes to a NEW tag and touches nothing that is running:
+
+```bash
+cd ~/robotx_ws/src/rx26_asv && docker build -t crsd-sim:nav2 -f crusader_sim/docker/crsd-sim.Dockerfile crusader_sim/docker
+```
+
+```bash
+docker run --rm crsd-sim:nav2 bash -c "source /opt/ros/humble/setup.bash && ros2 pkg list | grep -E 'nav2|spatio'"
+```
+
+The second line must list `nav2_planner`, `nav2_smac_planner`, `nav2_costmap_2d`,
+`nav2_lifecycle_manager` and `spatio_temporal_voxel_layer` among others. The image is about
+3.6 GB against 1.8 GB for the old one, mostly the Nav2 and STVL dependencies.
+
+**2. Switch the container.** `docker start` never changes a container's image, so an existing
+`crsd-sim` keeps the one it was created from. `gz_sim_up.sh` compares image IDs (not tags) and says so
+when they differ; the rig then runs `nav_mode off` and prints `*** AVOIDANCE OFF` rather than start a
+tree that waits for a planner. To switch, with the sim **down** (`GZ_SIM_DOWN.cmd`, or
+`gz_sim_down.sh`):
+
+```bash
+bash /mnt/c/Users/Chaser/Documents/dev/RobotX_2026/Boat/rx26_asv/crusader_sim/scripts/gz_sim_up.sh task1_core --recreate-container
+```
+
+Run it from the Windows checkout this first time: the copy under `~/robotx_ws/src` does not have the
+flag until step 1 of this very script has synced it.
+
+`--recreate-container` removes the old container, deletes the build and install directories of `crusader_bt` and
+`crusader_nav_layers` (their CMake caches hold the old image's `find_package` answers for Nav2),
+creates the container from `crsd-sim:nav2` and does one full `colcon build` (a few minutes). The
+workspace itself is the bind mount and is not touched otherwise. The by-hand equivalent is
+`docker rm -f crsd-sim`, the two `rm -rf`, then a normal `gz_sim_up.sh`. The Task 1 panel runs
+`gz_sim_up.sh` without the flag, so do this once first. Anything that lived only inside the old
+container (files under `/tmp`, logs) goes with it.
+
+**3. Run.** `NAV_MODE` is `on` by default when Nav2 is present:
+
+```bash
+NAV_MODE=on bash ~/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_sim_up.sh task1_core
+```
+
+```bash
+bash ~/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_task1.sh task1_core
+```
+
+`gz_rig_up.sh` starts `crusader_nav`'s `nav.launch.py` (datum = the course origin) before bt_runner,
+waits up to 40 s for `planner_server` to report `active` and says so if it does not, and passes
+`-p nav_mode:=$NAV_MODE` to bt_runner. `NAV_MODE=off` starts no nav stack: that is the baseline.
+`shadow` plans and displays but drives the legacy legs. Logs: `/tmp/nav.log` and `/tmp/bt.log`
+in `crsd-sim`. Each run's output is in `~/.cache/crusader_sim/task1_last.log`; **copy it per run**.
+`gz_sim_up.sh` also rebuilds `crusader_nav`, `crusader_nav_layers` and `crusader_groundstation`
+every run (seconds); `crusader_bt`, `crusader_perception` and `crusader_msgs` still need a manual
+`colcon build --packages-select ...` in `crsd-sim` after a change.
+
+**What to look at.** The ground station map (http://localhost:8090) draws the planned path dashed
+(green FOLLOWING, red BLOCKED, yellow PLANNING/DEGRADED, grey STRAIGHT), the carrot as a ring, the goal
+as a cross, and a top-left badge `NAV <STATE> <s> <why>`; the same JSON is `ros2 topic echo
+/crsd/nav/leg_status`. The judge's verdict gains a line, `min clearance <x> m (<object>), non-gate
+<y> m, hull <z> m`: centre-to-surface is the planner's contract (0.8 m), non-gate leaves out the
+samples inside a gate corridor for that gate's own two buoys, and `clearance_ok` is non-gate at least
+0.70 m. It is reported, never part of PASS. Check the arithmetic any time with:
+
+```bash
+PYTHONPATH=~/robotx_ws/src/rx26_asv/crusader_sim python3 -m crusader_sim.task1_judge --selftest
+```
+
+**The tests** (spec section 10.2). The baseline for every timing is the same commit with
+`NAV_MODE=off`; the median of 3 runs must be at most 1.2 times the baseline.
+
+| # | Course and setup | Pass |
+|---|---|---|
+| S1 | `task1_core`, the default Disruptive tree | PASS, `non_gate_centre_m` at least 0.70, no BLOCKED in `/tmp/bt.log` |
+| S2 | `task1_core`, `TREE=task1_safe_passage.xml`, `gz_sim_up.sh ... --no-uav` | PASS, clearance at least 0.70 |
+| S3 | `task1_blocked_exit` | PASS, `black3` at least 0.73 m, a visible detour, exit orbit at least 330 degrees ccw |
+| S4 | `task1_entry_black` | PASS, `black_entry` at least 0.73 m, entry orbit complete |
+| S5 | the panel: move the EXIT behind an unpaired buoy mid-run | no contact, exit orbit at least 330 degrees ccw |
+| S6 | `open_water_platform`, `TREE=nav_test_line.xml`, a SafePassage goal 40 m east (`approach_latitude 1.2806, approach_longitude 103.8560594`) | arrives, platform at least 0.73 m. Read `/crsd/lidar_cluster_health` first: at the default `water_margin` 0.15 the platform's deck is AT the water gate, so it may not be seen at all, and then run `ros2 param set /lidar_cluster_node water_margin 0.08`. Run at `r_max` 10 and 30 |
+| S7 | `task3`, `TREE=task3_disruptive.xml` | as the baseline; look and lead legs at least 0.73 m from fingers and deck; predock and berth STRAIGHT |
+| S8 | the panel: ring the boat with 4 black buoys | one hold, costmap clear at 5 s, FAILURE at 15 s, never into a buoy |
+| S9 | mid-transit, `SIM_GPS_HDG 0` on SITL (WSL, not `crsd-sim`), then `1` | DEGRADED and hold, no FAILURE, resumes |
+| S10 | `NAV_MODE=shadow`, `task1_core` | setpoints identical to the baseline; leg status shows plans |
+
+Stack checks in `crsd-sim`: **N1** `ros2 lifecycle get /planner_server` says `active`; **N2**
+`ros2 run tf2_ros tf2_echo map base_footprint` matches the boat's pose to 0.05 m; **N3** a buoy marked
+in view and then removed while still in view leaves the costmap within 5 s, and out of view it
+persists at least 20 s and is gone by 35 s (if not, switch to the ObstacleLayer fallback in the spec).
+
+### Sensor model (checked against the spec pages and Resources.md, 2026-09-30)
+
+**MID-360 LiDAR:**
+- Scans only the 180° in front of the sensor (−90..+90° about its forward
+  axis), because the real rear half sees only the boat's own hull. The boat's
+  clustering already uses 180° (`crusader_params.yaml:321`).
+- Keeps the 0.6° sample step, which gives about 10k points per scan at 10 Hz.
+- Vertical FOV −7..+52°, range 0.1–40 m, 2 cm noise.
+- Mounted upside down at the bow, so the raw frame is x forward, y starboard,
+  z down.
+- Its mount matches Resources.md:112-115.
+
+**OAK-D LR camera:**
+- HFOV 82°. Colour 1920x1200 and depth 640x400, both at 15 Hz.
+- Depth is aligned to the colour camera (`oak_pipeline.py:170`), so one HFOV
+  serves colour, depth and the preview cameras.
+- Depth range 0.58–30 m. The 0.58 m is derived from the 15 cm baseline and
+  95 px of disparity.
+- Its mount matches Resources.md:131-135. Its yaw and pitch are still assumed
+  to be 0.
+
+The panel's LiDAR view hatches everything aft of the sensor as "no coverage".
 
 ### GUIDED and MANUAL, and switching between them
 
@@ -165,18 +333,22 @@ manual, spins in AUTO". Fix it in the YAML, never in the params.
 |---|---|---|
 | `scripts/GZ_SIM_UP.cmd`, `GZ_SIM_DOWN.cmd` | Windows | double-click launchers |
 | `scripts/gz_sim_up.sh`, `gz_sim_down.sh` | WSL | the order of operations |
+| `scripts/gz_task1.sh`, `gz_keepalive.sh` | WSL | one Task 1 run, logged; the hidden client that stops WSL idling out |
+| `scripts/gz_sync.sh` | WSL | Windows checkout -> `~/robotx_ws/src` (shared by the sim and the panel) |
+| `scripts/TASK1_PANEL.cmd`, `task1_panel_up.sh` | Windows / WSL | double-click the panel; sync, then run it on :8095 |
+| `crusader_sim/task1_panel.py`, `.html`, `panel_sensors.py` | WSL host (no ROS) | the UAV panel: layout, RXL link (`tools/bench/uav_link.py`), live referee, sensor views over gz-transport |
 | `scripts/gz_rig_up.sh`, `gz_rig_down.sh` | `crsd-sim` | the ROS rig (the headless rig's `task1_sim_up.sh`, with sensors from Gazebo) |
 | `config/crusader_hull.yaml` | — | **the placeholder boat.** Edit this when CAD arrives |
 | `config/sitl_overlay.parm` | — | every place SITL differs from the boat, and why |
 | `config/gz_bridge.yaml` | — | Gazebo → ROS topic map |
-| `courses/*.yaml` | — | course layouts: buoys, beacon states, dock |
+| `courses/*.yaml` | — | course layouts: buoys, beacon states, dock. `task1_blocked_exit`, `task1_entry_black` and `open_water_platform` are the avoidance tests |
 | `crusader_sim/gen_crusader.py`, `gen_world.py` | WSL | build model and world into `~/.cache/crusader_sim` |
 | `crusader_sim/livox_shim.py`, `sim_camera.py` | `crsd-sim` | Gazebo sensors → the boat's driver topics |
 | `crusader_sim/sim_uav.py` | `crsd-sim` | Ekko's Task 1 radio, from the course's truth |
 | `crusader_sim/sim_transmitter.py` | WSL | the RC transmitter |
 | `crusader_sim/task1_goal.py`, `manual_drive.py`, `check_motion.py` | `crsd-sim` / WSL | operator tools |
-| `crusader_sim/task1_judge.py` | `crsd-sim` | independent Task 1 referee, from ground truth |
-| `docker/crsd-sim.Dockerfile` | WSL | the x86 stand-in for the boat's `asv` image |
+| `crusader_sim/task1_judge.py` | `crsd-sim` | independent Task 1 referee, from ground truth; also the minimum-clearance figure (`--selftest`) |
+| `docker/crsd-sim.Dockerfile` | WSL | the x86 stand-in for the boat's `asv` image, with Nav2 + STVL (`crsd-sim:nav2`) |
 | `setup/install_wsl.sh` | WSL | Gazebo, ArduPilot `Rover-4.6.3`, ardupilot_gazebo (`apt` stage as root, `user` stage as you) |
 
 ## Troubleshooting, all learned the hard way on 2026-09-28/29
@@ -184,6 +356,7 @@ manual, spins in AUTO". Fix it in the YAML, never in the params.
 | Symptom | Cause |
 |---|---|
 | Real-time factor ~0.2, "fcu_status stale", the tree aborts with OUTCOME_NOT_AUTONOMOUS | **Rendering on the CPU.** WSLg's Mesa defaults to `llvmpipe` on this PC (`glxinfo -B`: "Accelerated: no"). `gz_sim_up.sh` sets `GALLIUM_DRIVER=d3d12 MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA`, which gives "D3D12 (NVIDIA GeForce RTX 5060 Ti)". If a driver update breaks that, `GZ_GPU=cpu` forces software rendering: slow, but it runs |
+| No Gazebo window; `/tmp/gz_gui.log` ends in a segfault under `glXChooseFBConfig` / `libnvwgf2umx.so` | NVIDIA's WSL driver occasionally crashes the GUI at startup (the server is unaffected). `gz_sim_up.sh` checks and relaunches it, and the third try renders only the window on the CPU. By hand: `GZ_PARTITION=crusader_sim GALLIUM_DRIVER=d3d12 MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA gz sim -g` |
 | Arms, but motors sit at neutral; "Motors Emergency Stopped" | SITL's default RC holds ch7 (SB, `RC7_OPTION=165`) at 1000 µs = e-stop, and ArduPilot latches it at boot. `sim_transmitter set estop on`, then `off` |
 | "PreArm: Gyros inconsistent" for ~10–20 s after boot | normal; `check_motion`/`task1_goal` retry. Don't arm the instant SITL starts |
 | An override is silently ignored | `RC_CHANNELS_OVERRIDE` is only accepted from sysid 255 (`SYSID_MYGCS`) |

@@ -28,6 +28,10 @@ LABEL_OF = {
 # course beacon state -> rxl_codec beacon enum on the radio
 RXL_BEACON_OF = {"off": 1, "flash_red": 2, "flash_green": 3,
                  "flash_blue": 4, "steady_blue": 5}
+# every state a buoy's `beacon:` may take. It is what the buoy MEANS (the
+# judge and the UAV read it); whether it is visible is side_beacon/up_beacon,
+# so an Advanced/Disruptive course keeps the true colour with both lights off
+BEACON_STATES = tuple(RXL_BEACON_OF)
 
 
 def resolve(course):
@@ -65,7 +69,9 @@ def enu_to_latlon(east_m, north_m, origin):
 
 
 def buoys(course):
-    """[(name, x, y, beacon_state, side_on, up_on)] for every RoboBuoy."""
+    """[(name, x, y, beacon_state, side_on, up_on)] for every RoboBuoy.
+
+    beacon_state is the truth; side_on/up_on only say which lights show it."""
     out = []
     for e in course["elements"]:
         if e.get("type") == "robobuoy":

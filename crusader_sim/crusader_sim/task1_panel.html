@@ -1,0 +1,355 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Crusader Task 1 panel</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- task1_panel.py serves this; vanilla JS + canvas, no external libraries.
+     Sensor views poll /api/sensor/<view>.jpg (panel_sensors.py) only while
+     toggled on, on screen and the tab is visible: the server unsubscribes a
+     view ~5 s after its last request, and an unsubscribed gz camera is not
+     rendered, so a paused view costs the sim nothing. -->
+<style>
+:root{--bg:#0C141C;--panel:#131F2A;--line:#25384a;--ink:#DFE8EF;--dim:#7C8FA0;
+  --ok:#45BCA0;--warn:#E0A245;--bad:#E0736A;--accent:#4EAFD2}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,sans-serif}
+header{display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:10px 16px;
+  border-bottom:1px solid var(--line)}
+h1{font-size:17px;margin:0}.sub{color:var(--dim);font-size:12px}
+a{color:var(--accent)}
+.pill{padding:2px 10px;border-radius:10px;background:#ffffff10;font:600 12px monospace}
+.pill.up{background:#45bca030;color:var(--ok)}.pill.bad{background:#e0736a30;color:var(--bad)}
+.pill.busy{background:#e0a24530;color:var(--warn)}
+.err{background:#e0736a22;color:var(--bad);padding:6px 16px;font-size:13px}
+.ask{background:#e0a24533;border:2px solid var(--warn);margin:10px 16px;padding:12px;
+  border-radius:8px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.ask b{font-size:17px;color:var(--warn)}
+main{display:grid;grid-template-columns:minmax(0,1fr) 400px 340px;gap:12px;padding:12px 16px}
+@media (max-width:1500px){main{grid-template-columns:minmax(0,1fr) 400px}
+  #sensors{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}}
+@media (max-width:900px){main{grid-template-columns:1fr}#sensors{grid-template-columns:1fr}}
+.sens .row{margin:0 0 6px}.sens h3{margin:0}
+.frame{position:relative;background:#0a1a26;border-radius:5px;overflow:hidden}
+.frame img{display:block;width:100%;height:100%;object-fit:contain}
+.frame span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  color:var(--dim);font-size:13px;text-align:center;padding:8px}
+button.tog{min-width:44px;padding:2px 8px;font-size:12px}button.tog.on{background:#1f5f4f;border-color:var(--ok)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:10px}
+.card h3{margin:0 0 8px;font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+canvas{width:100%;height:62vh;display:block;background:#0a1a26;border-radius:8px;cursor:crosshair}
+button{background:#1d3042;color:var(--ink);border:1px solid var(--line);border-radius:5px;
+  padding:5px 10px;cursor:pointer;font:inherit}
+button:hover:not(:disabled){border-color:var(--accent)}button:disabled{opacity:.4;cursor:default}
+button.go{background:#1f5f4f;border-color:var(--ok)}button.stop{background:#5f2a26;border-color:var(--bad)}
+button.sel{outline:2px solid var(--accent)}
+input,select{background:#0c1822;color:var(--ink);border:1px solid var(--line);border-radius:4px;padding:3px 5px;font:inherit}
+table{border-collapse:collapse;width:100%;font-size:13px}td,th{padding:2px 4px;text-align:left}
+th{color:var(--dim);font-weight:500}
+.row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:6px 0}
+.sw{display:inline-block;width:11px;height:11px;border-radius:50%;margin-right:4px;vertical-align:-1px}
+.e{color:var(--bad)}.w{color:var(--warn)}
+.bar{height:8px;background:#ffffff10;border-radius:4px;overflow:hidden}.bar i{display:block;height:100%;background:var(--ok)}
+pre{margin:0;white-space:pre-wrap;font:12px/1.4 monospace}
+.logs pre{max-height:260px;overflow:auto;background:#0a121a;padding:6px;border-radius:5px}
+.tabs button{border-radius:5px 5px 0 0}
+#pop{position:fixed;display:none;background:var(--panel);border:1px solid var(--accent);border-radius:6px;padding:6px;z-index:5}
+#pop button{display:block;width:100%;margin:2px 0;text-align:left}
+</style></head><body>
+<header>
+  <h1>Crusader · Task 1 panel</h1><span class="sub">you are Ekko: Disruptive tier, only you see the colours</span>
+  <span id="simpill" class="pill">sim ?</span><span id="odom" class="sub"></span>
+  <span style="margin-left:auto"><a id="gcs" target="_blank">ground station</a> · <a id="bt" target="_blank">tree</a></span>
+</header>
+<div id="errors"></div>
+<div id="ask" class="ask" style="display:none">
+  <b id="askText"></b>
+  <button class="go" onclick="post('/api/ack')">ACK (no change)</button>
+  <button id="askSend" onclick="post('/api/send_ack')">SEND CHANGES + ACK</button>
+</div>
+<main>
+  <section>
+    <canvas id="map"></canvas>
+    <div class="row sub"><button onclick="fit=true;draw()">Fit</button>
+      <span id="hint"></span><span id="cursor" style="margin-left:auto"></span></div>
+    <div class="card logs">
+      <div class="tabs row" id="tabs"></div>
+      <pre id="logview"></pre>
+    </div>
+  </section>
+  <section>
+    <div id="setup">
+      <div class="card"><h3>Palette (click water to place)</h3><div class="row" id="palette"></div></div>
+      <div class="card"><h3>Buoys</h3>
+        <table><thead><tr><th>id</th><th>x (E)</th><th>y (N)</th><th>state</th><th></th></tr></thead>
+        <tbody id="btable"></tbody></table>
+        <div id="valid" style="margin-top:6px;font-size:13px"></div>
+      </div>
+      <div class="card" id="uav" title="UAV position error &lt; 1 m"><h3>UAV position error &lt; 1 m</h3>
+        <div class="row sub">Each buoy gets a fixed random offset (uniform in a disc of radius R), drawn when the
+          sim comes up. Every field sent carries buoy = truth + offset, ENTRY/EXIT too. The map shows the truth
+          (solid) and what the UAV says (hollow). The course file and the referee keep the truth.
+          UAV position error &lt; 1 m: R and jitter are limited to 0.99, and the total offset is clamped under 1 m.</div>
+        <div class="row"><label title="UAV position error &lt; 1 m: 0 to 0.99">R <input id="uR" type="number" min="0" max="0.99" step="0.1" size="5" style="width:70px"> m</label>
+          <label>seed <input id="uSeed" type="number" min="0" max="2147483647" step="1" style="width:110px"></label>
+          <button id="uReroll" onclick="post('/api/reroll').then(poll1)">Re-roll</button></div>
+        <div class="row"><label title="0 to 0.99; the total offset (fixed + jitter) is clamped under 1 m">jitter σ <input id="uJit" type="number" min="0" max="0.99" step="0.05" style="width:70px"> m per axis, per send</label></div>
+        <div id="uWarn" class="sub">Jitter 0 = the periodic resend repeats the same field. Any change in the field's
+          content makes the boat replan (PlanChanged), so jitter &gt; 0 replans it on EVERY 5 s resend.</div>
+        <div id="uInfo" class="sub" style="margin-top:4px"></div>
+        <div id="uLock" class="sub w"></div>
+      </div>
+      <div class="card" id="uav-anchor-setup"><h3>Layout</h3>
+        <div class="row"><select id="tpl"></select><button onclick="post('/api/template',{name:val('tpl')})">Load template</button>
+          <button onclick="post('/api/clear')">Clear</button></div>
+        <div class="row"><input id="saveName" placeholder="name" size="12"><button onclick="post('/api/save',{name:val('saveName')})">Save</button>
+          <select id="lays"></select><button onclick="post('/api/load',{name:val('lays')})">Load</button></div>
+        <div class="row"><button id="launch" class="go" onclick="post('/api/launch')">LAUNCH SIM</button>
+          <button onclick="post('/api/attach')" title="a sim launched from this panel is already up">ATTACH</button>
+          <span id="step" class="sub"></span></div>
+      </div>
+    </div>
+    <div id="run" style="display:none">
+      <div class="card"><h3>Mission</h3>
+        <div class="row"><button id="start" class="go" onclick="post('/api/start')">START TASK 1</button>
+          <button id="abort" onclick="post('/api/abort')" title="stops task1_goal only; the tree's goal is not cancelled">abort script</button></div>
+        <div id="phase" class="sub"></div><div class="bar"><i id="pct" style="width:0"></i></div>
+        <div id="judge" class="sub" title="the referee (task1_judge) grading the TRUE path against the colours as sent; dashed lines on the map are its gate pairs"></div>
+        <pre id="result" style="margin-top:6px"></pre><pre id="verdict" style="margin-top:6px"></pre>
+      </div>
+      <div class="card"><h3>Field</h3>
+        <div class="row"><b id="unsent"></b><button id="send" onclick="post('/api/send')">SEND CHANGES</button>
+          <button onclick="post('/api/discard')">DISCARD</button></div>
+        <div id="problem" class="e"></div>
+        <div class="row"><label><input type="checkbox" id="auto" onchange="post('/api/auto_ack',{on:this.checked})"> auto-ACK</label>
+          <span id="radio" class="sub"></span></div>
+        <div class="sub">click a buoy on the map to stage a colour change</div>
+      </div>
+      <div class="card"><h3>Checkpoints</h3><table><thead><tr><th>#</th><th>what</th><th>asked</th><th>answer</th><th>asks</th></tr></thead>
+        <tbody id="cps"></tbody></table></div>
+      <div class="card" id="uav-anchor-run"><button class="stop" onclick="if(confirm('Stop the sim?'))post('/api/stop_sim')">STOP SIM</button></div>
+    </div>
+  </section>
+  <aside id="sensors"></aside>
+</main>
+<div id="pop"></div>
+<script>
+var COL={flash_red:'#E5484D',flash_green:'#30A46C',flash_blue:'#3E8BFF',steady_blue:'#1D3FB8',off:'#111'};
+var LBL={flash_red:'RED',flash_green:'GREEN',flash_blue:'ENTRY',steady_blue:'EXIT',off:'BLACK'};
+var ORDER=['flash_red','flash_green','flash_blue','steady_blue','off'];
+var S=null, pick='flash_red', selIdx=-1, fit=true, view={cx:25,cy:0,s:10};
+var layout=[], rev=-1, drag=null, logs={sim:[],radio:[],mission:[],judge:[]}, seq={sim:0,radio:0,mission:0,judge:0};
+var tab='sim', trail=[], tgen=-1;
+function $(i){return document.getElementById(i)}
+function val(i){return $(i).value}
+function esc(s){return String(s).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c]})}
+function post(url,body){
+  return fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})})
+    .then(function(r){return r.json()}).then(function(d){if(!d.ok)alert(d.error||'failed');return d})
+    .catch(function(e){alert('panel unreachable: '+e)});
+}
+var host=location.hostname;
+$('gcs').href='http://'+host+':8090'; $('gcs').textContent='ground station :8090';
+$('bt').href='http://'+host+':8085'; $('bt').textContent='tree :8085';
+ORDER.forEach(function(s,i){
+  var b=document.createElement('button'); b.id='p_'+s;
+  b.innerHTML='<span class="sw" style="background:'+COL[s]+'"></span>'+(i+1)+' '+LBL[s];
+  b.onclick=function(){pick=s;paint()}; $('palette').appendChild(b);
+});
+['sim','radio','mission','judge'].forEach(function(k){
+  var b=document.createElement('button'); b.textContent=k; b.id='t_'+k;
+  b.onclick=function(){tab=k;showLog()}; $('tabs').appendChild(b);
+});
+function paint(){ORDER.forEach(function(s){$('p_'+s).className=s===pick?'sel':''})}
+paint();
+function editable(){return S&&(S.sim.state==='down'||S.sim.state==='failed')}
+function buoys(){return editable()||!S||!S.run?layout.map(function(b,i){var o=S&&S.uav&&S.uav.offsets[i]||[0,0];
+  return{x:b.x,y:b.y,ux:b.x+o[0],uy:b.y+o[1],staged:b.state,sent:b.state}}):S.run.buoys}
+// ---- map
+var cv=$('map'), g=cv.getContext('2d');
+function W2S(x,y){return[cv.width/2+(x-view.cx)*view.s, cv.height/2-(y-view.cy)*view.s]}
+function S2W(u,v){return[view.cx+(u-cv.width/2)/view.s, view.cy-(v-cv.height/2)/view.s]}
+function autofit(){
+  var pts=[[0,0]].concat(buoys().map(function(b){return[b.x,b.y]}),buoys().map(function(b){return[b.ux,b.uy]}),trail);
+  if(S&&S.boat)pts.push([S.boat.x,S.boat.y]);
+  var x0=1e9,x1=-1e9,y0=1e9,y1=-1e9;
+  pts.forEach(function(p){x0=Math.min(x0,p[0]);x1=Math.max(x1,p[0]);y0=Math.min(y0,p[1]);y1=Math.max(y1,p[1])});
+  x0-=5;x1+=5;y0-=5;y1+=5; if(x1-x0<30){x1=x0+30}
+  view.cx=(x0+x1)/2; view.cy=(y0+y1)/2; view.s=Math.min(cv.width/(x1-x0),cv.height/(y1-y0));
+}
+function draw(){
+  var r=cv.getBoundingClientRect(), dpr=window.devicePixelRatio||1;
+  if(cv.width!==Math.round(r.width*dpr)){cv.width=Math.round(r.width*dpr);cv.height=Math.round(r.height*dpr)}
+  if(fit)autofit();
+  g.setTransform(1,0,0,1,0,0); g.clearRect(0,0,cv.width,cv.height);
+  var a=S2W(0,cv.height), b=S2W(cv.width,0);
+  g.lineWidth=1; g.font=(11*dpr)+'px monospace'; g.fillStyle='#4a6070';
+  for(var x=Math.ceil(a[0]/5)*5;x<=b[0];x+=5){var p=W2S(x,0);g.strokeStyle=x===0?'#35556b':'#16293a';
+    g.beginPath();g.moveTo(p[0],0);g.lineTo(p[0],cv.height);g.stroke();g.fillText(x+'m',p[0]+2,cv.height-4)}
+  for(var y=Math.ceil(a[1]/5)*5;y<=b[1];y+=5){var q=W2S(0,y);g.strokeStyle=y===0?'#35556b':'#16293a';
+    g.beginPath();g.moveTo(0,q[1]);g.lineTo(cv.width,q[1]);g.stroke();g.fillText(y+'m',3,q[1]-3)}
+  var o=W2S(0,0); g.strokeStyle='#8aa';g.lineWidth=2*dpr;g.beginPath();g.arc(o[0],o[1],3*view.s,0,7);g.stroke();
+  arrowAt(0,0,0,'#8aa'); g.fillStyle='#8aa';g.fillText('start',o[0]+6,o[1]+16*dpr);
+  if(trail.length>1){g.strokeStyle='#E0A245';g.lineWidth=1.5*dpr;g.beginPath();
+    trail.forEach(function(p,i){var s=W2S(p[0],p[1]);i?g.lineTo(s[0],s[1]):g.moveTo(s[0],s[1])});g.stroke()}
+  if(S&&S.judge&&!editable()){var bs=buoys();   // the referee's gate pairs, by its result
+    Object.keys(S.judge.gates_detail).forEach(function(k){var ij=k.split('/'),a=bs[+ij[0].slice(1)],b=bs[+ij[1].slice(1)];
+      if(!a||!b)return;var res=S.judge.gates_detail[k],p=W2S(a.x,a.y),q=W2S(b.x,b.y);
+      g.setLineDash([6*dpr,4*dpr]);g.lineWidth=1.5*dpr;g.strokeStyle=res==='correct'?'#45BCA0':res==='not crossed'?'#7C8FA0':'#E0736A';
+      g.beginPath();g.moveTo(p[0],p[1]);g.lineTo(q[0],q[1]);g.stroke();g.setLineDash([])})}
+  buoys().forEach(function(bu){   // what the UAV says: hollow, joined to the truth by a thin line
+    if(Math.hypot(bu.ux-bu.x,bu.uy-bu.y)<0.05)return;
+    var p=W2S(bu.x,bu.y), q=W2S(bu.ux,bu.uy), rad=Math.max(7*dpr,0.5*view.s), jr=S&&S.uav?S.uav.jitter_m*view.s:0;
+    g.strokeStyle='#7C8FA0';g.lineWidth=1*dpr;g.beginPath();g.moveTo(p[0],p[1]);g.lineTo(q[0],q[1]);g.stroke();
+    g.strokeStyle=bu.staged==='off'?'#9ab':COL[bu.staged];g.lineWidth=2*dpr;g.beginPath();g.arc(q[0],q[1],rad,0,7);g.stroke();
+    if(jr>2*dpr){g.setLineDash([3*dpr,3*dpr]);g.lineWidth=1*dpr;g.beginPath();g.arc(q[0],q[1],jr,0,7);g.stroke();g.setLineDash([])}});
+  buoys().forEach(function(bu,i){
+    var p=W2S(bu.x,bu.y), rad=Math.max(7*dpr,0.5*view.s);
+    g.fillStyle=COL[bu.staged]; g.beginPath(); g.arc(p[0],p[1],rad,0,7); g.fill();
+    g.lineWidth=(i===selIdx?3:1.5)*dpr; g.strokeStyle=i===selIdx?'#fff':'#9ab'; g.stroke();
+    if(bu.staged!==bu.sent){g.setLineDash([4*dpr,3*dpr]);g.strokeStyle='#E0A245';g.lineWidth=2*dpr;
+      g.beginPath();g.arc(p[0],p[1],rad+5*dpr,0,7);g.stroke();g.setLineDash([])}
+    if(bu.staged==='flash_blue'||bu.staged==='steady_blue'){ // cw for ENTRY, ccw for EXIT
+      var cw=bu.staged==='flash_blue'; g.strokeStyle=COL[bu.staged]; g.lineWidth=2*dpr; g.beginPath();
+      g.arc(p[0],p[1],rad+11*dpr,0,4.7,!cw); g.stroke()}
+    g.fillStyle='#DFE8EF'; g.fillText('b'+i+(bu.staged==='flash_blue'?' ENTRY':bu.staged==='steady_blue'?' EXIT':''),p[0]+rad+4,p[1]-rad);
+    if(bu.staged!==bu.sent){g.fillStyle='#E0A245';g.fillText('was '+LBL[bu.sent],p[0]+rad+4,p[1]+rad+8*dpr)}
+  });
+  if(S&&S.boat){arrowAt(S.boat.x,S.boat.y,S.boat.yaw,S.boat.age>5?'#666':'#fff')}
+}
+function arrowAt(x,y,yaw,c){var p=W2S(x,y),k=Math.max(10,1.0*view.s);g.save();g.translate(p[0],p[1]);g.rotate(-yaw);
+  g.fillStyle=c;g.beginPath();g.moveTo(k,0);g.lineTo(-k*.6,k*.45);g.lineTo(-k*.6,-k*.45);g.closePath();g.fill();g.restore()}
+function hit(u,v){var bs=buoys(),dpr=window.devicePixelRatio||1;
+  for(var i=0;i<bs.length;i++){var p=W2S(bs[i].x,bs[i].y);if(Math.hypot(p[0]-u,p[1]-v)<Math.max(10*dpr,0.6*view.s))return i}return -1}
+function ev(e){var r=cv.getBoundingClientRect(),d=cv.width/r.width;return[(e.clientX-r.left)*d,(e.clientY-r.top)*d]}
+cv.onmousedown=function(e){var m=ev(e),i=hit(m[0],m[1]);$('pop').style.display='none';
+  drag={i:i,u:m[0],v:m[1],moved:false,cx:view.cx,cy:view.cy}; if(i>=0&&editable()){selIdx=i;draw()}};
+cv.onmousemove=function(e){var m=ev(e),w=S2W(m[0],m[1]);$('cursor').textContent='x '+w[0].toFixed(1)+'  y '+w[1].toFixed(1);
+  if(!drag)return; if(Math.hypot(m[0]-drag.u,m[1]-drag.v)>4)drag.moved=true; if(!drag.moved)return;
+  if(drag.i>=0&&editable()){layout[drag.i].x=Math.round(w[0]*10)/10;layout[drag.i].y=Math.round(w[1]*10)/10}
+  else{fit=false;view.cx=drag.cx-(m[0]-drag.u)/view.s;view.cy=drag.cy+(m[1]-drag.v)/view.s} draw()};
+cv.onmouseup=function(e){var d=drag;drag=null;if(!d)return;var m=ev(e),w=S2W(m[0],m[1]);
+  if(editable()){
+    if(d.i>=0&&d.moved)pushLayout();
+    else if(d.i<0&&!d.moved){if(layout.length>=10){alert('10 buoys max');return}
+      layout.push({x:Math.round(w[0]*10)/10,y:Math.round(w[1]*10)/10,state:pick});selIdx=layout.length-1;pushLayout()}
+  } else if(S&&S.run&&d.i>=0&&!d.moved){showPop(d.i,e.clientX,e.clientY)}};
+cv.onwheel=function(e){e.preventDefault();var m=ev(e),w=S2W(m[0],m[1]),k=e.deltaY<0?1.15:1/1.15;fit=false;
+  view.s*=k;view.cx=w[0]-(m[0]-cv.width/2)/view.s;view.cy=w[1]+(m[1]-cv.height/2)/view.s;draw()};
+document.onkeydown=function(e){if(e.target.tagName==='INPUT'||e.target.tagName==='SELECT')return;
+  if(e.key>='1'&&e.key<='5'){pick=ORDER[+e.key-1];paint()}
+  if((e.key==='Delete'||e.key==='Backspace')&&selIdx>=0&&editable()){layout.splice(selIdx,1);selIdx=-1;pushLayout()}};
+function showPop(i,x,y){var p=$('pop');p.innerHTML='<b>b'+i+'</b>'+ORDER.map(function(s){
+  return '<button onclick="stage('+i+',\''+s+'\')"><span class="sw" style="background:'+COL[s]+'"></span>'+LBL[s]+
+    (s===S.run.buoys[i].sent?' (sent)':'')+'</button>'}).join('');
+  p.style.left=x+8+'px';p.style.top=y+8+'px';p.style.display='block'}
+function stage(i,s){$('pop').style.display='none';post('/api/stage',{id:i,state:s}).then(poll1)}
+function uavPost(k,el){var v=parseFloat(el.value);if(!isFinite(v)){alert(k+': not a number');return}
+  var b={};b[k]=k==='seed'?Math.round(v):v;post('/api/uav_error',b).then(poll1)}
+$('uR').onchange=function(){uavPost('radius_m',this)};
+$('uJit').onchange=function(){uavPost('jitter_m',this)};
+$('uSeed').onchange=function(){uavPost('seed',this)};
+function pushLayout(){post('/api/layout',{buoys:layout}).then(function(d){if(d&&d.ok)rev=d.rev;poll1()});renderTable();draw()}
+// ---- setup table
+function renderTable(){
+  if(document.activeElement&&$('btable').contains(document.activeElement))return;
+  $('btable').innerHTML=layout.map(function(b,i){
+    return '<tr'+(i===selIdx?' style="background:#ffffff10"':'')+'><td>b'+i+'</td>'+
+      '<td><input size="5" value="'+b.x+'" onchange="setXY('+i+',\'x\',this.value)"></td>'+
+      '<td><input size="5" value="'+b.y+'" onchange="setXY('+i+',\'y\',this.value)"></td>'+
+      '<td><select onchange="layout['+i+'].state=this.value;pushLayout()">'+ORDER.map(function(s){
+        return '<option value="'+s+'"'+(s===b.state?' selected':'')+'>'+LBL[s]+'</option>'}).join('')+'</select></td>'+
+      '<td><button onclick="layout.splice('+i+',1);selIdx=-1;pushLayout()">✕</button></td></tr>'}).join('');
+}
+function setXY(i,k,v){var n=parseFloat(v);if(!isFinite(n)){alert('not a number');return}layout[i][k]=n;pushLayout()}
+function fillSelect(id,names){var el=$(id),cur=el.value;if(el.dataset.k===names.join())return;el.dataset.k=names.join();
+  el.innerHTML=names.map(function(n){return'<option>'+esc(n)+'</option>'}).join('');if(names.indexOf(cur)>=0)el.value=cur}
+// ---- logs
+function showLog(){['sim','radio','mission','judge'].forEach(function(k){$('t_'+k).className=k===tab?'sel':''});
+  var el=$('logview'),atEnd=el.scrollTop+el.clientHeight>=el.scrollHeight-20;el.textContent=logs[tab].join('\n');if(atEnd)el.scrollTop=el.scrollHeight}
+// ---- poll
+function fmtAge(t){return t==null?'—':t.toFixed(1)+' s'}
+function renderUav(inSetup){
+  var U=S.uav, card=$('uav'), home=inSetup?$('setup'):$('run'), before=inSetup?$('uav-anchor-setup'):$('uav-anchor-run');
+  if(card.parentNode!==home)home.insertBefore(card,before);
+  [['uR',U.radius_m],['uJit',U.jitter_m],['uSeed',U.seed]].forEach(function(f){
+    var el=$(f[0]);el.disabled=U.locked;if(document.activeElement!==el)el.value=f[1]});
+  $('uReroll').disabled=U.locked;
+  $('uWarn').className='sub'+(U.jitter_m>0?' w':'');
+  var m=U.offsets.map(function(o){return Math.hypot(o[0],o[1])});
+  $('uInfo').textContent=(U.live?'in use: ':'will draw at LAUNCH: ')+(m.length?'offsets '+m.map(function(v,i){return'b'+i+' '+v.toFixed(1)}).join('  ')+' m  (max '+Math.max.apply(null,m).toFixed(2)+' m)':'no buoys');
+  $('uLock').textContent=U.locked?'locked: a run is going, or the sim is starting/stopping':'';
+}
+function render(){
+  var st=S.sim.state, pill=$('simpill'); pill.textContent='sim '+st+(S.sim.step&&st!=='up'?' · '+S.sim.step:'')+(S.dry_run?' (DRY RUN)':'');
+  pill.className='pill '+(st==='up'?(S.sim.alive===false?'bad':'up'):st==='failed'?'bad':st==='down'?'':'busy');
+  $('odom').textContent=st==='up'?(S.sim.alive===false?'NO ODOMETRY for '+fmtAge(S.sim.odom_age)+': sim dead?':'odometry '+fmtAge(S.sim.odom_age)):'';
+  var errs=Object.keys(S.errors).map(function(k){return esc(S.errors[k])});
+  if(st==='failed')errs.push(esc(S.sim.detail));
+  $('errors').innerHTML=errs.map(function(e){return'<div class="err">'+e+'</div>'}).join('');
+  var ed=editable(); $('setup').style.display=ed||st==='launching'?'':'none'; $('run').style.display=ed||st==='launching'?'none':'';
+  renderUav(ed||st==='launching');
+  $('hint').textContent=(ed?'click water: place · drag: move/pan · Del: delete · wheel: zoom':'click a buoy: stage a colour · drag: pan · wheel: zoom')+' · solid = true, hollow = where the UAV says';
+  if(S.layout.rev!==rev&&!(drag&&drag.moved)){rev=S.layout.rev;layout=S.layout.buoys.map(function(b){return{x:b.x,y:b.y,state:b.state}});renderTable()}
+  $('valid').innerHTML=S.layout.errors.map(function(e){return'<div class="e">✗ '+esc(e)+'</div>'}).join('')+
+    S.layout.warnings.map(function(e){return'<div class="w">! '+esc(e)+'</div>'}).join('')+(S.layout.note?'<div class="sub">'+esc(S.layout.note)+'</div>':'');
+  $('launch').disabled=!ed||S.layout.errors.length>0; $('step').textContent=st==='launching'?'launching: '+S.sim.step:'';
+  fillSelect('tpl',S.templates); fillSelect('lays',S.layouts);
+  var m=S.mission, run=S.run;
+  $('start').disabled=!(st==='up'&&S.radio.up&&!m.running); $('abort').disabled=!m.running;
+  $('phase').textContent=m.phase?(m.phase+' '+m.pct.toFixed(0)+'%  buoys '+m.buoys+'  plan '+m.plan+'  '+m.warning):(m.running?m.operator:'');
+  $('pct').style.width=(m.pct||0)+'%'; $('result').textContent=m.result; $('verdict').textContent=S.verdict||'';
+  var J=S.judge; $('judge').textContent=!J?'':'referee: gates '+J.gates_correct+'/'+J.gates+' correct'+
+    (J.contacts.length?' · CONTACT '+J.contacts.join(' '):'')+Object.keys(J.circles).map(function(k){return' · '+k+' '+J.circles[k]}).join('');
+  if(run){$('unsent').textContent=run.unsent+' unsent change'+(run.unsent===1?'':'s');$('send').disabled=!run.unsent||!!run.problem;$('problem').textContent=run.problem||''}
+  $('auto').checked=S.radio.auto_ack;
+  $('radio').textContent=S.radio.up?('fields sent '+S.radio.sent+', resends '+S.radio.resends+', last '+fmtAge(S.radio.last_tx_age)):'radio down';
+  var c=S.checkpoint; $('ask').style.display=c?'':'none';
+  if(c){$('askText').textContent='Boat asks: checkpoint '+c.seq+' — '+c.label+' (waiting '+c.waiting_s.toFixed(0)+' s, re-asked '+(c.asks-1)+(c.asks===2?' time)':' times)');
+    $('askSend').disabled=!run||!run.unsent||!!run.problem}
+  $('cps').innerHTML=S.checkpoints.map(function(r){var t=new Date(r.asked*1000).toLocaleTimeString();
+    return'<tr><td>'+r.seq+'</td><td>'+esc(r.label)+'</td><td>'+t+'</td><td>'+(r.reply?esc(r.reply)+' +'+(r.answered-r.asked).toFixed(0)+'s':'<b class="w">waiting</b>')+
+      '</td><td>'+r.asks+'</td></tr>'}).join('');
+  draw();
+}
+function poll1(){
+  var q='log='+Object.keys(seq).map(function(k){return k+':'+seq[k]}).join(',')+'&trail='+tgen+':'+trail.length;
+  return fetch('/api/state?'+q).then(function(r){return r.json()}).then(function(d){
+    S=d; Object.keys(d.logs).forEach(function(k){var L=d.logs[k];if(L.seq<seq[k])logs[k]=[];
+      logs[k]=logs[k].concat(L.lines).slice(-3000);seq[k]=L.seq});
+    if(d.trail.gen!==tgen||d.trail.from===0){trail=[];tgen=d.trail.gen} trail=trail.concat(d.trail.pts);
+    render(); showLog();
+  }).catch(function(){$('simpill').textContent='panel unreachable';$('simpill').className='pill bad'});
+}
+function loop(){poll1().then(function(){setTimeout(loop,250)},function(){setTimeout(loop,1000)})}
+window.onresize=draw; loop();
+// ---- sensor views: one click toggles; fetched every 300 ms only while on, on screen, tab visible
+var SENS=[{k:'rgb',t:'Camera',ar:'480/300'},{k:'depth',t:'Depth',ar:'320/220'},{k:'lidar',t:'LiDAR · bow up',ar:'1/1'}];
+var sens={}, SENS_KEY='task1_panel.sensors';
+function sensSaved(){try{return JSON.parse(localStorage.getItem(SENS_KEY)||'[]')}catch(e){return[]}}
+function sensSave(){try{localStorage.setItem(SENS_KEY,JSON.stringify(SENS.filter(function(d){return sens[d.k].on}).map(function(d){return d.k})))}catch(e){}}
+function sensBlank(v,why){  // never leave an old frame up looking live (blanks over guesses)
+  if(v.url){URL.revokeObjectURL(v.url);v.url=null}
+  v.img.removeAttribute('src');v.img.style.visibility='hidden';v.msg.textContent=why;v.msg.style.display='';v.st.textContent=''}
+function sensSet(k,on){var v=sens[k];v.on=on;v.btn.textContent=on?'on':'off';v.btn.className='tog'+(on?' on':'');
+  sensBlank(v,on?'waiting for a frame':'off');sensSave();if(on)sensFetch(k)}
+function sensFetch(k){var v=sens[k];if(v.busy||!v.on||document.hidden||!v.vis)return;v.busy=true;
+  fetch('/api/sensor/'+k+'.jpg',{cache:'no-store'}).then(function(r){
+    if(r.status===204){sensBlank(v,r.headers.get('X-Sensor-Status')||'no frames');return}
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    var age=parseFloat(r.headers.get('X-Frame-Age'));
+    return r.blob().then(function(b){if(!v.on)return;var old=v.url;v.url=URL.createObjectURL(b);v.img.src=v.url;
+      if(old)URL.revokeObjectURL(old);v.img.style.visibility='';v.img.style.opacity='';v.msg.style.display='none';v.ok=Date.now();
+      v.st.textContent=isFinite(age)?'age '+age.toFixed(1)+' s':'';v.st.className='sub'+(age>2?' w':'')});
+  }).catch(function(e){sensBlank(v,'panel unreachable')}).then(function(){v.busy=false})}
+SENS.forEach(function(d){
+  var c=document.createElement('div');c.className='card sens';c.dataset.k=d.k;
+  c.innerHTML='<div class="row"><h3>'+d.t+'</h3><button class="tog">off</button><span class="sub"></span></div>'+
+    '<div class="frame" style="aspect-ratio:'+d.ar+'"><img alt="'+d.t+'"><span>off</span></div>';
+  $('sensors').appendChild(c);
+  var v=sens[d.k]={on:false,vis:true,busy:false,url:null,ok:0,btn:c.querySelector('button'),st:c.querySelector('.row .sub'),
+    img:c.querySelector('img'),msg:c.querySelector('.frame span')};
+  v.btn.onclick=function(){sensSet(d.k,!v.on)};
+  if(window.IntersectionObserver)new IntersectionObserver(function(es){es.forEach(function(e){v.vis=e.isIntersecting})}).observe(c);
+});
+sensSaved().forEach(function(k){if(sens[k])sensSet(k,true)});
+setInterval(function(){SENS.forEach(function(d){var v=sens[d.k];sensFetch(d.k);
+  if(v.on&&v.url&&Date.now()-v.ok>1500)v.img.style.opacity='.35'})},300);   // paused/stalled: dim it
+</script></body></html>

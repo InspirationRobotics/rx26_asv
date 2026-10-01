@@ -84,9 +84,8 @@ def _hull_links(h, n_thrusters):
         # write_model() copies the file into the generated model dir
         s = float(h.get("visual_mesh_scale", 1.0))
         o = h.get("visual_mesh_offset_m", [0.0, 0.0, 0.0])
-        out.append(f'<visual name="hull_mesh">{S.pose(*o)}<geometry><mesh>'
-                   f"<uri>model://crusader/meshes/{os.path.basename(mesh)}</uri>"
-                   f"<scale>{s} {s} {s}</scale></mesh></geometry></visual>")
+        uri = f"model://crusader/meshes/{os.path.basename(mesh)}"
+        out.append(f'<visual name="hull_mesh">{S.pose(*o)}{S.mesh(uri, s)}</visual>')
     else:
         wv = h["pontoon_visual_width_m"]
         for side, y in (("port", yc), ("stbd", -yc)):
@@ -172,6 +171,27 @@ def _thrusters(t):
     return "".join(links), "".join(plugins), "".join(controls)
 
 
+def _oak_camera(name, kind, topic, pose, rate_hz, hfov, size, fmt, clip, extra="",
+                own_info=False):
+    """One gz `camera` or `depth_camera` on the OAK-D's optical frame. `extra`
+    goes inside <camera>. own_info puts camera_info at <topic>/camera_info
+    instead of gz's default, beside the topic in its parent (`camera` only; a
+    `depth_camera` ignores it)."""
+    (w, h), (near, far) = size, clip
+    if own_info:
+        extra += f"<camera_info_topic>{topic}/camera_info</camera_info_topic>"
+    return (
+        f'<sensor name="{name}" type="{kind}">'
+        f"{pose}<topic>{topic}</topic>"
+        "<gz_frame_id>oak_rgb_camera_optical_frame</gz_frame_id>"
+        f"<update_rate>{rate_hz}</update_rate><always_on>1</always_on>"
+        f"<camera><horizontal_fov>{hfov:.5f}</horizontal_fov>"
+        f"<image><width>{w}</width><height>{h}</height>"
+        f"<format>{fmt}</format></image>"
+        f"<clip><near>{near}</near><far>{far}</far></clip>"
+        f"{extra}</camera></sensor>")
+
+
 def _sensors(s, mounts):
     lx, ly, lz = mounts["lidar"]
     sy, sz = mounts["lidar_signs"]
@@ -189,6 +209,11 @@ def _sensors(s, mounts):
     oak = s["oak_d_lr"]
     hfov = math.radians(oak["hfov_deg"])
     cam_pose = S.pose(cx, cy, cz, 0, cpitch, cyaw)
+    # The scan window is centred on the sensor's forward axis (x): -h_fov/2 ..
+    # +h_fov/2. A roll about x (the upside-down mount) leaves x pointing at the
+    # bow, so a 180 deg window is the half in front of the boat whichever way up
+    # the sensor is. 360 (the default, the real sensor) gives the old -pi..pi.
+    h_half = math.radians(float(mid.get("h_fov_deg", 360.0))) / 2.0
 
     lidar = (
         '<sensor name="mid360" type="gpu_lidar">'
@@ -197,7 +222,7 @@ def _sensors(s, mounts):
         f"<update_rate>{mid['rate_hz']}</update_rate><always_on>1</always_on>"
         "<lidar><scan>"
         f"<horizontal><samples>{mid['h_samples']}</samples><resolution>1</resolution>"
-        f"<min_angle>{-math.pi:.5f}</min_angle><max_angle>{math.pi:.5f}</max_angle></horizontal>"
+        f"<min_angle>{-h_half:.5f}</min_angle><max_angle>{h_half:.5f}</max_angle></horizontal>"
         f"<vertical><samples>{mid['v_samples']}</samples><resolution>1</resolution>"
         f"<min_angle>{math.radians(mid['v_min_deg']):.5f}</min_angle>"
         f"<max_angle>{math.radians(mid['v_max_deg']):.5f}</max_angle></vertical>"
@@ -207,29 +232,35 @@ def _sensors(s, mounts):
         f"<noise><type>gaussian</type><mean>0</mean><stddev>{mid['noise_sd_m']}</stddev></noise>"
         f"<visibility_mask>{0xFFFFFFFF & ~LIDAR_HIDDEN}</visibility_mask>"
         "</lidar></sensor>")
-    rgb = (
-        '<sensor name="oak_rgb" type="camera">'
-        # gz puts camera_info beside the image topic, so each camera needs its
-        # own parent or the two resolutions fight over one camera_info topic
-        f"{cam_pose}<topic>/crusader/oak/rgb/image</topic>"
-        "<gz_frame_id>oak_rgb_camera_optical_frame</gz_frame_id>"
-        f"<update_rate>{oak['rate_hz']}</update_rate><always_on>1</always_on>"
-        f"<camera><horizontal_fov>{hfov:.5f}</horizontal_fov>"
-        f"<image><width>{oak['rgb_width']}</width><height>{oak['rgb_height']}</height>"
-        "<format>R8G8B8</format></image>"
-        "<clip><near>0.05</near><far>300</far></clip>"
-        "<noise><type>gaussian</type><mean>0</mean><stddev>0.004</stddev></noise>"
-        "</camera></sensor>")
-    depth = (
-        '<sensor name="oak_depth" type="depth_camera">'
-        f"{cam_pose}<topic>/crusader/oak/depth/image</topic>"
-        "<gz_frame_id>oak_rgb_camera_optical_frame</gz_frame_id>"
-        f"<update_rate>{oak['rate_hz']}</update_rate><always_on>1</always_on>"
-        f"<camera><horizontal_fov>{hfov:.5f}</horizontal_fov>"
-        f"<image><width>{oak['depth_width']}</width><height>{oak['depth_height']}</height>"
-        "<format>R_FLOAT32</format></image>"
-        f"<clip><near>{oak['depth_min_m']}</near><far>{oak['depth_max_m']}</far></clip>"
-        "</camera></sensor>")
+    rgb_clip = (0.05, 300)
+    depth_clip = (oak["depth_min_m"], oak["depth_max_m"])
+    # gz puts camera_info beside the image topic, so each camera needs its
+    # own parent or the two resolutions fight over one camera_info topic.
+    # All four cameras share `hfov`: the depth is aligned to the colour camera's
+    # field of view (crusader_hull.yaml oak_d_lr). The colour noise, 0.004 of full
+    # scale (~1 count of 255), is a GUESS — Luxonis publishes no figure for the
+    # AR0234 after the ISP — and depth carries none (see the yaml).
+    rgb = _oak_camera(
+        "oak_rgb", "camera", "/crusader/oak/rgb/image", cam_pose, oak["rate_hz"], hfov,
+        (oak["rgb_width"], oak["rgb_height"]), "R8G8B8", rgb_clip,
+        "<noise><type>gaussian</type><mean>0</mean><stddev>0.004</stddev></noise>")
+    depth = _oak_camera(
+        "oak_depth", "depth_camera", "/crusader/oak/depth/image", cam_pose, oak["rate_hz"],
+        hfov, (oak["depth_width"], oak["depth_height"]), "R_FLOAT32", depth_clip)
+    # The operator panel's view: the same pose, HFOV and clip at a fraction of
+    # the pixels, and no noise (it is for eyes, not a detector). Its two topics
+    # DO share a parent, so the RGB one moves its camera_info to
+    # /crusader/preview/rgb/camera_info. The depth one cannot: gz-sensors 8's
+    # depth_camera ignores <camera_info_topic> (checked 2026-09-29), so it keeps
+    # /crusader/preview/camera_info — alone there, once the RGB has moved.
+    pv = oak["preview"]
+    preview_rgb = _oak_camera(
+        "oak_preview_rgb", "camera", "/crusader/preview/rgb", cam_pose, pv["rate_hz"], hfov,
+        (pv["rgb_width"], pv["rgb_height"]), "R8G8B8", rgb_clip, own_info=True)
+    preview_depth = _oak_camera(
+        "oak_preview_depth", "depth_camera", "/crusader/preview/depth", cam_pose,
+        pv["rate_hz"], hfov, (pv["depth_width"], pv["depth_height"]), "R_FLOAT32",
+        depth_clip)
     imu = (
         '<sensor name="imu_sensor" type="imu">'
         '<pose degrees="true">0 0 0 180 0 0</pose>'
@@ -248,7 +279,7 @@ def _sensors(s, mounts):
         + S.visual("mast_v", S.cylinder(0.015, cz - 0.45), "metal",
                    S.pose(cx - 0.04, cy, 0.45 + (cz - 0.45) / 2.0), flags=LIDAR_HIDDEN)
     )
-    return lidar + rgb + depth + imu, visuals
+    return lidar + rgb + depth + preview_rgb + preview_depth + imu, visuals
 
 
 def _ardupilot_plugin(controls):

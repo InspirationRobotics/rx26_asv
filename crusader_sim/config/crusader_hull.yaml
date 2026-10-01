@@ -92,18 +92,36 @@ thrusters:
 
 sensors:
   mid360:
-    # SPEC Livox MID-360: 360 deg x (-7..+52 deg) in its OWN frame, 10 Hz,
-    # ~200k pts/s -> ~20k per scan, 0.1-40 m @10 % reflectivity, <=2 cm noise.
+    # SPEC Livox MID-360 (livoxtech.com/mid-360/specs, read 2026-09-30): FOV 360
+    # deg x (-7..+52 deg) in its OWN frame, 10 Hz, 200k pts/s first return, 0.1 m
+    # blind zone, 40 m @10 % reflectivity (70 m @80 %), range sigma <=2 cm @10 m
+    # (<=3 cm @0.2 m), angular sigma <0.15 deg.
     # Mounted upside down (roll 180) — the pose comes from lidar_* params, and
     # the raw frame this produces is x fwd, y STARBOARD, z DOWN, like the real one.
-    rate_hz: 10.0
-    h_samples: 600
-    v_samples: 34
-    v_min_deg: -7.0
-    v_max_deg: 52.0
-    range_min_m: 0.1
+    #
+    # FRONT 180 DEG ONLY. The user says the rear half of the real scan sees only
+    # the boat's own hull; Resources.md:116-118 ("the hull blocks most of the view
+    # aft of the beam ... Everything downstream works on the forward 180 deg
+    # only") and lidar_cluster_node's fov_deg 180 (crusader_params.yaml:321) say
+    # the same. So the sim does not scan there at all, rather than scan it and feed
+    # the cluster node hull it would throw away. The window is -90..+90 deg about
+    # the sensor's forward axis x — which the 180 deg roll about x leaves pointing
+    # at the bow, so it is the bow half. The real angular step is kept (600
+    # samples per 360 deg = 0.6 deg -> 300 per 180), so points per degree are
+    # unchanged: ~10.2k pts/scan, ~102k pts/s = the front half of the real 200k/s.
+    rate_hz: 10.0            # SPEC   10 Hz typical
+    h_fov_deg: 180.0         # TEAM   user + Resources.md above; SPEC is 360
+    h_samples: 300           # SPEC   0.6 deg/sample, as the old 600 over 360 deg
+    v_samples: 34            # sim-only: 59 deg / 33 = 1.8 deg; with the 0.6 deg
+                             #        step, 360 deg gave 20.4k pts = the real 200k/s
+    v_min_deg: -7.0          # SPEC
+    v_max_deg: 52.0          # SPEC
+    range_min_m: 0.1         # SPEC   blind zone
+    # SPEC is 40 m @10 % reflectivity, 70 m @80 %. gz has no reflectivity, so the
+    # conservative figure holds for every surface — and livox_shim.py drops
+    # anything past its own range_max_m of 40 (keep the two equal).
     range_max_m: 40.0
-    noise_sd_m: 0.02
+    noise_sd_m: 0.02         # SPEC   sigma <=2 cm @10 m; <=3 cm @0.2 m not modelled
   oak_d_lr:
     # What the boat runs today (crusader_params.yaml): oak_detector takes COLOUR at
     # full sensor res (rgb_isp_denominator: 1 -> 1920x1200) and DEPTH at 1/3
@@ -111,15 +129,51 @@ sensors:
     # sensors at one pose, because gz's rgbd_camera forces one resolution on both.
     # If WSL rendering can't hold 15 fps at 1920x1200, drop rgb_* here for a run —
     # but every pixel-space threshold in oak_detector scales with it.
-    # HFOV ~82 deg per Luxonis — VERIFY against the device's calibration
-    # (depthai readCalibration) and put the measured value here.
-    rate_hz: 15.0            # = oakd_publisher.fps / oak_detector fps
+    # SPEC Luxonis OAK-D LR (docs.luxonis.com/hardware/products/OAK-D%20LR; the
+    # DFOV/HFOV/VFOV and resolution figures from the product spec sheet as copied
+    # by robosavvy.co.uk/luxonis-oak-d-lr.html, read 2026-09-30): THREE identical
+    # AR0234 2.3 MP global-shutter colour sensors, 1920x1200, M12 lenses whose
+    # default is DFOV/HFOV/VFOV 100/82/56 deg; stereo baselines 5/10/15 cm.
+    # gz derives the VFOV from aspect, 1920x1200 at HFOV 82 -> 57 deg (spec 56,
+    # rounding and lens distortion).
+    # HFOV 82 is the DEFAULT lens — VERIFY against the device's calibration
+    # (depthai readCalibration) and put the measured value here; a swapped lens
+    # changes it (and sim_camera.py's fx, which reads it from here).
+    #
+    # ONE HFOV for colour, depth and both previews, because the depth is ALIGNED
+    # TO THE COLOUR CAMERA: oak_pipeline.py:170 stereo.setDepthAlign(CAM_A) and
+    # oakd_publisher.py:21-24 emit it in CAM_A's field of view at 1/3 the pixels,
+    # which is why oak_detector rescales an RGB box into depth pixels by a plain
+    # ratio (oak_detector.py:839-844). The stereo pair (CAM_B/CAM_C, 15 cm apart,
+    # the same 82 deg lenses) only decides where depth is VALID — a strip down
+    # one edge loses its match at close range — which gz cannot render.
+    rate_hz: 15.0            # = oakd_publisher.fps / oak_detector fps (sensor: 60)
     rgb_width: 1920
     rgb_height: 1200
     depth_width: 640
     depth_height: 400
-    hfov_deg: 82.0
-    depth_min_m: 0.5
-    depth_max_m: 30.0
+    hfov_deg: 82.0           # SPEC   default lens
+    # MinZ = f*B / 95 px of disparity search, f = 320 px / tan(41 deg) = 368 px at
+    # 640 wide, B = 0.15 m (the outer pair), extended disparity off (DEFAULT
+    # preset, oak_pipeline.py:167) = 0.58 m. Luxonis's MinZ of 20 cm is for the
+    # 5 cm baseline with extended disparity at 800P — not what the boat runs.
+    depth_min_m: 0.58        # TEAM   derived as above; was 0.5
+    # Luxonis: "precise depth readings up to ~30 m" on the 15 cm baseline (product
+    # page). Its accuracy table (82 deg, theoretical, 800P): <2 % to 5.5 m, <4 %
+    # to 13.8 m, <8 % to 27.6 m — worse at the boat's 640 px. gz depth is an
+    # ideal, NOISELESS pinhole render, so the sim is optimistic past a few metres.
+    # oak_detector itself ignores anything past 25 m (crusader_params.yaml:271).
+    depth_max_m: 30.0        # SPEC
+    # Operator panel only; not what the boat sees at full res; rendered only
+    # while something subscribes. Two more gz sensors at the OAK's pose, HFOV and
+    # clip (topics /crusader/preview/rgb, /crusader/preview/depth), so the web
+    # panel never costs a 1920x1200 render. No detector reads these, so unlike
+    # rgb_* above they can change freely.
+    preview:
+      rate_hz: 5.0
+      rgb_width: 480
+      rgb_height: 300
+      depth_width: 320
+      depth_height: 200
   imu:
     rate_hz: 1000.0          # what ArduPilotPlugin needs for lockstep

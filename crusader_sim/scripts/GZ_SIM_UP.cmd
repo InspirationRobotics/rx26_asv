@@ -1,43 +1,58 @@
 @echo off
 rem ==================================================================
-rem  GZ_SIM_UP.cmd -- double-click to bring up the Gazebo sim of Crusader.
+rem  GZ_SIM_UP.cmd -- double-click: the whole Gazebo sim of Crusader,
+rem  then Task 1.  GZ_SIM_DOWN.cmd stops all of it.
 rem
 rem  Runs in: Windows. Everything real happens in WSL (gz_sim_up.sh);
-rem  this file only crosses the boundary and opens the pages.
+rem  this file only crosses the boundary, opens the pages, and runs the
+rem  mission in this window so its verdict stays on screen.
 rem
 rem  Optional argument: a course name (default task1_core), e.g. from a
-rem  terminal:   GZ_SIM_UP.cmd task3
+rem  terminal:   GZ_SIM_UP.cmd task3      (no mission is started for a
+rem  course that isn't a Task 1 course)
 rem
-rem  Same WSL keep-alive as tools\sitl\SIM_UP.cmd, for the same reason:
-rem  WSL2 stops the VM about a minute after the last client leaves, and
-rem  takes Gazebo, SITL and the crsd-sim container with it, silently.
-rem  GZ_SIM_DOWN.cmd kills the keep-alive.
+rem  Running it while the sim is up restarts everything from scratch.
 rem ==================================================================
 setlocal
 set "DISTRO=Ubuntu-22.04"
-set "SYS=%SystemRoot%\System32"
 set "COURSE=%~1"
 if "%COURSE%"=="" set "COURSE=task1_core"
+title Crusader sim - %COURSE%
 
 set "HEREWIN=%~dp0"
 set "HEREWIN=%HEREWIN:~0,-1%"
 for /f "usebackq delims=" %%i in (`wsl.exe -d %DISTRO% -- wslpath -a "%HEREWIN%"`) do set "HERE=%%i"
 if not defined HERE goto :nowsl
 
-start "rx26-gz-keepalive" /min wsl.exe -d %DISTRO% -- sleep infinity
-
-echo Bringing up the Gazebo sim (course %COURSE%). First run builds the workspace: a few minutes.
+echo Bringing up the Gazebo sim (course %COURSE%). About a minute; the first run
+echo ever also builds the workspace, which takes a few minutes more.
 echo.
 wsl.exe -d %DISTRO% -- bash -lc "tr -d '\r' < '%HERE%/gz_sim_up.sh' > /tmp/gz_sim_up.sh && RX26_WIN_SRC='%HERE%/../..' bash /tmp/gz_sim_up.sh %COURSE%"
 if errorlevel 2 goto :failed
 
+rem WSL2 stops its VM about a minute after the last wsl.exe client exits,
+rem taking the sim with it. gz_keepalive.sh is that client, hidden;
+rem GZ_SIM_DOWN.cmd releases it.
+powershell -NoProfile -Command "Start-Process -WindowStyle Hidden -FilePath wsl.exe -ArgumentList '-d','%DISTRO%','--cd','~','-e','bash','robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_keepalive.sh'"
+
 start "" http://localhost:8090
 start "" http://localhost:8085
+
+if /i not "%COURSE:~0,5%"=="task1" goto :idle
 echo.
-echo Up. Gazebo's window is on the desktop; the ground station and the tree are in the browser.
-echo Start Task 1 from a WSL terminal:
-echo   docker exec -it crsd-sim bash -lc "python3 -m crusader_sim.task1_goal --course %COURSE%"
+echo Gazebo is on the desktop; the ground station and the tree are in the browser.
+choice /c YN /t 20 /d Y /m "Run Task 1 now? It starts by itself in 20 s. N = skip it and drive yourself"
+if "%errorlevel%"=="2" goto :idle
 echo.
+wsl.exe -d %DISTRO% --cd ~ -e bash robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_task1.sh %COURSE%
+echo.
+echo Task 1 run over. The log is ~/.cache/crusader_sim/task1_last.log in WSL.
+
+:idle
+echo.
+echo The sim keeps running until you double-click GZ_SIM_DOWN.cmd.
+echo To run Task 1 again from the same start, run GZ_SIM_UP.cmd again: it
+echo restarts everything, and the boat goes back to the start.
 pause
 exit /b 0
 

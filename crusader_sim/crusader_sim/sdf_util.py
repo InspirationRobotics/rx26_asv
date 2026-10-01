@@ -1,7 +1,8 @@
 """sdf_util — the few SDF fragments every generator here needs.
 
-Plain string building, deliberately: the models are primitives, and a template
-engine or xacro would be one more thing to install in the container for no gain.
+Plain string building, deliberately: the models are primitives (plus one
+generated mesh, where SDF has no primitive), and a template engine or xacro
+would be one more thing to install in the container for no gain.
 """
 import math
 
@@ -49,6 +50,11 @@ def cylinder(radius, length):
 
 def sphere(radius):
     return f"<geometry><sphere><radius>{radius:.4f}</radius></sphere></geometry>"
+
+
+def mesh(uri, scale=1.0):
+    return (f"<geometry><mesh><uri>{uri}</uri>"
+            f"<scale>{scale} {scale} {scale}</scale></mesh></geometry>")
 
 
 def visual(name, geometry, colour, p="", emissive=0.0, alpha=1.0, flags=None):

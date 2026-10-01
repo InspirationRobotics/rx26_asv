@@ -1,8 +1,11 @@
 """task1_goal — the operator's "Send goal" for a Gazebo run: arm, GUIDED, go.
 
-    python3 -m crusader_sim.task1_goal --course task1_core [--tier disruptive]
+    python3 -m crusader_sim.task1_goal --course task1_core [--tier disruptive] [--no-judge]
 
 Runs in: the crsd-sim container, after gz_rig_up.sh.
+
+--no-judge leaves the referee out: the Task 1 panel runs its own, because only
+the panel knows when it changed a beacon mid-run.
 
 Does what an operator does before a Task 1 attempt, in order, and then watches:
   1. ARM, over MAVLink on the TOOLING port 14550 (the bridge has no arm path on
@@ -50,16 +53,26 @@ def approach_point(course):
 
 
 class Operator(Node):
-    """The operator, plus an independent referee watching the TRUE path
-    (task1_judge) — the tree's own 'passed correctly' is the tree grading itself."""
+    """The operator, plus (unless judge is None) an independent referee watching
+    the TRUE path (task1_judge) — the tree's own 'passed correctly' is the tree
+    grading itself."""
 
-    def __init__(self, judge):
+    def __init__(self, judge=None):
         super().__init__("sim_operator")
         self.mode_pub = self.create_publisher(String, "/crsd/set_mode", 10)
         self.client = ActionClient(self, SafePassage, "/crsd/safe_passage")
-        self.create_subscription(
-            Odometry, "/sim/crusader/odometry",
-            lambda m: judge.update(m.pose.pose.position.x, m.pose.pose.position.y), 10)
+        if judge is not None:
+            self.create_subscription(Odometry, "/sim/crusader/odometry",
+                                     lambda m: _feed_judge(judge, m), 10)
+
+
+def _feed_judge(judge, m):
+    """True pose -> referee. The heading lets it test contact against the hull
+    rectangle: a bow pressed on a buoy is 0.70 m centre to centre, which a
+    0.55 m circle misses (seen 2026-09-30)."""
+    p, q = m.pose.pose.position, m.pose.pose.orientation
+    yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+    judge.update(p.x, p.y, yaw)
 
 
 def main():
@@ -68,6 +81,8 @@ def main():
     ap.add_argument("--tier", choices=sorted(TIERS), default=None,
                     help="default: the course's `tier`")
     ap.add_argument("--timeout-s", type=float, default=400.0)
+    ap.add_argument("--no-judge", action="store_true",
+                    help="no referee (the Task 1 panel runs its own)")
     a = ap.parse_args()
 
     course = C.load(a.course)
@@ -80,7 +95,7 @@ def main():
         return 2
 
     rclpy.init()
-    judge = Task1Judge(course)
+    judge = None if a.no_judge else Task1Judge(course)
     op = Operator(judge)
     if not set_mode(op, op.mode_pub, "GUIDED"):
         print("[operator] GUIDED never confirmed on /crsd/fcu_status — is telemetry_bridge up?")
@@ -118,11 +133,14 @@ def main():
     print(f"[result] outcome {r.outcome}  {r.detail}\n"
           f"         classified {r.buoys_classified}, passed correctly "
           f"{r.buoys_passed_correctly}, {r.elapsed_s:.0f} s", flush=True)
-    v = judge.verdict()
-    print(format_verdict(v), flush=True)
+    passed = True
+    if judge is not None:
+        v = judge.verdict()
+        print(format_verdict(v), flush=True)
+        passed = v["pass"]
     op.destroy_node()
     rclpy.shutdown()
-    return 0 if (r.outcome == SafePassage.Result.OUTCOME_SUCCESS and v["pass"]) else 1
+    return 0 if (r.outcome == SafePassage.Result.OUTCOME_SUCCESS and passed) else 1
 
 
 if __name__ == "__main__":

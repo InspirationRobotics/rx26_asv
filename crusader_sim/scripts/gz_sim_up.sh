@@ -1,9 +1,25 @@
 #!/usr/bin/env bash
 # gz_sim_up.sh — the whole Gazebo sim, in order. Runs in: WSL2 Ubuntu-22.04.
 #
-#     bash crusader_sim/scripts/gz_sim_up.sh [course] [--no-gui] [--no-uav] [--no-rig]
+#     bash crusader_sim/scripts/gz_sim_up.sh [course | --course-file PATH] [--no-gui] [--no-uav] [--no-rig]
+#                                            [--recreate-container]
+#
+#     NAV_MODE=off|shadow|on  (environment) the tree's Nav2 planning; default on
+#                 when the image has Nav2. docs/nav2_avoidance_spec.md.
+#     RX26_IMAGE  the image a NEW container is made from. Default: crsd-sim:nav2 when
+#                 it exists, else crsd-sim:humble (no Nav2).
+#     --recreate-container
+#                 remove the crsd-sim container if it was made from a different image
+#                 than RX26_IMAGE and make a new one. Only after the sim is down.
+#                 An existing container keeps its old image otherwise, and the rig
+#                 then runs nav_mode off with a banner.
 #
 #     course     a name in crusader_sim/courses/ (default task1_core)
+#     --course-file PATH
+#                a course YAML from anywhere (the Task 1 panel writes one). It
+#                is copied in as courses/<its stem>.yaml after the sync, so the
+#                container's colcon build installs it and every node finds it
+#                by name, exactly like a checked-in course
 #     --no-gui   Gazebo server only (the sim runs the same; you just can't watch)
 #     --no-uav   no Ekko stand-in: the boat is on its own camera (Core tier)
 #     --no-rig   stop after Gazebo + SITL (for check_motion, or your own nodes)
@@ -11,7 +27,8 @@
 # From Windows, double-click crusader_sim/scripts/GZ_SIM_UP.cmd instead.
 #
 # ORDER, and why:
-#   1. sync       Windows checkout -> ~/robotx_ws/src (the team's sync_to_wsl.sh)
+#   1. sync       Windows checkout -> ~/robotx_ws/src (gz_sync.sh: the team's
+#                 sync_to_wsl.sh plus the binary meshes), then --course-file
 #   2. generate   model (hull yaml + the boat's params), world (course), SITL params
 #   3. gazebo     server first: SITL's JSON backend needs something to talk to
 #   4. transmitter  before SITL, so the receiver has a signal from boot
@@ -21,15 +38,20 @@
 #   7. rig        the boat's nodes + sim shims in the crsd-sim container
 set -uo pipefail
 
-COURSE=task1_core; GUI=1; UAV_ARG=""; RIG=1
-for a in "$@"; do
-  case "$a" in
+COURSE=task1_core; COURSE_FILE=""; GUI=1; UAV_ARG=""; RIG=1; RECREATE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --recreate-container) RECREATE=1 ;;
     --no-gui) GUI=0 ;;
     --no-uav) UAV_ARG="--no-uav" ;;
     --no-rig) RIG=0 ;;
-    -*) echo "unknown flag $a" >&2; exit 2 ;;
-    *) COURSE="$a" ;;
+    --course-file)
+      [ $# -ge 2 ] || { echo "--course-file needs a path" >&2; exit 2; }
+      COURSE_FILE="$2"; shift ;;
+    -*) echo "unknown flag $1" >&2; exit 2 ;;
+    *) COURSE="$1" ;;
   esac
+  shift
 done
 
 WIN_SRC="${RX26_WIN_SRC:-/mnt/c/Users/Chaser/Documents/dev/RobotX_2026/Boat/rx26_asv}"
@@ -38,7 +60,11 @@ SIM="$WS_SRC/crusader_sim"
 GEN="${CRUSADER_SIM_GEN:-$HOME/.cache/crusader_sim}"
 APGZ="${ARDUPILOT_GAZEBO_DIR:-$HOME/ardupilot_gazebo}"
 CONTAINER="${RX26_CONTAINER:-crsd-sim}"
-IMAGE="${RX26_IMAGE:-crsd-sim:humble}"
+# The Nav2 image when it has been built (docs/nav2_avoidance_spec.md 8.2), else the
+# original. The choice only matters when a container is CREATED; see ensure_container.
+if [ -n "${RX26_IMAGE:-}" ]; then IMAGE="$RX26_IMAGE"
+elif docker image inspect crsd-sim:nav2 >/dev/null 2>&1; then IMAGE=crsd-sim:nav2
+else IMAGE=crsd-sim:humble; fi
 
 export PATH="$HOME/.local/bin:$PATH"
 export PYTHONPATH="$SIM${PYTHONPATH:+:$PYTHONPATH}"
@@ -64,19 +90,63 @@ fi
 step() { printf '\n=== %s ===\n' "$1"; }
 die()  { printf '\n*** FAILED: %s\n' "$1" >&2; exit 2; }
 
+# Reuse, create or (only with --recreate-container) recreate the sim container.
+# `docker start` never changes a container's image, so an existing crsd-sim stays on
+# the image it was made from after crsd-sim:nav2 is built. IDs are compared, not tags
+# (tags move). A recreate also drops the two CMake build dirs that look for Nav2:
+# find_package results are cached per build dir and were made in the other image.
+# FULL_BUILD=1 then makes the colcon step rebuild everything.
+FULL_BUILD=0
+ensure_container() {
+  local want have
+  want="$(docker image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null)"
+  if [ -n "$want" ] && docker inspect "$CONTAINER" >/dev/null 2>&1; then
+    have="$(docker inspect -f '{{.Image}}' "$CONTAINER")"
+    if [ "$have" != "$want" ]; then
+      if [ "$RECREATE" = 1 ]; then
+        echo "  $CONTAINER is on an older image: recreating it from $IMAGE"
+        docker rm -f "$CONTAINER" >/dev/null || die "cannot remove $CONTAINER"
+        for d in build install; do
+          rm -rf "$HOME/robotx_ws/$d/crusader_bt" "$HOME/robotx_ws/$d/crusader_nav_layers"
+        done
+        FULL_BUILD=1
+      else
+        echo "  *** $CONTAINER was made from an older image than $IMAGE and keeps it: Nav2 may be missing (the rig then runs nav_mode off and says so)."
+        echo "      To switch, with the sim down: gz_sim_up.sh --recreate-container   (crusader_sim/README.md, 'Nav2 avoidance in the sim')"
+      fi
+    fi
+  fi
+  if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
+    echo "  creating $CONTAINER from $IMAGE (--net=host --ipc=host)"
+    docker run -d --name "$CONTAINER" --net=host --ipc=host \
+      -v "$HOME/robotx_ws:/root/robotx_ws" "$IMAGE" sleep infinity >/dev/null \
+      || die "docker run $IMAGE (build it: see crusader_sim/docker/crsd-sim.Dockerfile)"
+  fi
+}
+
+# checked BEFORE step 0: a bad path must not cost the user the sim that is running
+if [ -n "$COURSE_FILE" ]; then
+  [ -f "$COURSE_FILE" ] || die "--course-file $COURSE_FILE: no such file"
+  COURSE_FILE="$(realpath "$COURSE_FILE")"
+  COURSE="$(basename "$COURSE_FILE")"; COURSE="${COURSE%.*}"
+  # the name crosses into docker exec and ros2 run unquoted
+  [[ "$COURSE" =~ ^[A-Za-z0-9_.-]+$ ]] || die "--course-file: '$COURSE' is not a usable course name (letters, digits, _ . - only)"
+fi
+
 step "0/7  clean slate"
 bash "$SIM/scripts/gz_sim_down.sh" --keep-container >/dev/null 2>&1 || true
 
 step "1/7  Windows -> WSL"
-[ -d "$WIN_SRC" ] || die "no Windows checkout at $WIN_SRC (set RX26_WIN_SRC)"
-mkdir -p "$WS_SRC"
-tr -d '\r' < "$WIN_SRC/tools/sitl/sync_to_wsl.sh" > /tmp/rx26_sync.sh
-RX26_WIN_SRC="$WIN_SRC" RX26_WSL_SRC="$WS_SRC" bash /tmp/rx26_sync.sh sync | tail -1 | sed 's/^/  /'
-# meshes are BINARY: the sync above strips \r from every file it copies, which
-# would corrupt a .glb/.stl, so they are copied byte-for-byte here instead
-if [ -d "$WIN_SRC/crusader_sim/meshes" ]; then
-  mkdir -p "$SIM/meshes" && cp -u "$WIN_SRC/crusader_sim/meshes/"* "$SIM/meshes/" 2>/dev/null
-  echo "  meshes: $(ls "$SIM/meshes" | wc -l) file(s)"
+# the WINDOWS copy: before the first sync the workspace may not have gz_sync.sh
+[ -f "$WIN_SRC/crusader_sim/scripts/gz_sync.sh" ] \
+  || die "no $WIN_SRC/crusader_sim/scripts/gz_sync.sh (set RX26_WIN_SRC to the Windows checkout)"
+tr -d '\r' < "$WIN_SRC/crusader_sim/scripts/gz_sync.sh" > /tmp/gz_sync.sh
+RX26_WIN_SRC="$WIN_SRC" RX26_WSL_SRC="$WS_SRC" bash /tmp/gz_sync.sh || die "Windows -> WSL sync"
+if [ -n "$COURSE_FILE" ]; then
+  # after the sync, so the sync cannot overwrite it with a checked-in namesake
+  [ "$COURSE_FILE" -ef "$SIM/courses/$COURSE.yaml" ] \
+    || cp "$COURSE_FILE" "$SIM/courses/$COURSE.yaml" || die "copying $COURSE_FILE into courses/"
+  echo "  course file $COURSE_FILE -> courses/$COURSE.yaml"
 fi
 
 step "2/7  generate  (course: $COURSE)"
@@ -122,29 +192,59 @@ if [ "$RIG" = 0 ]; then
 fi
 
 step "7/7  the ROS rig in $CONTAINER"
-if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
-  echo "  creating $CONTAINER from $IMAGE (--net=host --ipc=host)"
-  docker run -d --name "$CONTAINER" --net=host --ipc=host \
-    -v "$HOME/robotx_ws:/root/robotx_ws" "$IMAGE" sleep infinity >/dev/null \
-    || die "docker run $IMAGE (build it: see crusader_sim/docker/crsd-sim.Dockerfile)"
-fi
+ensure_container
 docker start "$CONTAINER" >/dev/null || die "cannot start $CONTAINER"
-if ! docker exec "$CONTAINER" test -d /root/robotx_ws/install/crusader_sim; then
+# a full build when there is no install/ yet, after a recreate, or when the checkout
+# has the Nav2 packages and install/ does not (the msgs changed under them too)
+if [ "$FULL_BUILD" = 1 ] || ! docker exec "$CONTAINER" bash -c \
+     'cd /root/robotx_ws && [ -d install/crusader_sim ] && { [ ! -d src/rx26_asv/crusader_nav ] || [ -d install/crusader_nav ]; }'; then
   # plain build, like the team's rig: mixing --symlink-install into an install/
   # a plain build made is a colcon error on the next build
-  echo "  first run: colcon build (a few minutes)"
+  echo "  full colcon build (first run, new image or new packages: a few minutes)"
   docker exec "$CONTAINER" bash -lc \
     "cd /root/robotx_ws && source /opt/ros/humble/setup.bash && colcon build 2>&1 | tail -5" \
     | sed 's/^/  /'
 else
-  # the sim package only, every run (seconds): its nodes run from install/
+  # the sim, nav and ground-station packages every run (seconds; nodes run from
+  # install/, so a GCS edit needs this). crusader_bt, crusader_perception and
+  # crusader_msgs still need a manual rebuild after a change, as before. Only the
+  # packages the checkout has: --packages-select refuses an unknown name.
   docker exec "$CONTAINER" bash -lc \
-    "cd /root/robotx_ws && source install/setup.bash && colcon build --packages-select crusader_sim 2>&1 | tail -1" \
+    "cd /root/robotx_ws && source install/setup.bash && P=''; for p in crusader_sim crusader_nav crusader_nav_layers crusader_groundstation; do [ -d src/rx26_asv/\$p ] && P=\"\$P \$p\"; done; colcon build --packages-select \$P 2>&1 | tail -2" \
     | sed 's/^/  /'
 fi
-# docker exec does not inherit this shell's environment: TREE crosses explicitly
-docker exec -e TREE="${TREE:-}" "$CONTAINER" bash -lc \
+# docker exec does not inherit this shell's environment: TREE and NAV_MODE cross explicitly
+docker exec -e TREE="${TREE:-}" -e NAV_MODE="${NAV_MODE:-}" "$CONTAINER" bash -lc \
   "bash /root/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_rig_up.sh $COURSE $UAV_ARG" 2>&1 | sed 's/^/  /'
+
+if [ "$GUI" = 1 ]; then
+  # The GUI sometimes segfaults at startup inside NVIDIA's WSL driver
+  # (glXChooseFBConfig -> libnvwgf2umx.so, seen 2026-09-29) while the server
+  # renders on the same GPU without trouble, and a relaunch has come up every
+  # time. So check it and relaunch it; the third try renders the WINDOW on the
+  # CPU (the sensors stay on the GPU) rather than show nothing.
+  for try in 1 2 3; do
+    pgrep -f "gz sim -g" >/dev/null && break
+    cp /tmp/gz_gui.log "/tmp/gz_gui.crash$try.log" 2>/dev/null
+    if [ "$try" -lt 3 ]; then
+      echo "  GUI is not running (crashed at startup) — relaunching"
+      nohup gz sim -g > /tmp/gz_gui.log 2>&1 &
+    else
+      echo "  GUI crashed twice — relaunching it with CPU rendering"
+      GALLIUM_DRIVER=llvmpipe LIBGL_ALWAYS_SOFTWARE=1 nohup gz sim -g > /tmp/gz_gui.log 2>&1 &
+    fi
+    sleep 12
+  done
+  pgrep -f "gz sim -g" >/dev/null || echo "  *** no GUI (see /tmp/gz_gui.log); the sim runs on without it"
+  # lock the GUI camera onto the boat: the course is ~50 m long and a 1 m boat
+  # leaves the default view within seconds of GUIDED
+  for _ in $(seq 1 30); do gz service -l 2>/dev/null | grep -qx /gui/follow && break; sleep 1; done
+  gz service -s /gui/follow --reqtype gz.msgs.StringMsg --reptype gz.msgs.Boolean \
+    --timeout 3000 --req 'data: "crusader"' >/dev/null 2>&1 \
+  && gz service -s /gui/follow/offset --reqtype gz.msgs.Vector3d --reptype gz.msgs.Boolean \
+    --timeout 3000 --req 'x: -6, y: -5, z: 4' >/dev/null 2>&1 \
+  && echo "  GUI camera following crusader"
+fi
 
 cat <<EOF
 
@@ -152,7 +252,7 @@ cat <<EOF
   Gazebo GUI      on the desktop (or: gz sim -g, with GZ_PARTITION=crusader_sim)
   ground station  http://localhost:8090     behaviour tree  http://localhost:8085
   QGroundControl  auto-connects on udp 14550 (Windows)
-  start Task 1:   docker exec -it $CONTAINER bash -lc 'python3 -m crusader_sim.task1_goal --course $COURSE'
+  start Task 1:   bash $SIM/scripts/gz_task1.sh $COURSE
   drive MANUAL:   ros2 topic pub /crsd/rc_override ... (in $CONTAINER), mode MANUAL
   stop:           bash $SIM/scripts/gz_sim_down.sh
 EOF

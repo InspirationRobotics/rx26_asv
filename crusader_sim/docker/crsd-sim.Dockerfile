@@ -14,6 +14,15 @@
 #   docker run -d --name crsd-sim --net=host --ipc=host \
 #       -v ~/robotx_ws:/root/robotx_ws crsd-sim:humble sleep infinity
 #
+# NAV2 (docs/nav2_avoidance_spec.md section 8): this file also installs the Nav2
+# planner + costmap (+ STVL) the tree's planned legs call. Nothing COPYs from the
+# build context, so a tiny context is enough (this docker/ directory). While the
+# live container still runs the old image, build to a NEW tag first:
+#   docker build -t crsd-sim:nav2 -f crusader_sim/docker/crsd-sim.Dockerfile crusader_sim/docker
+# gz_sim_up.sh picks crsd-sim:nav2 over crsd-sim:humble when both exist (RX26_IMAGE).
+# An EXISTING container keeps the image it was created from: recreate it (sim down
+# first) - see crusader_sim/README.md "Nav2 avoidance in the sim".
+#
 # --ipc=host IS LOAD-BEARING: the Gazebo bridge and sim shims run on the WSL
 # host, the boat's nodes in here. Fast DDS sees "same machine" and moves data
 # over shared memory, which fails silently across IPC namespaces — the LiDAR
@@ -54,6 +63,21 @@ RUN curl -fsSL https://packages.osrfoundation.org/gazebo.gpg \
         ros-humble-ros-gzharmonic-bridge \
     && rm -rf /var/lib/apt/lists/*
 ENV GZ_PARTITION=crusader_sim
+
+# Nav2 for Humble: planner_server + global costmap (SmacPlanner2D; NavFn only as the
+# A/B fallback), the Spatio-Temporal Voxel Layer for the LiDAR cloud, and what they
+# need (docs/nav2_avoidance_spec.md 8.1). Kept AFTER the layers above so rebuilding
+# this one reuses their cache, and a Nav2 apt problem cannot disturb the gz bridge.
+# Same list as setup/asv_add_nav2.Dockerfile, which does it for the boat's own image.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-humble-nav2-planner ros-humble-nav2-smac-planner ros-humble-nav2-navfn-planner \
+        ros-humble-nav2-costmap-2d ros-humble-nav2-lifecycle-manager ros-humble-nav2-msgs \
+        ros-humble-nav2-util ros-humble-nav2-core ros-humble-spatio-temporal-voxel-layer \
+        ros-humble-tf2-ros-py \
+    && rm -rf /var/lib/apt/lists/*
+
+# Fail the BUILD, not the sim, if Nav2 or STVL did not land.
+RUN bash -c 'source /opt/ros/humble/setup.bash && ros2 pkg prefix nav2_planner && ros2 pkg prefix nav2_smac_planner && ros2 pkg prefix nav2_costmap_2d && ros2 pkg prefix spatio_temporal_voxel_layer && python3 -c "import tf2_ros" && echo "nav2 ok"'
 
 RUN echo "source /opt/ros/humble/setup.bash" >> /root/.bashrc \
     && echo "[ -f /root/robotx_ws/install/setup.bash ] && source /root/robotx_ws/install/setup.bash" >> /root/.bashrc

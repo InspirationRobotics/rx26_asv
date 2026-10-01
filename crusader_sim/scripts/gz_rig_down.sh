@@ -8,9 +8,16 @@
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="${RX26_SRC:-/root/robotx_ws/src/rx26_asv}"
 bash "$SRC/tools/sitl/nodes_down.sh" >/dev/null 2>&1
-while read -r pat; do
-  [ -z "$pat" ] || [ "${pat:0:1}" = "#" ] && continue
-  pkill -f -- "$pat" 2>/dev/null
-done < "$HERE/gz_rig_processes.txt"
+kill_listed() {
+  while read -r pat; do
+    [ -z "$pat" ] || [ "${pat:0:1}" = "#" ] && continue
+    pkill -f -- "$pat" 2>/dev/null
+  done < "$HERE/gz_rig_processes.txt"
+}
+kill_listed
+sleep 1
+# second pass: nav.launch.py respawns planner_server, so anything that came back
+# between the first pass and the launch going down is caught here
+kill_listed
 sleep 1
 echo "gz rig nodes stopped."

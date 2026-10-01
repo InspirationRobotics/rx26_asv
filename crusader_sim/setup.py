@@ -14,6 +14,8 @@ setup(
     name=PKG,
     version="0.1.0",
     packages=[PKG],
+    # task1_panel serves its page from beside its own .py
+    package_data={PKG: ["*.html"]},
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + PKG]),
         ("share/" + PKG, ["package.xml"]),

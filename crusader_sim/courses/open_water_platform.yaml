@@ -1,0 +1,22 @@
+# Open water with a UAV delivery platform on the line to a goal 40 m east (avoidance
+# test S6, docs/nav2_avoidance_spec.md 10.2): the planner must route around something
+# only the LiDAR (or the world model) knows about, with no buoy involved.
+# Drive it with TREE=nav_test_line.xml and a SafePassage goal at
+# approach_latitude 1.28060, approach_longitude 103.8560594 (40 m east at SITL scale).
+#
+# CHECK THE FREEBOARD BEFORE TRUSTING A RESULT. gen_world.platform() puts the deck top
+# 0.15 m above the water (a GUESS in that file). lidar_cluster_node keeps only points
+# more than water_margin = 0.15 m above the water surface (water_z 0.24 + 0.15 above
+# the hull datum), so at the defaults this deck is at the gate: the LiDAR sees it
+# marginally or not at all, and a missing platform in the costmap is then a PERCEPTION
+# finding, not a planner one. Read /crsd/lidar_cluster_health for the platform, and if
+# it is not clustered:  ros2 param set /lidar_cluster_node water_margin 0.08
+name: open_water_platform
+origin: {lat: 1.28060, lon: 103.85570}
+draft_m: 0.24
+depth_m: 5.0
+boat_start: {x: 0.0, y: 0.0, yaw_deg: 0.0}
+elements:
+  - {type: robobuoy, name: ref_red,   x: 15.0, y: -3.0, beacon: flash_red}
+  - {type: robobuoy, name: ref_green, x: 15.0, y:  3.0, beacon: flash_green}
+  - {type: platform, name: plat, x: 20.0, y: 0.0}

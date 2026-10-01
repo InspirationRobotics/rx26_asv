@@ -1,0 +1,29 @@
+# Task 1 with the EXIT behind an unpaired black buoy (avoidance test S3,
+# docs/nav2_avoidance_spec.md 10.2). Everything is task1_core.yaml (read its header
+# for the rules and the frame) except:
+#   - the EXIT moved from x 52 to x 62, y 0, so the leg out of gate 3 is long;
+#   - black3 at (53.0, -0.6), beacon off: an obstacle ON the straight line from gate
+#     3's through point (about 48, -1) to the start of the EXIT ring (about 56, -0.4).
+# This is the 2026-09-30 finding as a course: the straight leg runs into black3 and
+# the planner must go around it, keeping >= 0.8 m (centre to surface), then orbit
+# the EXIT counter-clockwise. Pass: referee PASS, black3 centre-to-surface >= 0.73 m.
+
+name: task1_blocked_exit
+origin: {lat: 1.28060, lon: 103.85570}   # = tools/sitl/start_sitl.sh SITL_HOME
+draft_m: 0.24
+depth_m: 5.0
+boat_start: {x: 0.0, y: 0.0, yaw_deg: 0.0}
+tier: core
+
+elements:
+  - {type: robobuoy, name: entry,  x: 12.0, y:  3.0, beacon: flash_blue,  up_beacon: false}
+  - {type: robobuoy, name: g1_red, x: 22.0, y: -3.0, beacon: flash_red,   up_beacon: false}
+  - {type: robobuoy, name: g1_grn, x: 22.0, y:  3.0, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: g2_red, x: 32.0, y: -1.0, beacon: flash_red,   up_beacon: false}
+  - {type: robobuoy, name: g2_grn, x: 32.0, y:  5.0, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: g3_red, x: 42.0, y: -4.0, beacon: flash_red,   up_beacon: false}
+  - {type: robobuoy, name: g3_grn, x: 42.0, y:  2.0, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: exit,   x: 62.0, y:  0.0, beacon: steady_blue, up_beacon: false}
+  - {type: robobuoy, name: black1, x: 27.0, y:  8.0, beacon: "off"}
+  - {type: robobuoy, name: black2, x: 37.0, y: -9.0, beacon: "off"}
+  - {type: robobuoy, name: black3, x: 53.0, y: -0.6, beacon: "off"}
