@@ -1,14 +1,18 @@
 # Task 1 with the boat boxed in at the start (avoidance test S8, docs/nav2_avoidance_spec.md
-# 10.2). Everything is task1_core.yaml (read its header for the rules and the frame) plus four
-# black buoys 1.3 m from the start (0, 0), one on each side:
+# 10.2). The frame and the rules are task1_core.yaml's (read its header). Four black buoys
+# sit 1.3 m from the start (0, 0), one on each side:
 #   - box_e (1.3, 0), box_w (-1.3, 0), box_n (0, 1.3), box_s (0, -1.3), beacon off.
 # Why 1.3 m and not the spec's 2 m: a hazard is lethal out to its 0.22 m radius plus the
 # 0.80 m inscribed radius, so at 2 m the 2.83 m diagonal gaps leave a corridor and the
-# planner drives out (arithmetic, review of 2026-10-01); at 1.5 m the corridor is ~4 cm, which cell
-# rounding decides. At 1.3 m the diagonal midpoints are 0.92 m from two buoy centres:
-# shut. The hull (1.0 x 0.6 m) is still 0.58 m clear of every buoy surface at the start.
+# planner drives out (arithmetic, review of 2026-10-01); at 1.5 m the corridor is ~4 cm,
+# which cell rounding decides. At 1.3 m the diagonal midpoints are 0.92 m from two buoy
+# centres: shut. The hull (1.0 x 0.6 m) is still 0.58 m clear of every buoy surface.
+# RXL_SAFE_PASSAGE carries at most 10 buoys (robotx dialect, array length 10), so this
+# course has only TWO gates: ENTRY, 2 gates, EXIT and the 4 box buoys make 10. With more
+# the UAV stand-in cannot send the field and the tree fails at once (found 2026-10-01).
 # Pass: the first leg holds once, the costmap is cleared at 5 s, the leg FAILs at 15 s,
 # the mission ends with a clear result, and the referee reports no contact.
+
 name: task1_boxed_in
 origin: {lat: 1.28060, lon: 103.85570}   # = tools/sitl/start_sitl.sh SITL_HOME
 draft_m: 0.24
@@ -22,12 +26,8 @@ elements:
   - {type: robobuoy, name: g1_grn, x: 22.0, y:  3.0, beacon: flash_green, up_beacon: false}
   - {type: robobuoy, name: g2_red, x: 32.0, y: -1.0, beacon: flash_red,   up_beacon: false}
   - {type: robobuoy, name: g2_grn, x: 32.0, y:  5.0, beacon: flash_green, up_beacon: false}
-  - {type: robobuoy, name: g3_red, x: 42.0, y: -4.0, beacon: flash_red,   up_beacon: false}
-  - {type: robobuoy, name: g3_grn, x: 42.0, y:  2.0, beacon: flash_green, up_beacon: false}
-  - {type: robobuoy, name: exit,   x: 52.0, y:  0.0, beacon: steady_blue, up_beacon: false}
-  - {type: robobuoy, name: black1, x: 27.0, y:  8.0, beacon: "off"}
-  - {type: robobuoy, name: black2, x: 37.0, y: -9.0, beacon: "off"}
-  - {type: robobuoy, name: box_e, x: 1.3, y: 0.0, beacon: "off"}
-  - {type: robobuoy, name: box_w, x: -1.3, y: 0.0, beacon: "off"}
-  - {type: robobuoy, name: box_n, x: 0.0, y: 1.3, beacon: "off"}
-  - {type: robobuoy, name: box_s, x: 0.0, y: -1.3, beacon: "off"}
+  - {type: robobuoy, name: exit,   x: 42.0, y:  0.0, beacon: steady_blue, up_beacon: false}
+  - {type: robobuoy, name: box_e,  x:  1.3, y:  0.0, beacon: "off"}
+  - {type: robobuoy, name: box_w,  x: -1.3, y:  0.0, beacon: "off"}
+  - {type: robobuoy, name: box_n,  x:  0.0, y:  1.3, beacon: "off"}
+  - {type: robobuoy, name: box_s,  x:  0.0, y: -1.3, beacon: "off"}

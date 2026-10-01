@@ -23,6 +23,8 @@ import time
 from crusader_sim import course as C
 from crusader_sim.paths import _SRC_REPO
 
+RXL_MAX_BUOYS = 10   # RXL_SAFE_PASSAGE buoy_lat/buoy_lon/buoy_color array length (robotx dialect)
+
 
 def _bench_dir():
     for base in (os.environ.get("RX26_SRC"), _SRC_REPO, "/root/robotx_ws/src/rx26_asv",
@@ -47,6 +49,11 @@ def plan_from_course(course):
             exit_ = (lat, lon)
     if entry is None or exit_ is None:
         raise ValueError("course has no flash_blue ENTRY or steady_blue EXIT buoy")
+    if len(buoys) > RXL_MAX_BUOYS:
+        # the message's arrays are fixed at 10: an 11th buoy cannot be packed, and a field
+        # that silently never arrives looks like a boat fault (found 2026-10-01)
+        raise ValueError(f"course has {len(buoys)} buoys; RXL_SAFE_PASSAGE carries at most "
+                         f"{RXL_MAX_BUOYS} (move a black buoy instead of adding one)")
     return buoys, entry, exit_
 
 

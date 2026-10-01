@@ -8,6 +8,11 @@
 # the planner must go around it, keeping >= 0.8 m (centre to surface), then orbit
 # the EXIT counter-clockwise. Pass: referee PASS, black3 centre-to-surface >= 0.73 m.
 
+# RXL_SAFE_PASSAGE carries at most 10 buoys (robotx dialect, array length 10), so the
+# obstacle REPLACES task1_core's black2 (37, -9), which is off every leg,
+# rather than adding an 11th: with 11 the UAV stand-in cannot
+# send the field and the tree fails at once (found 2026-10-01).
+
 name: task1_blocked_exit
 origin: {lat: 1.28060, lon: 103.85570}   # = tools/sitl/start_sitl.sh SITL_HOME
 draft_m: 0.24
@@ -25,5 +30,4 @@ elements:
   - {type: robobuoy, name: g3_grn, x: 42.0, y:  2.0, beacon: flash_green, up_beacon: false}
   - {type: robobuoy, name: exit,   x: 62.0, y:  0.0, beacon: steady_blue, up_beacon: false}
   - {type: robobuoy, name: black1, x: 27.0, y:  8.0, beacon: "off"}
-  - {type: robobuoy, name: black2, x: 37.0, y: -9.0, beacon: "off"}
   - {type: robobuoy, name: black3, x: 53.0, y: -0.6, beacon: "off"}
