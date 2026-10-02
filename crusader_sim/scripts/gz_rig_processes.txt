@@ -11,5 +11,6 @@ crusader_nav/nav_lifecycle
 ros_gz_bridge/parameter_bridge
 crusader_sim/lib
 crusader_sim/lib/crusader_sim/panel_feed
+crusader_sim.sim_camera
 crusader_sim.sim_uav
 crusader_perception/lib/crusader_perception/lidar_cluster_node

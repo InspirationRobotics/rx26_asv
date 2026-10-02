@@ -20,6 +20,12 @@
 # NAV_MODE=off|shadow|on in the environment picks the tree's planning (default on
 # when Nav2 is present, forced off with a banner when it is not).
 #
+# SIM_DETECTOR=truth|yolo in the environment picks sim_camera's boxes: truth (default) is the
+# geometric oracle; yolo runs the team's REAL YOLO detector + LED classifier on the rendered
+# frames (crusader_sim/README.md, "The real YOLO detector in the sim"). It needs the venv from
+# setup_yolo_venv.sh and falls back to truth, with a banner, when that is missing.
+# SIM_CAMERA_ARGS adds ROS args to sim_camera, e.g. "-p yolo_imgsz:=1920 -p yolo_conf:=0.1".
+#
 # Everything downstream — telemetry_bridge, rxl_link_node, target_tracker,
 # ground_station, bt_runner — is the boat's code, unmodified, same params file.
 # ROS's setup.bash reads unset variables, so strict mode goes on AFTER it
@@ -50,8 +56,32 @@ echo "=== sensors (Gazebo -> the boat's topics) ==="
 up gz_bridge /tmp/gzb.log \
   ros2 run ros_gz_bridge parameter_bridge --ros-args -p config_file:="$SIMSHARE/config/gz_bridge.yaml"
 up livox_shim /tmp/livox_shim.log ros2 run crusader_sim livox_shim
-up sim_camera /tmp/sim_camera.log \
-  ros2 run crusader_sim sim_camera --ros-args -p course:="$COURSE"
+# the camera: the oracle detector, or the real YOLO. YOLO needs torch + ultralytics, which live
+# in a venv (setup_yolo_venv.sh), so the node is started with THAT python; -m instead of
+# `ros2 run` because the entry-point script's shebang is the system python
+DETECTOR="${SIM_DETECTOR:-truth}"
+case "$DETECTOR" in truth|yolo) ;;
+  *) echo "*** SIM_DETECTOR must be truth or yolo (got '$DETECTOR')" >&2; exit 2 ;; esac
+YOLO_PY=$WS/venvs/yolo/bin/python
+if [ "$DETECTOR" = yolo ]; then
+  YOLO_WHY=""
+  if [ ! -x "$YOLO_PY" ]; then YOLO_WHY="no venv at $YOLO_PY"
+  elif [ ! -f "$WS/models/sim_yolo/crusader_det_yolo26n.pt" ] || [ ! -f "$WS/models/sim_yolo/crusader_led_cls.pt" ]; then
+    YOLO_WHY="no .pt files in $WS/models/sim_yolo"
+  elif ! "$YOLO_PY" -c "import torch, ultralytics, rclpy, crusader_sim.yolo_detect" >/dev/null 2>&1; then
+    YOLO_WHY="the venv does not import torch/ultralytics/rclpy/crusader_sim.yolo_detect"
+  fi
+  if [ -n "$YOLO_WHY" ]; then
+    echo "  *** SIM_DETECTOR=yolo UNAVAILABLE ($YOLO_WHY): running the TRUTH detector. Fix: bash crusader_sim/scripts/setup_yolo_venv.sh"
+    DETECTOR=truth
+  fi
+fi
+export YOLO_CONFIG_DIR=/tmp/Ultralytics
+CAM_CMD=(ros2 run crusader_sim sim_camera); CAM_ARGS=()
+if [ "$DETECTOR" = yolo ]; then
+  CAM_CMD=("$YOLO_PY" -u -m crusader_sim.sim_camera); CAM_ARGS=(-p detector:=yolo)
+fi
+up sim_camera /tmp/sim_camera.log   "${CAM_CMD[@]}" --ros-args -p course:="$COURSE" "${CAM_ARGS[@]}" ${SIM_CAMERA_ARGS:-}
 
 echo "=== the boat's stack ==="
 up telemetry_bridge /tmp/tb.log \
@@ -139,6 +169,6 @@ fi
 echo
 echo "=== up ==="
 ros2 node list 2>/dev/null | sort | sed 's/^/  /'
-echo "  tree: $(basename "$TREE")   course: $COURSE   nav_mode: $NAV_MODE"
+echo "  tree: $(basename "$TREE")   course: $COURSE   nav_mode: $NAV_MODE   detector: $DETECTOR"
 timeout 5 ros2 topic echo /crsd/fcu_status --once 2>/dev/null \
   | grep -E '^mode|^armed' | tr '\n' ' ' | sed 's/^/  /'; echo

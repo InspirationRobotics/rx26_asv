@@ -64,7 +64,7 @@ bash ~/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_sim_down.sh
 | `--no-rig` | stop after Gazebo + SITL, for `check_motion` or your own nodes |
 | `--recreate-container` | remove the `crsd-sim` container if it was made from a different image than `RX26_IMAGE` and make a new one. Only with the sim down; see "Nav2 avoidance in the sim" |
 
-Environment, set in front of the command: `NAV_MODE=off`, `shadow` or `on` (the tree's planning, below), `TREE=<xml>` (a name in `crusader_bt/behavior_trees` or a path), `RX26_IMAGE` (the image a *new* container is made from; default `crsd-sim:nav2` when it exists, else `crsd-sim:humble`).
+Environment, set in front of the command: `NAV_MODE=off`, `shadow` or `on` (the tree's planning, below), `TREE=<xml>` (a name in `crusader_bt/behavior_trees` or a path), `SIM_DETECTOR=truth` or `yolo` (the camera's boxes: the oracle, or the real YOLO; see "The real YOLO detector in the sim"), `RX26_IMAGE` (the image a *new* container is made from; default `crsd-sim:nav2` when it exists, else `crsd-sim:humble`).
 
 ### Task 1
 
@@ -283,6 +283,87 @@ Stack checks in `crsd-sim`: **N1** `ros2 lifecycle get /planner_server` says `ac
 in view and then removed while still in view leaves the costmap within 5 s, and out of view it
 persists at least 20 s and is gone by 35 s (if not, switch to the ObstacleLayer fallback in the spec).
 
+### The real YOLO detector in the sim
+
+By default `sim_camera` boxes the buoys from geometry (an oracle that reports what a *working* detector
+would). `SIM_DETECTOR=yolo` swaps that for **the team's real detector and LED classifier running on the
+rendered 1920x1200 frames** (`crusader_vision/runs/crusader_det_yolo26n.pt` + `crusader_led_cls.pt`), so
+you can see what they do on Gazebo renders and what the boat's stack then does with their output.
+
+```bash
+# once (WSL): venv + model copy; a 1.5 GB venv under `~/robotx_ws/venvs/yolo`, 2-3 minutes. Never touches the host python
+bash ~/robotx_ws/src/rx26_asv/crusader_sim/scripts/setup_yolo_venv.sh
+
+SIM_DETECTOR=yolo bash ~/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_sim_up.sh task1_core --no-gui
+bash ~/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_sim_up.sh task1_core --detector yolo      # same
+bash ~/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_nav_test.sh task1_core --detector yolo --tag c5_yolo
+```
+
+`gz_nav_test.sh --detector yolo` adds the run's score line to `summary.txt`, and marks the run INVALID if
+the rig fell back to the oracle. Extra `sim_camera` ROS args go in `SIM_CAMERA_ARGS`, e.g.
+`SIM_CAMERA_ARGS="-p yolo_log:=/tmp/yolo.csv -p yolo_imgsz:=1920 -p yolo_conf:=0.1"`.
+
+**What runs.** `crusader_sim/yolo_detect.py` is `oak_detector._run_pipeline` with the TensorRT engines
+replaced by the `.pt` files they are exported from (ultralytics 8.4.144 = the version they were trained
+with, CPU torch, 4 threads, ~5 Hz on a worker thread). The decisions are `oak_detector_core`'s own functions,
+imported, not copied: `led_patch` (the classifier's crop), `TrackTable`, `FlashTracker`, and the label words
+(`flash_red_diamond`, `red_diamond`, `off_diamond`, `diamond`). Every tunable is read from the
+`oak_detector` block of `crusader_params.yaml`. The box then goes through the same depth-median patch,
+stereo noise and `Detection3DArray` as the oracle's, on `crsd/oak/detections`. The oracle's occlusion check
+is not applied (a network does not box what it cannot see).
+
+Deliberate differences from the boat: `marking_shape` is skipped (the shape in the label is the detector's
+class; Task 1 never branches on shape); the flash tracker runs on **sim time** (the beacons blink on the sim
+clock, and a wall-clock tracker would mis-time them whenever RTF is not 1); inference is on the CPU because the
+container has no GPU. If the venv, the models or the label order are wrong the node says
+`detector:=yolo is UNAVAILABLE` and runs the oracle (`gz_rig_up.sh` prints the same as a banner).
+
+**The score.** The sim knows where every buoy is, so every ~10 s `/tmp/sim_camera.log` (container) gets:
+
+```
+yolo vs truth | last window 50 frames: recall 0.80 (40/50) precision 0.91 (40/44) | colour 36 right / 2 wrong / 2 unresolved | ENTRY/EXIT 3/4 (1 undecided) | mean IoU 0.71 || run 300 frames: ... | recall by range 0-10 m 12/12, 10-20 m 20/28, >20 m 0/0
+```
+
+Recall counts buoys at least `min_bbox_px` (24) tall that are not hidden behind another buoy; precision counts
+a box on any buoy in view (down to 6 px) as right; colour and ENTRY/EXIT are judged on the matched boxes
+(a label with no colour in it is *unresolved*, not wrong; `n/a` when there is nothing to judge: a blank, not a 0). Matching is by IoU >= 0.3 against the idealised
+0.43 x 0.41 m silhouette. `yolo_log:=<csv>` writes one row per truth buoy per frame.
+
+**Offline, on any image:** `docker exec crsd-sim /root/robotx_ws/venvs/yolo/bin/python -m crusader_sim.yolo_detect frame.png`
+(`--imgsz`, `--conf` as below). Tests without torch: `python3 -m unittest discover -s test -p "test_yolo*.py"`.
+
+| `sim_camera` param | Default | |
+|---|---|---|
+| `detector` | `truth` | `truth` or `yolo` |
+| `yolo_rate_hz` | 5.0 | inferences per sim second, at most; a busy worker skips frames instead of queueing |
+| `yolo_threads` | 4 | torch CPU threads |
+| `yolo_imgsz`, `yolo_conf` | 0, 0.0 | experiments only. 0 = the boat's `det_imgsz_*` (640) and `det_conf_min` (0.60) |
+| `yolo_model_dir`, `yolo_device`, `yolo_log` | `~/robotx_ws/models/sim_yolo`, `cpu`, none | |
+
+**Cost.** The RGB stream is rendered and bridged for the whole run (1920x1200 at 15 Hz is the expensive
+thing in this sim), plus ~100 ms of CPU per inference at 640. Watch RTF the first time.
+
+**What it does on Gazebo renders (first measurement, 2026-10-01).** `task1_core`, with the UAV stand-in,
+`gz_nav_test.sh task1_core --mode on --detector yolo --tag c5_yolo`: the judge said PASS (3/3 gates, no
+contact, 163 s; the same run on the oracle took 169 s with 0.78 m minimum clearance, this one 0.52 m), but
+the passage came from the UAV's plan. The boat's own camera contributed little:
+
+- **Detection.** At the boat's own settings (640 input, conf 0.60) recall was 0.23 (194/850) with precision
+  0.98: 58 % of buoys closer than 10 m (178/307), 3 % at 10-20 m (16/543). A buoy 14-40 px tall in the
+  1920x1200 frame is 5-13 px at the detector's 640 input, and at the start line the model boxed nothing at all.
+  Raising the input to 1920 and lowering the floor to 0.1 (`yolo_imgsz`, `yolo_conf`; not what the boat runs)
+  found 2 of 6 buoys at ~290 ms a frame. On the boat's own 640x400 footage from 2026-09-14
+  (`Boat/20260914-010054/camera`) the same detector boxes buoys 11-84 px tall (median 33): size matters, not
+  only render style.
+- **Colour.** 0 of the 194 matched boxes carried a colour: the labels stayed bare (`diamond`), the flash
+  tracker never resolved a light state (it wants 8 samples over 4 s on one track, and the classifier hedges).
+  Given perfect boxes on one frame, the LED classifier read the two green buoys right, one red buoy as
+  off (possibly its dark phase) and the other as blue, and both unlit buoys as blue or green (0.4-0.98
+  confidence). The sim's LED crops are 4-15 px; the ones it was trained on are ~87x48.
+
+Treat recall by range in the log line as the answer to "from how far does the model see a Gazebo buoy",
+and `colour ... unresolved` as the flash tracker's, not the model's, verdict.
+
 ### Sensor model (checked against the spec pages and Resources.md, 2026-09-30)
 
 **MID-360 LiDAR:**
@@ -379,7 +460,7 @@ manual, spins in AUTO". Fix it in the YAML, never in the params.
 | OmniX mixing and **lateral motion**, with SERVO1/4 reversal | Thruster positions and angles are *derived from the mixer*, not measured |
 | Yaw from GPS, compass off (NMEA HDT instead of Unicore moving baseline) | Waves, wind, current (flat water) |
 | MAVProxy port map, 5 Hz HEARTBEAT, `--streamrate=-1` | MID360's non-repetitive scan pattern (a 600 × 34 grid instead) |
-| MID360 mount from `lidar_*` params, **upside down**, Livox point format | Camera **detections** come from ground truth (the OAK-D NN can't run in a sim). The **frames** are real renders on `oak/rgb` |
+| MID360 mount from `lidar_*` params, **upside down**, Livox point format | Camera **detections** come from ground truth (the OAK-D NN can't run in a sim) unless `SIM_DETECTOR=yolo` runs the real `.pt` models on the frames (CPU, not the OAK's engines). The **frames** are real renders on `oak/rgb` |
 | OAK-D mount from `cam_*` params; RGB 1920×1200 and depth 640×400 as `oak_detector` runs them | Beacons are lit steadily; the 1 s on/off flash isn't animated yet |
 | RC e-stop, mode switch and autonomy-drop, on their real channels | Colour indicator, pump/water stream, Task 3 not yet flown |
 | The RobotX 2026 light beacon (new 2026-09-14 design), RoboBuoy, dock from `task3_sim` | Task 1 layout is **illustrative**; the handbook gives it only as an image |
@@ -401,6 +482,7 @@ manual, spins in AUTO". Fix it in the YAML, never in the params.
 | `courses/*.yaml` | — | course layouts: buoys, beacon states, dock. `task1_avoid`, `task1_blocked_exit`, `task1_entry_black` and `open_water_platform` are the avoidance tests |
 | `crusader_sim/gen_crusader.py`, `gen_world.py` | WSL | build model and world into `~/.cache/crusader_sim` |
 | `crusader_sim/livox_shim.py`, `sim_camera.py` | `crsd-sim` | Gazebo sensors → the boat's driver topics |
+| `crusader_sim/yolo_detect.py`, `scripts/setup_yolo_venv.sh` | `crsd-sim` / WSL | the real YOLO + LED classifier on sim frames and its score; the venv + model-copy script (`SIM_DETECTOR=yolo`) |
 | `crusader_sim/sim_uav.py` | `crsd-sim` | Ekko's Task 1 radio, from the course's truth |
 | `crusader_sim/sim_transmitter.py` | WSL | the RC transmitter |
 | `crusader_sim/task1_goal.py`, `manual_drive.py`, `check_motion.py` | `crsd-sim` / WSL | operator tools |

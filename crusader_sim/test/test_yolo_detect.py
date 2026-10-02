@@ -170,7 +170,7 @@ class ScoreboardTest(unittest.TestCase):
         n = s.run.n
         self.assertEqual((n["truth"], n["tp_scored"]), (3, 2))   # c missed; hidden and far not targets
         self.assertEqual((n["dets"], n["tp"]), (4, 3))           # precision counts the small one
-        self.assertEqual((n["colour_n"], n["colour_ok"]), (2, 1))
+        self.assertEqual((n["colour_ok"], n["colour_bad"], n["colour_none"]), (1, 1, 0))
         self.assertEqual(n["occluded"], 1)
         self.assertIn("recall 0.67 (2/3) precision 0.75 (3/4)", s.report())
 
@@ -190,7 +190,15 @@ class ScoreboardTest(unittest.TestCase):
         s = Y.Scoreboard()
         s.update(0.0, [truth("k", "black_buoy", (0, 0, 10, 10))],
                  [Y.Det((0, 0, 10, 10), "off_diamond", 0.9, "diamond", None, "off", 1)])
-        self.assertEqual((s.run.n["colour_n"], s.run.n["colour_ok"]), (1, 1))
+        self.assertEqual((s.run.n["colour_ok"], s.run.n["colour_bad"], s.run.n["colour_none"]), (1, 0, 0))
+
+    def test_a_colourless_label_is_unresolved_not_wrong(self):
+        s = Y.Scoreboard()
+        s.update(0.0, [truth("k", "red_buoy", (0, 0, 10, 10))],
+                 [Y.Det((0, 0, 10, 10), "diamond", 0.9, "diamond", None, "unknown", 1)])
+        n = s.run.n
+        self.assertEqual((n["colour_ok"], n["colour_bad"], n["colour_none"]), (0, 0, 1))
+        self.assertIn("colour 0 right / 0 wrong / 1 unresolved", s.report())
 
     def test_blank_over_a_guess_with_no_truth(self):
         s = Y.Scoreboard()

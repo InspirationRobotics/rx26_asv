@@ -2,10 +2,14 @@
 # gz_sim_up.sh — the whole Gazebo sim, in order. Runs in: WSL2 Ubuntu-22.04.
 #
 #     bash crusader_sim/scripts/gz_sim_up.sh [course | --course-file PATH] [--no-gui] [--no-uav] [--no-rig]
-#                                            [--recreate-container]
+#                                            [--recreate-container] [--detector truth|yolo]
 #
 #     NAV_MODE=off|shadow|on  (environment) the tree's Nav2 planning; default on
 #                 when the image has Nav2. docs/nav2_avoidance_spec.md.
+#     SIM_DETECTOR=truth|yolo  (environment, or --detector) sim_camera's boxes: the geometric
+#                 oracle (default) or the team's REAL YOLO detector + LED classifier running on
+#                 the rendered frames. yolo needs `bash crusader_sim/scripts/setup_yolo_venv.sh`
+#                 once; without it the rig says so and runs truth. SIM_CAMERA_ARGS adds ROS args.
 #     RX26_IMAGE  the image a NEW container is made from. Default: crsd-sim:nav2 when
 #                 it exists, else crsd-sim:humble (no Nav2).
 #     --recreate-container
@@ -45,6 +49,9 @@ while [ $# -gt 0 ]; do
     --no-gui) GUI=0 ;;
     --no-uav) UAV_ARG="--no-uav" ;;
     --no-rig) RIG=0 ;;
+    --detector)
+      [ $# -ge 2 ] || { echo "--detector needs truth or yolo" >&2; exit 2; }
+      SIM_DETECTOR="$2"; shift ;;
     --course-file)
       [ $# -ge 2 ] || { echo "--course-file needs a path" >&2; exit 2; }
       COURSE_FILE="$2"; shift ;;
@@ -216,8 +223,9 @@ else
     "cd /root/robotx_ws && source install/setup.bash && P=''; for p in crusader_msgs crusader_bt crusader_perception crusader_sim crusader_nav crusader_nav_layers crusader_groundstation; do [ -d src/rx26_asv/\$p ] && P=\"\$P \$p\"; done; flock /root/robotx_ws/.colcon.lock colcon build --packages-select \$P 2>&1 | tail -2" \
     | sed 's/^/  /'
 fi
-# docker exec does not inherit this shell's environment: TREE and NAV_MODE cross explicitly
-docker exec -e TREE="${TREE:-}" -e NAV_MODE="${NAV_MODE:-}" "$CONTAINER" bash -lc \
+# docker exec does not inherit this shell's environment: TREE, NAV_MODE and SIM_* cross explicitly
+docker exec -e TREE="${TREE:-}" -e NAV_MODE="${NAV_MODE:-}" -e SIM_DETECTOR="${SIM_DETECTOR:-}" \
+  -e SIM_CAMERA_ARGS="${SIM_CAMERA_ARGS:-}" "$CONTAINER" bash -lc \
   "bash /root/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_rig_up.sh $COURSE $UAV_ARG" 2>&1 | sed 's/^/  /'
 
 if [ "$GUI" = 1 ]; then
