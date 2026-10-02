@@ -3,10 +3,13 @@
     ros2 run crusader_sim panel_feed --ros-args -p course:=task1_core
     python3 -m crusader_sim.panel_feed --selftest          # pure python, no ROS
 
-Runs in: the crsd-sim container (sim only — never on the boat), started by
-gz_rig_up.sh on every rig. The panel (task1_panel, WSL host python, no ROS)
-cannot subscribe to anything, so this node does it and sends what the panel
-draws as compact JSON over UDP on 127.0.0.1 (the container is --net=host).
+Runs in: the crsd-sim container (started by gz_rig_up.sh on every sim rig) and, in
+lake mode, the `asv` container on the boat (lake_rig_up.sh, `python3 -m
+crusader_sim.panel_feed --ros-args -p origin:=<LAKE_DATUM>`: crusader_sim is not
+colcon-built there). The panel (task1_panel; WSL host python in the sim, inside `asv`
+in lake mode) cannot subscribe to anything in the sim, so this node does it and sends
+what the panel draws as compact JSON over UDP on 127.0.0.1 (both containers are
+--net=host). It only SUBSCRIBES: it commands nothing and opens no autopilot port.
 
     in   /crsd/nav/leg_status       std_msgs/String JSON, nav spec 4.3: the leg
                                     bt_runner is driving (state, path, carrot, goal)
@@ -25,6 +28,13 @@ draws as compact JSON over UDP on 127.0.0.1 (the container is --net=host).
          /global_costmap/voxel_grid     sensor_msgs/PointCloud2: STVL's own voxels (needs
                                     publish_voxel_map: true in nav2_params.yaml)
          /crsd/datum                    crusader_msgs/LatLonHead: the nav map frame's origin
+         /crsd/pose                     crusader_msgs/LatLonHead: where the boat is (lake mode: the
+                                    panel has no gazebo odometry) -> layer "pose"
+         /crsd/fcu_status               crusader_msgs/FcuStatus: mode + armed, from the autopilot's
+                                    HEARTBEAT -> layer "fcu" (the lake panel's START is enabled
+                                    only on armed + GUIDED)
+         /crsd/nav/hazards              crusader_msgs/HazardArray: the known field the costmap
+                                    is built from -> layer "hazards"
     out  udp 127.0.0.1:14556        one datagram every 0.25 s (SEND_PERIOD_S)
 
 UDP PORT 14556. The aircraft owns 1454x and the boat 1455x (CLAUDE.md, the
@@ -43,6 +53,14 @@ latlon_to_enu() is the exact inverse of course.enu_to_latlon (the sim's
 through THEIR lat/lon, so the scale cancels for everything the boat publishes
 back as lat/lon — which is all of it. The origin is the course's, the same one
 gz_rig_up.sh gives the nav datum and SITL as home.
+
+THE LAKE LAYERS (pose, fcu, hazards) follow the same rules as leg/tracks/passage: `age`,
+blank when stale, never the last value. The packet also carries `datum` = {"lat", "lon"} or
+null: the nav frame's origin as the boat itself published it. It is a definition, not a
+measurement (latched, sent once), so it has no age; the lake panel compares it with its own
+origin and refuses to commit a field when they differ. `passage` also passes the report's
+"n_gates" / "gates_cleared" / "single_count" through (null when the tree predates them):
+n_gates = PAIRED gates, which is what the panel's checkpoint labels count.
 
 BLANKS OVER GUESSES. Each layer carries `age`: seconds since this node last
 received that topic. A layer never heard is null, not an empty list; an empty
@@ -97,7 +115,8 @@ SEND_PERIOD_S = 0.25
 STALE_S = 2.0                   # a layer older than this is stale: the panel blanks it
 FAR_M = 20_000.0                # a point farther than this from the origin is not this course's
 MAX_PATH, MAX_TRACKS, MAX_BUOYS = 120, 60, 40     # keep a datagram far under 64 KB
-LAYERS = ("leg", "tracks", "passage")
+MAX_HAZARDS, MAX_POLY = 60, 12                    # hazards kept, vertices kept per polygon hazard
+LAYERS = ("leg", "tracks", "passage", "pose", "fcu", "hazards")
 COSTMAP_LAYER = "costmap"       # not in LAYERS: sent once a second, held by the receiver
 COSTMAP_PERIOD_S = 1.0          # at most this often on the wire
 COSTMAP_STALE_S = 4.0           # the layer is carried 1 datagram in 4, so it ages longer
@@ -112,6 +131,9 @@ COSTMAP_TOPIC = "/global_costmap/costmap"
 COSTMAP_UPDATES_TOPIC = "/global_costmap/costmap_updates"
 VOXEL_TOPIC = "/global_costmap/voxel_grid"
 DATUM_TOPIC = "/crsd/datum"
+POSE_TOPIC = "/crsd/pose"
+FCU_TOPIC = "/crsd/fcu_status"
+HAZARDS_TOPIC = "/crsd/nav/hazards"
 # nav_math.hpp / crusader_nav.frames_core: the map frame's Earth radius
 NAV_EARTH_R_M = 6371000.0
 
@@ -350,7 +372,59 @@ def passage_feed(report, origin):
             skipped += 1
             continue
         out.append({"x": p[0], "y": p[1], "state": BEACON_STATE.get(b.get("state"), "unknown")})
-    return {"n": len(buoys), "skipped": skipped, "buoys": out}
+    # the tree's own gate count (one per PAIRED gate), for the lake panel's checkpoint labels; a
+    # report from a tree that predates the keys gives null, never a guess
+    counts = {k: report[k] if isinstance(report.get(k), int) and not isinstance(report.get(k), bool)
+              and report[k] >= 0 else None for k in ("n_gates", "gates_cleared", "single_count")}
+    return dict({"n": len(buoys), "skipped": skipped, "buoys": out}, **counts)
+
+
+def pose_feed(msg, origin):
+    """A LatLonHead (/crsd/pose) -> the boat's pose layer: x/y course metres; `yaw` is the ENU
+    angle in radians (0 = east, counter-clockwise, what the panel draws) and `heading_deg` the
+    boat's own compass heading (0 = north, clockwise). Both heading fields are null when the
+    autopilot has no valid yaw (the boat has no compass: the heading is GPS yaw, absent until
+    the moving baseline fixes). A position that is not usable is refused (ValueError): a boat
+    that is not where the last fix said is not drawn there."""
+    p = _pt(msg.latitude, msg.longitude, origin)
+    if p is None:
+        raise ValueError("pose has no usable position")
+    hd = float(msg.heading) if _num(msg.heading) else None
+    yaw = None if hd is None else round(math.radians(90.0 - hd) % (2.0 * math.pi), 4)
+    return {"x": p[0], "y": p[1], "heading_deg": _f(hd, 1), "yaw": yaw,
+            "speed": _f(getattr(msg, "ground_speed", None), 2)}
+
+
+def fcu_feed(msg, _origin):
+    """A FcuStatus (/crsd/fcu_status) -> {"mode", "armed", "status"}."""
+    return {"mode": _s(msg.mode, 16), "armed": bool(msg.armed), "status": int(msg.system_status)}
+
+
+def hazards_feed(msg, origin, datum):
+    """A HazardArray (/crsd/nav/hazards) -> the hazards layer. The message is in the nav `map`
+    frame (ENU metres from the datum, nav's Earth radius), so it goes through map_affine to the
+    panel's course metres, exactly as the costmap does; with no datum there is no way to place
+    it and it is refused (ValueError), never drawn at the wrong place. kind 0 = circle (x, y, r),
+    1 = polygon (pts, at most MAX_POLY of them). Each is {kind, src, id, keepout, ...}."""
+    if getattr(msg.header, "frame_id", "map") != "map":
+        raise ValueError("hazards are not in the map frame")
+    if datum is None:
+        raise ValueError("no datum yet")
+    ex0, sx, ny0, sy = map_affine(datum, origin)
+    items = []
+    for h in list(msg.hazards)[:MAX_HAZARDS]:
+        base = {"kind": int(h.kind), "src": int(h.source), "id": int(h.id), "keepout": _f(h.keepout_m, 2)}
+        if int(h.kind) == 0:
+            if not (_num(h.x) and _num(h.y) and _num(h.radius_m)):
+                continue
+            items.append(dict(base, x=round(ex0 + sx * h.x, 2), y=round(ny0 + sy * h.y, 2),
+                              r=round(float(h.radius_m), 2)))
+        else:
+            pts = [[round(ex0 + sx * x, 2), round(ny0 + sy * y, 2)]
+                   for x, y in zip(h.polygon_x, h.polygon_y) if _num(x) and _num(y)]
+            if len(pts) >= 3:
+                items.append(dict(base, pts=_decimate(pts, MAX_POLY)))
+    return {"n": len(msg.hazards), "seq": int(msg.seq), "items": items}
 
 
 class Feeder:
@@ -399,6 +473,15 @@ class Feeder:
     def on_targets(self, msg, now=None):
         self._hold("tracks", msg, now)
 
+    def on_pose(self, msg, now=None):
+        self._hold("pose", msg, now)
+
+    def on_fcu(self, msg, now=None):
+        self._hold("fcu", msg, now)
+
+    def on_hazards(self, msg, now=None):
+        self._hold("hazards", msg, now)
+
     def on_passage(self, text, now=None):
         obj = self._json_object(text)
         if obj is None or not isinstance(obj.get("buoys"), list):
@@ -410,7 +493,10 @@ class Feeder:
         """The nav map frame's origin. A blank or (0, 0) is not a datum."""
         if _num(lat) and _num(lon) and abs(lat) <= 90.0 and abs(lon) <= 180.0 and (lat, lon) != (0.0, 0.0):
             with self.lock:
-                self.datum = (float(lat), float(lon))
+                new = (float(lat), float(lon))
+                if new != self.datum and self._held["hazards"] is not None:
+                    self._held["hazards"][2] = None      # converted against the old (or no) datum: redo
+                self.datum = new
 
     def _costmap_in(self, fn, arg, now):
         """Apply a grid message; a malformed one is counted and leaves the grid as it was."""
@@ -451,7 +537,15 @@ class Feeder:
             lay["stamp"] = round(self._grid_wall, 3)
         return dict(lay, age=round(max(0.0, now - self._grid_rx), 2))
 
-    _CONVERT = {"leg": leg_feed, "tracks": targets_feed, "passage": passage_feed}
+    _CONVERT = {"leg": leg_feed, "tracks": targets_feed, "passage": passage_feed,
+                "pose": pose_feed, "fcu": fcu_feed}
+
+    def _convert(self, layer, raw):
+        """One held message -> its layer dict. Call with the lock held. hazards alone needs the
+        datum, and a missing one is not a refusal to remember: it is simply not placeable yet."""
+        if layer == "hazards":
+            return hazards_feed(raw, self.origin, self.datum)
+        return self._CONVERT[layer](raw, self.origin)
 
     def packet(self, now=None, costmap=False):
         """The datagram's content. Each layer is None (never heard) or its
@@ -463,14 +557,18 @@ class Feeder:
         with self.lock:
             self.seq += 1
             pkt["seq"] = self.seq
+            pkt["datum"] = None if self.datum is None else {"lat": self.datum[0], "lon": self.datum[1]}
             for k in LAYERS:
                 held = self._held[k]
                 if held is None:
                     pkt[k] = None
                     continue
                 if held[2] is None:
+                    if k == "hazards" and self.datum is None:
+                        pkt[k] = None               # not placeable until the datum arrives; not a bad message
+                        continue
                     try:
-                        held[2] = self._CONVERT[k](held[0], self.origin)
+                        held[2] = self._convert(k, held[0])
                     except (ValueError, TypeError, AttributeError, KeyError, OverflowError):
                         held[2] = False             # refused once, not retried every tick
                         self.bad[k] += 1
@@ -578,7 +676,8 @@ class FeedReceiver:
         out = {"port": self.port, "error": err, "packets": packets, "bad": bad, "up": up,
                "silent_s": None if silent is None else round(silent, 2),
                "course": pkt.get("course") if pkt else None,
-               "origin": pkt.get("origin") if pkt else None}
+               "origin": pkt.get("origin") if pkt else None,
+               "datum": pkt.get("datum") if pkt and up else None}
         for k in LAYERS:
             out[k] = self._judge(None if pkt is None else pkt.get(k), silent, up, self.stale_s)
         # the costmap rides on 1 datagram in 4, so its age is the planner's age when it was sent
@@ -618,7 +717,7 @@ def main(args=None):
     if "--selftest" in sys.argv[1:]:
         raise SystemExit(1 if _selftest() else 0)
     import rclpy
-    from crusader_msgs.msg import LatLonHead, TrackedTargetArray
+    from crusader_msgs.msg import FcuStatus, HazardArray, LatLonHead, TrackedTargetArray
     from map_msgs.msg import OccupancyGridUpdate
     from nav_msgs.msg import OccupancyGrid
     from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
@@ -650,6 +749,10 @@ def main(args=None):
     node.create_subscription(String, LEG_TOPIC, lambda m: feeder.on_leg(m.data), qos)
     node.create_subscription(TrackedTargetArray, TARGETS_TOPIC, feeder.on_targets, qos)
     node.create_subscription(String, PASSAGE_TOPIC, lambda m: feeder.on_passage(m.data), qos)
+    # the lake panel's layers: where the boat is, what the autopilot says (armed / mode), the known field
+    node.create_subscription(LatLonHead, POSE_TOPIC, feeder.on_pose, qos)
+    node.create_subscription(FcuStatus, FCU_TOPIC, feeder.on_fcu, qos)
+    node.create_subscription(HazardArray, HAZARDS_TOPIC, feeder.on_hazards, qos)
     # the costmap's own QoS (latched, reliable): the grid is only republished when the window moves,
     # and the datum once. The callbacks store; the conversion is on the timer, once a second.
     latched = QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
@@ -694,6 +797,7 @@ def main(args=None):
     log.info("panel_feed: course %s origin (%.6f, %.6f) -> udp %s:%d; %s, %s, %s, %s (+updates, %s, %s)"
              % (course, origin["lat"], origin["lon"], host, port,
                 LEG_TOPIC, TARGETS_TOPIC, PASSAGE_TOPIC, COSTMAP_TOPIC, VOXEL_TOPIC, DATUM_TOPIC))
+    log.info("panel_feed: + %s, %s, %s" % (POSE_TOPIC, FCU_TOPIC, HAZARDS_TOPIC))
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
@@ -817,6 +921,93 @@ def _selftest():
     n = len(encode(h.packet(now=1.0)))
     check("worst-case datagram bytes < 30000", n < 30000, True)
     check("... and the tracks were capped", len(h.packet(now=1.0)["tracks"]["items"]), MAX_TRACKS)
+
+    # --- the lake layers: pose, fcu, hazards, the datum, the passage's gate counts
+    def pose_msg(x, y, hd, spd=0.5, **kw):
+        la, lo = C.enu_to_latlon(x, y, origin)
+        return SimpleNamespace(latitude=kw.get("latitude", la), longitude=kw.get("longitude", lo),
+                               heading=hd, ground_speed=spd)
+    lk = Feeder(origin, "lake", clock=lambda: 0.0)
+    lk.on_pose(pose_msg(12.0, -3.0, 90.0), now=0.0)
+    P = lk.packet(now=0.5)["pose"]
+    check("pose x", P["x"], 12.0, 0.05)
+    check("pose y", P["y"], -3.0, 0.05)
+    check("pose: compass heading 90 (east) is ENU yaw 0", (P["heading_deg"], P["yaw"]), (90.0, 0.0), None)
+    check("pose age", P["age"], 0.5, 1e-6)
+    lk.on_pose(pose_msg(0.0, 0.0, 0.0), now=1.0)
+    check("pose: compass heading 0 (north) is ENU yaw pi/2", lk.packet(now=1.0)["pose"]["yaw"], 1.5708, 1e-3)
+    lk.on_pose(pose_msg(1.0, 1.0, float("nan")), now=2.0)
+    P = lk.packet(now=2.0)["pose"]
+    check("pose: NaN heading -> heading and yaw null", (P["heading_deg"], P["yaw"]), (None, None))
+    check("pose: ... position kept", P["x"], 1.0, 0.05)
+    lk.on_pose(pose_msg(1.0, 1.0, 10.0, latitude=float("nan")), now=3.0)
+    check("pose: an unusable position is a blank (layer None) and counted", (lk.packet(now=3.0)["pose"], lk.bad["pose"]), (None, 1))
+    lk.on_pose(pose_msg(0.0, 0.0, 10.0, latitude=0.0, longitude=0.0), now=4.0)
+    check("pose: lat/lon 0,0 (no fix) is not on this course: blank", lk.packet(now=4.0)["pose"], None)
+    lk.on_fcu(SimpleNamespace(mode="GUIDED", armed=True, system_status=4), now=5.0)
+    F = lk.packet(now=5.1)["fcu"]
+    check("fcu mode/armed", (F["mode"], F["armed"], F["status"]), ("GUIDED", True, 4))
+    check("fcu age", F["age"], 0.1, 1e-6)
+    lk.on_fcu(SimpleNamespace(mode="HOLD", armed=False, system_status=3), now=6.0)
+    check("fcu: the newest wins", (lk.packet(now=6.0)["fcu"]["mode"], lk.packet(now=6.0)["fcu"]["armed"]), ("HOLD", False))
+
+    def hz(kind, x, y, r=0.0, px=(), py=(), src=0, i=1, keepout=0.0):
+        return SimpleNamespace(kind=kind, source=src, id=i, x=x, y=y, radius_m=r, polygon_x=list(px),
+                               polygon_y=list(py), keepout_m=keepout)
+    hmsg = SimpleNamespace(header=SimpleNamespace(frame_id="map"), seq=7, hazards=[
+        hz(0, 10.0, 20.0, 0.45, src=0, i=3, keepout=0.3),
+        hz(1, 0, 0, px=[0, 4, 4, 0], py=[0, 0, 2, 2], src=2, i=9),
+        hz(1, 0, 0, px=[0, 1], py=[0, 1]),                              # two vertices: not a polygon
+        hz(0, float("nan"), 1.0, 0.4)])                                 # no position: dropped
+    lk.on_hazards(hmsg, now=10.0)
+    check("hazards before the datum: not placeable, a blank, NOT counted as a bad message",
+          (lk.packet(now=10.0)["hazards"], lk.bad["hazards"]), (None, 0))
+    check("the packet has no datum yet", lk.packet(now=10.0)["datum"], None)
+    lk.on_datum(origin["lat"], origin["lon"])
+    H = lk.packet(now=10.5)["hazards"]
+    check("hazards after the datum arrives: 2 usable of 4", (H["n"], len(H["items"]), H["seq"]), (4, 2, 7))
+    cx = [it for it in H["items"] if it["kind"] == 0][0]
+    # nav's map metres are 1.0011 of the course's (6371 km vs 111318.845 m/deg): 10 m -> 10.01, 20 m -> 20.02
+    check("circle x", cx["x"], 10.01, 0.011)
+    check("circle y", cx["y"], 20.02, 0.011)
+    check("circle r, keepout, src, id", (cx["r"], cx["keepout"], cx["src"], cx["id"]), (0.45, 0.3, 0, 3))
+    pg = [it for it in H["items"] if it["kind"] == 1][0]
+    check("a polygon keeps its vertices", len(pg["pts"]), 4)
+    check("... through map_affine too", pg["pts"][1][0], 4.0045, 0.011)
+    check("the packet carries the datum", lk.packet(now=10.5)["datum"], {"lat": origin["lat"], "lon": origin["lon"]})
+    lk.on_hazards(SimpleNamespace(header=SimpleNamespace(frame_id="odom"), seq=8, hazards=[]), now=11.0)
+    check("hazards in another frame are refused and counted", (lk.packet(now=11.0)["hazards"], lk.bad["hazards"]), (None, 1))
+    lk.on_hazards(SimpleNamespace(header=SimpleNamespace(frame_id="map"), seq=9, hazards=[]), now=12.0)
+    H = lk.packet(now=12.0)["hazards"]
+    check("an empty field is 'heard, holds nothing', not None", (H["n"], H["items"]), (0, []))
+    # a datum that moves re-places the held hazards
+    lk.on_hazards(hmsg, now=13.0)
+    before = lk.packet(now=13.0)["hazards"]["items"][0]["y"]
+    lk.on_datum(origin["lat"] + 0.0001, origin["lon"])
+    check("a moved datum re-places the held hazards (+11.132 m north)", lk.packet(now=13.0)["hazards"]["items"][0]["y"] - before, 11.132, 0.01)
+    rep9 = {"buoys": [], "n_gates": 3, "gates_cleared": 1, "single_count": 0}
+    lk.on_passage(json.dumps(rep9), now=14.0)
+    Q = lk.packet(now=14.0)["passage"]
+    check("passage passes n_gates / gates_cleared / single_count through", (Q["n_gates"], Q["gates_cleared"], Q["single_count"]), (3, 1, 0))
+    lk.on_passage(json.dumps({"buoys": [], "n_gates": "3", "gates_cleared": -1}), now=15.0)
+    Q = lk.packet(now=15.0)["passage"]
+    check("... a string or negative count is null, a report without the key too", (Q["n_gates"], Q["gates_cleared"], Q["single_count"]), (None, None, None))
+    # the worst case with every layer: still far under the datagram ceiling
+    lk.on_hazards(SimpleNamespace(header=SimpleNamespace(frame_id="map"), seq=1, hazards=[
+        hz(1, 0, 0, px=list(range(40)), py=[i % 7 for i in range(40)], i=k) for k in range(200)]), now=16.0)
+    lk.on_targets(many, now=16.0)
+    lk.on_leg(json.dumps(big), now=16.0)
+    pk = lk.packet(now=16.0)
+    check("hazards are capped (MAX_HAZARDS) and their polygons decimated (MAX_POLY)",
+          (len(pk["hazards"]["items"]), len(pk["hazards"]["items"][0]["pts"])), (MAX_HAZARDS, MAX_POLY))
+    check("the lake datagram with every layer at its cap is < 30000 bytes", len(encode(pk)) < 30000, True)
+    rcvl = FeedReceiver(clock=lambda: 0.0)
+    rcvl.ingest(encode(lk.packet(now=17.0)), now=17.0)
+    v = rcvl.view(now=17.3)
+    check("receiver: the datum is in the view", v["datum"]["lat"], origin["lat"] + 0.0001, 1e-9)
+    check("receiver: hazards fresh with data", (v["hazards"]["status"], len(v["hazards"]["data"]["items"])), ("fresh", MAX_HAZARDS))
+    check("receiver: a pose layer that was blank is 'none' on a live feed", v["pose"]["status"], "none")
+    check("receiver: an offline feed shows no datum", FeedReceiver(clock=lambda: 0.0).view(now=0.0)["datum"], None)
 
     # --- the panel's half: age, staleness, blanks
     rcv = FeedReceiver(clock=lambda: 0.0)

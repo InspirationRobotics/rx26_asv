@@ -226,6 +226,7 @@ ODOM_TOPIC = "/model/crusader/odometry"
 PANEL_COURSE = "panel"
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 SENSOR_RE = re.compile(r"^/api/sensor/(\w+)\.jpg$")
+DOWNLOAD_RE = re.compile(r"^/api/course/([A-Za-z0-9_-]{1,40})\.yaml$")
 TREE_RE = re.compile(r"^\[tree\]\s+(\S+)\s+([\d.]+)%\s+buoys\s+(\d+)/(\d+)\s+plan v(\d+)\s*(.*)$")
 # = courses/task1_core.yaml's header; origin = tools/sitl/start_sitl.sh SITL_HOME
 COURSE_HEAD = {"origin": {"lat": 1.28060, "lon": 103.85570}, "draft_m": 0.24,
@@ -259,9 +260,17 @@ print("         classified 10, passed correctly 0, 0 s", flush=True)
 
 # ------------------------------------------------------------------ course
 
-def course_of(name, buoys):
-    """[{x, y, state}] -> a course dict in courses/*.yaml's schema (course.py)."""
+def course_of(name, buoys, origin=None, boat_start=None, approach=None):
+    """[{x, y, state}] -> a course dict in courses/*.yaml's schema (course.py). The sim's panel
+    leaves origin/boat_start/approach alone (the SITL home, the origin); the lake panel gives the
+    lake datum, where the boat was, and the approach point the operator clicked."""
     c = dict(COURSE_HEAD, name=name)
+    if origin is not None:
+        c["origin"] = {"lat": float(origin["lat"]), "lon": float(origin["lon"])}
+    if boat_start is not None:
+        c["boat_start"] = dict(boat_start)
+    if approach is not None:
+        c["approach"] = {"x": round(approach["x"], 2), "y": round(approach["y"], 2)}
     c["elements"] = [{"type": "robobuoy", "name": "b%d" % i, "x": round(b["x"], 2),
                       "y": round(b["y"], 2), "beacon": b["state"],
                       "side_beacon": False, "up_beacon": False}
@@ -272,13 +281,16 @@ def course_of(name, buoys):
 def course_yaml(c):
     """The course as YAML text. Beacons are always quoted: bare `off` is a
     boolean to YAML 1.1 (task1_core.yaml quotes it for the same reason)."""
-    o = c["origin"]
+    o, bs = c["origin"], c["boat_start"]
     out = ["# written by crusader_sim.task1_panel; list index == RXL buoy id",
            "name: %s" % c["name"],
            "origin: {lat: %.7f, lon: %.7f}" % (o["lat"], o["lon"]),
            "draft_m: %s" % c["draft_m"], "depth_m: %s" % c["depth_m"],
-           "boat_start: {x: 0.0, y: 0.0, yaw_deg: 0.0}", "tier: %s" % c["tier"], "",
-           "elements:"]
+           "boat_start: {x: %s, y: %s, yaw_deg: %s}" % (bs["x"], bs["y"], bs["yaw_deg"]),
+           "tier: %s" % c["tier"]]
+    if "approach" in c:
+        out.append("approach: {x: %s, y: %s}" % (c["approach"]["x"], c["approach"]["y"]))
+    out += ["", "elements:"]
     for e in c["elements"]:
         out.append('  - {type: robobuoy, name: %s, x: %.2f, y: %.2f, beacon: "%s", '
                    "side_beacon: false, up_beacon: false}"
@@ -309,8 +321,9 @@ def layout_of(course):
     return out, "; ".join(notes)
 
 
-def check_layout(buoys):
-    """(errors, warnings). Errors block LAUNCH; warnings do not."""
+def check_layout(buoys, start_clear_m=START_CLEAR_M):
+    """(errors, warnings). Errors block LAUNCH; warnings do not. start_clear_m: how far a buoy
+    must be from (0, 0), where the sim's boat starts; the lake passes 0 (its boat is wherever it is)."""
     errors, warnings = [], []
     states = [b["state"] for b in buoys]
     for s, what in ((ENTRY, "ENTRY (flashing blue)"), (EXIT, "EXIT (steady blue)")):
@@ -320,8 +333,8 @@ def check_layout(buoys):
         warnings.append("%d buoys; the handbook course has 10 (3.3.2:9)" % len(buoys))
     for i, a in enumerate(buoys):
         d0 = math.hypot(a["x"], a["y"])
-        if d0 < START_CLEAR_M:
-            errors.append("b%d is %.1f m from the boat's start (min %.0f)" % (i, d0, START_CLEAR_M))
+        if d0 < start_clear_m:
+            errors.append("b%d is %.1f m from the boat's start (min %.0f)" % (i, d0, start_clear_m))
         for j in range(i + 1, len(buoys)):
             d = math.hypot(a["x"] - buoys[j]["x"], a["y"] - buoys[j]["y"])
             if d < MIN_SPACING_M:
@@ -545,14 +558,19 @@ class Panel:
     panel (on_ask) and the two would wait on each other.
     """
 
+    ACTIONS = None          # None: every act_* method is a POST route; a subclass lists its own
+    PAGE = "task1_panel.html"
+
     def __init__(self, a):
         self.a = a
+        # the frame the fields are placed in: the sim's course origin, or the lake's datum (main() sets a.origin)
+        self.origin = dict(getattr(a, "origin", None) or COURSE_HEAD["origin"])
         self.lock = threading.RLock()
         self.tx_lock = threading.Lock()
         self.quit = threading.Event()
         self.logs = {k: LogBuffer() for k in ("sim", "radio", "mission", "judge")}
         self.errors = {}
-        self.dir = os.path.join(generated_dir(), "panel")
+        self.dir = self._panel_dir()
         self.layout, self.layout_rev, self.layout_note = [], 0, ""
         self.sim, self.sim_step, self.sim_detail, self.sim_up_t = "down", "", "", None
         self.launched = None
@@ -571,6 +589,19 @@ class Panel:
         self.mission = self._fresh_mission()
         self.gz = None
         self._odom_on = False
+        self.feed = FeedReceiver(a.feed_port)      # started in main(), like the sensors
+        self.sensors = None
+        self._init_gz()
+        self._init_sensors()
+        self._init_layout()
+
+    def _panel_dir(self):
+        """Where this panel keeps panel.yaml and its saved layouts."""
+        return os.path.join(generated_dir(), "panel")
+
+    def _init_gz(self):
+        """gz-transport, for the boat's TRUE pose. The lake panel has none (the boat's pose
+        comes from the feed) and skips it."""
         try:
             os.environ.setdefault("GZ_PARTITION", "crusader_sim")    # = gz_sim_up.sh:45
             from gz.transport13 import Node
@@ -578,8 +609,8 @@ class Panel:
             self.gz, self._Odometry = Node(), Odometry
         except Exception as e:                 # noqa: BLE001 -- the page shows it
             self.errors["gz"] = "gz-transport unavailable (%s): no boat pose" % e
-        self.feed = FeedReceiver(a.feed_port)      # started in main(), like the sensors
-        self.sensors = None
+
+    def _init_sensors(self):
         try:
             # its own import: numpy/cv2 are the only non-stdlib needs, and a host
             # without them still gets a working panel, just no pictures
@@ -587,6 +618,8 @@ class Panel:
             self.sensors = SensorHub(self.gz)
         except Exception as e:                 # noqa: BLE001 -- the page shows it
             self.errors["sensors"] = "sensor views unavailable: %s" % e
+
+    def _init_layout(self):
         panel_yaml = os.path.join(self.dir, "panel.yaml")
         if os.path.isfile(panel_yaml):               # the last launched layout wins ...
             self._set_layout(*layout_of(C.load(panel_yaml)))
@@ -851,7 +884,17 @@ class Panel:
                     dx, dy = clamp_offset(dx + self.jrng.gauss(0.0, sj), dy + self.jrng.gauss(0.0, sj))
                 pos.append((e["x"] + dx, e["y"] + dy))
         return plan_from_course(course_of(PANEL_COURSE, [
-            {"x": x, "y": y, "state": s} for (x, y), s in zip(pos, states)]))
+            {"x": x, "y": y, "state": s} for (x, y), s in zip(pos, states)], origin=self.origin))
+
+    def _operator_present(self):
+        """May the panel speak for the UAV right now (resends, auto-ACK)? The sim's always may;
+        the lake panel's dead-man says no once the browser has stopped polling."""
+        return True
+
+    def _gates(self):
+        """The gate count the checkpoint labels use: the SENT field's (one per red/green pair).
+        The lake panel prefers the boat's own count from its passage report."""
+        return field_gates(self.sent)
 
     def _resend(self, link):
         """The periodic retransmission. Call with tx_lock held. At jitter 0 it is
@@ -913,7 +956,7 @@ class Panel:
                 for r in self._open():
                     if r["seq"] < seq:
                         self._close_silent(r)
-                label, what = checkpoint_text(seq, field_gates(self.sent))
+                label, what = checkpoint_text(seq, self._gates())
                 rec = {"seq": seq, "label": label, "what": what, "asked": now,
                        "last_ask": now, "asks": 1, "answered": None, "reply": None,
                        "changed": False, "auto_tried": False, "late_asks": 0}
@@ -1121,21 +1164,21 @@ class Panel:
             link.poll()
             with self.lock:
                 due = self.last_tx is None or time.time() - self.last_tx >= RESEND_S
-            if due and self._resend(link):
+            if due and self._operator_present() and self._resend(link):
                 with self.lock:
                     self.resends += 1
                     self.last_tx = time.time()
         with self.lock:
-            rec = next((r for r in self._open() if not r["auto_tried"]), None) if self.auto_ack else None
+            rec = (next((r for r in self._open() if not r["auto_tried"]), None)
+                   if self.auto_ack and self._operator_present() else None)
             if rec is not None:
                 rec["auto_tried"] = True
         if rec is not None:
             self._answer("auto-ack", staged=False)
 
     # ---------------------------------------------------------- state
-    def state(self, q):
-        link = self.link
-        pending = link.status()["pending"] if link is not None else None
+    def _logs_since(self, q):
+        """The four log buffers from the page's `log=sim:N,radio:N,...` cursor onward."""
         logs = {}
         want = dict(p.split(":", 1) for p in (q.get("log", [""])[0]).split(",") if ":" in p)
         for k, buf in self.logs.items():
@@ -1143,37 +1186,68 @@ class Panel:
                 logs[k] = buf.since(int(want.get(k, 0)))
             except ValueError:
                 logs[k] = buf.since(0)
+        return logs
+
+    def _trail_since(self, q):
+        """The boat's trail from the page's `trail=GEN:N` cursor onward. Call with self.lock held."""
+        tg, tn = (q.get("trail", ["-1:0"])[0] + ":0").split(":")[:2]
+        start = int(tn) if tg == str(self.trail_gen) and tn.isdigit() else 0
+        return {"gen": self.trail_gen, "from": start, "pts": self.trail[start:]}
+
+    def _field_state(self, field_live):
+        """The blocks the sim page and the lake page draw the same way: `run` (the field as sent
+        and staged, with the UAV's offsets), `uav` (the position-error settings) and the
+        checkpoints. field_live: a field is on the air. Call with self.lock held."""
+        now = time.time()
+        run = None
+        if (field_live and self.launched is not None
+                and len(self.offsets) == len(self.launched["elements"])):
+            run = {"buoys": [{"x": e["x"], "y": e["y"], "ux": u[0], "uy": u[1], "sent": s,
+                              "staged": t}
+                             for e, u, s, t in zip(self.launched["elements"], self._reported(),
+                                                   self.sent, self.staged)],
+                   "unsent": sum(1 for s, t in zip(self.sent, self.staged) if s != t),
+                   "problem": field_problem(self.staged)}
+        # the offsets the run is using, or — before LAUNCH — the ones this
+        # seed WILL give the layout (a pure function of seed/R/index)
+        offs = self.offsets if run else uav_offsets(
+            self.uav["seed"], self.uav["radius_m"], len(self.layout))
+        uav = dict(self.uav, offsets=[[round(dx, 3), round(dy, 3)] for dx, dy in offs],
+                   locked=self.mission["running"] or self.sim in ("launching", "stopping"),
+                   live=run is not None)
+        ask = self._open()
+        ask = ask[-1] if ask else None
+        # copies: the JSON is built after this lock is released, while the
+        # poll thread may still be counting re-asks into these records
+        return {"run": run, "uav": uav,
+                "checkpoint": None if ask is None else dict(ask, waiting_s=now - ask["asked"]),
+                "checkpoints": [dict(r) for r in self.checkpoints]}
+
+    def _link_pending(self):
+        """(radio up?, the checkpoint the boat is waiting on). Read BEFORE self.lock is taken:
+        the link's own lock must never be waited on under it (class docstring)."""
+        link = self.link
+        return link is not None, link.status()["pending"] if link is not None else None
+
+    def _radio_state(self, up, pending):
+        """The `radio` block. Call with self.lock held."""
+        return {"up": up, "endpoint": self.a.rxl_endpoint,
+                "sent": self.tx_count, "resends": self.resends,
+                "last_tx_age": time.time() - self.last_tx if self.last_tx else None,
+                "auto_ack": self.auto_ack, "pending": pending}
+
+    def state(self, q):
+        radio_up, pending = self._link_pending()
+        logs = self._logs_since(q)
         now = time.time()
         feed = self.feed.view()                  # its own leaf lock, never under self.lock
         with self.lock:
             errs, warns = check_layout(self.layout)
-            tg, tn = (q.get("trail", ["-1:0"])[0] + ":0").split(":")[:2]
-            start = int(tn) if tg == str(self.trail_gen) and tn.isdigit() else 0
             odom_age = now - self.odom_t if self.odom_t else None
             alive = None
             if self.sim == "up":
                 ref = self.odom_t or self.sim_up_t or now
                 alive = now - ref < ODOM_DEAD_S
-            run = None
-            if (self.launched is not None and self.sim in ("up", "stopping")
-                    and len(self.offsets) == len(self.launched["elements"])):
-                run = {"buoys": [{"x": e["x"], "y": e["y"], "ux": u[0], "uy": u[1], "sent": s,
-                                  "staged": t}
-                                 for e, u, s, t in zip(self.launched["elements"], self._reported(),
-                                                       self.sent, self.staged)],
-                       "unsent": sum(1 for s, t in zip(self.sent, self.staged) if s != t),
-                       "problem": field_problem(self.staged)}
-            # the offsets the run is using, or — before LAUNCH — the ones this
-            # seed WILL give the layout (a pure function of seed/R/index)
-            offs = self.offsets if run else uav_offsets(
-                self.uav["seed"], self.uav["radius_m"], len(self.layout))
-            uav = dict(self.uav, offsets=[[round(dx, 3), round(dy, 3)] for dx, dy in offs],
-                       locked=self.mission["running"] or self.sim in ("launching", "stopping"),
-                       live=run is not None)
-            ask = self._open()
-            ask = ask[-1] if ask else None
-            # copies: the JSON is built after this lock is released, while the
-            # poll thread may still be counting re-asks into these records
             return {
                 "dry_run": self.a.dry_run,
                 "errors": dict(self.errors, **({"feed": feed["error"]} if feed["error"] else {})),
@@ -1183,13 +1257,7 @@ class Panel:
                            "errors": errs, "warnings": warns},
                 "templates": _names(courses_dir()), "default_template": DEFAULT_TEMPLATE,
                 "layouts": _names(os.path.join(self.dir, "layouts")),
-                "run": run, "uav": uav,
-                "radio": {"up": link is not None, "endpoint": self.a.rxl_endpoint,
-                          "sent": self.tx_count, "resends": self.resends,
-                          "last_tx_age": now - self.last_tx if self.last_tx else None,
-                          "auto_ack": self.auto_ack, "pending": pending},
-                "checkpoint": None if ask is None else dict(ask, waiting_s=now - ask["asked"]),
-                "checkpoints": [dict(r) for r in self.checkpoints],
+                "radio": self._radio_state(radio_up, pending),
                 "mission": dict(self.mission), "verdict": self.verdict,
                 # the referee's live view, so the page (and a test) can see a
                 # colour change re-pair the gates the moment it goes on the air
@@ -1198,9 +1266,14 @@ class Panel:
                 "feed": feed,
                 "boat": None if self.boat is None else {
                     "x": self.boat[0], "y": self.boat[1], "yaw": self.boat[2], "age": odom_age},
-                "trail": {"gen": self.trail_gen, "from": start, "pts": self.trail[start:]},
+                "trail": self._trail_since(q),
                 "logs": logs,
+                **self._field_state(self.launched is not None and self.sim in ("up", "stopping")),
             }
+
+    def download(self, name):
+        """(bytes, filename) for GET /api/course/<name>.yaml, or None. The sim's panel has none."""
+        return None
 
     def sensor_frame(self, name):
         """(jpeg or None, age_s, why-no-frame) for GET /api/sensor/<name>.jpg;
@@ -1238,8 +1311,11 @@ def _header_safe(s):
 # ------------------------------------------------------------------ http
 
 def make_handler(panel):
-    page = os.path.join(os.path.dirname(os.path.abspath(__file__)), "task1_panel.html")
-    actions = {"/api/" + n[4:]: getattr(panel, n) for n in dir(panel) if n.startswith("act_")}
+    page = os.path.join(os.path.dirname(os.path.abspath(__file__)), panel.PAGE)
+    # every act_* method is a POST route, unless the panel lists its own (the lake panel does:
+    # it inherits the sim's launch/attach/stop acts and none of them may be reachable there)
+    names = panel.ACTIONS if panel.ACTIONS is not None else [n[4:] for n in dir(panel) if n.startswith("act_")]
+    actions = {"/api/" + n: getattr(panel, "act_" + n) for n in names}
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -1251,6 +1327,14 @@ def make_handler(panel):
             if u.path == "/api/state":
                 return self._send(json.dumps(panel.state(parse_qs(u.query))).encode(),
                                   "application/json")
+            m = DOWNLOAD_RE.match(u.path)
+            if m:
+                got = panel.download(m.group(1))
+                if got is None:
+                    return self.send_error(404)
+                data, name = got
+                return self._send(data, "text/yaml; charset=utf-8",
+                                  {"Content-Disposition": 'attachment; filename="%s"' % name})
             m = SENSOR_RE.match(u.path)
             if m:
                 try:
@@ -1313,12 +1397,27 @@ def main():
                     help="udp port panel_feed (in crsd-sim) sends the boat's map layers to; "
                          "a test panel needs its own, as with --port")
     ap.add_argument("--container", default=os.environ.get("RX26_CONTAINER", "crsd-sim"))
+    ap.add_argument("--lake", action="store_true",
+                    help="LAKE MODE: the REAL boat, you play the UAV. Runs inside `asv` on the Jetson "
+                         "(lake_panel.py, LAKE_MODE.md); no simulator, no gazebo")
+    ap.add_argument("--datum", default=os.environ.get("LAKE_DATUM", ""),
+                    help="lake mode: the map origin 'lat,lon' = the nav datum = panel_feed's origin "
+                         "(default: $LAKE_DATUM)")
+    ap.add_argument("--bind", default="0.0.0.0", help="the HTTP server's address")
     ap.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--dry-run-mission-s", type=float, default=20.0, help=argparse.SUPPRESS)
     a = ap.parse_args()
 
-    panel = Panel(a)
-    srv = ThreadingHTTPServer(("0.0.0.0", a.port), make_handler(panel))
+    if a.lake:
+        from crusader_sim.lake_panel import LakePanel, parse_datum
+        try:
+            a.origin = parse_datum(a.datum)
+        except ValueError as e:
+            ap.error("--lake needs --datum lat,lon (or $LAKE_DATUM): %s" % e)
+        panel = LakePanel(a)
+    else:
+        panel = Panel(a)
+    srv = ThreadingHTTPServer((a.bind, a.port), make_handler(panel))
     srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     threading.Thread(target=panel.loop, daemon=True).start()
@@ -1327,11 +1426,13 @@ def main():
     panel.feed.start()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: panel.quit.set())
-    print("task1_panel on http://localhost:%d%s" % (a.port, " (DRY RUN)" if a.dry_run else ""),
-          flush=True)
+    print("task1_panel%s on http://%s:%d%s" % (
+        " LAKE MODE" if a.lake else "", "<this host>" if a.lake else "localhost", a.port,
+        " (DRY RUN)" if a.dry_run else ""), flush=True)
     while not panel.quit.wait(0.5):
         pass
-    print("task1_panel: stopping (the sim keeps running)", flush=True)
+    print("task1_panel: stopping (%s)" % ("the radio goes silent; a running goal is cancelled" if a.lake
+                                          else "the sim keeps running"), flush=True)
     panel.shutdown()
     srv.shutdown()
 

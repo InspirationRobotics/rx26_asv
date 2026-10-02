@@ -17,6 +17,10 @@ Does what an operator does before a Task 1 attempt, in order, and then watches:
      short of the ENTRY buoy on the line from the start — the operator's rough
      "the course is over there".
 Then prints the tree's feedback (phase, progress, buoys) until the result.
+
+Ctrl-C / SIGTERM CANCELS the goal (goal_client.run_goal) and waits for the tree to finish
+it: the action server keeps ticking when its client dies, so before 2026-10-02 stopping
+this script left the tree running. The task 1 panel's "abort" relies on it.
 """
 import argparse
 import math
@@ -31,10 +35,9 @@ from nav_msgs.msg import Odometry
 
 from crusader_msgs.action import SafePassage
 from crusader_sim import course as C
+from crusader_sim.goal_client import TIERS, install_stop, run_goal
 from crusader_sim.operator_tools import arm, set_mode
 from crusader_sim.task1_judge import Task1Judge, format_verdict
-
-TIERS = {"core": 0, "advanced": 1, "disruptive": 2}
 
 
 def approach_point(course):
@@ -109,30 +112,11 @@ def main():
                             orbit_radius_m=0.0, timeout_s=float(a.timeout_s))
     print(f"[operator] goal: tier {tier}, approach {lat:.7f} {lon:.7f}", flush=True)
 
-    last = [None]
-
-    def fb(msg):
-        # one line per phase change, per 5 % of progress, or per new warning —
-        # the tree sends feedback every tick and 0.1 % steps drown the phases
-        f = msg.feedback
-        key = (f.phase, int(f.progress * 20), f.buoys_resolved, f.plan_version, f.warning)
-        if key != last[0]:
-            print(f"[tree] {f.phase:12s} {f.progress * 100:5.1f}%  buoys {f.buoys_resolved}/"
-                  f"{f.buoys_known}  plan v{f.plan_version}  {f.warning}", flush=True)
-            last[0] = key
-
-    fut = op.client.send_goal_async(goal, feedback_callback=fb)
-    rclpy.spin_until_future_complete(op, fut)
-    handle = fut.result()
-    if not handle.accepted:
-        print("[operator] goal REJECTED")
+    stop = install_stop()                   # after rclpy.init(): see goal_client.install_stop
+    run = run_goal(op.client, goal, lambda t: rclpy.spin_once(op, timeout_sec=t), stop)
+    if run.status != "result":
         return 1
-    res_fut = handle.get_result_async()
-    rclpy.spin_until_future_complete(op, res_fut)
-    r = res_fut.result().result
-    print(f"[result] outcome {r.outcome}  {r.detail}\n"
-          f"         classified {r.buoys_classified}, passed correctly "
-          f"{r.buoys_passed_correctly}, {r.elapsed_s:.0f} s", flush=True)
+    r = run.result
     passed = True
     if judge is not None:
         v = judge.verdict()
