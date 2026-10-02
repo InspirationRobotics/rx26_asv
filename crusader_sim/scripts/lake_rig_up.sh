@@ -166,7 +166,11 @@ up() {   # up <name> <logfile> <command...>: its own process group; its pid (= p
   echo "$name $(cat "$pf" 2>/dev/null)" >> "$PIDS"
   printf '  %-16s -> %s\n' "$name" "$log"
 }
-running() { pgrep -f -- "$1" >/dev/null; }
+# a live process matching a pattern. pgrep -f falls back to the process NAME for a zombie (empty cmdline), and the
+# container's init does not reap: a dead nav_frames_node read as "already running" on 2026-10-02. Zombies are skipped.
+running() { local p; for p in $(pgrep -f -- "$1"); do
+              if [ -s /proc/$p/cmdline ]; then echo "    (pid $p: $(tr '\0' ' ' < /proc/$p/cmdline | cut -c1-90))" >&2; return 0; fi
+            done; return 1; }
 
 echo "=== lake rig: datum $LAKE_DATUM  tree $(basename "$TREE")  nav_mode $NAV_MODE  publish_setpoints $PUB ==="
 # rxl_link_node: loopback, by command-line override (the running one was stopped above, once)

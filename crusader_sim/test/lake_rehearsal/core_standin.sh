@@ -12,9 +12,15 @@ CFG=$WS/install/crusader_bringup/share/crusader_bringup/config/crusader_params.y
 SIMSHARE=$WS/install/crusader_sim/share/crusader_sim
 export GZ_PARTITION=crusader_sim
 export RX26_SRC=$SRC
-# the sim rig's nodes down first (gz and SITL stay up)
+# the sim rig's nodes down first (gz and SITL stay up). gz_rig_down.sh is not enough on its own (2026-10-02: the sim's
+# nav stack, bt_runner and a second telemetry_bridge were still up 8 s later), so whatever is left is stopped by name
 bash "$SRC/crusader_sim/scripts/gz_rig_down.sh" >/dev/null 2>&1
-sleep 1
+LEFT='ros2 launch crusader_nav|nav_frames_node|planner_server|nav_lifecycle|costmap_probe|bt_runner_node|target_tracker|rxl_link_node|lib/crusader_sim/panel_feed|tools/bt_view.py|sim_uav|telemetry_bridge|ground_station|lidar_cluster_node|ros_gz_bridge|livox_shim|sim_camera'
+for sig in TERM KILL; do
+  for p in $(pgrep -f -- "$LEFT"); do kill -$sig $p 2>/dev/null; done
+  sleep 2
+done
+echo "  left after the stop (zombies excluded): $(for p in $(pgrep -f -- "$LEFT"); do [ -s /proc/$p/cmdline ] && echo $p; done | wc -l)"
 up() { local name=$1 log=$2; shift 2; nohup "$@" > "$log" 2>&1 &
        printf '  %-20s -> %s\n' "$name" "$log"; }
 up gz_bridge /tmp/gzb.log \

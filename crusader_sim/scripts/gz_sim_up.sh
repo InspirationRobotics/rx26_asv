@@ -218,9 +218,11 @@ else
   # every package a sim run exercises, every run: nodes run from install/, and a stale
   # crusader_bt silently ignores nav_mode and runs legacy legs (the review of
   # 2026-10-01). Unchanged packages cost seconds; a changed crusader_bt about 40 s.
+  # crusader_world_model/_bringup/_common are here since 2026-10-02: a stale target_tracker install crashed on the YAML's colour-vote
+  # keys ('no declared posture for params') and the sim ran with no camera tracks at all.
   # Only the packages the checkout has: --packages-select refuses an unknown name.
   docker exec "$CONTAINER" bash -lc \
-    "cd /root/robotx_ws && source install/setup.bash && P=''; for p in crusader_msgs crusader_bt crusader_perception crusader_sim crusader_nav crusader_nav_layers crusader_groundstation; do [ -d src/rx26_asv/\$p ] && P=\"\$P \$p\"; done; flock /root/robotx_ws/.colcon.lock colcon build --packages-select \$P 2>&1 | tail -2" \
+    "cd /root/robotx_ws && source install/setup.bash && P=''; for p in crusader_msgs crusader_common crusader_bringup crusader_world_model crusader_bt crusader_perception crusader_sim crusader_nav crusader_nav_layers crusader_groundstation; do [ -d src/rx26_asv/\$p ] && P=\"\$P \$p\"; done; flock /root/robotx_ws/.colcon.lock colcon build --packages-select \$P 2>&1 | tail -2" \
     | sed 's/^/  /'
 fi
 # docker exec does not inherit this shell's environment: TREE, NAV_MODE and SIM_* cross explicitly
