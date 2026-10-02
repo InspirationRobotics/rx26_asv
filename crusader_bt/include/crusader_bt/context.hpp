@@ -426,9 +426,23 @@ inline bool hazardsPublishable(const Context & c)
 ///
 /// THE ONE FUNCTION both the hazard publisher and the leaves call, so the costmap
 /// and the BT's own local checks can never disagree about the known field.
+///
+/// SIDE FENCES join the set ONLY in nav_mode on (path::sideFences). They exist for the planner,
+/// which is the only thing that can steer round them. In off a known hazard on a straight leg
+/// HOLDS the boat, and in shadow the legacy legs ignore the plan, so a fence there would stop
+/// the boat at a wall nothing is going to go round. They come from the tree's own passage plan
+/// (ctx.passage, re-planned every tick of the transit and cleared with the mission), so a
+/// Task 1 field is the only thing that can produce one.
 inline std::vector<path::Hazard> knownHazards(const Context & c)
 {
-  return path::buildHazards(c.buoys, c.obstacles, c.dock, c.dock_min_obs, c.nav);
+  std::vector<path::Hazard> hz =
+    path::buildHazards(c.buoys, c.obstacles, c.dock, c.dock_min_obs, c.nav);
+  if (c.nav_mode == path::Mode::On && c.have_entry && c.have_exit) {
+    const std::vector<path::Hazard> fences =
+      path::sideFences(c.buoys, c.passage, c.entry, c.exitp, c.nav);
+    hz.insert(hz.end(), fences.begin(), fences.end());
+  }
+  return hz;
 }
 
 // ------------------------------------------------------------------ nav_mode

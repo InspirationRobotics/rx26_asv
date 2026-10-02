@@ -414,9 +414,13 @@ int main()
 
     // Driving the passage backwards is a different course, and the gate order
     // must reverse with it.
-    Passage rev = planPassage(field, exitp, entry);
+    // (Orientation filter off: driven backwards these reds are on the boat's LEFT, which the
+    // default 60 deg refuses as gates -- see the orientation section below.)
+    Passage rev = planPassage(field, exitp, entry, 20.0, 2.0, 180.0);
     chk("reversing entry and exit reverses the order", rev.gates.size() == 3 &&
       rev.gates[0].red_id == 5 && rev.gates[2].red_id == 1);
+    chk("... and by default the backwards course has no gates at all",
+      planPassage(field, exitp, entry).gates.empty());
   }
 
   // Pairing must be GLOBAL, not nearest-from-each-red. Both reds here are
@@ -426,8 +430,8 @@ int main()
     const std::vector<Buoy> greedy{
       {1, {0, 0}, Beacon::FlashingRed, false},
       {2, {0, 30}, Beacon::FlashingRed, false},
-      {3, {8, 4}, Beacon::FlashingGreen, false},     // nearest to BOTH reds
-      {4, {8, 30}, Beacon::FlashingGreen, false}};
+      {3, {-8, 4}, Beacon::FlashingGreen, false},    // nearest to BOTH reds
+      {4, {-8, 30}, Beacon::FlashingGreen, false}};  // (greens WEST: reds to starboard going north)
     Passage pa = planPassage(greedy, {0, -10}, {0, 50});
     chk("the closest pair claims each other first", pa.gates.size() == 2 &&
       pa.gates[0].red_id == 1 && pa.gates[0].green_id == 3);
@@ -470,6 +474,62 @@ int main()
     chk("... and the orphan is named", pa.unpaired.size() == 1 && pa.unpaired[0] == 3);
   }
 
+  // ------------------------------------------- planPassage: pair orientation
+  //
+  // A pair is a gate only if it can be crossed FORWARDS with the red to starboard:
+  // d = rot90ccw(unit(red - green)) within max_cross_deg of the entry -> exit axis.
+  // Northbound axis here, so starboard is EAST and a gate has its red east of its green.
+  {
+    const Vec2 entry{0, 0}, exitp{0, 80};
+    const std::vector<Buoy> good{
+      {1, {5, 20}, Beacon::FlashingRed, false},
+      {2, {-5, 20}, Beacon::FlashingGreen, false}};
+    chk("red east of green, going north: a gate", planPassage(good, entry, exitp).gates.size() == 1);
+    chk_near("crossingDir of that pair is north (the axis)", dot(crossingDir({10, 0}), {0, 1}),
+      1.0, 1e-12);
+
+    const std::vector<Buoy> flipped{
+      {1, {-5, 20}, Beacon::FlashingRed, false},
+      {2, {5, 20}, Beacon::FlashingGreen, false}};
+    Passage pf = planPassage(flipped, entry, exitp);
+    chk("red WEST of green, going north: not a gate", pf.valid && pf.gates.empty());
+    chk("... both buoys are unpaired (singles)", pf.unpaired.size() == 2);
+    chk("... but a boat going the other way can drive it",
+      planPassage(flipped, exitp, entry).gates.size() == 1);
+
+    // A rejected pair does not CLAIM its buoys: the red's nearest green is on the wrong
+    // side of it (8.1 m, red to its left), its second nearest (10 m) is the proper partner.
+    const std::vector<Buoy> steal{
+      {1, {5, 20}, Beacon::FlashingRed, false},
+      {2, {-5, 20}, Beacon::FlashingGreen, false},
+      {3, {13, 21}, Beacon::FlashingGreen, false}};
+    Passage ps = planPassage(steal, entry, exitp);
+    chk("a mis-oriented near green does not steal the red", ps.gates.size() == 1 &&
+      ps.gates[0].red_id == 1 && ps.gates[0].green_id == 2);
+    chk("... and it is the one left unpaired", ps.unpaired.size() == 1 && ps.unpaired[0] == 3);
+
+    // The threshold. Rotate a gate about its middle until its crossing direction is `a` deg
+    // off the axis: it is a gate up to max_cross_deg and a pair of singles beyond it.
+    const auto rotated = [](double a_deg) {
+        const double a = a_deg * kDeg;
+        // crossing direction a deg anticlockwise of north: d = (-sin a, cos a); the red is on
+        // d's right, i.e. at mid + 5 * (cos a, sin a), the green opposite it
+        const Vec2 r{5 * std::cos(a), 20 + 5 * std::sin(a)}, g{-5 * std::cos(a), 20 - 5 * std::sin(a)};
+        return std::vector<Buoy>{{1, r, Beacon::FlashingRed, false},
+          {2, g, Beacon::FlashingGreen, false}};
+      };
+    chk("a gate 59 deg off the axis is a gate", planPassage(rotated(59), entry, exitp).gates.size() == 1);
+    chk("a gate 61 deg off the axis is not", planPassage(rotated(61), entry, exitp).gates.empty());
+    chk("... the same 61 deg is a gate at max_cross_deg 62",
+      planPassage(rotated(61), entry, exitp, 20.0, 2.0, 62.0).gates.size() == 1);
+    chk("... and clockwise of the axis too (-61 deg)",
+      planPassage(rotated(-61), entry, exitp).gates.empty());
+    chk("max_cross_deg 180 turns the filter off",
+      planPassage(rotated(180), entry, exitp, 20.0, 2.0, 180.0).gates.size() == 1);
+    chk("the default is 60", planPassage(rotated(60 - 1e-6), entry, exitp).gates.size() == 1 &&
+      planPassage(rotated(60 + 1e-3), entry, exitp).gates.empty());
+  }
+
   // ------------------------------------------------ gateCleared / nextGate
   //
   // Cleared gates are remembered BY BUOY IDS. A confirmation can bring new
@@ -503,7 +563,9 @@ int main()
     std::vector<Buoy> recoloured = field;
     recoloured[0].state = Beacon::FlashingGreen;
     recoloured[1].state = Beacon::FlashingRed;
-    Passage after = planPassage(recoloured, {0, 0}, {0, 60});
+    // Angle 180 = no orientation filter: the swap makes red the LEFT buoy of this pair, which
+    // the default 60 deg would (rightly) refuse as a gate. This case is about the ids.
+    Passage after = planPassage(recoloured, {0, 0}, {0, 60}, 20.0, 2.0, 180.0);
     chk("a recolour keeps the same two buoys as a gate", after.gates.size() == 2 &&
       after.gates[0].red_id == 2 && after.gates[0].green_id == 1);
     // Only the NEAR gate cleared, so there is still one to find. Clearing both

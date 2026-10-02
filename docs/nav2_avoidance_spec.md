@@ -630,6 +630,7 @@ struct NavParams {                         // defaults == crusader_params.yaml b
   double clear_after_s = 5.0, unblock_reset_s = 3.0, escape_margin_m = 0.5, goal_margin_m = 0.3;
   double local_check_tol_m = 0.1, orbit_max_push_m = 3.0, orbit_clear_m = 1.4;
   double dock_finger_len_m = 2.0, dock_finger_w_m = 0.5, dock_slip_w_m = 1.5, dock_deck_depth_m = 1.0;
+  double fence_len_m = 10.0, fence_spacing_m = 0.5, fence_radius_m = 0.3, fence_clear_m = 8.0;
 };
 /// Signed distance from p to the hazard's LETHAL boundary (surface + keepout); < 0 inside.
 double clearance(const Hazard & h, Vec2 p);
@@ -1132,6 +1133,10 @@ Everything here is [RO]: the runner reads it at startup.
 | `nav_dock_finger_w_m` | double | 0.5 | — |
 | `nav_dock_slip_w_m` | double | 1.5 | — |
 | `nav_dock_deck_depth_m` | double | 1.0 | — |
+| `nav_fence_len_m` | double | 10.0 | side fences (Task 1, nav_mode on only); 0 = none |
+| `nav_fence_spacing_m` | double | 0.5 | < 2 x `nav_fence_radius_m`, so the row is a wall |
+| `nav_fence_radius_m` | double | 0.3 | — |
+| `nav_fence_clear_m` | double | 8.0 | ≥ orbit radius + `nav_orbit_clear_m` + radius (6 + 1.4 + 0.3) |
 
 ### 5.9 Unit tests, all off-ROS
 

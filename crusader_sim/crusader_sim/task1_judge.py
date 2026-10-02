@@ -16,10 +16,19 @@ Rules (handbook 3.3.2:19-33):
     flashing RED   kept to STARBOARD      flashing GREEN   kept to PORT
     ENTRY (flashing BLUE) circled CLOCKWISE,  EXIT (steady BLUE) COUNTER-clockwise
     no contact with any buoy
-Gates are each red paired with its nearest green (<= 15 m). A gate is judged when
-the boat's path crosses the segment between them; "correct" = red on the
-starboard side at the crossing. A circle is >= 330 deg of unwrapped bearing
-swept around the buoy while within circle_radius_m of it.
+EVERY red and green buoy is scored on its own, paired or not (handbook 3.3.2 defines no
+gates): the boat PASSES a buoy at the moment it goes from ahead of the track to behind
+it (the track abeam of the buoy, travel direction taken over the last >= 0.3 m), and
+red must then be on the boat's starboard side, green on its port. A buoy the boat
+passes more than once (an orbit, a loop) is judged on its CLOSEST pass; a buoy it never
+passes is "not passed" and fails. This is the verdict: `pass` needs every red and green
+correct, no contact, ENTRY circled clockwise and EXIT counter-clockwise.
+Gates are kept as an informational extra (each red paired with its nearest green,
+<= 15 m, judged when the boat's path crosses the segment between them; "correct" =
+red on the starboard side at the crossing) and are NOT part of `pass`: a pair the
+boat has to take apart (a red on the left of its green) is never crossed.
+A circle is >= 330 deg of unwrapped bearing swept around the buoy while within
+circle_radius_m of it.
 
 Clearance (docs/nav2_avoidance_spec.md section 7) is reported, never part of
 `pass`: the referee grades the task, clearance is our engineering metric. Per
@@ -31,6 +40,7 @@ samples inside a gate's corridor for that gate's own two buoys, because crossing
 a gate is meant to pass close to them. `--selftest` checks the arithmetic.
 """
 import argparse
+import collections
 import json
 import math
 import threading
@@ -50,6 +60,17 @@ CONTACT_SLACK_M = 0.03
 CONTACT_M = HULL_HALF_B + BUOY_HALF_M + CONTACT_SLACK_M     # 0.55, the no-yaw circle
 CIRCLE_DEG = 330.0
 GATE_PAIR_M = 15.0
+# A buoy is passed when it goes from ahead of the boat to behind it. "Ahead" is judged against the
+# direction of travel taken over the last PASS_CHORD_M of track (a single 50 ms step is noise), and
+# the track history is thinned to one point per PASS_STEP_M so a hovering boat does not grow it.
+PASS_CHORD_M = 0.3
+PASS_STEP_M = 0.01
+# Every pass is scored, but only one within PASS_LOG_M is announced as it happens: an orbit
+# sweeps its direction of travel through the whole circle, so 40 m-away buoys flip "ahead" to
+# "behind" (and back) on the way round, and a live "WRONG SIDE" line for each would be a false
+# alarm that the buoy's real, closer pass overrides a minute later.
+PASS_LOG_M = 12.0
+SIDE_CONSTRAINED = ("flash_red", "flash_green")
 # clearance: the planner's 0.8 m contract less 0.1 m for quantisation (spec 7), and
 # the half-width of the gate corridor whose samples are left out of the non-gate figure
 CLEARANCE_OK_M = 0.70
@@ -163,6 +184,17 @@ def _segments_intersect(p1, p2, q1, q2):
     return (d1 * d2 < 0) and (d3 * d4 < 0)
 
 
+_COLOUR_WORD = {"flash_red": "red", "flash_green": "green"}
+
+
+def _describe_pass(rec):
+    """One buoy's line in the verdict. rec is _track_passes's record, or None (never passed)."""
+    if rec is None:
+        return "not passed"
+    return (f"{'correct' if rec['ok'] else 'WRONG SIDE'} ({_COLOUR_WORD[rec['colour']]} kept to "
+            f"{rec['side']}, passed at {rec['range']:.1f} m)")
+
+
 def _touching(x, y, yaw, bx, by):
     """Is the buoy at (bx, by) touching a hull centred at (x, y)? With yaw, the
     buoy's centre within BUOY_HALF_M + slack of the hull rectangle; without, the
@@ -186,6 +218,11 @@ class Task1Judge:
         self.contacts = set()
         self.prev = None
         self.events = []
+        # per-buoy side scoring: name -> the closest pass so far (see _track_passes); the track
+        # history the travel direction comes from; name -> "ahead" figure at the last sample
+        self.passes = {}
+        self._hist = collections.deque(maxlen=400)
+        self._ahead = {}
         # clearance: every buoy is the BUOY_HALF_M box; platforms, docks and pads come
         # from the course's elements. Positions never move (set_states changes beacons)
         self.shapes = {b[0]: [(b[1], b[2], 0.0, BUOY_HALF_M, BUOY_HALF_M)] for b in self.buoys}
@@ -274,13 +311,70 @@ class Task1Judge:
             centre = min(_point_rect_dist(x, y, r) for r in rects)
             _keep_min(m, "centre", "t", centre, t)
             if name not in in_gate:
+                if centre < CLEARANCE_OK_M <= m["non_gate"]:
+                    # the first time an object is closer than the planner's contract: say where,
+                    # so a near miss in the verdict can be found in the run's log
+                    self._say(f"clearance: {name} {centre:.2f} m (boat at {x:.1f}, {y:.1f}, t {t:.1f} s)")
                 m["non_gate"] = min(m["non_gate"], centre)
             if hull is not None:
                 _keep_min(m, "hull", "t_hull", min(_rect_gap(hull, r) for r in rects), t)
 
+    def _travel_dir(self, p):
+        """The direction of travel at p: from the newest earlier track point at least
+        PASS_CHORD_M back (the oldest one, when the whole track is shorter than that). None
+        while the boat has not moved."""
+        for q in reversed(self._hist):
+            if math.hypot(p[0] - q[0], p[1] - q[1]) >= PASS_CHORD_M:
+                return (p[0] - q[0], p[1] - q[1])
+        if self._hist:
+            d = (p[0] - self._hist[0][0], p[1] - self._hist[0][1])
+            if math.hypot(*d) > 1e-6:
+                return d
+        return None
+
+    def _track_passes(self, p, t):
+        """Score every red and green buoy on its own. A pass is the moment a buoy goes from
+        ahead of the boat to behind it; the side it is on then, against the direction of
+        travel, is the result (red must be to starboard, green to port). Of several passes
+        (an orbit sweeps the whole field) the CLOSEST one is the buoy's pass: a buoy the track
+        goes past at 4 m and is circled at 12 m is judged at 4. Only buoys that are red or
+        green at the time are scored; a pass already earned survives a later recolour."""
+        d = self._travel_dir(p)
+        if d is None:
+            return
+        for name, bx, by, state, *_ in self.buoys:
+            if state not in SIDE_CONSTRAINED:
+                self._ahead.pop(name, None)
+                continue
+            rel = (bx - p[0], by - p[1])
+            ahead = d[0] * rel[0] + d[1] * rel[1]
+            before, self._ahead[name] = self._ahead.get(name), ahead
+            if before is None or not (before > 0.0 >= ahead):
+                continue
+            rng = math.hypot(*rel)
+            old = self.passes.get(name)
+            if old is not None and old["range"] <= rng:
+                continue
+            side = "starboard" if _cross(d[0], d[1], rel[0], rel[1]) < 0 else "port"
+            want = "starboard" if state == "flash_red" else "port"
+            self.passes[name] = {"colour": state, "side": side, "range": rng, "t": t,
+                                 "ok": side == want}
+            if rng <= PASS_LOG_M and (old is None or old["range"] > PASS_LOG_M
+                                      or old["ok"] != (side == want)):
+                self._say(f"passed {name} ({_COLOUR_WORD[state]}) with it to {side} at {rng:.1f} m: "
+                          f"{'correct' if side == want else 'WRONG SIDE'}")
+
+    def _buoy_results(self):
+        """[(name, record or None)] for every buoy that is scored: red or green now, or passed
+        while it was. A record is _track_passes's; None = never passed."""
+        names = {b[0]: b[3] in SIDE_CONSTRAINED for b in self.buoys}
+        return [(n, self.passes.get(n)) for n in names if names[n] or n in self.passes]
+
     def _update(self, x, y, yaw, t):
         self._track_clearance(x, y, yaw, t)
         p = (x, y)
+        if self.prev is None:
+            self._hist.append(p)                    # the track starts here
         if self.prev is not None and p != self.prev:
             for gate in self.gates:
                 if gate["result"] is None and _segments_intersect(self.prev, p, gate["r"], gate["g"]):
@@ -289,6 +383,9 @@ class Task1Judge:
                     side = _cross(d[0], d[1], gate["r"][0] - p[0], gate["r"][1] - p[1])
                     gate["result"] = "correct" if side < 0 else "WRONG WAY"
                     self._say(f"gate {gate['red']}/{gate['green']}: {gate['result']}")
+            self._track_passes(p, t)
+            if not self._hist or math.hypot(p[0] - self._hist[-1][0], p[1] - self._hist[-1][1]) >= PASS_STEP_M:
+                self._hist.append(p)
         for name, c in self.circles.items():
             dx, dy = x - c["xy"][0], y - c["xy"][1]
             if math.hypot(dx, dy) <= self.radius:
@@ -336,9 +433,14 @@ class Task1Judge:
             gates_ok = sum(1 for g in self.gates if g["result"] == "correct")
             circles = {n: (c["done"] or f"not circled ({math.degrees(c['swept']):.0f} deg)")
                        for n, c in self.circles.items()}
-            ok = (gates_ok == len(self.gates) and not self.contacts
+            results = self._buoy_results()
+            buoys_ok = sum(1 for _, r in results if r is not None and r["ok"])
+            ok = (buoys_ok == len(results) and not self.contacts
                   and all(c["done"] == "correct" for c in self.circles.values()))
-            return {"pass": ok, "gates_correct": gates_ok, "gates": len(self.gates),
+            return {"pass": ok, "buoys_correct": buoys_ok, "buoys": len(results),
+                    "buoys_detail": {n: _describe_pass(r) for n, r in results},
+                    # the gate pairing is informational (module docstring): it is not in `pass`
+                    "gates_correct": gates_ok, "gates": len(self.gates),
                     "gates_detail": {f"{g['red']}/{g['green']}": g["result"] or "not crossed"
                                      for g in self.gates},
                     "circles": circles, "contacts": sorted(self.contacts),
@@ -346,8 +448,14 @@ class Task1Judge:
 
 
 def format_verdict(v):
-    lines = [f"[judge] VERDICT: {'PASS' if v['pass'] else 'FAIL'} — gates "
-             f"{v['gates_correct']}/{v['gates']} correct, contacts {v['contacts'] or 'none'}"]
+    if "buoys" in v:                        # a verdict from before per-buoy scoring has no buoys
+        head = (f"buoys {v['buoys_correct']}/{v['buoys']} on their side (gates "
+                f"{v['gates_correct']}/{v['gates']} crossed)")
+    else:
+        head = f"gates {v['gates_correct']}/{v['gates']} correct"
+    lines = [f"[judge] VERDICT: {'PASS' if v['pass'] else 'FAIL'} — {head}, "
+             f"contacts {v['contacts'] or 'none'}"]
+    lines += [f"[judge]   buoy {k}: {r}" for k, r in v.get("buoys_detail", {}).items()]
     lines += [f"[judge]   gate {k}: {r}" for k, r in v["gates_detail"].items()]
     lines += [f"[judge]   circle {k}: {r}" for k, r in v["circles"].items()]
     mc = v.get("min_clearance")

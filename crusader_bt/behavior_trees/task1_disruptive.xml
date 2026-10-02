@@ -53,6 +53,19 @@
      SelectNextGate hands back the same pair. The ForceSuccess around the leg is
      what makes a failure a RESTART rather than the end of the transit.
 
+  6. RED AND GREEN BUOYS NEED NOT COME IN PAIRS. handbook 3.3.2 puts a side on every
+     one (red to starboard, green to port) and defines no gates. PlanPassage pairs a
+     red with a green only if the pair can be crossed FORWARDS red-to-starboard
+     (max_cross_angle, 60 deg off the entry -> exit axis); every other red or green
+     is a SINGLE and has no checkpoint of its own. With nav_mode on, bt_runner_node
+     holds each of them to its side with a SIDE FENCE: a wall of small hazard
+     circles running outward from the buoy (path::sideFences; nav_fence_* params),
+     so the planner's cheapest way past is the right one. The fences exist only in
+     the planned legs: the gate crossing below is still straight and still
+     exempts only its own two buoys, and its own walls are never on that line. The
+     checkpoints are unchanged: the entry orbit's, one per PAIRED gate, and the
+     last gate's ask is the exit confirmation (the report's n_gates counts them).
+
   THE GUARD BAND is re-ticked every tick and halts everything below it in one
   tick. PassagePlanFresh is in it twice over: it is the handbook's "the UAV must
   report before the USV may transit" gate, AND the dead-link stop.
@@ -80,6 +93,17 @@
       <Sequence name="passage">
 
         <SetTask token="TASK_SAFE_PASSAGE"/>
+
+        <!-- Plan the passage ONCE before the entry orbit, only so the side fences
+             (note 6) are in the costmap well before the first planned leg asks it
+             for a path: they are drawn from this plan, and a plan made before
+             they arrive can run straight through a wall and be thrown out a few
+             seconds later. The transit loop re-plans every tick as before. The
+             ForceSuccess is because a field with no entry yet is the orbit's
+             problem to report, not this leaf's. -->
+        <ForceSuccess>
+          <PlanPassage max_width="20.0" min_width="2.0" max_cross_angle="60.0"/>
+        </ForceSuccess>
 
         <!-- The entry buoy is known from the field the moment it arrives, so
              this drives straight at it instead of loitering to spot it. -->
@@ -112,7 +136,7 @@
               <!-- Re-planned at 10 Hz against the fused field, so a
                    confirmation carrying new colours or new positions is
                    picked up on the next tick with no special case. -->
-              <PlanPassage max_width="20.0" min_width="2.0"/>
+              <PlanPassage max_width="20.0" min_width="2.0" max_cross_angle="60.0"/>
 
               <!-- One gate. Anything that fails inside restarts the leg. -->
               <ForceSuccess>

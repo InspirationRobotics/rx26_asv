@@ -973,13 +973,17 @@ public:
   {
     return {
       BT::InputPort<double>("max_width", 20.0, "widest a real gate can be, m"),
-      BT::InputPort<double>("min_width", 2.0, "narrowest a real gate can be, m")};
+      BT::InputPort<double>("min_width", 2.0, "narrowest a real gate can be, m"),
+      BT::InputPort<double>("max_cross_angle", 60.0,
+        "a pair is a gate only if crossing it red-to-starboard is within this many degrees "
+        "of the entry -> exit axis; otherwise both buoys are singles")};
   }
 
   BT::NodeStatus tick() override
   {
     const double wmax = getInput<double>("max_width").value_or(20.0);
     const double wmin = getInput<double>("min_width").value_or(2.0);
+    const double wang = getInput<double>("max_cross_angle").value_or(60.0);
 
     std::lock_guard<std::mutex> lk(ctx_->mu);
     if (!ctx_->have_entry || !ctx_->have_exit) {
@@ -990,7 +994,7 @@ public:
       return BT::NodeStatus::FAILURE;
     }
 
-    ctx_->passage = nav::planPassage(ctx_->buoys, ctx_->entry, ctx_->exitp, wmax, wmin);
+    ctx_->passage = nav::planPassage(ctx_->buoys, ctx_->entry, ctx_->exitp, wmax, wmin, wang);
     if (!ctx_->passage.valid) {
       RCLCPP_WARN_THROTTLE(
         log(), *ctx_->node->get_clock(), 5000,
@@ -1008,7 +1012,8 @@ public:
         line += " (" + std::to_string(g.red_id) + "," + std::to_string(g.green_id) + ")";
       }
       RCLCPP_INFO(
-        log(), "passage planned: %zu gate(s)%s, %zu buoy(s) unpaired",
+        log(), "passage planned: %zu gate(s)%s, %zu buoy(s) unpaired (singles, held to their "
+        "side by fences in nav_mode on)",
         n, line.c_str(), ctx_->passage.unpaired.size());
     }
     return BT::NodeStatus::SUCCESS;
