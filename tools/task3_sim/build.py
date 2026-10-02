@@ -255,6 +255,7 @@ def main():
         run_test("test_dock_math")
         run_test("test_fire_math")
         run_test("test_path_math")
+        run_test("test_side_fences")
         run_test("test_planned_leg")
     if a.what == "btcpp":
         btcpp()
