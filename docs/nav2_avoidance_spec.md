@@ -407,6 +407,7 @@ global_costmap:
           topic: /crsd/nav/obstacle_cloud
           marking: true
           clearing: false
+          obstacle_range: 40.0               # PER SOURCE, default 2.5 m: without it STVL marks nothing past 2.5 m
           min_obstacle_height: 0.0           # cloud is already water-gated upstream
           max_obstacle_height: 5.0
           expected_update_rate: 1.0          # s; silence -> costmap not current -> no plans
@@ -428,7 +429,8 @@ global_costmap:
           min_z: 0.5                         # m, = lidar_cluster_node r_min
           max_z: 20.0                        # m: in-view decay only where a 0.3 m buoy is reliably seen
           decay_acceleration: 5.0            # 1/s^2: in-view & unseen -> gone in ~3 s
-          expected_update_rate: 1.0
+          obstacle_range: 40.0
+          expected_update_rate: 0.0          # NOT 1.0: this buffer is never marked updated (STVL 2.3.4), costmap stays non-current
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
