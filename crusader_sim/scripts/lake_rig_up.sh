@@ -93,9 +93,14 @@ for t in pgrep setsid; do command -v $t >/dev/null || { echo "*** $t is not in t
 
 # ---- the boat's own stack must be up: this script adds to it, it does not start it
 echo "=== preflight ==="
-nodes="$(timeout 8 ros2 node list 2>/dev/null)"
-case "$nodes" in *telemetry_bridge*) echo "  telemetry_bridge up (core.launch.py)" ;;
-  *) echo "*** telemetry_bridge is not running: core.launch.py (systemd crsd-ros) must be up first. On the HOST: systemctl status crsd-ros" >&2; exit 2 ;; esac
+# Every ros2 introspection here is --no-daemon: a wedged ros2 daemon ("!rclpy.ok()") makes `ros2 node list` fail
+# and would read as "nothing is running". A process check does not depend on it.
+if pgrep -f 'lib/crusader_fcu/telemetry_bridge|crusader_fcu.*telemetry_bridge' >/dev/null; then echo "  telemetry_bridge up (core.launch.py)"
+else echo "*** telemetry_bridge is not running: core.launch.py (systemd crsd-ros) must be up first. On the HOST: systemctl status crsd-ros" >&2; exit 2; fi
+fcu="$(timeout 8 ros2 topic echo /crsd/fcu_status --once --no-daemon 2>/dev/null | grep -E '^mode|^armed' | tr '
+' ' ')"
+if [ -n "$fcu" ]; then echo "  autopilot: $fcu"
+else echo "  *** no /crsd/fcu_status within 8 s: telemetry_bridge is up but silent (MAVProxy, the Pixhawk?). START will stay disabled"; fi
 need=""
 for p in crusader_link crusader_bt crusader_world_model crusader_nav crusader_nav_layers nav2_planner crusader_groundstation; do
   ros2 pkg prefix $p >/dev/null 2>&1 || need="$need $p"
@@ -198,7 +203,7 @@ up task1_panel "$LAKE_LOGDIR/panel.log" python3 -u -m crusader_sim.task1_panel -
 if [ "$NAV_MODE" != off ]; then
   t0=$SECONDS; state=""
   while [ $((SECONDS - t0)) -lt 40 ]; do
-    state="$(timeout 8 ros2 lifecycle get /planner_server 2>/dev/null | head -1)"
+    state="$(timeout 8 ros2 lifecycle get /planner_server --no-daemon 2>/dev/null | head -1)"
     case "$state" in active*) break ;; esac
     sleep 2
   done
@@ -210,9 +215,9 @@ fi
 
 echo
 echo "=== up ==="
-ros2 node list 2>/dev/null | sort | sed 's/^/  /'
+timeout 10 ros2 node list --no-daemon 2>/dev/null | sort | sed 's/^/  /'
 echo "  rxl_link_node processes: $(pgrep -fc rxl_link_node) (ours has $RXL_ENDPOINT; core's serial one respawns, see the header)"
-timeout 5 ros2 topic echo /crsd/fcu_status --once 2>/dev/null | grep -E '^mode|^armed' | tr '\n' ' ' | sed 's/^/  autopilot: /'; echo
+timeout 5 ros2 topic echo /crsd/fcu_status --once --no-daemon 2>/dev/null | grep -E '^mode|^armed' | tr '\n' ' ' | sed 's/^/  autopilot: /'; echo
 echo
 echo "  panel:        http://<jetson>:$PANEL_PORT      ground station: http://<jetson>:8090      tree: http://<jetson>:8085"
 if [ "$PUB" = true ]; then

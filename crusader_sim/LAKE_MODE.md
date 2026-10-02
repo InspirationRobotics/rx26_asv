@@ -162,6 +162,7 @@ The frame is the same: the course's metres east/north of its origin are the sim'
 | START greyed | the reason is under the button: not committed / not armed / not GUIDED / no FCU status from the feed |
 | `planner_server is not active` | Nav2 needs a pose with a finite **heading** (GPS yaw from the RTK pair; the compass is disabled): wait for the moving baseline |
 | the boat never asks checkpoint 1 | it has not finished the ENTRY orbit; check `bt.log` and the tree on :8085 |
+| `ros2 node list` raises `!rclpy.ok()` | the container's ros2 daemon is wedged (seen in crsd-sim 2026-10-02). The rig's own checks are `--no-daemon`; use `ros2 node list --no-daemon`, or `ros2 daemon stop` |
 | a field was sent but the boat ignores it | `rxl_link_node` is not the loopback one: `ps -ef | grep rxl_link` in asv; `rxl.log` |
 | "udp 14555/14556 is taken" | an old rig process: `lake_rig_down.sh`, then `ps -ef | grep -E 'rxl_link|panel_feed'` |
 | page works but a layer is blank | a layer older than 2 s is drawn as nothing and says so under the map (blank, never the last value) |
