@@ -94,6 +94,17 @@
 
         <SetTask token="TASK_SAFE_PASSAGE"/>
 
+        <!-- Plan the passage ONCE before the entry orbit, only so the side fences
+             (note 6) are in the costmap well before the first planned leg asks it
+             for a path: they are drawn from this plan, and a plan made before
+             they arrive can run straight through a wall and be thrown out a few
+             seconds later. The transit loop re-plans every tick as before. The
+             ForceSuccess is because a field with no entry yet is the orbit's
+             problem to report, not this leaf's. -->
+        <ForceSuccess>
+          <PlanPassage max_width="20.0" min_width="2.0" max_cross_angle="60.0"/>
+        </ForceSuccess>
+
         <!-- The entry buoy is known from the field the moment it arrives, so
              this drives straight at it instead of loitering to spot it. -->
         <!-- A hop that cannot be driven FAILS after 15 s and the Retry starts

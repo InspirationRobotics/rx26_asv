@@ -311,6 +311,10 @@ class Task1Judge:
             centre = min(_point_rect_dist(x, y, r) for r in rects)
             _keep_min(m, "centre", "t", centre, t)
             if name not in in_gate:
+                if centre < CLEARANCE_OK_M <= m["non_gate"]:
+                    # the first time an object is closer than the planner's contract: say where,
+                    # so a near miss in the verdict can be found in the run's log
+                    self._say(f"clearance: {name} {centre:.2f} m (boat at {x:.1f}, {y:.1f}, t {t:.1f} s)")
                 m["non_gate"] = min(m["non_gate"], centre)
             if hull is not None:
                 _keep_min(m, "hull", "t_hull", min(_rect_gap(hull, r) for r in rects), t)
