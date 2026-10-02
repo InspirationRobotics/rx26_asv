@@ -111,6 +111,7 @@ refuses to start with anything but `off`. To check that on a machine that has Na
 | | `exempt` | `""` | with `avoid="false"` only: `gate` (the pair being driven), `dock`, or both comma separated. With `avoid="true"` it logs a WARN and is ignored |
 | | `blocked_timeout_s` | `15.0` | FAILURE after being blocked this long |
 | `CircleBuoy` | `points` | `8` (was 5) | waypoints on the ring, after one explicit hop onto it |
+| | `overshoot_deg` | `45` | degrees the ring runs past one full turn, the same way round (one extra point at 8 points); `0` = exactly 360. 2026-10-01: a hop counts as arrived within `tolerance` (2 m, about 19° at 6 m), so a 360° ring closed about 19° short and the referee scored 328 against its 330; the circle is complete only after the last (overshoot) point |
 | | `avoid`, `blocked_timeout_s` | `true`, `15.0` | per hop |
 
 **What a planned leg does** (`nav_mode on`, `avoid` true). Clearance is 0.8 m hard

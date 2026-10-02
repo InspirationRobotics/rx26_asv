@@ -615,18 +615,25 @@ public:
 };
 
 /// Drives once around a buoy: `points` waypoints on a ring, preceded by one explicit
-/// hop onto the ring. Core Tier: ENTRY clockwise before the transit, EXIT
-/// counterclockwise to complete the task.
+/// hop onto the ring and followed by the overshoot (below). Core Tier: ENTRY
+/// clockwise before the transit, EXIT counterclockwise to complete the task.
 ///
 /// THE RING STARTS ON THE BOAT'S OWN BEARING and is built by path::orbitRing, so
 /// ring[0] is the hop that gets the boat onto the circle and the sweep over
-/// ring[1..points] is +-360 whatever the start (the old orbit() measured it from
-/// the boat's position, and a far start read as a 313 degree circle). Each hop is
-/// one PlannedLeg, restarted per hop: in every nav_mode the hops are at least straight
-/// ones (in off, guarded ones that hold in front of a known hazard), so the
+/// ring[1..] is +-(360 + overshoot_deg) whatever the start (the old orbit() measured
+/// it from the boat's position, and a far start read as a 313 degree circle). Each hop
+/// is one PlannedLeg, restarted per hop: in every nav_mode the hops are at least
+/// straight ones (in off, guarded ones that hold in front of a known hazard), so the
 /// short-circle fix does not need Nav2. A ring point
 /// within orbit_clear_m of a known hazard is pushed outward (path::adjustRing) or
 /// dropped, and the log says how many.
+///
+/// THE OVERSHOOT. A hop counts as arrived within `tolerance` (2 m, ~19 degrees at a 6 m
+/// ring), so a ring that stops at exactly 360 closes the circle ~19 degrees short, and an
+/// approach that enters off ring[0] loses more: the independent referee scored 328
+/// degrees where it needs 330. The ring therefore keeps going `overshoot_deg` past the
+/// start, the same way round, and the circle is complete only once the LAST point
+/// (the overshoot one) has been reached.
 ///
 /// A hop that cannot be driven FAILS the leaf after its blocked_timeout_s, and the
 /// tree's RetryUntilSuccessful restarts the whole orbit.
@@ -643,6 +650,10 @@ public:
       BT::InputPort<double>("lon", 0.0, "with anchor=fix: longitude"),
       BT::InputPort<double>("radius", 6.0, "orbit radius, metres"),
       BT::InputPort<int>("points", 8, "waypoints around the circle"),
+      BT::InputPort<double>("overshoot_deg", kOvershootDeg,
+        "degrees to keep going past one full turn, the same way round, so a boat that "
+        "takes each hop early (tolerance 2 m is ~19 deg at 6 m) still sweeps >= 360; "
+        "45 = one extra point at 8 points; 0 = stop at exactly 360; clamped to 0..360"),
       BT::InputPort<std::string>("direction", "cw", "cw | ccw"),
       BT::InputPort<double>("tolerance", 2.0, "arrival radius, metres"),
       BT::InputPort<bool>("avoid", true,
@@ -657,6 +668,7 @@ public:
     const bool cw = getInput<std::string>("direction").value_or("cw") != "ccw";
     const double radius = getInput<double>("radius").value_or(6.0);
     const int points = getInput<int>("points").value_or(8);
+    const double overshoot = getInput<double>("overshoot_deg").value_or(kOvershootDeg);
 
     Vec2 a, from;
     std::vector<path::Hazard> hazards;
@@ -685,7 +697,7 @@ public:
       from = ctx_->boat;
       hazards = knownHazards(*ctx_);
     }
-    const std::vector<Vec2> raw = path::orbitRing(a, from, radius, points, cw);
+    const std::vector<Vec2> raw = path::orbitRing(a, from, radius, points, cw, overshoot);
     if (raw.empty()) {
       RCLCPP_WARN(log(), "CircleBuoy: points=%d makes no ring (needs at least 1)", points);
       return BT::NodeStatus::FAILURE;
@@ -694,11 +706,11 @@ public:
     ring_ = path::adjustRing(raw, a, hazards, ctx_->nav, &dropped);
     i_ = 0;
     RCLCPP_INFO(
-      log(), "CircleBuoy %s: %d waypoints at %.1f m, %s (sweep %.0f deg, %d point(s) dropped "
-      "for a known hazard)",
+      log(), "CircleBuoy %s: %d waypoints at %.1f m, %s (sweep %.0f deg with %.0f deg "
+      "overshoot, %d point(s) dropped for a known hazard)",
       anchor.c_str(), points, radius, cw ? "CW" : "CCW",
       nav::sweepDeg(a, std::vector<Vec2>(ring_.begin() + 1, ring_.end()), ring_.front()),
-      dropped);
+      overshoot, dropped);
     cfg_ = legConfigFromPorts(*this);
     return startHop();
   }
@@ -719,13 +731,17 @@ public:
   }
 
 private:
+  /// The default overshoot_deg: one extra point at the default 8 points.
+  static constexpr double kOvershootDeg = 45.0;
+
   std::string label() const
   {
     return "  orbit " + std::to_string(i_ + 1) + "/" + std::to_string(ring_.size());
   }
 
   /// Start hop i_, or finish the orbit when there is none left. Hop 0 is the
-  /// explicit hop onto the ring; the orbit is over once the last point is reached.
+  /// explicit hop onto the ring; the orbit is over once the last point (the overshoot
+  /// one, when there is one) is reached.
   BT::NodeStatus startHop()
   {
     if (i_ >= ring_.size()) {

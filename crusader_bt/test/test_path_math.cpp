@@ -60,6 +60,46 @@ static Hazard square(double half, double keepout = 0.0, bool ccw = true)
   return h;
 }
 
+/// orbitRing as it was before overshoot_deg existed (the n + 1 point ring, ring[n] a
+/// copy of ring[0]). The reference the "overshoot 0 changes nothing" checks compare to.
+static std::vector<Vec2> old_ring(Vec2 anchor, Vec2 from, double radius, int n, bool cw)
+{
+  std::vector<Vec2> ring;
+  const Vec2 d = from - anchor;
+  const double a0 = nav::norm(d) < 1e-6 ? 0.0 : std::atan2(d.y, d.x);
+  const double step = (cw ? -1.0 : 1.0) * 2.0 * nav::kPi / static_cast<double>(n);
+  for (int k = 0; k < n; ++k) {
+    const double a = a0 + step * k;
+    ring.push_back(anchor + Vec2{std::cos(a), std::sin(a)} * radius);
+  }
+  ring.push_back(ring.front());
+  return ring;
+}
+
+/// The signed angle (degrees, ccw+) a polyline sweeps around `c`, summed point to point
+/// the short way round. Independent of nav::sweepDeg, and meant for rings whose steps
+/// are all well under 180 degrees.
+static double unwound_deg(Vec2 c, const std::vector<Vec2> & p)
+{
+  double total = 0.0;
+  for (std::size_t i = 1; i < p.size(); ++i) {
+    double d = std::atan2(p[i].y - c.y, p[i].x - c.x) - std::atan2(p[i - 1].y - c.y, p[i - 1].x - c.x);
+    while (d > nav::kPi) {d -= 2.0 * nav::kPi;}
+    while (d <= -nav::kPi) {d += 2.0 * nav::kPi;}
+    total += d / nav::kDeg;
+  }
+  return total;
+}
+
+static bool same_points(const std::vector<Vec2> & a, const std::vector<Vec2> & b)
+{
+  if (a.size() != b.size()) {return false;}
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    if (a[i].x != b[i].x || a[i].y != b[i].y) {return false;}
+  }
+  return true;
+}
+
 /// A dense straight path along +x with 0.1 m vertices, like Smac's.
 static std::vector<Vec2> line(double x0, double x1)
 {
@@ -400,6 +440,85 @@ int main()
       orbitRing(anchor, anchor, 4.0, 8, true)[0].x > 3.9);
   }
 
+  // --------------------------------------------- 10b. orbitRing, overshoot_deg
+  // Each hop is "arrived" within the leg tolerance (2 m at a 6 m ring is ~19 degrees), so
+  // a ring that stops at exactly 360 closes ~340 and an off-start approach loses more
+  // (task1_blocked_exit scored 328 against the referee's 330). The ring runs past the
+  // start by overshoot_deg, the same way round.
+  std::printf("10b. orbitRing, overshoot_deg\n");
+  {
+    const Vec2 anchor{0, 0};
+    bool zero_is_old = true;
+    for (const int n : {1, 3, 5, 8}) {
+      for (const bool cw : {true, false}) {
+        for (const Vec2 from : {Vec2{0, 20}, Vec2{60, 0}, Vec2{-7, -3}}) {
+          zero_is_old = zero_is_old &&
+            same_points(orbitRing(anchor, from, 4.0, n, cw, 0.0), old_ring(anchor, from, 4.0, n, cw)) &&
+            same_points(orbitRing(anchor, from, 4.0, n, cw), old_ring(anchor, from, 4.0, n, cw));
+        }
+      }
+    }
+    chk("overshoot 0 (and the default) is the old ring, bit for bit", zero_is_old);
+
+    const std::vector<Vec2> old_cw = old_ring(anchor, {0, 20}, 4.0, 8, true);
+    const std::vector<Vec2> cw = orbitRing(anchor, {0, 20}, 4.0, 8, true, 45.0);
+    chk("overshoot 45 at n = 8: ten points (one extra)", cw.size() == 10);
+    chk("... ring[0..8] is the old ring", same_points(std::vector<Vec2>(cw.begin(), cw.begin() + 9), old_cw));
+    chk_near("... the extra point sits where ring[1] does (x)", cw[9].x, old_cw[1].x, 1e-12);
+    chk_near("... (y)", cw[9].y, old_cw[1].y, 1e-12);
+    chk("cw still goes EAST first from the north", cw[1].x > 0.0);
+    const std::vector<Vec2> tail_cw(cw.begin() + 1, cw.end());
+    chk_near("cw: the sweep over ring[1..9] is -405", nav::sweepDeg(anchor, tail_cw, cw[0]), -405.0, 1e-6);
+    const std::vector<Vec2> ccw = orbitRing(anchor, {0, 20}, 4.0, 8, false, 45.0);
+    const std::vector<Vec2> tail_ccw(ccw.begin() + 1, ccw.end());
+    chk_near("ccw: the sweep is +405", nav::sweepDeg(anchor, tail_ccw, ccw[0]), 405.0, 1e-6);
+    chk("ccw still goes WEST first from the north", ccw[1].x < 0.0);
+    const std::vector<Vec2> far = orbitRing(anchor, {60, 0}, 4.0, 8, true, 45.0);
+    chk_near("far start: ring[0] is still at the orbit radius", nav::norm(far[0]), 4.0, 1e-9);
+    chk_near("far start: the unwound angle is -405", unwound_deg(anchor, far), -405.0, 1e-6);
+    chk("n < 1 is still empty with an overshoot", orbitRing(anchor, {0, 20}, 4.0, 0, true, 45.0).empty());
+    bool on_circle = true;
+    for (const Vec2 & q : cw) {on_circle = on_circle && std::fabs(nav::norm(q - anchor) - 4.0) < 1e-9;}
+    chk("every point is on the circle", on_circle);
+
+    // THE UNWINDING CHECK: summed point to point round the centre, the ring goes at least
+    // 360 + overshoot in the right direction, and not further than that.
+    bool wound = true, not_over = true, steps_even = true;
+    struct Case {int n; double over;};
+    for (const Case k : {Case{8, 45.0}, Case{8, 30.0}, Case{8, 90.0}, Case{8, 360.0}, Case{5, 72.0},
+        Case{5, 10.0}, Case{7, 360.0 / 7.0}, Case{3, 100.0}, Case{12, 15.0}, Case{8, 0.0}})
+    {
+      for (const bool cw_dir : {true, false}) {
+        for (const Vec2 from : {Vec2{0, 20}, Vec2{60, 0}, Vec2{-7, -3}}) {
+          const std::vector<Vec2> r = orbitRing(anchor, from, 4.0, k.n, cw_dir, k.over);
+          const double turned = (cw_dir ? -1.0 : 1.0) * unwound_deg(anchor, r);
+          wound = wound && turned >= 360.0 + k.over - 1e-6;
+          not_over = not_over && turned <= 360.0 + k.over + 1e-6;
+          for (std::size_t i = 1; i < r.size(); ++i) {       // no hop longer than one step
+            steps_even = steps_even &&
+              std::fabs(unwound_deg(anchor, {r[i - 1], r[i]})) <= 360.0 / k.n + 1e-6;
+          }
+        }
+      }
+    }
+    chk("unwound angle >= 360 + overshoot - 1e-6, both ways, 3 starts, 10 (n, overshoot) pairs", wound);
+    chk("... and never more than 360 + overshoot", not_over);
+    chk("... with no hop wider than one step", steps_even);
+
+    // An overshoot that is not a whole number of steps ends EXACTLY on it: 8 points, 30 deg.
+    const std::vector<Vec2> odd = orbitRing(anchor, {0, 20}, 4.0, 8, true, 30.0);
+    chk("8 points, overshoot 30: ten points, the last at exactly 390", odd.size() == 10 &&
+      std::fabs(unwound_deg(anchor, odd) + 390.0) < 1e-6);
+    chk("... and the one before it is the closing 360 point", same_points({odd[8]}, {odd[0]}));
+
+    // A bad port value is a short ring, never a long or empty one.
+    chk("a negative overshoot is no overshoot", same_points(orbitRing(anchor, {0, 20}, 4.0, 8, true, -50.0), old_cw));
+    chk("a NaN overshoot is no overshoot",
+      same_points(orbitRing(anchor, {0, 20}, 4.0, 8, true, std::nan("")), old_cw));
+    chk_near("an absurd overshoot is capped at one more lap (720)",
+      unwound_deg(anchor, orbitRing(anchor, {0, 20}, 4.0, 8, true, 1e9)), -720.0, 1e-6);
+  }
+
   // -------------------------------------------------------------- 11. adjustRing
   std::printf("11. adjustRing\n");
   {
@@ -434,6 +553,30 @@ int main()
       gone.front().x == ring.front().x && gone.back().y == ring.back().y &&
       minClearance(wall, ring.front()) < 1.4);
     chk("dropped may be omitted", adjustRing(ring, anchor, wall, P).size() == gone.size());
+
+    // THE OVERSHOOT POINT IS NOT AN ENDPOINT. ring[0] stays the explicit hop (and so does
+    // the 360 point, which is a copy of it), but the extra point past the start is as
+    // subject to a known hazard as any other: pushed out, or dropped.
+    const std::vector<Vec2> over = orbitRing(anchor, {0, 20}, 4.0, 8, true, 45.0);
+    chk("overshoot 45: ten points, ring[8] still the copy of ring[0]",
+      over.size() == 10 && same_points({over[8]}, {over[0]}));
+    const std::vector<Hazard> on_extra{circle(1, over[9].x, over[9].y, 0.3)};
+    const std::vector<Vec2> adj_extra = adjustRing(over, anchor, on_extra, P, &dropped);
+    chk("a buoy on the extra point pushes it out, none dropped", adj_extra.size() == over.size() && dropped == 0);
+    chk("... to a clearance of at least 1.4 m", minClearance(on_extra, adj_extra[9]) >= P.orbit_clear_m - 1e-9);
+    chk("... radially outward", std::fabs(nav::cross(adj_extra[9], over[9])) < 1e-9 &&
+      nav::norm(adj_extra[9]) > nav::norm(over[9]));
+    const std::vector<Hazard> near_start{circle(1, over[0].x, over[0].y, 0.3)};
+    const std::vector<Vec2> adj_start = adjustRing(over, anchor, near_start, P, &dropped);
+    chk("a buoy on ring[0]: ring[0] and its 360 copy are untouched",
+      same_points({adj_start[0]}, {over[0]}) && same_points({adj_start[8]}, {over[0]}));
+    chk("... and the extra point, 45 deg on and clear of it, is untouched", same_points({adj_start[9]}, {over[9]}));
+    const std::vector<Hazard> block_extra{circle(1, over[9].x, over[9].y, 4.5)};
+    const std::vector<Vec2> gone_extra = adjustRing(over, anchor, block_extra, P, &dropped);
+    chk("an unfixable extra point is dropped, and counted", dropped >= 1 &&
+      gone_extra.size() + static_cast<std::size_t>(dropped) == over.size());
+    chk("... and the ring then ends on the 360 copy of ring[0]",
+      same_points({gone_extra.back()}, {over[0]}) && same_points({gone_extra.front()}, {over[0]}));
   }
 
   // ------------------------------------------------------ 12. projection parity

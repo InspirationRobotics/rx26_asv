@@ -622,37 +622,57 @@ inline bool preferNew(bool cur_valid, double cur_len, double new_len, double fra
 
 // --------------------------------------------------------------------- orbit
 
-/// n+1 points: ring[0] = on the anchor->from bearing at `radius` (the explicit hop target),
-/// ring[k] = a0 + k*step, ring[n] == ring[0]. cw = decreasing ENU angle (as nav::orbit).
+/// ring[0] = on the anchor->from bearing at `radius` (the explicit hop target),
+/// ring[k] = a0 + k*step, step = 360/n, ring[n] == ring[0] (the 360 point).
+/// cw = decreasing ENU angle (as nav::orbit).
 ///
 /// nav::orbit starts at k = 1 from the boat's own bearing, so its first waypoint is
 /// already a step round the circle and a boat that starts far out sweeps only
 /// ~313 degrees (task1-panel-build memory). Here the ring starts ON the bearing
 /// at the orbit radius: hop 0 is the approach, and ring[0..n] is a full turn from
 /// wherever the boat began. ring[n] is a copy of ring[0], not a recomputed
-/// cos(a0 + 2 pi), so the last hop is EXACTLY the first.
-inline std::vector<Vec2> orbitRing(Vec2 anchor, Vec2 from, double radius, int n, bool cw)
+/// cos(a0 + 2 pi), so that hop is EXACTLY the first.
+///
+/// `overshoot_deg` runs the ring PAST that full turn, the same way round: n + 1
+/// points up to a sweep of exactly 360 + overshoot_deg, the last step shorter when the
+/// overshoot is not a whole number of steps. Why: a hop counts as arrived within the
+/// leg tolerance (2 m at a 6 m ring is ~19 degrees), so a ring that ends at exactly 360
+/// closes the circle ~19 degrees short, and an approach that enters off ring[0] loses
+/// more; the referee's 330 degrees was missed at 328 (task1_blocked_exit, 2026-10-01).
+/// 0 gives the n + 1 point ring above, bit for bit. Clamped to [0, 360]: a negative or
+/// NaN value is no overshoot, and the ring never goes more than one extra lap.
+inline std::vector<Vec2> orbitRing(
+  Vec2 anchor, Vec2 from, double radius, int n, bool cw, double overshoot_deg = 0.0)
 {
   std::vector<Vec2> ring;
   if (n < 1) {return ring;}
+  const double over_deg = std::min(std::max(0.0, overshoot_deg), 360.0);   // NaN -> 0
+  const double step_deg = 360.0 / static_cast<double>(n);
+  const double total_deg = 360.0 + over_deg;
+  const int whole = static_cast<int>(std::floor(total_deg / step_deg + 1e-9));
   const Vec2 d = from - anchor;
   const double a0 = nav::norm(d) < 1e-6 ? 0.0 : std::atan2(d.y, d.x);
   const double step = (cw ? -1.0 : 1.0) * 2.0 * nav::kPi / static_cast<double>(n);
-  ring.reserve(static_cast<std::size_t>(n) + 1);
-  for (int k = 0; k < n; ++k) {
-    const double a = a0 + step * k;
-    ring.push_back(anchor + Vec2{std::cos(a), std::sin(a)} * radius);
+  const auto at = [&](double a) {return anchor + Vec2{std::cos(a), std::sin(a)} * radius;};
+  ring.reserve(static_cast<std::size_t>(whole) + 2);
+  for (int k = 0; k < whole + 1; ++k) {
+    ring.push_back(k == n ? ring.front() : at(a0 + step * k));
   }
-  ring.push_back(ring.front());
+  if (total_deg - whole * step_deg > 1e-6) {
+    ring.push_back(at(a0 + (cw ? -1.0 : 1.0) * total_deg * nav::kDeg));      // the odd last step
+  }
   return ring;
 }
 
-/// Each ring point (not 0 or n) with minClearance < orbit_clear_m: push radially out in
-/// 0.25 m steps up to orbit_max_push_m; still short -> drop it (logged by the caller).
+/// Each ring point with minClearance < orbit_clear_m: push radially out in 0.25 m steps
+/// up to orbit_max_push_m; still short -> drop it (logged by the caller).
 ///
-/// The endpoints are never touched: ring[0] is the explicit hop the leg promised
-/// and ring[n] closes the circle on it. `dropped` counts the points given up on so
-/// the caller can say so rather than silently orbiting a polygon with a side missing.
+/// ring[0] is never touched: it is the explicit hop the leg promised. Neither is a copy
+/// of it (the 360 point, which closes the circle on it): the orbit is meant to end
+/// where it began. EVERY OTHER point is fair game, including the last one when the ring
+/// overshoots (orbitRing's overshoot_deg): that one is just another point round the
+/// circle. `dropped` counts the points given up on so the caller can say so rather than
+/// silently orbiting a polygon with a side missing.
 inline std::vector<Vec2> adjustRing(
   const std::vector<Vec2> & ring, Vec2 anchor, const std::vector<Hazard> & hz,
   const NavParams & p, int * dropped = nullptr)
@@ -661,8 +681,8 @@ inline std::vector<Vec2> adjustRing(
   std::vector<Vec2> out;
   const int pushes = static_cast<int>(std::floor(p.orbit_max_push_m / 0.25 + 1e-9));
   for (std::size_t i = 0; i < ring.size(); ++i) {
-    const bool endpoint = i == 0 || i + 1 == ring.size();
-    if (endpoint || !(minClearance(hz, ring[i]) < p.orbit_clear_m)) {
+    const bool is_start = i == 0 || (ring[i].x == ring[0].x && ring[i].y == ring[0].y);
+    if (is_start || !(minClearance(hz, ring[i]) < p.orbit_clear_m)) {
       out.push_back(ring[i]);
       continue;
     }

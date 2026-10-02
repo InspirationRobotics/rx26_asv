@@ -677,9 +677,13 @@ Carrot carrot(const std::vector<Vec2> & path, Vec2 boat, std::size_t hint,
 bool preferNew(bool cur_valid, double cur_len, double new_len, double frac, double abs_m);
 /// n+1 points: ring[0] = on the anchor->from bearing at `radius` (the explicit hop target),
 /// ring[k] = a0 + k*step, ring[n] == ring[0]. cw = decreasing ENU angle (as nav::orbit).
-std::vector<Vec2> orbitRing(Vec2 anchor, Vec2 from, double radius, int n, bool cw);
-/// Each ring point (not 0 or n) with minClearance < orbit_clear_m: push radially out in
-/// 0.25 m steps up to orbit_max_push_m; still short -> drop it (logged by the caller).
+/// overshoot_deg > 0 runs the ring on past ring[n], the same way round, to a sweep of
+/// exactly 360 + overshoot_deg (clamped to 0..360; 0 = the n+1 point ring, bit for bit).
+std::vector<Vec2> orbitRing(Vec2 anchor, Vec2 from, double radius, int n, bool cw,
+  double overshoot_deg = 0.0);
+/// Each ring point (not ring[0], nor a copy of it) with minClearance < orbit_clear_m: push
+/// radially out in 0.25 m steps up to orbit_max_push_m; still short -> drop it (logged by
+/// the caller). The overshoot point is not exempt.
 std::vector<Vec2> adjustRing(const std::vector<Vec2> & ring, Vec2 anchor,
   const std::vector<Hazard> & hz, const NavParams & p, int * dropped = nullptr);
 ```
@@ -958,16 +962,25 @@ The new ports:
 | Port | Type | Default | Change |
 |---|---|---|---|
 | `points` | int | **8** (was 5) | — |
+| `overshoot_deg` | double | **45** | new, 2026-10-01 (below): the ring runs this far past one full turn |
 | `avoid` | bool | true | new |
 | `blocked_timeout_s` | double | 15.0 | new, per hop |
 
 - **onStart:** the anchor as now. Then `ring_ = adjustRing(orbitRing(a, boat, radius, points, cw), a, knownHazards, nav, &dropped)`.
-  Log the sweep as `nav::sweepDeg(a, ring[1..], ring[0])`, which must be ±360, and the
-  number dropped. Hop `i_ = 0` is **the explicit hop to the ring start**. Each hop is
+  Log the sweep as `nav::sweepDeg(a, ring[1..], ring[0])`, which must be ±(360 +
+  `overshoot_deg`), and the number dropped. Hop `i_ = 0` is **the explicit hop to the ring start**. Each hop is
   one `PlannedLeg` (restarted per hop) with goal `ring_[i_]` and tolerance from the
   port.
-- **onRunning:** step the leg. On Success, increment `i_`; when `i_ > points`, return
-  SUCCESS. On Failure, return FAILURE, and the XML Retry restarts the orbit.
+- **onRunning:** step the leg. On Success, increment `i_`; when `i_` is past the last
+  ring point (the overshoot point, when there is one), return SUCCESS. On Failure, return
+  FAILURE, and the XML Retry restarts the orbit.
+- **Note 2026-10-01 (why `overshoot_deg`):** a hop counts as arrived within its 2 m
+  tolerance (about 19° at the 6 m ring), so a ring ending at exactly 360° closes the circle
+  about 19° short, and an approach that enters off ring[0] loses more. `task1_blocked_exit`
+  (nav_mode on) was scored `not circled (328 deg)` by the referee, which needs 330; the
+  pre-stage-B code had measured 313°. The ring now runs 45° (one extra point at 8 points)
+  past the start, the same way round, and "circle complete" is declared only after that last
+  point. The overshoot point is subject to the same hazard drop as any other.
 - **This applies in all modes.** In Off mode the hops are straight legacy hops, so the
   313° short circle is fixed even without Nav2.
 - Delete `nav::orbit`? **No.** test_nav_math pins it, and it stays as dead-but-tested
@@ -1147,9 +1160,12 @@ CMake `add_test`.
    current path is always replaced.
 10. `orbitRing` with n = 8: 9 points, `ring[0] == ring[8]`, and the sweep from ring[0]
     over ring[1..8] is -360 for cw and +360 for ccw. Also the **far-start case**: from
-    (60, 0) with the anchor at the origin, the sweep is still ±360.
+    (60, 0) with the anchor at the origin, the sweep is still ±360. With
+    `overshoot_deg` 45: 10 points, the sweep is ±405, the unwound angle is at least
+    360 + overshoot, and overshoot 0 is the old ring bit for bit.
 11. `adjustRing`: a buoy on the ring pushes that point out to a clearance of at least
-    1.4 m. An unfixable point is dropped. The endpoints are kept.
+    1.4 m. An unfixable point is dropped. ring[0] and its 360° copy are kept; the
+    overshoot point is not exempt.
 12. The projection parity literal from §3.2, through `nav::toLocal`.
 
 **`test_planned_leg.cpp`** uses a `FakePlannerPort` with scripted replies and a manual
