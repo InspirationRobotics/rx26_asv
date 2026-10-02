@@ -171,6 +171,10 @@ PARAM_SPEC = {
     "colour_family_labels": dict(read_only=True,
                                  description="labels that are ONE buoy in "
                                              "different beacon states"),
+    "colour_family_shapes": dict(read_only=True,
+                                 description="oak_detector shapes: every "
+                                             "[flash_|off_]<colour>_<shape> and "
+                                             "bare <shape> label is one family"),
     "colour_unlit_labels": dict(read_only=True,
                                 description="family labels that carry no "
                                             "colour (dark beacon); excluded "
@@ -196,7 +200,8 @@ _CORE_PARAMS = (
     "fuse_bearing_deg", "fuse_range_m", "fuse_range_frac", "min_confidence",
     "track_unlabeled", "assoc_radius_m", "pos_alpha", "vel_alpha",
     "confirm_hits", "tentative_timeout_s", "track_timeout_s", "max_tracks",
-    "colour_vote_enable", "colour_family_labels", "colour_unlit_labels",
+    "colour_vote_enable", "colour_family_labels", "colour_family_shapes",
+    "colour_unlit_labels",
     "colour_unknown_label", "colour_min_votes", "colour_min_ratio")
 
 

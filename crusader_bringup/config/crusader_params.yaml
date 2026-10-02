@@ -670,6 +670,11 @@ target_tracker:
       - "steady_blue_buoy"                 #      blue_buoy (buoy_detector.labels),
       - "blue_buoy"                        #      listed too so a lit-blue RoboBuoy
                                            #      merges with its own dark frames
+    colour_family_shapes:                  # [RO] oak_detector's names are
+      - "diamond"                          #      [flash_|off_]<colour>_<shape> or
+                                           #      a bare <shape>: each shape is one
+                                           #      family; bare/off_ = unlit votes;
+                                           #      unknown reports unknown_<shape>
     colour_unlit_labels:                   # [RO] family votes that carry NO
       - "black_buoy"                       #      colour (dark side beacon, or the
                                            #      off half of a flash). Left out

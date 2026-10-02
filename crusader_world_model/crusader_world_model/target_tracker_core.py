@@ -159,6 +159,14 @@ class TrackerParams:
                                      # reported when no lit colour wins. Must
                                      # contain no colour word: bt_runner's
                                      # beaconFromLabel() matches substrings
+    colour_family_shapes: tuple = ("diamond",)
+                                     # oak_detector's vocabulary is
+                                     # [flash_|off_]<colour>_<shape> or a bare
+                                     # <shape> (oak_detector_core label()): every
+                                     # label ending in _<shape>, and <shape>
+                                     # itself, is one family per shape. Bare and
+                                     # off_ labels are its unlit votes, and its
+                                     # unknown label is unknown_<shape>.
     colour_min_votes: int = 5        # a lit colour needs at least this many
     colour_min_ratio: float = 0.6    # ... and this share of the LIT votes
 
@@ -499,13 +507,49 @@ def _majority(votes: dict) -> str:
     return max(votes.items(), key=lambda kv: kv[1])[0]
 
 
-def _in_family(label: str, p: TrackerParams) -> bool:
-    return p.colour_vote_enable and label in p.colour_family_labels
+_LIST = ""   # family key of colour_family_labels; a shape family's key is the shape
 
 
-def _family_track(votes: dict, p: TrackerParams) -> bool:
-    """True when any of these votes is for a colour-family label."""
-    return any(_in_family(l, p) for l in votes)
+def _family_key(label: str, p: TrackerParams):
+    """Which colour family `label` belongs to: _LIST, a shape, or None."""
+    if not p.colour_vote_enable or not label:
+        return None
+    if label in p.colour_family_labels:
+        return _LIST
+    for shape in p.colour_family_shapes:
+        if label == shape or label.endswith("_" + shape):
+            return shape
+    return None
+
+
+def _family_of(votes: dict, p: TrackerParams):
+    """The family of a track's votes (the first family label found), or None."""
+    for label in votes:
+        key = _family_key(label, p)
+        if key is not None:
+            return key
+    return None
+
+
+def _unlit(label: str, key: str, p: TrackerParams) -> bool:
+    """A vote that carries no colour: a dark side beacon or the off half of a flash."""
+    if label in p.colour_unlit_labels:
+        return True
+    return key != _LIST and (label == key or label.startswith("off_"))
+
+
+def _colour(label: str, key: str) -> str:
+    """The colour a lit vote is FOR. flash_red_diamond and red_diamond are both
+    red: whether the light flashed is the detector's call, the colour is the
+    vote. A colour_family_labels entry is its own colour."""
+    if key == _LIST:
+        return label
+    c = label[:-len(key)].rstrip("_")
+    return c[len("flash_"):] if c.startswith("flash_") else c
+
+
+def _unknown_label(key: str, p: TrackerParams) -> str:
+    return p.colour_unknown_label if key == _LIST else "unknown_" + key
 
 
 def resolve_label(votes: dict, p: TrackerParams) -> str:
@@ -526,20 +570,24 @@ def resolve_label(votes: dict, p: TrackerParams) -> str:
     """
     if not votes:
         return ""
-    if not _family_track(votes, p):
+    key = _family_of(votes, p)
+    if key is None:
         return _majority(votes)
-    lit = sorted(((n, l) for l, n in votes.items()
-                  if _in_family(l, p) and l not in p.colour_unlit_labels),
-                 reverse=True)
-    if not lit:
-        return p.colour_unknown_label
-    n_top, top = lit[0]
-    if len(lit) > 1 and lit[1][0] == n_top:
-        return p.colour_unknown_label
-    share = n_top / sum(n for n, _ in lit)
-    if n_top >= p.colour_min_votes and share >= p.colour_min_ratio:
-        return top
-    return p.colour_unknown_label
+    tally, best = {}, {}      # colour -> lit votes; colour -> (votes, label)
+    for label, n in votes.items():
+        if _family_key(label, p) != key or _unlit(label, key, p):
+            continue
+        c = _colour(label, key)
+        tally[c] = tally.get(c, 0) + n
+        if n > best.get(c, (0, ""))[0]:
+            best[c] = (n, label)
+    ranked = sorted(tally.items(), key=lambda kv: kv[1], reverse=True)
+    if not ranked or (len(ranked) > 1 and ranked[1][1] == ranked[0][1]):
+        return _unknown_label(key, p)
+    top, n_top = ranked[0]
+    if n_top >= p.colour_min_votes and n_top / sum(tally.values()) >= p.colour_min_ratio:
+        return best[top][1]
+    return _unknown_label(key, p)
 
 
 def _label_ok(track: Track, obs: Observation, p: TrackerParams) -> bool:
@@ -566,8 +614,9 @@ def _label_ok(track: Track, obs: Observation, p: TrackerParams) -> bool:
     """
     if not track.label_votes or not obs.label:
         return True
-    if _in_family(obs.label, p):
-        return _family_track(track.label_votes, p)
+    key = _family_key(obs.label, p)
+    if key is not None:
+        return _family_of(track.label_votes, p) == key
     return _majority(track.label_votes) == obs.label
 
 
@@ -623,7 +672,8 @@ class TargetTracker:
         stats["tracks"] = len(tracks)
         stats["confirmed"] = sum(1 for t in tracks if t.confirmed(self.p))
         stats["colour_unknown"] = sum(
-            1 for t in tracks if t.label == self.p.colour_unknown_label)
+            1 for t in tracks if t.label == self.p.colour_unknown_label
+            or t.label.startswith("unknown_"))
         self.stats = stats
         return tracks
 

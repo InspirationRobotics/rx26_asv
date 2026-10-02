@@ -213,6 +213,39 @@ class VotingTest(unittest.TestCase):
             self.assertNotIn(word, label)
 
 
+class OakVocabularyTest(unittest.TestCase):
+    """oak_detector names: [flash_|off_]<colour>_<shape>, or a bare <shape>."""
+
+    def test_bare_and_flash_red_diamond_are_one_track_resolving_red(self):
+        f = Feeder(make_tracker())
+        tracks = f.alternate("flash_red_diamond", "diamond", 10)
+        self.assertEqual(one_label(tracks), "flash_red_diamond")
+
+    def test_flash_and_solid_of_one_colour_pool_their_votes(self):
+        f = Feeder(make_tracker())
+        f.see("red_diamond", 3)
+        self.assertEqual(one_label(f.see("flash_red_diamond", 2)), "red_diamond")
+
+    def test_dark_diamond_only_is_unknown_diamond(self):
+        f = Feeder(make_tracker())
+        f.see("diamond", 10)
+        self.assertEqual(one_label(f.see("off_diamond", 10)), "unknown_diamond")
+        self.assertEqual(f.tracker.stats["colour_unknown"], 1)
+
+    def test_red_green_diamond_split_is_unknown(self):
+        f = Feeder(make_tracker())
+        tracks = f.alternate("flash_red_diamond", "flash_green_diamond", 10)
+        self.assertEqual(one_label(tracks), "unknown_diamond")
+
+    def test_diamond_never_merges_with_another_shape_or_the_buoy_list(self):
+        f = Feeder(make_tracker())
+        f.see("diamond", 5)
+        tracks = f.see("red_buoy", 5)
+        self.assertEqual(len(tracks), 2)
+        tracks = f.see("blue_circle", 5)
+        self.assertEqual(len(tracks), 3)
+
+
 class DisableTest(unittest.TestCase):
 
     def test_disabled_restores_one_track_per_label(self):
