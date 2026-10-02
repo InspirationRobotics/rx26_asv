@@ -667,10 +667,9 @@ target_tracker:
       - "green_buoy"                       #      this list keep the old rule
       - "black_buoy"                       #      (same label, or one side empty).
       - "flashing_blue_buoy"               #      NOTE the engine's own class is
-      - "steady_blue_buoy"                 #      blue_buoy (buoy_detector.labels):
-                                           #      add it here once the detector
-                                           #      is retrained to the flash /
-                                           #      steady names
+      - "steady_blue_buoy"                 #      blue_buoy (buoy_detector.labels),
+      - "blue_buoy"                        #      listed too so a lit-blue RoboBuoy
+                                           #      merges with its own dark frames
     colour_unlit_labels:                   # [RO] family votes that carry NO
       - "black_buoy"                       #      colour (dark side beacon, or the
                                            #      off half of a flash). Left out

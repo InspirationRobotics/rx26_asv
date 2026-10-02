@@ -149,7 +149,8 @@ class TrackerParams:
                                      # label or one side empty to associate,
                                      # plain majority to report.
     colour_family_labels: tuple = ("red_buoy", "green_buoy", "black_buoy",
-                                   "flashing_blue_buoy", "steady_blue_buoy")
+                                   "flashing_blue_buoy", "steady_blue_buoy",
+                                   "blue_buoy")
                                      # ONE object type in different beacon
                                      # states: associate with each other
     colour_unlit_labels: tuple = ("black_buoy",)
