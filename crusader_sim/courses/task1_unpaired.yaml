@@ -1,0 +1,45 @@
+# Task 1 with red and green buoys that do NOT come in pairs: the course for the boat's SIDE
+# FENCES (crusader_bt path::sideFences, nav_mode on). The frame and the rules are
+# task1_core.yaml's (read its header): the boat starts at the origin heading east, so
+# starboard is SOUTH: RED must end up south of the boat's track, GREEN north of it.
+# 88 m long, exactly 10 buoys (RXL_SAFE_PASSAGE carries at most 10):
+#   ENTRY (10, 2), EXIT (88, 0), 2 red, 3 green, 3 black (beacon off).
+#
+# What is on it, in the order the boat meets it:
+#   black1     (19, 1.0)  on the line ENTRY ring end -> the gate's approach point, as task1_avoid's
+#                         avoid1: the planned leg has to go round it.
+#   the GATE   g1_red (30, -4.5) / g1_grn (30, 4.5): an ordinary pair, red on the right of the
+#                         way through. The only gate: one checkpoint after it, the EXIT one.
+#   black2     (45, 0.2)  on the way from the gate to the next pair.
+#   the WRONG-WAY PAIR  wrong_red (56, 1.2) / wrong_grn (66, -1.2): the red is on the LEFT of its
+#                         green facing down the course (crossing direction 103 deg off the
+#                         ENTRY -> EXIT axis, the tree's max_cross_angle is 60), so it is NOT a
+#                         gate and both are singles. Kept to their sides they ask for an S: north
+#                         of the red, then south of the green (4.6 m of swing over 10 m). The
+#                         fences make that the SHORTEST route: without them the cheapest way past
+#                         is south of both, red on the wrong side.
+#   single_grn (76, -4)   a lone green on the course line's right-hand side. The straight way to
+#                         the EXIT ring passes it 3 m to its north, green on the boat's STARBOARD
+#                         = wrong; the boat has to deviate south of it. Its fence runs north.
+#   black3     (79, 3)    beside the last leg.
+# Pass: referee PASS (every red and green on its side, ENTRY clockwise, EXIT counter-clockwise,
+# no contact) and the clearance figure at or above 0.70 m.
+
+name: task1_unpaired
+origin: {lat: 1.28060, lon: 103.85570}   # = tools/sitl/start_sitl.sh SITL_HOME
+draft_m: 0.24
+depth_m: 5.0
+boat_start: {x: 0.0, y: 0.0, yaw_deg: 0.0}
+tier: core
+
+elements:
+  - {type: robobuoy, name: entry,      x: 10.0, y:  2.0, beacon: flash_blue,  up_beacon: false}
+  - {type: robobuoy, name: exit,       x: 88.0, y:  0.0, beacon: steady_blue, up_beacon: false}
+  - {type: robobuoy, name: g1_red,     x: 30.0, y: -4.5, beacon: flash_red,   up_beacon: false}
+  - {type: robobuoy, name: g1_grn,     x: 30.0, y:  4.5, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: single_grn, x: 76.0, y: -4.0, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: wrong_red,  x: 56.0, y:  1.2, beacon: flash_red,   up_beacon: false}
+  - {type: robobuoy, name: wrong_grn,  x: 66.0, y: -1.2, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: black1,     x: 19.0, y:  1.0, beacon: "off"}
+  - {type: robobuoy, name: black2,     x: 45.0, y:  0.2, beacon: "off"}
+  - {type: robobuoy, name: black3,     x: 79.0, y:  3.0, beacon: "off"}

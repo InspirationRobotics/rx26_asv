@@ -1022,7 +1022,7 @@ private:
     // The boat's own plan, for whoever draws the checkpoints: one per PAIRED gate (plus the
     // entry orbit's, and the last gate's is the exit confirmation). A red or green with no
     // partner is a single; it has a side to be passed on but no checkpoint.
-    os << ",\"gate_count\":" << gates << ",\"gates_cleared\":" << cleared
+    os << ",\"n_gates\":" << gates << ",\"gates_cleared\":" << cleared
        << ",\"single_count\":" << singles;
     if (he) {
       const nav::LatLon ll = nav::toLatLon(e, origin);

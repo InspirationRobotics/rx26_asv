@@ -233,7 +233,7 @@ static Field unpairedField()
     mk(2, 30.0, -4.5, Beacon::FlashingRed), mk(3, 30.0, 4.5, Beacon::FlashingGreen),
     mk(4, 76.0, -4.0, Beacon::FlashingGreen),
     mk(5, 56.0, 1.2, Beacon::FlashingRed), mk(6, 66.0, -1.2, Beacon::FlashingGreen),
-    mk(7, 19.0, 1.0, Beacon::Off), mk(8, 46.0, 4.5, Beacon::Off), mk(9, 79.0, 3.0, Beacon::Off)};
+    mk(7, 19.0, 1.0, Beacon::Off), mk(8, 45.0, 0.2, Beacon::Off), mk(9, 79.0, 3.0, Beacon::Off)};
   return f;
 }
 
