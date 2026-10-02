@@ -158,6 +158,32 @@ PARAM_SPEC = {
                                         "course for the run)"),
     "max_tracks": dict(read_only=False, lo=1, hi=1000,
                        description="hard cap; runaway guard, not a normal path"),
+    # --- colour voting [DYN] / label sets [RO] ---
+    # The three label settings are [RO]: they define what the tracker thinks a
+    # RoboBuoy IS, and rclpy has no range check for a string list to refuse a
+    # typo with. The vote thresholds and the master switch are safe to sweep
+    # live — votes are kept complete, so the whole history re-resolves.
+    "colour_vote_enable": dict(read_only=False,
+                               description="True: family labels associate "
+                                           "and the colour is voted. False: "
+                                           "the old same-label rule + plain "
+                                           "majority"),
+    "colour_family_labels": dict(read_only=True,
+                                 description="labels that are ONE buoy in "
+                                             "different beacon states"),
+    "colour_unlit_labels": dict(read_only=True,
+                                description="family labels that carry no "
+                                            "colour (dark beacon); excluded "
+                                            "from the vote ratio"),
+    "colour_unknown_label": dict(read_only=True,
+                                 description="reported when no lit colour "
+                                             "wins; must hold no colour word"),
+    "colour_min_votes": dict(read_only=False, lo=1, hi=1000,
+                             description="votes a lit colour needs to be "
+                                         "reported"),
+    "colour_min_ratio": dict(read_only=False, lo=0.0, hi=1.0,
+                             description="share of the LIT votes a colour "
+                                         "needs to be reported"),
     "health_period_s": dict(read_only=False, lo=1.0, hi=60.0,
                             description="JSON stats publish period"),
 }
@@ -169,7 +195,9 @@ _CORE_PARAMS = (
     "cam_x", "cam_y", "cam_z", "cam_yaw_deg", "cam_pitch_deg", "use_lidar",
     "fuse_bearing_deg", "fuse_range_m", "fuse_range_frac", "min_confidence",
     "track_unlabeled", "assoc_radius_m", "pos_alpha", "vel_alpha",
-    "confirm_hits", "tentative_timeout_s", "track_timeout_s", "max_tracks")
+    "confirm_hits", "tentative_timeout_s", "track_timeout_s", "max_tracks",
+    "colour_vote_enable", "colour_family_labels", "colour_unlit_labels",
+    "colour_unknown_label", "colour_min_votes", "colour_min_ratio")
 
 
 def stamp_key(header):
