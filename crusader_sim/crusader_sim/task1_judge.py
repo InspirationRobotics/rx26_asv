@@ -65,6 +65,11 @@ GATE_PAIR_M = 15.0
 # the track history is thinned to one point per PASS_STEP_M so a hovering boat does not grow it.
 PASS_CHORD_M = 0.3
 PASS_STEP_M = 0.01
+# Every pass is scored, but only one within PASS_LOG_M is announced as it happens: an orbit
+# sweeps its direction of travel through the whole circle, so 40 m-away buoys flip "ahead" to
+# "behind" (and back) on the way round, and a live "WRONG SIDE" line for each would be a false
+# alarm that the buoy's real, closer pass overrides a minute later.
+PASS_LOG_M = 12.0
 SIDE_CONSTRAINED = ("flash_red", "flash_green")
 # clearance: the planner's 0.8 m contract less 0.1 m for quantisation (spec 7), and
 # the half-width of the gate corridor whose samples are left out of the non-gate figure
@@ -350,7 +355,8 @@ class Task1Judge:
             want = "starboard" if state == "flash_red" else "port"
             self.passes[name] = {"colour": state, "side": side, "range": rng, "t": t,
                                  "ok": side == want}
-            if old is None or old["ok"] != (side == want):
+            if rng <= PASS_LOG_M and (old is None or old["range"] > PASS_LOG_M
+                                      or old["ok"] != (side == want)):
                 self._say(f"passed {name} ({_COLOUR_WORD[state]}) with it to {side} at {rng:.1f} m: "
                           f"{'correct' if side == want else 'WRONG SIDE'}")
 

@@ -131,6 +131,13 @@ class PerBuoySides(unittest.TestCase):
         drive(j, [(0, 0), (20, 0)])
         self.assertFalse(j.verdict()["pass"])
 
+    def test_far_passes_are_scored_but_not_announced(self):
+        # an orbit-style loop 40 m out flips the buoy ahead -> behind: scored, silent
+        j = judge(buoy("r", 10, 40, "flash_red"))
+        drive(j, [(0, 0), (20, 0)])
+        self.assertEqual(j.verdict()["buoys_detail"]["r"][:10], "WRONG SIDE")
+        self.assertEqual(j.events, [])
+
     def test_events_say_what_happened(self):
         j = judge(buoy("r", 10, 3, "flash_red"))
         drive(j, [(0, 0), (20, 0)])

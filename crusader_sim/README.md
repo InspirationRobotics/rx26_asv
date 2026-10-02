@@ -58,7 +58,7 @@ bash ~/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_sim_down.sh
 
 | Flag | Effect |
 |---|---|
-| `<course>` | any `courses/*.yaml`: `task1_core`, `task3`, `open_water`, and the avoidance tests `task1_avoid` (4 obstacles on the legs, the panel's default), `task1_blocked_exit`, `task1_entry_black`, `task1_boxed_in` (S8), `open_water_platform` |
+| `<course>` | any `courses/*.yaml`: `task1_core`, `task3`, `open_water`, and the avoidance tests `task1_avoid` (4 obstacles on the legs, the panel's default), `task1_unpaired` (red/green buoys that are not pairs: the side fences), `task1_blocked_exit`, `task1_entry_black`, `task1_boxed_in` (S8), `open_water_platform` |
 | `--no-gui` | Gazebo server only. The sim is identical, you just can't watch it |
 | `--no-uav` | no Ekko stand-in; the boat has only its own camera (Core-tier test) |
 | `--no-rig` | stop after Gazebo + SITL, for `check_motion` or your own nodes |
@@ -84,12 +84,27 @@ the course's tier. To run a different tree, put
 
 Every run is also scored by **`task1_judge`**, an independent referee that sees
 only the boat's *true* path (Gazebo ground truth) and the course file. It checks
-that red was kept to starboard, green to port, ENTRY was circled clockwise, EXIT
-counter-clockwise, and that no buoy was touched. The tree's own
+that EVERY red was kept to starboard and every green to port (each buoy on its own,
+paired or not: it is judged at its closest pass), ENTRY was circled clockwise, EXIT
+counter-clockwise, and that no buoy was touched. The gate lines in its output are
+informational; the verdict is `buoys N/N on their side`. The tree's own
 `buoys_passed_correctly` is the tree grading itself; this referee can disagree
 with it, which is the point. It also runs standalone:
 `python3 -m crusader_sim.task1_judge --course task1_core` (Ctrl-C for the
 verdict; live JSON on `/sim/task1_judge`).
+
+### Side fences: red and green buoys that do not pair
+
+`task1_unpaired` (10 buoys: ENTRY, EXIT, 2 red, 3 green, 3 black) has one gate, a lone green on
+the course line's right-hand side and a red/green pair with the red on the LEFT of its green.
+With `nav_mode on` bt_runner walls each red and green with a row of hazard circles running
+outward from it (`nav_fence_*` in crusader_params.yaml, source 4 in `/crsd/nav/hazards`), so the
+planner can only pass it on the handbook's side. Scored run (2026-10-02): PASS 5/5 on their
+side, 1.4 m clearance, 190 s; the same run with `nav_fence_len_m: 0` FAILs 2/5. crusader_bringup
+is not rebuilt by `gz_sim_up.sh` and the rig reads the INSTALLED params yaml: after editing it,
+`colcon build --packages-select crusader_bringup` in `crsd-sim` or the run keeps the old values.
+The report `/crsd/safe_passage_report` carries `n_gates` (paired gates in the boat's plan),
+`gates_cleared` and `single_count`.
 
 ### Task 1 Disruptive: you are the UAV (the panel)
 
