@@ -9,6 +9,9 @@
 #   in the container:  LAKE_DATUM=1.3000000,103.8500000 bash /root/robotx_ws/src/rx26_asv/crusader_sim/scripts/lake_rig_up.sh
 #   then, on the laptop, a browser at  http://192.168.100.109:8095
 #
+#   Add --check to see whether this container is READY (packages, imports, ports, core's nodes) and exit without
+#   starting anything: `LAKE_DATUM=1.3,103.85 bash .../lake_rig_up.sh --check`. Do it at home, not on the dock.
+#
 # Environment (all optional but LAKE_DATUM):
 #   LAKE_DATUM   REQUIRED "lat,lon": the map origin. nav_frames_node's datum, panel_feed's origin and the
 #                panel's origin are all this one value; the field, SAVE AS COURSE and every boat layer are
@@ -107,9 +110,46 @@ if [ -n "$need" ]; then
 fi
 if pgrep -f 'crusader_perception.*oak_detector|oak_detector' >/dev/null; then echo "  oak_detector running"
 else echo "  *** oak_detector is NOT running: no camera tracks until you start it from the GCS Nodes tab (http://<jetson>:8090)"; fi
+if python3 - <<'PY' 2>/tmp/lake_imports.err
+import yaml, pymavlink                                              # the panel's radio and its course files
+from crusader_sim import lake_panel, lake_goal, panel_feed          # PYTHONPATH = $LAKE_SRC/crusader_sim
+from crusader_msgs.action import SafePassage
+from crusader_msgs.msg import FcuStatus, HazardArray, LatLonHead, TrackedTargetArray
+PY
+then echo "  python imports ok (yaml, pymavlink, crusader_sim, crusader_msgs)"
+else echo "*** python imports failed:" >&2; sed 's/^/    /' /tmp/lake_imports.err >&2
+  [ "${1:-}" = "--check" ] || exit 2; fi
+if [ "${1:-}" = "--check" ]; then
+  for pr in 14555 14556; do ss -lun 2>/dev/null | grep -q ":$pr " && echo "  note: udp $pr is in use (a lake rig already up? lake_rig_up.sh restarts it)"; done
+  echo "check done: nothing was started."; exit 0
+fi
 
 # ---- ours only: stop the previous lake rig (by recorded pid), never anything else
 bash "$HERE/lake_rig_down.sh" --quiet
+# core.launch.py's rxl_link_node (serial, respawning) is stopped ONCE, here, so the loopback one can have udp 14555
+if [ "$LAKE_RXL" = replace ]; then
+  for pid in $(pgrep -f 'rxl_link_node'); do
+    if tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null | grep -q 'rxl_link_node'; then
+      echo "  stopping the running rxl_link_node (pid $pid); core.launch.py respawns its serial one in 5 s (see this script's header)"
+      kill "$pid" 2>/dev/null
+    fi
+  done
+  sleep 1
+fi
+if python3 -c "
+import socket, sys
+for port in (14555, 14556):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.bind(('127.0.0.1', port))
+    except OSError as e:
+        sys.exit('udp %d is taken (%s): something else owns it. 14555 is rxl_link_node, 14556 panel_feed -> the panel' % (port, e))
+    finally:
+        s.close()
+" 2>&1; then :; else
+  echo "  (an old process of ours may have escaped lake_rig_down: ps -ef | grep -E 'rxl_link|panel_feed')" >&2
+  exit 2
+fi
 
 up() {   # up <name> <logfile> <command...>: its own process group, pid recorded for lake_rig_down.sh
   local name=$1 log=$2; shift 2
@@ -120,15 +160,8 @@ up() {   # up <name> <logfile> <command...>: its own process group, pid recorded
 running() { pgrep -f -- "$1" >/dev/null; }
 
 echo "=== lake rig: datum $LAKE_DATUM  tree $(basename "$TREE")  nav_mode $NAV_MODE  publish_setpoints $PUB ==="
-# rxl_link_node: loopback, by command-line override
+# rxl_link_node: loopback, by command-line override (the running one was stopped above, once)
 if [ "$LAKE_RXL" = replace ]; then
-  for pid in $(pgrep -f 'rxl_link_node'); do
-    if tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null | grep -q 'rxl_link_node'; then
-      echo "  stopping core's rxl_link_node (pid $pid); core.launch.py will respawn its serial one in 5 s (see this script's header)"
-      kill "$pid" 2>/dev/null
-    fi
-  done
-  sleep 1
   up rxl_link_node "$LAKE_LOGDIR/rxl.log" \
     ros2 run crusader_link rxl_link_node --ros-args --params-file "$CFG" -p rxl_endpoint:=$RXL_ENDPOINT
 else

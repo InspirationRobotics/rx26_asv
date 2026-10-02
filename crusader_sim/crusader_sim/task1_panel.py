@@ -181,6 +181,14 @@ Test hooks: --rxl-endpoint, --feed-port and --port (keep a test clear of a real
 run's 14555, 14556 and 8095); --dry-run (every child process is a harmless stub,
 the mission a --dry-run-mission-s long printout); GZ_PARTITION and CRUSADER_SIM_GEN
 in the environment keep a test's gz traffic and panel.yaml away from a live sim's.
+
+LAKE MODE (--lake --datum LAT,LON). The same radio handshake against the REAL boat at a lake, with no
+simulator: lake_panel.py (LakePanel, a subclass of Panel) and lake_panel.html. It runs inside the `asv`
+container on the Jetson, takes the boat's pose / FCU state / hazards from panel_feed's extra layers, resends
+the field only while a browser polls /api/state (dead-man), and starts lake_goal, which refuses unless the
+pilot has armed the boat and chosen GUIDED. Its HTTP routes are the lake_panel.ACTIONS only: the sim's
+launch / attach / stop_sim do not exist there. LAKE_MODE.md is the operator procedure.
+The sim page and the lake page share panel_common.js / panel_common.css (served at /panel_common.*).
 """
 import argparse
 import json
