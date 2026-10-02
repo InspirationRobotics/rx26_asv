@@ -1311,7 +1311,9 @@ def _header_safe(s):
 # ------------------------------------------------------------------ http
 
 def make_handler(panel):
-    page = os.path.join(os.path.dirname(os.path.abspath(__file__)), panel.PAGE)
+    here = os.path.dirname(os.path.abspath(__file__))
+    page = os.path.join(here, panel.PAGE)
+    common = os.path.join(here, "panel_common.js")        # the map and layer code both pages share
     # every act_* method is a POST route, unless the panel lists its own (the lake panel does:
     # it inherits the sim's launch/attach/stop acts and none of them may be reachable there)
     names = panel.ACTIONS if panel.ACTIONS is not None else [n[4:] for n in dir(panel) if n.startswith("act_")]
@@ -1324,6 +1326,9 @@ def make_handler(panel):
                 # re-read per request: a sync of the checkout shows up on reload
                 with open(page, "rb") as f:
                     return self._send(f.read(), "text/html; charset=utf-8")
+            if u.path == "/panel_common.js":
+                with open(common, "rb") as f:
+                    return self._send(f.read(), "text/javascript; charset=utf-8")
             if u.path == "/api/state":
                 return self._send(json.dumps(panel.state(parse_qs(u.query))).encode(),
                                   "application/json")
