@@ -167,6 +167,20 @@ The frame is the same: the course's metres east/north of its origin are the sim'
 | "udp 14555/14556 is taken" | an old rig process: `lake_rig_down.sh`, then `ps -ef | grep -E 'rxl_link|panel_feed'` |
 | page works but a layer is blank | a layer older than 2 s is drawn as nothing and says so under the map (blank, never the last value) |
 
-## What was verified, and where
+## What was verified, and where (rehearsal record)
 
-See the bottom of this file ("Rehearsal record").
+Checked 2026-10-02, never on the real boat (no ssh was used):
+
+| Check | How to re-run | Result |
+|---|---|---|
+| Offline unit tests: `goal_client` cancel on SIGINT/SIGTERM, `lake_goal` refuses unless armed + GUIDED (fake rclpy), the code of `lake_goal` / `lake_panel` / `goal_client` has no arm / mode / RC-override / MAVLink-port use, dead-man gating of resends and auto-ACK, field <-> course YAML round trip, checkpoint labels, only the lake routes exist, panel_feed's pose / fcu / hazards / datum / `n_gates` layers and the < 60 KB packet, gzip | WSL: `cd crusader_sim; python3 -m unittest discover -s test` (`-p test_lake.py` for these) and `python3 -m crusader_sim.panel_feed --selftest` | 54 lake tests + the existing 50 pass; mutation-checked (removing the dead-man gate, the FCU guard, the cancel call or the START guard each fails a test) |
+| `lake_goal` with REAL rclpy against a fake boat (isolated `ROS_DOMAIN_ID=87`, private code copy) | see `goal_real.sh` history in the session; the unit test above is the same logic | SIGINT and SIGTERM (from a shell that ignores SIGINT) cancel the goal and the server sees it; HOLD and disarmed are refused with no goal sent |
+| LakePanel + the REAL `panel_feed` node + the REAL `rxl_link_node` (private ports 34555/34556, domain 87) | `test/ros_lake_integration.py` (the docstring has the command) | 26/26: every new layer from real ROS messages, the plan arrives with the right buoy colours and lat/lon, a resend does not bump the plan version, a recolour does, an ask shows with its label, ACK reaches `/crsd/next_gate`, START follows the FCU stream |
+| The lake page in a browser against a dry-run panel and a synthetic feed (HTTP + DOM, no screenshots) | `test/lake_testkit.py` builds the pieces | field built by clicking tracks, PIN AT BOAT, COMMIT, checkpoint banner, recolour + SEND CHANGES + ACK, START refused in HOLD, START + ABORT banner, STOP UAV, SAVE AS COURSE + download |
+| The sim page after the shared-JS extraction | same, `task1_panel` dry-run | layers, mouse placement, keys, launch, staging, send, stop: as before |
+| `lake_rig_up.sh --check` against the live sim container (read-only), `lake_rig_down.sh` and `up()` on dummy process groups | `bash scripts/lake_rig_up.sh --check` | preflight ok; only recorded pids are stopped; a non-leader pid and a stale pid are left alone |
+| **Gazebo rehearsal** of the whole procedure (sim as the boat; `lake_rig_up.sh` unmodified; the pilot's arm + GUIDED played by `pilot_standin.py`, never by the panel): PASS run with the judge, ABORT in transit, browser closed in transit | `test/lake_rehearsal/reh_run.sh <tag> pass|abort|deadman` (WSL; needs the sim FREE, it brings it up and down) | **NOT RUN YET**: the sim was in use by another session when this was written. Results go in `~/.cache/lake_rehearsal/<tag>/` |
+
+Not verified anywhere, because only the boat can: that the `asv` container has Nav2, the newer `crusader_bt` /
+`crusader_world_model`, `pymavlink`; that `oak_detector` produces tracks over the lake; that the RTK heading is valid
+for `planner_server`; the WiFi's behaviour with the dead-man.
