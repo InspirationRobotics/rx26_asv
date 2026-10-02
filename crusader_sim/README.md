@@ -58,7 +58,7 @@ bash ~/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_sim_down.sh
 
 | Flag | Effect |
 |---|---|
-| `<course>` | any `courses/*.yaml`: `task1_core`, `task3`, `open_water`, and the avoidance tests `task1_blocked_exit`, `task1_entry_black`, `task1_boxed_in` (S8), `open_water_platform` |
+| `<course>` | any `courses/*.yaml`: `task1_core`, `task3`, `open_water`, and the avoidance tests `task1_avoid` (4 obstacles on the legs, the panel's default), `task1_blocked_exit`, `task1_entry_black`, `task1_boxed_in` (S8), `open_water_platform` |
 | `--no-gui` | Gazebo server only. The sim is identical, you just can't watch it |
 | `--no-uav` | no Ekko stand-in; the boat has only its own camera (Core-tier test) |
 | `--no-rig` | stop after Gazebo + SITL, for `check_motion` or your own nodes |
@@ -99,8 +99,13 @@ The panel is the UAV: in the Disruptive tier the colours are visible only from
 the air, so every beacon in the world is unlit and the colours exist only here.
 
 1. **Setup.** Pick a state (RED, GREEN, ENTRY, EXIT, BLACK), click the water to
-   place a buoy, drag to move, or edit the table; or load the `task1_core`
-   template. Save and load layouts (kept in `~/.cache/crusader_sim/panel/`).
+   place a buoy, drag to move, or edit the table; or load a template. A panel
+   that has never launched starts on **`task1_avoid`** (the Load template list
+   offers it first): ENTRY, 2 gates, EXIT and 4 black obstacles standing ON the
+   straight lines between them, 77 m long, for watching Nav2 route round buoys
+   (the obstacle positions and why they are where they are: the header of
+   `courses/task1_avoid.yaml`). A panel that launched before keeps its last layout;
+   press Load template. Save and load layouts (kept in `~/.cache/crusader_sim/panel/`).
    Exactly one ENTRY and one EXIT are needed.
 2. **LAUNCH SIM** builds the world from the layout (`gz_sim_up.sh --course-file
    ... --no-uav`: no auto-acking stand-in) and starts sending your field over
@@ -110,10 +115,14 @@ the air, so every beacon in the world is unlit and the colours exist only here.
    checkpoint: **1 = ENTRY orbit done** (asked after the clockwise circle, not
    before), **k+1 = gate k cleared**. Answer ACK, or click buoys to change their
    state (staged until sent) and SEND CHANGES + ACK. A changed field makes the
-   boat replan; auto-ACK answers every checkpoint for you.
-4. **There is no EXIT checkpoint** in the boat's tree: it uses the EXIT in the
-   latest field when it starts its exit orbit, so move the EXIT at the last
-   gate's checkpoint at the latest.
+   boat replan; auto-ACK answers every checkpoint for you. The yellow banner says
+   plainly what you are confirming (which gate, as it stands in the field you last
+   sent), and what each button does.
+4. **The ask after the last gate is the EXIT checkpoint**: with n gates in the field
+   you last sent (n = the smaller of the red and the green count), checkpoint n+1
+   reads "EXIT gate - confirm exit", and the boat waits for it before it circles the
+   EXIT (a sim log, 3 gates: checkpoint 4 asked and awaited). The boat circles the
+   EXIT in the latest field, so move the EXIT at that ask at the latest.
 5. The referee is the panel's own `task1_judge`, which grades each gate with
    the colours in force when it was crossed.
 6. **STOP SIM** stops the sim and keeps the panel (and layout); `GZ_SIM_DOWN.cmd`
@@ -124,19 +133,25 @@ Sensor views, each off until toggled and rendered only while shown: RGB
 sensors themselves stay full resolution), and a LiDAR top-down view ±25 m in
 the boat frame. All three on cost no measurable real-time factor (2026-09-30).
 
-**The boat's own picture** (three map layers, default on, a toggle each under the map; the choice is
-remembered per browser). Solid circles are the true buoys and hollow circles the UAV's report, as before;
-these show what the BOAT thinks:
+**Two maps, one pan/zoom.** The top map is the truth (solid circles) against what the UAV sent (hollow
+circles, joined to the truth), with the referee's gate pairs and the boat's trail. **Boat's map**, below it, draws
+only what the BOAT believes (four layers, default on, a toggle each under it; the choice is remembered per
+browser), with the true buoys as faint dots to read it against. Pan or zoom either and the other follows; Fit
+resets both; "boat's layers here too" overlays the layers on the top map. Buoys are placed, moved and staged on
+the top map only. The layers, bottom to top:
 
 | Layer | Topic | Drawn as |
 |---|---|---|
+| Costmap | Nav2 local costmap, via panel_feed's `costmap` layer `{res_m, cells, lidar, stamp}` | translucent violet squares of side `res_m` where the costmap is lethal or inscribed, and cyan squares for the LiDAR (STVL) voxels; under everything else, so the path and tracks stay readable. A rig whose panel_feed predates the layer sends no `costmap` key: nothing is drawn and the line under the map says so |
 | Planned path | `/crsd/nav/leg_status` | the leg dashed in the ground station's colours (green FOLLOWING, red BLOCKED, yellow PLANNING/DEGRADED, grey STRAIGHT), the carrot as a ring, the goal as a cross, and a `NAV <state> <s> <why>` badge on the map's top left |
-| Boat's camera tracks | `/crsd/world_targets` | hollow squares in the colour of the track's label, `#id label`, a cross at the estimate, dashed while tentative, fading with time since last seen (`seen N s ago` after 2 s) |
+| Boat's camera tracks | `/crsd/world_targets` | squares, `#id label`, a cross at the estimate, dashed while tentative, fading with time since last seen (`seen N s ago` after 2 s). The **outline** is the boat's own colour vote from the label (`red_buoy`, `green_buoy`, `flashing_blue_buoy`, `steady_blue_buoy`; `black_buoy` from older data), and a grey outline with a `?` is `unknown_buoy`: not confidently seen. Where the fused passage gives that buoy a colour, the **fill** is the UAV's colour, so a grey `?` filled red reads "boat says ?, UAV says red"; a red outline filled green is a disagreement. The pairing is by position (a fused buoy within 0.75 m of the track), because the report carries no track id |
 | Boat's fused passage | `/crsd/safe_passage_report` | small diamonds in the colour the UAV gave, at the tracker's position where a track matched and at the UAV's where none did: the tree's own association of the UAV field to its tracks. The tree publishes it only while a Task 1 run is ticking, so it is empty before START. A diamond with no hollow square on it is a buoy the boat has not matched to a track |
 
-With all beacons unlit (Disruptive) the tracks read `black_buoy`: that is correct, the colours exist only in
-the UAV's report and so only in the diamonds. A hollow square sitting well away from its solid circle is
-the boat's own mapping error; one with no circle under it is a ghost track.
+With the side beacons off (Disruptive) the colours exist only in the UAV's report, so the tracker's label is
+normally `unknown_buoy` and the colour shows only as the fill and in the diamonds (older builds labelled
+everything `black_buoy`, which still draws). A square sitting well away from its faint truth dot is the boat's
+own mapping error; one with no dot under it is a ghost track. Path over costmap: a dashed path through violet
+squares is the planner driving through what the costmap calls lethal, which it should never do.
 
 The panel has no ROS, so `crusader_sim/panel_feed.py` (a sim-only node in `crsd-sim`, started by every
 `gz_rig_up.sh`, stopped with the rig) subscribes those topics, converts their lat/lon to course metres
@@ -383,7 +398,7 @@ manual, spins in AUTO". Fix it in the YAML, never in the params.
 | `config/crusader_hull.yaml` | — | **the placeholder boat.** Edit this when CAD arrives |
 | `config/sitl_overlay.parm` | — | every place SITL differs from the boat, and why |
 | `config/gz_bridge.yaml` | — | Gazebo → ROS topic map |
-| `courses/*.yaml` | — | course layouts: buoys, beacon states, dock. `task1_blocked_exit`, `task1_entry_black` and `open_water_platform` are the avoidance tests |
+| `courses/*.yaml` | — | course layouts: buoys, beacon states, dock. `task1_avoid`, `task1_blocked_exit`, `task1_entry_black` and `open_water_platform` are the avoidance tests |
 | `crusader_sim/gen_crusader.py`, `gen_world.py` | WSL | build model and world into `~/.cache/crusader_sim` |
 | `crusader_sim/livox_shim.py`, `sim_camera.py` | `crsd-sim` | Gazebo sensors → the boat's driver topics |
 | `crusader_sim/sim_uav.py` | `crsd-sim` | Ekko's Task 1 radio, from the course's truth |

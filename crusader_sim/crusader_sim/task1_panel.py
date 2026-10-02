@@ -25,7 +25,23 @@ exit), 5 s resends. Sensor views on a real render: RTF ~1.0 with all three
 on, same as off; the LiDAR view's port/starboard and fore/aft checked
 against true buoy positions.
 
+VERIFIED 2026-10-01, offline only (the panel started on a spare port against a
+scratch GZ_PARTITION/CRUSADER_SIM_GEN, a synthetic feed datagram; no sim): the
+EXIT checkpoint label (checkpoint_text), the default template, the page's JSON,
+and the page's own JS in a browser — Boat's map canvas, the costmap layer, the
+track colours and the track/fused pairing, driven by that synthetic feed.
+
 TODO — what is still unverified or missing:
+  * LIVE SIM CHECK of the 2026-10-01 additions: (1) the EXIT checkpoint banner
+    on a real run of task1_avoid (checkpoint 3 of 2 gates reads "EXIT gate -
+    confirm exit"); (2) the costmap layer against a real panel_feed costmap
+    export (cell/LiDAR density and speed, the square size res_m, whether
+    positions line up with the buoys); (3) track colours once the tracker
+    publishes red_buoy/green_buoy/flashing_blue_buoy/steady_blue_buoy/
+    unknown_buoy (with the side beacons off, unknown_buoy is the normal label),
+    and the "boat says ?, UAV says red" fill, whose track<->fused pairing is by
+    position (FUSE_MATCH_M in the page) because the report carries no track id;
+    (4) task1_avoid itself: that Nav2 routes round all four obstacles.
   * saved layouts: save/load work; no delete.
 
 WHY A HUMAN UAV. In the Disruptive tier every beacon in the world is unlit, so
@@ -51,8 +67,13 @@ says why the handshake must exist once. What each control does on the air:
     SEND + ACK      confirm(STAGED field)    field first, THEN the ack
     auto-ACK        confirm() as each new checkpoint is asked
 
-    seq 1 = "ENTRY orbit done", seq k+1 = "gate k cleared". There is no EXIT
-    checkpoint: the boat circles whatever the latest field calls EXIT.
+    seq 1 = "ENTRY orbit done", seq k+1 = "gate k cleared", and the ask after
+    the LAST gate is the EXIT checkpoint: with n gates in the SENT field (n =
+    min(#red, #green)) seq n+1 is labelled "EXIT gate - confirm exit". The boat
+    waits for it like any other before it circles the EXIT, and circles whatever
+    the latest field calls EXIT, so a moved EXIT may still be sent at that ask.
+    (Verified in a sim log: 3 gates, checkpoint 4 asked and awaited.) Each ask
+    carries `what`: the plain sentence the page's banner shows.
 
 Every field is the WHOLE course and buoy id = list index, so positions are
 locked once the sim is up; only colours change mid-run. The panel is the
@@ -85,7 +106,11 @@ freshly jittered field, not uav_link's resend() — and the boat replans every 5
 Re-roll = a new random seed; allowed whenever no run is going.
 
 THE BOAT'S OWN PICTURE (map layers, each toggled in the page, default on). The
-panel has no ROS, so panel_feed.py (a node in crsd-sim, started by gz_rig_up.sh)
+page has TWO canvases sharing one pan/zoom: the top one is the truth (solid) and
+what the UAV sent (hollow), with the referee's gate pairs and the boat's trail;
+the "Boat's map" below it draws only what the boat believes, plus the true buoys as
+faint dots to read it against. A checkbox overlays the boat's layers on the top map.
+The panel has no ROS, so panel_feed.py (a node in crsd-sim, started by gz_rig_up.sh)
 subscribes the boat's topics and sends compact JSON to udp 127.0.0.1:14556
 (--feed-port); a thread here (panel_feed.FeedReceiver) keeps the newest packet.
     planned path   /crsd/nav/leg_status: the leg bt_runner is driving, dashed by
@@ -93,13 +118,27 @@ subscribes the boat's topics and sends compact JSON to udp 127.0.0.1:14556
                    yellow PLANNING/DEGRADED, grey STRAIGHT), the carrot as a
                    ring, the goal as a cross, and a NAV <state> badge
     boat's tracks  /crsd/world_targets: what target_tracker believes from the
-                   boat's camera — hollow squares, the track's colour, "#id
-                   label", faded by time since seen. Not the true buoys (solid)
-                   and not the UAV's report (hollow circles)
+                   boat's camera — squares, "#id label", faded by time since
+                   seen. The OUTLINE is the boat's own colour vote from the label
+                   (red_buoy, green_buoy, flashing_blue_buoy, steady_blue_buoy;
+                   black_buoy for old data; unknown_buoy = not confidently seen,
+                   the normal case with the side beacons off: a grey outline
+                   with "?"). Where the fused passage gives that buoy a colour,
+                   the FILL is the UAV's colour, so "boat says ?, UAV says red"
+                   reads as a grey "?" outline filled red. Not the true buoys
+                   (solid) and not the UAV's report (hollow circles)
     fused passage  /crsd/safe_passage_report: the tree's association of the UAV
                    field to those tracks (the UAV's colour, at the tracker's
                    position where a track matched, else the UAV's) — small
                    diamonds. Published only while a run is going
+    costmap        the Nav2 local costmap, as panel_feed's "costmap" layer
+                   {res_m, cells, lidar, stamp}; each position in the layer's
+                   [x, y] course metres like a path point (a {x, y} object is
+                   read too). cells = lethal/inscribed obstacles, translucent
+                   squares of side res_m; lidar = the STVL LiDAR voxels, in a
+                   second colour. Drawn UNDER the tracks and the path. A
+                   panel_feed that predates the layer sends no key: the layer
+                   draws nothing and says so
 A layer whose topic is older than 2 s is STALE: the server returns its age and no
 data, and the page draws nothing and says so. Never the last value.
 
@@ -118,7 +157,10 @@ POSTs take a JSON object and return {"ok": bool, "error": str?}.
                                      204 + X-Sensor-Status while it has none.
                                      Asking is what subscribes (panel_sensors.py)
     POST /api/layout   {buoys: [{x, y, state}]}   the Setup layout, whole
-    POST /api/template {name}        a courses/*.yaml as the layout
+    POST /api/template {name}        a courses/*.yaml as the layout (default:
+                                     task1_avoid, which a fresh panel — one with
+                                     no panel.yaml yet — starts on, and the
+                                     Load template list offers first)
     POST /api/clear
     POST /api/save     {name}        POST /api/load {name}
     POST /api/launch                 write panel.yaml, gz_sim_up.sh --no-uav
@@ -163,7 +205,9 @@ from crusader_sim.sim_uav import plan_from_course
 from crusader_sim.task1_judge import Task1Judge, format_verdict
 
 ENTRY, EXIT = "flash_blue", "steady_blue"
-LABEL = {"flash_red": "RED", "flash_green": "GREEN", ENTRY: "ENTRY", EXIT: "EXIT",
+RED, GREEN = "flash_red", "flash_green"
+DEFAULT_TEMPLATE = "task1_avoid"      # courses/: the layout a fresh panel starts with, and what Load template offers first
+LABEL = {RED: "RED", GREEN: "GREEN", ENTRY: "ENTRY", EXIT: "EXIT",
          "off": "BLACK"}
 STATES = tuple(LABEL)
 MAX_BUOYS = 10                  # handbook 3.3.2:9 "ten (10) buoys"; the message carries 10
@@ -294,8 +338,33 @@ def field_problem(states):
     return None
 
 
-def checkpoint_label(seq):
-    return "ENTRY orbit done" if seq == 1 else "gate %d cleared" % (seq - 1)
+def field_gates(states):
+    """How many gates a field has: one per red/green pair, so min(#red, #green)."""
+    return min(states.count(RED), states.count(GREEN))
+
+
+def checkpoint_text(seq, gates):
+    """(label, what) for the boat's seq-th ask, in a field of `gates` gates.
+
+    The boat asks after the ENTRY orbit (seq 1) and after each gate (seq k+1 =
+    gate k cleared), THE LAST GATE INCLUDED, and waits for the answer before it
+    circles the EXIT (seen in a sim log: 3 gates -> checkpoint 4 asked and
+    awaited). So seq == gates + 1 is the EXIT checkpoint. `label` is the table
+    row; `what` is the plain sentence the banner shows. `gates` is counted in
+    the SENT field, the one the boat holds when it asks."""
+    last = seq == gates + 1
+    if seq == 1:
+        done, did = "ENTRY orbit done", "circled the ENTRY buoy"
+    else:
+        done, did = "gate %d cleared" % (seq - 1), "driven through gate %d" % (seq - 1)
+    if last:
+        label = "EXIT gate - confirm exit" if seq > 1 else done + " - confirm exit"
+        nxt = "the EXIT buoy (as it stands in the field you last sent) before it circles it"
+    else:
+        label = "%s - confirm gate %d" % (done, seq)
+        nxt = ("gate %d (its red and green buoys, as they stand in the field you last sent) "
+               "before it drives it" % seq)
+    return label, "The boat has %s and asks you to confirm %s." % (did, nxt)
 
 
 def _num(v):
@@ -519,8 +588,11 @@ class Panel:
         except Exception as e:                 # noqa: BLE001 -- the page shows it
             self.errors["sensors"] = "sensor views unavailable: %s" % e
         panel_yaml = os.path.join(self.dir, "panel.yaml")
-        if os.path.isfile(panel_yaml):
+        if os.path.isfile(panel_yaml):               # the last launched layout wins ...
             self._set_layout(*layout_of(C.load(panel_yaml)))
+        else:                                        # ... a panel that never launched starts on the default
+            self._load_file(os.path.join(courses_dir(), DEFAULT_TEMPLATE + ".yaml"),
+                            "default template " + DEFAULT_TEMPLATE)
 
     @staticmethod
     def _fresh_mission():
@@ -566,7 +638,7 @@ class Panel:
             return {"ok": True, "rev": self.layout_rev}
 
     def act_template(self, body):
-        name = body.get("name", "task1_core")
+        name = body.get("name", DEFAULT_TEMPLATE)
         if not (isinstance(name, str) and NAME_RE.match(name)):
             return {"ok": False, "error": "bad template name"}
         return self._load_file(os.path.join(courses_dir(), name + ".yaml"), "template " + name)
@@ -841,7 +913,8 @@ class Panel:
                 for r in self._open():
                     if r["seq"] < seq:
                         self._close_silent(r)
-                rec = {"seq": seq, "label": checkpoint_label(seq), "asked": now,
+                label, what = checkpoint_text(seq, field_gates(self.sent))
+                rec = {"seq": seq, "label": label, "what": what, "asked": now,
                        "last_ask": now, "asks": 1, "answered": None, "reply": None,
                        "changed": False, "auto_tried": False, "late_asks": 0}
                 self.checkpoints.append(rec)
@@ -1108,7 +1181,7 @@ class Panel:
                         "alive": alive, "odom_age": odom_age},
                 "layout": {"rev": self.layout_rev, "buoys": self.layout, "note": self.layout_note,
                            "errors": errs, "warnings": warns},
-                "templates": _names(courses_dir()),
+                "templates": _names(courses_dir()), "default_template": DEFAULT_TEMPLATE,
                 "layouts": _names(os.path.join(self.dir, "layouts")),
                 "run": run, "uav": uav,
                 "radio": {"up": link is not None, "endpoint": self.a.rxl_endpoint,
