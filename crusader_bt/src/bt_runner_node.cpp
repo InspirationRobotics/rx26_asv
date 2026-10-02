@@ -856,7 +856,9 @@ private:
       {"nav_orbit_max_push_m", &n.orbit_max_push_m}, {"nav_orbit_clear_m", &n.orbit_clear_m},
       {"nav_dock_finger_len_m", &n.dock_finger_len_m},
       {"nav_dock_finger_w_m", &n.dock_finger_w_m}, {"nav_dock_slip_w_m", &n.dock_slip_w_m},
-      {"nav_dock_deck_depth_m", &n.dock_deck_depth_m}};
+      {"nav_dock_deck_depth_m", &n.dock_deck_depth_m},
+      {"nav_fence_len_m", &n.fence_len_m}, {"nav_fence_spacing_m", &n.fence_spacing_m},
+      {"nav_fence_radius_m", &n.fence_radius_m}, {"nav_fence_clear_m", &n.fence_clear_m}};
     for (const auto & kv : reals) {*kv.second = declare_parameter<double>(kv.first, *kv.second);}
     n.invalid_confirm = static_cast<int>(
       declare_parameter<int64_t>("nav_invalid_confirm", n.invalid_confirm));
@@ -989,6 +991,7 @@ private:
     std::vector<nav::Buoy> snap;
     bool he = false, hx = false;
     nav::Vec2 e, x;
+    std::size_t gates = 0, cleared = 0, singles = 0;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       if (!ctx_->origin_set) {return;}
@@ -996,6 +999,17 @@ private:
       snap = ctx_->buoys;
       he = ctx_->have_entry; e = ctx_->entry;
       hx = ctx_->have_exit;  x = ctx_->exitp;
+      // The tree plans only once the transit starts; before that (the entry orbit) the same
+      // planner with the tree's own defaults says what it is going to find.
+      nav::Passage pa = ctx_->passage;
+      if (!pa.valid && ctx_->have_entry && ctx_->have_exit) {
+        pa = nav::planPassage(ctx_->buoys, ctx_->entry, ctx_->exitp);
+      }
+      gates = pa.gates.size();
+      singles = pa.unpaired.size();
+      for (const nav::PlannedGate & g : pa.gates) {
+        if (nav::gateCleared(ctx_->cleared_gates, g.red_id, g.green_id)) {++cleared;}
+      }
     }
     for (const auto & b : snap) {
       const nav::LatLon ll = nav::toLatLon(b.p, origin);
@@ -1005,6 +1019,11 @@ private:
          << "},\"state\":\"" << beaconName(b.state) << "\"}";
     }
     os << "]";
+    // The boat's own plan, for whoever draws the checkpoints: one per PAIRED gate (plus the
+    // entry orbit's, and the last gate's is the exit confirmation). A red or green with no
+    // partner is a single; it has a side to be passed on but no checkpoint.
+    os << ",\"gate_count\":" << gates << ",\"gates_cleared\":" << cleared
+       << ",\"single_count\":" << singles;
     if (he) {
       const nav::LatLon ll = nav::toLatLon(e, origin);
       os << ",\"entry_position\":{\"latitude\":" << ll.lat
@@ -1280,6 +1299,11 @@ private:
     // has stopped. And the pump OFF: SprayUntilHit switches it off when it is
     // halted, but a tree that throws never halts its leaves.
     if (ctx_->cannon) {ctx_->cannon(false, 0.0, 0.0, 0.0);}
+    {
+      // The side fences are drawn from this plan: a finished mission leaves no walls behind.
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      ctx_->passage = nav::Passage{};
+    }
     stopIfSilent(true);                 // the boat stopped, if we were driving it
     resetLeg(result->elapsed_s);        // and no leg is running any more
     publishTask(kTaskNone);

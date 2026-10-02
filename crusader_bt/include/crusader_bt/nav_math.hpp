@@ -334,6 +334,12 @@ struct Gate
   const char * why = "no gate";      ///< why it is invalid, for the log
 };
 
+/// The direction a boat must travel to cross the pair (red, green) with the red to
+/// STARBOARD: the red-minus-green vector turned 90 deg counter-clockwise, as a unit
+/// vector. The red then lies to the right of it. gateWaypoints()'s heading is this
+/// direction as a compass bearing.
+inline Vec2 crossingDir(Vec2 red_minus_green) {return portOf(red_minus_green);}
+
 /// Where to steer to run the gate made by one RED and one GREEN buoy.
 ///
 /// THE THROUGH-COURSE IS FIXED BY THE PAIR ALONE:
@@ -546,11 +552,23 @@ struct Passage
 /// driving between them crosses the channel diagonally. Those buoys go to
 /// `unpaired` so a caller can say so.
 ///
+/// ORIENTATION IS A FILTER TOO. A pair is a gate only if the boat can drive it
+/// FORWARDS with the red to starboard. The crossing direction of a pair is
+///
+///     d = rot90ccw(unit(red - green))        (red lies to the right of d)
+///
+/// and the pair is accepted only when d is within `max_cross_deg` of the
+/// entry -> exit axis. A red on the LEFT of its green, facing down the course, has
+/// d pointing back at the entry: the only way through is backwards. Such a pair is
+/// not a candidate at all (it does not claim either buoy, so each can still pair
+/// with a better-placed partner) and, failing that, both stay unpaired -- singles,
+/// which the side fences (path::sideFences) then hold to their correct sides.
+///
 /// An empty `gates` with valid=true is a real answer: a field with an entry and
 /// an exit and no red-green pairs means drive straight to the exit.
 inline Passage planPassage(
   const std::vector<Buoy> & buoys, Vec2 entry, Vec2 exitp,
-  double max_width_m = 20.0, double min_width_m = 2.0)
+  double max_width_m = 20.0, double min_width_m = 2.0, double max_cross_deg = 60.0)
 {
   Passage out;
 
@@ -559,6 +577,7 @@ inline Passage planPassage(
     return out;
   }
   const Vec2 axis = unit(exitp - entry);
+  const double min_cos = std::cos(max_cross_deg * kDeg);
 
   std::vector<int> reds, greens;
   for (std::size_t i = 0; i < buoys.size(); ++i) {
@@ -574,8 +593,9 @@ inline Passage planPassage(
       if (red_used[i]) {continue;}
       for (std::size_t j = 0; j < greens.size(); ++j) {
         if (green_used[j]) {continue;}
-        const double w = norm(buoys[reds[i]].p - buoys[greens[j]].p);
-        if (w <= best && w >= min_width_m) {
+        const Vec2 rg = buoys[reds[i]].p - buoys[greens[j]].p;
+        const double w = norm(rg);
+        if (w <= best && w >= min_width_m && dot(crossingDir(rg), axis) >= min_cos - 1e-9) {
           best = w;
           bi = static_cast<int>(i);
           bj = static_cast<int>(j);

@@ -1470,6 +1470,20 @@ bt_runner_node:
     nav_dock_finger_w_m: 0.5                # [RO]
     nav_dock_slip_w_m: 1.5                  # [RO]
     nav_dock_deck_depth_m: 1.0              # [RO]
+    nav_fence_len_m: 10.0                   # [RO] SIDE FENCES, nav_mode on only: every
+                                            #      red/green the passage plan colours
+                                            #      gets a wall of hazard circles this
+                                            #      long, running OUTWARD from the buoy
+                                            #      (gate line away from the partner;
+                                            #      a single: red right / green left
+                                            #      of the axis), so the planner can
+                                            #      only pass it on the handbook's side.
+                                            #      0 = no fences
+    nav_fence_spacing_m: 0.5                # [RO] circle pitch; < 2 x radius = a wall
+    nav_fence_radius_m: 0.3                 # [RO] circle radius
+    nav_fence_clear_m: 8.0                  # [RO] no circle this close to the ENTRY or
+                                            #      EXIT buoy: orbit radius 6 +
+                                            #      nav_orbit_clear_m 1.4 + radius 0.3
 
 # ---------------------------------------------------------------------------
 # rxl_link_node — the boat's end of the UAV link.

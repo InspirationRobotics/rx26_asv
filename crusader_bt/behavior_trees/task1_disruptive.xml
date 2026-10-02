@@ -112,7 +112,7 @@
               <!-- Re-planned at 10 Hz against the fused field, so a
                    confirmation carrying new colours or new positions is
                    picked up on the next tick with no special case. -->
-              <PlanPassage max_width="20.0" min_width="2.0"/>
+              <PlanPassage max_width="20.0" min_width="2.0" max_cross_angle="60.0"/>
 
               <!-- One gate. Anything that fails inside restarts the leg. -->
               <ForceSuccess>

@@ -44,7 +44,11 @@ namespace path
 using nav::Vec2;
 
 enum class HazardKind {Circle = 0, Polygon = 1};                              // == Hazard.msg kind
-enum class HazardSource {PlanBuoy = 0, Track = 1, Dock = 2, Keepout = 3};     // == Hazard.msg SRC_*
+// Fence = 4 has no SRC_* constant in Hazard.msg (the .msg is shared and stays as it is): the
+// message's `source` is a plain uint8 that the layer ignores, so 4 reaches the ground station
+// as "something else" and a reader of the published array can still tell a fence circle from a
+// buoy.
+enum class HazardSource {PlanBuoy = 0, Track = 1, Dock = 2, Keepout = 3, Fence = 4};
 
 /// One known hazard. A circle uses c and r; a polygon uses poly (convex, vertices
 /// counter-clockwise, as Hazard.msg says). `keepout` pads either beyond the
@@ -75,6 +79,8 @@ struct NavParams
   double local_check_tol_m = 0.1, orbit_max_push_m = 3.0, orbit_clear_m = 1.4;
   double dock_finger_len_m = 2.0, dock_finger_w_m = 0.5, dock_slip_w_m = 1.5,
     dock_deck_depth_m = 1.0;
+  // Side fences (sideFences). fence_len_m <= 0 switches them off.
+  double fence_len_m = 10.0, fence_spacing_m = 0.5, fence_radius_m = 0.3, fence_clear_m = 8.0;
 };
 
 namespace detail
@@ -271,6 +277,75 @@ inline std::vector<Hazard> buildHazards(
   }
   const std::vector<Hazard> d = dockHazards(dock_book, dock_min_obs, p);
   out.insert(out.end(), d.begin(), d.end());
+  return out;
+}
+
+/// SIDE FENCES: the handbook's "RED to starboard, GREEN to port" turned into geometry the
+/// planner already understands.
+///
+/// handbook 3.3.2 puts a side on EVERY red and green buoy, paired or not. The planner knows
+/// nothing about sides, only about hazards, so a buoy that is not half of a gate is just an
+/// obstacle it may go round either way. A fence closes the wrong way: a row of small hazard
+/// circles running OUTWARD from the buoy, so the cheapest way past is the side the rule wants.
+///
+///   PAIRED buoy  the row runs along the gate line, away from its partner (red: unit(red -
+///                green), green: unit(green - red)). The gate is walled in on both outer sides.
+///   SINGLE buoy  the row runs perpendicular to the entry -> exit axis: red to the RIGHT of the
+///                axis (the boat passes on the red's left, red to starboard), green to the LEFT.
+///
+/// The row starts just outside the buoy's own hazard circle (touching it, so there is no gap
+/// to squeeze through) and spans fence_len_m at fence_spacing_m, each circle fence_radius_m:
+/// spacing < 2 r, so it is a wall. A wall is not a promise: it is `fence_len_m` long, and a
+/// route round its far end is still a route. Keep the field's singles within a leg's reach of
+/// the course and that route is never the short one.
+///
+/// WHAT STAYS OUT, and why each is safe:
+///   * circles within fence_clear_m of the ENTRY or EXIT buoy. The orbit ring (radius 6) is
+///     checked by adjustRing() for orbit_clear_m (1.4) from every hazard; a circle edge
+///     (fence_radius_m) at that distance would push or drop ring points. 6 + 1.4 + 0.3 = 7.7,
+///     so the default 8.0 leaves the ring untouched (a unit test builds the worst case).
+///   * a gate's own crossing line. It runs through the middle of the pair, perpendicular to
+///     the gate line, and its own rows start beyond the buoys on that same line: the nearest
+///     circle edge is half the gate's width + 0.3 m from it, further than the buoy it is
+///     attached to, which the leg exempts.
+/// Source Fence, id = the buoy the circle belongs to. `passage` supplies the pairing, so the
+/// fences and the tree's gates can never disagree about which buoy has a partner.
+inline std::vector<Hazard> sideFences(
+  const std::vector<nav::Buoy> & buoys, const nav::Passage & passage, Vec2 entry, Vec2 exitp,
+  const NavParams & p)
+{
+  std::vector<Hazard> out;
+  if (!passage.valid || !(p.fence_len_m > 0.0) || !(p.fence_spacing_m > 0.0) ||
+    !detail::finite(entry) || !detail::finite(exitp) || nav::norm(exitp - entry) < 1e-6)
+  {
+    return out;
+  }
+  const Vec2 axis = nav::unit(exitp - entry);
+  const double start = p.buoy_radius_m + p.fence_radius_m;
+  const int n = static_cast<int>(std::floor(p.fence_len_m / p.fence_spacing_m + 1e-9));
+
+  for (const nav::Buoy & b : buoys) {
+    const bool red = b.state == nav::Beacon::FlashingRed;
+    if ((!red && b.state != nav::Beacon::FlashingGreen) || !detail::finite(b.p)) {continue;}
+
+    int partner_id = -1;
+    for (const nav::PlannedGate & g : passage.gates) {
+      if (red && g.red_id == b.id) {partner_id = g.green_id;}
+      if (!red && g.green_id == b.id) {partner_id = g.red_id;}
+    }
+    const nav::Buoy * partner = nav::findById(buoys, partner_id);
+    const Vec2 dir = (partner != nullptr && detail::finite(partner->p)) ?
+      nav::unit(b.p - partner->p) :
+      (red ? nav::starboardOf(axis) : nav::portOf(axis));
+
+    for (int k = 0; k <= n; ++k) {
+      const Vec2 c = b.p + dir * (start + k * p.fence_spacing_m);
+      if (nav::norm(c - entry) < p.fence_clear_m || nav::norm(c - exitp) < p.fence_clear_m) {
+        continue;
+      }
+      out.push_back(detail::circleHazard(HazardSource::Fence, b.id, c, p.fence_radius_m));
+    }
+  }
   return out;
 }
 
