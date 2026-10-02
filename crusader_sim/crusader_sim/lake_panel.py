@@ -144,9 +144,7 @@ class LakePanel(Panel):
             return
         try:
             c = C.load(path)
-            o = c["origin"]
-            if (abs(o["lat"] - self.origin["lat"]) > ORIGIN_TOL_DEG
-                    or abs(o["lon"] - self.origin["lon"]) > ORIGIN_TOL_DEG):
+            if not self._is_datum(c["origin"]):
                 return                          # another place: its metres mean nothing here
             buoys, note = layout_of(c)
             Panel._set_layout(self, buoys, "restored the field in progress" + ("; " + note if note else ""))
@@ -166,6 +164,11 @@ class LakePanel(Panel):
                                                approach=self.approach)))
         except OSError:
             pass                                # a convenience, never a reason to fail
+
+    def _is_datum(self, o):
+        """Is {"lat", "lon"} `o` this panel's datum (to ~0.1 m)?"""
+        return (abs(o["lat"] - self.origin["lat"]) <= ORIGIN_TOL_DEG
+                and abs(o["lon"] - self.origin["lon"]) <= ORIGIN_TOL_DEG)
 
     def _operator_present(self):
         return time.time() - self.last_poll <= DEADMAN_S
@@ -229,8 +232,7 @@ class LakePanel(Panel):
         """Why the field cannot be placed (the feed and this panel use different origins), or None.
         Both convert metres <-> lat/lon around their own origin, so they must be the same place."""
         o = feed["origin"]
-        if feed["up"] and o and (abs(o["lat"] - self.origin["lat"]) > ORIGIN_TOL_DEG
-                                 or abs(o["lon"] - self.origin["lon"]) > ORIGIN_TOL_DEG):
+        if feed["up"] and o and not self._is_datum(o):
             return ("panel_feed's origin (%.7f, %.7f) is not this panel's datum (%.7f, %.7f): every "
                     "boat layer is in a different frame. Restart the rig with ONE LAKE_DATUM" % (
                         o["lat"], o["lon"], self.origin["lat"], self.origin["lon"]))

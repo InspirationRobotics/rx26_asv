@@ -833,6 +833,19 @@ class HttpTest(PanelCase):
         self.assertEqual(d["boat"]["x"], 0.0)
         self.assertEqual(d["fcu"]["status"], "fresh")
 
+    def test_the_state_goes_gzip_when_asked_and_plain_otherwise(self):
+        import gzip as gz
+        req = urllib.request.Request(self.base + "/api/state", headers={"Accept-Encoding": "gzip"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            self.assertEqual(r.headers.get("Content-Encoding"), "gzip")
+            small = r.read()
+        d = json.loads(gz.decompress(small))
+        self.assertTrue(d["lake"])
+        st, h, body = self.get("/api/state")                 # urllib sends no Accept-Encoding
+        self.assertIsNone(h.get("Content-Encoding"))
+        self.assertGreater(len(body), len(small))
+        self.assertTrue(json.loads(body)["lake"])
+
     def test_download_and_a_bad_name(self):
         self.panel.act_layout({"buoys": K.FIELD})
         r = self.post("/api/save", {"name": "dl_test"})

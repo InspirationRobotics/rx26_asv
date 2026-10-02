@@ -176,6 +176,15 @@ Nav2: `docs/nav2_avoidance_spec.md`, run and tested as "Nav2 avoidance in the si
 `task1_blocked_exit` and `task1_entry_black` as the reproductions. An orbit entered from far
 away can still end short of a full circle (313 degrees measured); the tests below require 330 or more.
 
+### Lake mode: the real boat, you are the UAV
+
+The same panel against the **real** Crusader at a lake, with no simulator (`task1_panel --lake`,
+`lake_panel.py`, `lake_panel.html`). It runs inside the `asv` container on the Jetson and is a browser page
+for the laptop. `lake_rig_up.sh` / `lake_rig_down.sh` start only what `core.launch.py` does not run; `lake_goal.py`
+sends the goal and refuses unless the pilot has armed the boat and chosen GUIDED; the field is resent only while
+a browser polls (dead-man); `SAVE AS COURSE` writes a course YAML that replays in this sim. Procedure, safety rules
+and troubleshooting: **[`LAKE_MODE.md`](LAKE_MODE.md)**. Tests: `test/test_lake.py`.
+
 ### Nav2 avoidance in the sim
 
 The boat's tree plans its legs around known hazards through Nav2's `planner_server` and a
@@ -475,6 +484,9 @@ manual, spins in AUTO". Fix it in the YAML, never in the params.
 | `scripts/gz_sync.sh` | WSL | Windows checkout -> `~/robotx_ws/src` (shared by the sim and the panel) |
 | `scripts/TASK1_PANEL.cmd`, `task1_panel_up.sh` | Windows / WSL | double-click the panel; sync, then run it on :8095 |
 | `crusader_sim/task1_panel.py`, `.html`, `panel_sensors.py` | WSL host (no ROS) | the UAV panel: layout, RXL link (`tools/bench/uav_link.py`), live referee, sensor views over gz-transport |
+| `crusader_sim/panel_common.js`, `.css` | (served by the panel) | the map, layers, field editing and look both pages share; `gz_sync.sh` copies them |
+| `crusader_sim/lake_panel.py`, `lake_panel.html`, `lake_goal.py`, `goal_client.py` | `asv` on the Jetson | LAKE MODE (`LAKE_MODE.md`): the real boat, the panel plays the UAV; `goal_client` is the goal-sending/cancel code `task1_goal` shares |
+| `scripts/lake_rig_up.sh`, `lake_rig_down.sh` | `asv` on the Jetson | start / stop what lake mode adds to `core.launch.py` (by recorded pid) |
 | `scripts/gz_rig_up.sh`, `gz_rig_down.sh` | `crsd-sim` | the ROS rig (the headless rig's `task1_sim_up.sh`, with sensors from Gazebo) |
 | `config/crusader_hull.yaml` | — | **the placeholder boat.** Edit this when CAD arrives |
 | `config/sitl_overlay.parm` | — | every place SITL differs from the boat, and why |

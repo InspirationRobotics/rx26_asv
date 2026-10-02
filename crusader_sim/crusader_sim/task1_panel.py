@@ -191,6 +191,7 @@ launch / attach / stop_sim do not exist there. LAKE_MODE.md is the operator proc
 The sim page and the lake page share panel_common.js / panel_common.css (served at /panel_common.*).
 """
 import argparse
+import gzip
 import json
 import math
 import os
@@ -236,6 +237,7 @@ NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 SENSOR_RE = re.compile(r"^/api/sensor/(\w+)\.jpg$")
 COMMON = {"/panel_common.js": "text/javascript; charset=utf-8",      # what the sim page and the lake page share,
           "/panel_common.css": "text/css; charset=utf-8"}            # served from beside this file
+GZIP_MIN = 2048                 # bytes: below this a response is sent as it is
 DOWNLOAD_RE = re.compile(r"^/api/course/([A-Za-z0-9_-]{1,40})\.yaml$")
 TREE_RE = re.compile(r"^\[tree\]\s+(\S+)\s+([\d.]+)%\s+buoys\s+(\d+)/(\d+)\s+plan v(\d+)\s*(.*)$")
 # = courses/task1_core.yaml's header; origin = tools/sitl/start_sitl.sh SITL_HOME
@@ -1393,9 +1395,16 @@ def make_handler(panel):
 
         def _send(self, body, ctype, headers=None, code=200):
             try:
+                # /api/state carries the costmap's cells (tens of KB) four times a second: over a lake's WiFi
+                # that is the dead-man's heartbeat, so it goes gzip'd (a browser asks for it and undoes it)
+                gz = len(body) > GZIP_MIN and "gzip" in (self.headers.get("Accept-Encoding") or "")
+                if gz:
+                    body = gzip.compress(body, 3)
                 self.send_response(code)
                 if ctype:
                     self.send_header("Content-Type", ctype)
+                if gz:
+                    self.send_header("Content-Encoding", "gzip")
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-store")
                 for k, v in (headers or {}).items():
