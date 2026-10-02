@@ -104,7 +104,9 @@ autopilot (`GUIDED . ARMED`, or why not), the dead-man, the feed and whether the
 EXIT, BLACK), then any of:
 - **click a camera track** on the map (the squares: outline = the boat's own colour vote, grey `?` = unknown), or the
   `-> buoy` button in the *Camera tracks* table. Clicking a buoy's track again recolours it;
-- **PIN AT BOAT**: a buoy where the boat is now (fresh pose only);
+- **PIN AT BOAT**: a buoy where the boat is now (fresh pose only). It is the boat's GPS position, not the buoy's: bring the
+  boat alongside and expect ~1 m. A camera track is the better source; the boat fuses your position with its own track
+  within 5 m (`assoc_radius_m`), and the UAV error requirement is < 1 m;
 - **ADD lat/lon**: typed coordinates;
 - **Load template / Load saved**: a course YAML as the starting field, placed from the datum whatever its own origin.
 The "map click" choice switches between *camera track -> buoy*, *place a buoy at the click* and *set approach point*.

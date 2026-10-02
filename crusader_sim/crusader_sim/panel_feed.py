@@ -804,8 +804,9 @@ def main(args=None):
         pass
     finally:
         sock.close()
-        node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():                       # a SIGINT (lake_rig_down.sh) has already shut the context down
+            node.destroy_node()
+            rclpy.shutdown()
 
 
 # ------------------------------------------------------------------ selftest
