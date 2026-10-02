@@ -170,6 +170,10 @@ class LakePanel(Panel):
     def _operator_present(self):
         return time.time() - self.last_poll <= DEADMAN_S
 
+    def _logs_since(self, q):
+        """Only the two buffers the lake page has tabs for (the sim's `sim` and `judge` are empty here)."""
+        return {k: v for k, v in super()._logs_since(q).items() if k in ("radio", "mission")}
+
     def _gates(self):
         """n_gates from the boat's own passage report when it has one (one per PAIRED gate, which
         is what the checkpoints count), else min(#red, #green) of the field that was sent."""

@@ -12,60 +12,7 @@
      from S.feed in /api/state, which task1_panel.py fills from panel_feed.py's
      udp stream: a layer older than 2 s arrives with its age and NO data, and is
      drawn as nothing (blanks over guesses). -->
-<style>
-:root{--bg:#0C141C;--panel:#131F2A;--line:#25384a;--ink:#DFE8EF;--dim:#7C8FA0;
-  --ok:#45BCA0;--warn:#E0A245;--bad:#E0736A;--accent:#4EAFD2}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,sans-serif}
-header{display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:10px 16px;
-  border-bottom:1px solid var(--line)}
-h1{font-size:17px;margin:0}.sub{color:var(--dim);font-size:12px}
-a{color:var(--accent)}
-.pill{padding:2px 10px;border-radius:10px;background:#ffffff10;font:600 12px monospace}
-.pill.up{background:#45bca030;color:var(--ok)}.pill.bad{background:#e0736a30;color:var(--bad)}
-.pill.busy{background:#e0a24530;color:var(--warn)}
-.err{background:#e0736a22;color:var(--bad);padding:6px 16px;font-size:13px}
-.ask{background:#e0a24533;border:2px solid var(--warn);margin:10px 16px;padding:12px;
-  border-radius:8px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
-.ask b{font-size:17px;color:var(--warn)}
-.ask .what{flex:1 1 320px}.ask .help{flex-basis:100%}
-main{display:grid;grid-template-columns:minmax(0,1fr) 400px 340px;gap:12px;padding:12px 16px}
-@media (max-width:1500px){main{grid-template-columns:minmax(0,1fr) 400px}
-  #sensors{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}}
-@media (max-width:900px){main{grid-template-columns:1fr}#sensors{grid-template-columns:1fr}}
-.sens .row{margin:0 0 6px}.sens h3{margin:0}
-.frame{position:relative;background:#0a1a26;border-radius:5px;overflow:hidden}
-.frame img{display:block;width:100%;height:100%;object-fit:contain}
-.frame span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
-  color:var(--dim);font-size:13px;text-align:center;padding:8px}
-button.tog{min-width:44px;padding:2px 8px;font-size:12px}button.tog.on{background:#1f5f4f;border-color:var(--ok)}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:10px}
-.card h3{margin:0 0 8px;font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
-canvas{width:100%;height:max(250px,41vh);display:block;background:#0a1a26;border-radius:8px;cursor:crosshair}
-.mapwrap{position:relative;margin-bottom:6px}
-.maptag{position:absolute;right:10px;top:8px;padding:1px 8px;border-radius:10px;background:#0a1a26cc;
-  font:600 12px monospace;color:var(--dim);pointer-events:none}
-#navbadge{position:absolute;left:10px;top:10px;max-width:70%;padding:2px 10px;border-radius:10px;
-  background:#0a1a26cc;font:600 12px monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none}
-.lay{display:inline-flex;gap:6px;align-items:center;margin-right:14px}
-button{background:#1d3042;color:var(--ink);border:1px solid var(--line);border-radius:5px;
-  padding:5px 10px;cursor:pointer;font:inherit}
-button:hover:not(:disabled){border-color:var(--accent)}button:disabled{opacity:.4;cursor:default}
-button.go{background:#1f5f4f;border-color:var(--ok)}button.stop{background:#5f2a26;border-color:var(--bad)}
-button.sel{outline:2px solid var(--accent)}
-input,select{background:#0c1822;color:var(--ink);border:1px solid var(--line);border-radius:4px;padding:3px 5px;font:inherit}
-table{border-collapse:collapse;width:100%;font-size:13px}td,th{padding:2px 4px;text-align:left}
-th{color:var(--dim);font-weight:500}
-.row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:6px 0}
-.sw{display:inline-block;width:11px;height:11px;border-radius:50%;margin-right:4px;vertical-align:-1px}
-.e{color:var(--bad)}.w{color:var(--warn)}
-.bar{height:8px;background:#ffffff10;border-radius:4px;overflow:hidden}.bar i{display:block;height:100%;background:var(--ok)}
-pre{margin:0;white-space:pre-wrap;font:12px/1.4 monospace}
-.logs pre{max-height:260px;overflow:auto;background:#0a121a;padding:6px;border-radius:5px}
-.tabs button{border-radius:5px 5px 0 0}
-#pop{position:fixed;display:none;background:var(--panel);border:1px solid var(--accent);border-radius:6px;padding:6px;z-index:5}
-#pop button{display:block;width:100%;margin:2px 0;text-align:left}
-</style></head><body>
+<link rel="stylesheet" href="/panel_common.css"></head><body>
 <header>
   <h1>Crusader · Task 1 panel</h1><span class="sub">you are Ekko: Disruptive tier, only you see the colours</span>
   <span id="simpill" class="pill">sim ?</span><span id="odom" class="sub"></span>

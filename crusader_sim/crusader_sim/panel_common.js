@@ -7,7 +7,7 @@
      editable()         may the field's positions be edited now (default: no)
      buoys()            [{x, y, ux, uy, staged, sent}] the field Fit and the map draw
      drawMap(boat,dpr)  paint one canvas of MAPS (using drawGrid, drawTrail, drawBuoys, drawBoatLayers, arrowAt)
-     emptyClick(w,e)    a click on empty water while editable
+     emptyClick(w,e), liveClick(w,e)   a click on empty water while editable / while the field is on the air
      render()           S (the /api/state JSON) -> the DOM
      onUnreachable()    the poll failed
      feedIdle(), feedWanted(), fitExtra(), isTruthMap()   optional, defaults below
@@ -25,7 +25,8 @@ var FEED_IDLE_TEXT='sim is down';
 var TABLE_LATLON=false;   // the lake page adds lat/lon columns to the buoy table
 var UAV_TEXT={commit:'LAUNCH',locked:'a run is going, or the sim is starting/stopping'};
 function editable(){return false}
-function emptyClick(w,e){}
+function emptyClick(w,e){}   // a click on empty water while the field is editable
+function liveClick(w,e){}    // ... and while it is on the air (the lake page's approach tool)
 function isTruthMap(){return true}
 function feedIdle(){return false}
 function feedWanted(){return true}
@@ -253,7 +254,7 @@ function onUp(e){var d=drag;drag=null;if(!d)return;var m=ev(e),w=S2W(m[0],m[1]);
   if(editable()){
     if(d.i>=0&&d.moved)pushLayout();
     else if(d.i<0&&!d.moved)emptyClick(w,e);
-  } else if(S&&S.run&&d.i>=0&&!d.moved){showPop(d.i,e.clientX,e.clientY)}}
+  } else if(S&&S.run&&!d.moved){if(d.i>=0)showPop(d.i,e.clientX,e.clientY);else liveClick(w,e)}}
 function arrowAt(x,y,yaw,c){var p=W2S(x,y),k=Math.max(10,1.0*view.s);g.save();g.translate(p[0],p[1]);g.rotate(-yaw);
   g.fillStyle=c;g.beginPath();g.moveTo(k,0);g.lineTo(-k*.6,k*.45);g.lineTo(-k*.6,-k*.45);g.closePath();g.fill();g.restore()}
 function ev(e){useCanvas(e.currentTarget);var r=cv.getBoundingClientRect(),d=cv.width/r.width;return[(e.clientX-r.left)*d,(e.clientY-r.top)*d]}
@@ -327,7 +328,7 @@ function fmtAge(t){return t==null?'—':t.toFixed(1)+' s'}
 function poll1(){
   var q='log='+Object.keys(seq).map(function(k){return k+':'+seq[k]}).join(',')+'&trail='+tgen+':'+trail.length;
   return fetch('/api/state?'+q).then(function(r){return r.json()}).then(function(d){
-    S=d; Object.keys(d.logs).forEach(function(k){var L=d.logs[k];if(L.seq<seq[k])logs[k]=[];
+    S=d; Object.keys(d.logs).forEach(function(k){if(!logs[k])return;var L=d.logs[k];if(L.seq<seq[k])logs[k]=[];
       logs[k]=logs[k].concat(L.lines).slice(-3000);seq[k]=L.seq});
     if(d.trail.gen!==tgen||d.trail.from===0){trail=[];tgen=d.trail.gen} trail=trail.concat(d.trail.pts);
     render(); showLog();

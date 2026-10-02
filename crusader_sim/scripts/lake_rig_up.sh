@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# lake_rig_up.sh — everything LAKE MODE needs that core.launch.py does not already run.
+#
+#     Runs in: INSIDE the `asv` container on the Jetson (ROS 2 Humble, host network).
+#     NOT on the laptop, NOT on the Jetson host, NOT in crsd-sim.
+#
+#   from the laptop:   plink ... crusader@192.168.100.109            (the Jetson host, over SSH)
+#   on the host:       docker exec -it asv bash
+#   in the container:  LAKE_DATUM=1.3000000,103.8500000 bash /root/robotx_ws/src/rx26_asv/crusader_sim/scripts/lake_rig_up.sh
+#   then, on the laptop, a browser at  http://192.168.100.109:8095
+#
+# Environment (all optional but LAKE_DATUM):
+#   LAKE_DATUM   REQUIRED "lat,lon": the map origin. nav_frames_node's datum, panel_feed's origin and the
+#                panel's origin are all this one value; the field, SAVE AS COURSE and every boat layer are
+#                metres east/north of it. Pick a point on the lake bank you can name again (a pier corner).
+#   NAV_MODE     off | shadow | on        default shadow: the planner runs and is DRAWN, the tree drives the
+#                legacy straight legs. `on` = the tree drives the planner's paths (the water).
+#   PUBLISH      1|true | anything else   default false = STAND TEST: bt_runner plans and ticks but sends NO
+#                setpoints (publish_setpoints:=false), so the boat cannot move on the tree's account.
+#                PUBLISH=1 is what lets the tree steer, and the pilot must still arm + choose GUIDED.
+#   TREE         default task1_disruptive.xml (crusader_bt's behavior_trees/; or a path)
+#   PANEL_PORT   default 8095            LAKE_LOGDIR  default ~/.cache/crusader_lake
+#   LAKE_RXL     replace (default) | keep.  See "rxl_link_node" below.
+#   LAKE_SRC     the checkout inside the container, default /root/robotx_ws/src/rx26_asv
+#
+# WHAT IT STARTS (only what core.launch.py does not run — it never starts a duplicate of a node that is up):
+#   rxl_link_node   with `-p rxl_endpoint:=udpin:127.0.0.1:14555` ON THE COMMAND LINE (the YAML's
+#                   /dev/crsd-rfd is never edited): the panel plays the UAV over LOOPBACK, no radio.
+#   target_tracker  camera detections + pose -> /crsd/world_targets
+#   nav             ros2 launch crusader_nav nav.launch.py datum_source:=param (unless NAV_MODE=off)
+#   bt_view         the tree, http://<jetson>:8085
+#   ground_station  :8090 ONLY if core is not already running one
+#   panel_feed      the boat's layers (pose, FCU, tracks, hazards, costmap, path) -> the panel, udp 127.0.0.1:14556
+#   bt_runner       tree_file task1_disruptive.xml, nav_mode, publish_setpoints, default_timeout_s 600
+#   task1_panel --lake   the page, http://<jetson>:8095
+# WHAT IT NEVER STARTS: telemetry_bridge, lidar_cluster_node, proximity_bridge, rc_watchdog, led nodes (core's),
+# and the OAK-D owner. START oak_detector FROM THE GCS NODES TAB (http://<jetson>:8090): it owns the OAK-D, and
+# the device admits one client; without it there are no camera tracks to click.
+#
+# rxl_link_node: core.launch.py runs one WITH RESPAWN on /dev/crsd-rfd (the RFD900). The panel needs it on
+# loopback instead, so with LAKE_RXL=replace (default) this script stops the running one ONCE and starts its own.
+# core.launch.py then respawns its serial one after 5 s: without the RFD900 on USB it exits at startup (harmless
+# noise in `journalctl -u crsd-ros`); with the radio plugged in it runs beside ours and, hearing no UAV, publishes
+# nothing. For a cleaner lake day unplug the RFD900. To put the radio back to normal, run lake_rig_down.sh: it
+# stops only what this script started (pids in $LAKE_LOGDIR/pids) and never touches core's nodes.
+# LAKE_RXL=keep leaves core's node alone and starts none (then the panel has no loopback peer: bench use only).
+#
+# Logs: $LAKE_LOGDIR/<name>.log (default ~/.cache/crusader_lake/; inside asv ~ is /root).
+# Stop: bash lake_rig_down.sh
+#
+# SAFETY: nothing here arms, disarms, selects a mode or publishes an RC override. The RC SB switch is the only
+# e-stop. PUBLISH defaults to false.
+# ROS's setup.bash reads unset variables, so strict mode goes on AFTER it
+source /opt/ros/humble/setup.bash
+source /root/robotx_ws/install/setup.bash
+set -uo pipefail
+
+WS=/root/robotx_ws
+SRC="${LAKE_SRC:-$WS/src/rx26_asv}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CFG=$WS/install/crusader_bringup/share/crusader_bringup/config/crusader_params.yaml
+BT=$WS/install/crusader_bt/share/crusader_bt/behavior_trees
+TREE="${TREE:-task1_disruptive.xml}"
+case "$TREE" in */*) ;; *) TREE="$BT/$TREE" ;; esac
+LAKE_LOGDIR="${LAKE_LOGDIR:-$HOME/.cache/crusader_lake}"
+PANEL_PORT="${PANEL_PORT:-8095}"
+LAKE_RXL="${LAKE_RXL:-replace}"
+RXL_ENDPOINT="udpin:127.0.0.1:14555"
+mkdir -p "$LAKE_LOGDIR"
+PIDS="$LAKE_LOGDIR/pids"
+
+# ---- inputs, checked before anything starts
+case "${NAV_MODE:-shadow}" in off|shadow|on) NAV_MODE="${NAV_MODE:-shadow}" ;;
+  *) echo "*** NAV_MODE must be off, shadow or on (got '${NAV_MODE:-}')" >&2; exit 2 ;; esac
+case "${PUBLISH:-}" in 1|true|TRUE|True) PUB=true ;; *) PUB=false ;; esac
+case "$LAKE_RXL" in replace|keep) ;; *) echo "*** LAKE_RXL must be replace or keep" >&2; exit 2 ;; esac
+if [ -z "${LAKE_DATUM:-}" ]; then
+  echo "*** LAKE_DATUM is required: 'lat,lon' of the map origin, e.g. LAKE_DATUM=1.3000000,103.8500000" >&2; exit 2
+fi
+export PYTHONPATH="$SRC/crusader_sim${PYTHONPATH:+:$PYTHONPATH}"
+export RX26_SRC="$SRC"
+if ! python3 -c "import sys; from crusader_sim.lake_panel import parse_datum; parse_datum(sys.argv[1])" "$LAKE_DATUM" 2>/tmp/lake_datum.err; then
+  echo "*** LAKE_DATUM '$LAKE_DATUM' is not a usable 'lat,lon' (or crusader_sim is not under $SRC):" >&2
+  sed 's/^/    /' /tmp/lake_datum.err >&2; exit 2
+fi
+DLAT="${LAKE_DATUM%%,*}"; DLON="${LAKE_DATUM##*,}"
+[ -f "$CFG" ] || { echo "*** no $CFG: is this the asv container, with the workspace built?" >&2; exit 2; }
+[ -f "$TREE" ] || { echo "*** no tree file $TREE (crusader_bt built in this workspace?)" >&2; exit 2; }
+for t in pgrep setsid; do command -v $t >/dev/null || { echo "*** $t is not in this container" >&2; exit 2; }; done
+
+# ---- the boat's own stack must be up: this script adds to it, it does not start it
+echo "=== preflight ==="
+nodes="$(timeout 8 ros2 node list 2>/dev/null)"
+case "$nodes" in *telemetry_bridge*) echo "  telemetry_bridge up (core.launch.py)" ;;
+  *) echo "*** telemetry_bridge is not running: core.launch.py (systemd crsd-ros) must be up first. On the HOST: systemctl status crsd-ros" >&2; exit 2 ;; esac
+need=""
+for p in crusader_link crusader_bt crusader_world_model crusader_nav crusader_nav_layers nav2_planner crusader_groundstation; do
+  ros2 pkg prefix $p >/dev/null 2>&1 || need="$need $p"
+done
+if [ -n "$need" ]; then
+  if [ "$NAV_MODE" != off ] && echo "$need" | grep -qE 'crusader_nav|nav2_planner'; then
+    echo "  *** AVOIDANCE OFF: not built / not installed here:$need  (rebuild on the HOST: tools/scripts/rebuild.sh)"
+    NAV_MODE=off
+    need="$(echo "$need" | sed -E 's/ (crusader_nav_layers|crusader_nav|nav2_planner)//g')"
+  fi
+  [ -z "${need// /}" ] || { echo "*** missing packages:$need  (rebuild on the HOST: tools/scripts/rebuild.sh)" >&2; exit 2; }
+fi
+if pgrep -f 'crusader_perception.*oak_detector|oak_detector' >/dev/null; then echo "  oak_detector running"
+else echo "  *** oak_detector is NOT running: no camera tracks until you start it from the GCS Nodes tab (http://<jetson>:8090)"; fi
+
+# ---- ours only: stop the previous lake rig (by recorded pid), never anything else
+bash "$HERE/lake_rig_down.sh" --quiet
+
+up() {   # up <name> <logfile> <command...>: its own process group, pid recorded for lake_rig_down.sh
+  local name=$1 log=$2; shift 2
+  setsid nohup "$@" > "$log" 2>&1 &
+  echo "$name $!" >> "$PIDS"
+  printf '  %-16s -> %s\n' "$name" "$log"
+}
+running() { pgrep -f -- "$1" >/dev/null; }
+
+echo "=== lake rig: datum $LAKE_DATUM  tree $(basename "$TREE")  nav_mode $NAV_MODE  publish_setpoints $PUB ==="
+# rxl_link_node: loopback, by command-line override
+if [ "$LAKE_RXL" = replace ]; then
+  for pid in $(pgrep -f 'rxl_link_node'); do
+    if tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null | grep -q 'rxl_link_node'; then
+      echo "  stopping core's rxl_link_node (pid $pid); core.launch.py will respawn its serial one in 5 s (see this script's header)"
+      kill "$pid" 2>/dev/null
+    fi
+  done
+  sleep 1
+  up rxl_link_node "$LAKE_LOGDIR/rxl.log" \
+    ros2 run crusader_link rxl_link_node --ros-args --params-file "$CFG" -p rxl_endpoint:=$RXL_ENDPOINT
+else
+  echo "  rxl_link_node        -- not started (LAKE_RXL=keep): the panel has no loopback peer"
+fi
+if running 'crusader_world_model.*target_tracker|target_tracker'; then echo "  target_tracker       -- already running, left alone"
+else up target_tracker "$LAKE_LOGDIR/tt.log" ros2 run crusader_world_model target_tracker --ros-args --params-file "$CFG"; fi
+if [ "$NAV_MODE" != off ]; then
+  if running 'nav_frames_node'; then echo "  nav                  -- already running (its datum was NOT set by this rig: check /crsd/datum)"
+  else up nav "$LAKE_LOGDIR/nav.log" ros2 launch crusader_nav nav.launch.py datum_source:=param datum_lat:=$DLAT datum_lon:=$DLON; fi
+else
+  echo "  nav                  -- not started (NAV_MODE=off: the legacy straight legs)"
+fi
+if running 'tools/bt_view.py'; then echo "  bt_view              -- already running, left alone"
+else up bt_view "$LAKE_LOGDIR/btview.log" python3 -u "$SRC/tools/bt_view.py"; fi
+if running 'groundstation.*ground_station|ground_station'; then echo "  ground_station       -- running (core.launch.py)"
+else up ground_station "$LAKE_LOGDIR/gcs.log" ros2 run crusader_groundstation ground_station --ros-args --params-file "$CFG"; fi
+# the boat's layers for the panel. crusader_sim is not colcon-built on the boat: python3 -m from source
+up panel_feed "$LAKE_LOGDIR/panel_feed.log" \
+  python3 -u -m crusader_sim.panel_feed --ros-args -p origin:="$LAKE_DATUM" -p course:=lake
+sleep 6
+if running 'bt_runner_node'; then
+  echo "*** a bt_runner_node is already running that this rig did not start (GCS Nodes tab?). Stop it first: its publish_setpoints / nav_mode are not this rig's." >&2
+  exit 3
+fi
+up bt_runner "$LAKE_LOGDIR/bt.log" \
+  ros2 run crusader_bt bt_runner_node --ros-args --params-file "$CFG" \
+  -p tree_file:="$TREE" -p publish_setpoints:=$PUB -p default_timeout_s:=600.0 -p nav_mode:="$NAV_MODE"
+sleep 6
+up task1_panel "$LAKE_LOGDIR/panel.log" python3 -u -m crusader_sim.task1_panel --lake --datum "$LAKE_DATUM" --port "$PANEL_PORT"
+
+# planner_server leaves 'activating' only once TF map -> base_footprint exists: a pose WITH A FINITE HEADING
+# (GPS yaw from the moving-baseline RTK pair; the compass is disabled by design). Say so now, not 15 s into a leg.
+if [ "$NAV_MODE" != off ]; then
+  t0=$SECONDS; state=""
+  while [ $((SECONDS - t0)) -lt 40 ]; do
+    state="$(timeout 8 ros2 lifecycle get /planner_server 2>/dev/null | head -1)"
+    case "$state" in active*) break ;; esac
+    sleep 2
+  done
+  case "$state" in
+    active*) echo "  planner_server: $state" ;;
+    *) echo "  *** planner_server is not active after 40 s (${state:-no such node}): NAV_MODE=$NAV_MODE legs will hold and FAIL at 15 s. Does the autopilot report a valid heading (RTK GPS yaw)? See $LAKE_LOGDIR/nav.log" ;;
+  esac
+fi
+
+echo
+echo "=== up ==="
+ros2 node list 2>/dev/null | sort | sed 's/^/  /'
+echo "  rxl_link_node processes: $(pgrep -fc rxl_link_node) (ours has $RXL_ENDPOINT; core's serial one respawns, see the header)"
+timeout 5 ros2 topic echo /crsd/fcu_status --once 2>/dev/null | grep -E '^mode|^armed' | tr '\n' ' ' | sed 's/^/  autopilot: /'; echo
+echo
+echo "  panel:        http://<jetson>:$PANEL_PORT      ground station: http://<jetson>:8090      tree: http://<jetson>:8085"
+if [ "$PUB" = true ]; then
+  echo "  PUBLISH=true: the tree WILL send setpoints once the pilot has armed and chosen GUIDED. The RC SB switch is the only e-stop."
+else
+  echo "  STAND TEST (PUBLISH=false): the tree plans and ticks but sends NO setpoints. For the water: PUBLISH=1 NAV_MODE=on"
+fi
+echo "  stop everything this started: bash $HERE/lake_rig_down.sh"

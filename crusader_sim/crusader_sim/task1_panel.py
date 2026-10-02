@@ -226,6 +226,8 @@ ODOM_TOPIC = "/model/crusader/odometry"
 PANEL_COURSE = "panel"
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 SENSOR_RE = re.compile(r"^/api/sensor/(\w+)\.jpg$")
+COMMON = {"/panel_common.js": "text/javascript; charset=utf-8",      # what the sim page and the lake page share,
+          "/panel_common.css": "text/css; charset=utf-8"}            # served from beside this file
 DOWNLOAD_RE = re.compile(r"^/api/course/([A-Za-z0-9_-]{1,40})\.yaml$")
 TREE_RE = re.compile(r"^\[tree\]\s+(\S+)\s+([\d.]+)%\s+buoys\s+(\d+)/(\d+)\s+plan v(\d+)\s*(.*)$")
 # = courses/task1_core.yaml's header; origin = tools/sitl/start_sitl.sh SITL_HOME
@@ -1313,7 +1315,6 @@ def _header_safe(s):
 def make_handler(panel):
     here = os.path.dirname(os.path.abspath(__file__))
     page = os.path.join(here, panel.PAGE)
-    common = os.path.join(here, "panel_common.js")        # the map and layer code both pages share
     # every act_* method is a POST route, unless the panel lists its own (the lake panel does:
     # it inherits the sim's launch/attach/stop acts and none of them may be reachable there)
     names = panel.ACTIONS if panel.ACTIONS is not None else [n[4:] for n in dir(panel) if n.startswith("act_")]
@@ -1326,9 +1327,9 @@ def make_handler(panel):
                 # re-read per request: a sync of the checkout shows up on reload
                 with open(page, "rb") as f:
                     return self._send(f.read(), "text/html; charset=utf-8")
-            if u.path == "/panel_common.js":
-                with open(common, "rb") as f:
-                    return self._send(f.read(), "text/javascript; charset=utf-8")
+            if u.path in COMMON:
+                with open(os.path.join(here, u.path[1:]), "rb") as f:
+                    return self._send(f.read(), COMMON[u.path])
             if u.path == "/api/state":
                 return self._send(json.dumps(panel.state(parse_qs(u.query))).encode(),
                                   "application/json")

@@ -25,8 +25,9 @@ if [ -d "$WIN_SRC/crusader_sim/meshes" ]; then
   mkdir -p "$SIM/meshes" && cp -u "$WIN_SRC/crusader_sim/meshes/"* "$SIM/meshes/" 2>/dev/null
   echo "  meshes: $(ls "$SIM/meshes" | wc -l) file(s)"
 fi
-# the Task 1 panel's page: the team's extension list has no *.html, and the
-# panel serves it from this source tree (task1_panel.py make_handler), not install/
-for f in "$WIN_SRC"/crusader_sim/crusader_sim/*.html; do
+# the Task 1 panel's pages: the team's extension list has no *.html, *.js or *.css, and the
+# panel serves them from this source tree (task1_panel.py make_handler), not install/
+for f in "$WIN_SRC"/crusader_sim/crusader_sim/*.html "$WIN_SRC"/crusader_sim/crusader_sim/*.js \
+         "$WIN_SRC"/crusader_sim/crusader_sim/*.css; do
   if [ -f "$f" ]; then tr -d '\r' < "$f" > "$SIM/crusader_sim/$(basename "$f")"; fi
 done

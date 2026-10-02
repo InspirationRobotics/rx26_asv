@@ -1,0 +1,290 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Crusader LAKE MODE</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/panel_common.css">
+<!-- lake_panel.py serves this (task1_panel --lake): the REAL boat, you play the UAV. Vanilla JS + canvas.
+     The map, the boat's layers, the field table and the poll are panel_common.js (shared with the sim page);
+     this page is what the water changes: build the field from the camera's tracks / the boat's position /
+     typed lat/lon, COMMIT it, answer the checkpoints, START the goal the PILOT has armed the boat for.
+     It does not arm, disarm or set a mode, and it is not an e-stop: the page says so, because on a lake a
+     big red button looks like one. The browser PULLS /api/state at 4 Hz; that poll IS the dead-man: the field
+     is resent only while it keeps arriving. -->
+<style>
+canvas#map{height:max(340px,58vh)}
+.safety{background:#5f2a26;color:#ffe9e6;border-bottom:2px solid var(--bad);padding:6px 16px;font-weight:600;font-size:13px}
+.dm{padding:6px 16px;font-size:13px;border-bottom:1px solid var(--line)}
+.dm.ok{background:#45bca01a;color:var(--ok)}.dm.warn{background:#e0a24533;color:var(--warn)}
+.dm.bad{background:#e0736a33;color:var(--bad);font-weight:700;font-size:15px}
+.abort{background:#e0736a33;border:3px solid var(--bad);margin:10px 16px;padding:12px;border-radius:8px;font-size:16px}
+.abort b{color:var(--bad)}
+main.lake{display:grid;grid-template-columns:minmax(0,1fr) 440px;gap:12px;padding:12px 16px}
+@media (max-width:1000px){main.lake{grid-template-columns:1fr}}
+.tools label{margin-right:12px}
+button.big{padding:9px 16px;font-weight:700}
+#tracks td.sub,#tracks th{font-size:12px}
+</style></head><body>
+<header>
+  <h1>Crusader · LAKE MODE</h1><span class="sub">the REAL boat · you are Ekko (the UAV) · Disruptive tier</span>
+  <span id="fcupill" class="pill">autopilot ?</span><span id="dmpill" class="pill">dead-man ?</span>
+  <span id="feedpill" class="pill">feed ?</span><span id="radiopill" class="pill">UAV ?</span>
+  <span style="margin-left:auto"><a id="gcs" target="_blank">ground station</a> · <a id="bt" target="_blank">tree</a>
+    · datum <span id="datum" class="sub"></span></span>
+</header>
+<div class="safety">NOT AN E-STOP. The only e-stop is the RC SB switch. This page cannot arm, disarm or change the mode:
+  the pilot arms the boat and selects GUIDED with the RC. Stop the boat with the RC (SC to HOLD, or SB).</div>
+<div id="deadman" class="dm"></div>
+<div id="errors"></div>
+<div id="abortban" class="abort" style="display:none">
+  <b>GOAL CANCEL REQUESTED<span id="abortAt"></span>.</b> The tree stops commanding, but the autopilot is still
+  <b>ARMED</b> and the boat may keep moving under its last command.
+  <b>Switch SC to HOLD / use the RC.</b> <span id="abortState" class="sub"></span></div>
+<div id="ask" class="ask" style="display:none">
+  <div class="what"><b id="askText"></b><div id="askWhat"></div></div>
+  <button class="go" onclick="post('/api/ack')">ACK (no change)</button>
+  <button id="askSend" onclick="post('/api/send_ack')">SEND CHANGES + ACK</button>
+  <div class="sub help">ACK confirms the field exactly as you last SENT it. SEND CHANGES + ACK puts your staged
+    colour changes on the air first, then confirms. The boat drives on after either; unanswered, it re-asks
+    every 3 s and gives up after 120 s.</div>
+</div>
+<main class="lake">
+  <section>
+    <div class="mapwrap"><canvas id="map"></canvas><div id="navbadge" style="display:none"></div><div class="maptag">FIELD + BOAT'S MAP (metres from the datum)</div></div>
+    <div class="row sub tools"><button onclick="fit=true;draw()">Fit</button>
+      <span id="toolrow"><b>map click:</b>
+        <label><input type="radio" name="tool" value="track" checked> camera track &rarr; buoy</label>
+        <label><input type="radio" name="tool" value="place"> place a buoy</label>
+        <label><input type="radio" name="tool" value="approach"> set approach point</label></span>
+      <span id="cursor" style="margin-left:auto"></span></div>
+    <div class="row sub" id="hint"></div>
+    <div class="row w" id="toast"></div>
+    <div class="row sub" id="layers" title="the boat's own picture, from panel_feed"></div>
+    <div class="sub" id="layerkey">Solid circle = a buoy in the field you are building / sending; dashed ring = a staged colour change not sent yet; hollow = where
+      the UAV says it is, when UAV error &gt; 0 &middot; square = a camera track (outline = the boat's own colour vote, grey ? = unknown_buoy;
+      fill = your colour once the boat fused it) &middot; red circles = the boat's hazards (the keep-out ring dashed) &middot; violet = the
+      Nav2 costmap, cyan = LiDAR &middot; diamond = the boat's fused passage &middot; dashed path = the leg bt_runner is driving &middot; white
+      arrow = the boat (blank when its pose is stale) &middot; a layer older than 2 s is blank and says so</div>
+    <div class="card logs">
+      <div class="tabs row" id="tabs"></div>
+      <pre id="logview"></pre>
+    </div>
+  </section>
+  <section>
+    <div id="build">
+      <div class="card"><h3>Field: <span id="count"></span></h3>
+        <div class="row sub">Role of the next buoy (keys 1-5):</div>
+        <div class="row" id="palette"></div>
+        <div class="row"><button id="pinbtn" onclick="post('/api/pin',{state:pick}).then(poll1)" title="a buoy at the boat's position now (fresh pose only)">PIN AT BOAT</button>
+          <span class="sub">or click a camera track on the map</span></div>
+        <div class="row"><input id="llat" placeholder="lat" size="11"><input id="llon" placeholder="lon" size="12">
+          <button onclick="addLatLon()">ADD lat/lon</button></div>
+        <table><thead><tr><th>id</th><th>x (E)</th><th>y (N)</th><th>lat</th><th>lon</th><th>role</th><th></th></tr></thead>
+          <tbody id="btable"></tbody></table>
+        <div id="valid" style="margin-top:6px;font-size:13px"></div>
+        <div class="row"><button id="commit" class="go big" onclick="post('/api/commit').then(poll1)">COMMIT FIELD</button>
+          <span class="sub">puts the field on the air; positions lock, colours change through SEND</span></div>
+      </div>
+      <div class="card"><h3>Camera tracks (the boat's)</h3>
+        <table id="tracks"><thead><tr><th>#</th><th>label</th><th>x</th><th>y</th><th>seen</th><th></th></tr></thead><tbody id="trk"></tbody></table>
+        <div class="sub" id="trkNote"></div>
+      </div>
+    </div>
+    <div id="live" style="display:none">
+      <div class="card"><h3>Mission</h3>
+        <div class="row"><button id="start" class="go big" onclick="post('/api/start').then(poll1)">START TASK 1</button>
+          <button id="abort" class="stop big" onclick="post('/api/abort').then(poll1)" title="cancels the tree's goal (SIGINT to lake_goal); does NOT stop the boat">ABORT GOAL</button>
+          <button class="stop" onclick="if(confirm('STOP UAV: nothing more is transmitted. A running goal aborts on the boat’s own plan-freshness guard (~15 s). Continue?'))post('/api/stop_uav').then(poll1)">STOP UAV</button></div>
+        <div id="startwhy" class="sub w"></div>
+        <div id="phase" class="sub"></div><div class="bar"><i id="pct" style="width:0"></i></div>
+        <pre id="result" style="margin-top:6px"></pre>
+      </div>
+      <div class="card"><h3>Field on the air</h3>
+        <div class="row"><b id="unsent"></b><button id="send" onclick="post('/api/send').then(poll1)">SEND CHANGES</button>
+          <button onclick="post('/api/discard').then(poll1)">DISCARD</button></div>
+        <div id="problem" class="e"></div>
+        <table><thead><tr><th>id</th><th>role (staged)</th><th>sent</th><th>x (E)</th><th>y (N)</th></tr></thead><tbody id="ltable"></tbody></table>
+        <div class="row"><label><input type="checkbox" id="auto" onchange="post('/api/auto_ack',{on:this.checked})"> auto-ACK</label>
+          <span id="radio" class="sub"></span></div>
+        <div class="sub">recolour a buoy here (or click it on the map), then SEND CHANGES, or answer a checkpoint with SEND CHANGES + ACK. Auto-ACK is off by default and, like the resends, is held back when no browser is polling.</div>
+      </div>
+      <div class="card"><h3>Checkpoints</h3><table><thead><tr><th>#</th><th>what</th><th>asked</th><th>answer</th><th>asks</th></tr></thead>
+        <tbody id="cps"></tbody></table></div>
+    </div>
+    <div class="card" id="approach"><h3>Approach point</h3>
+      <div class="row"><span id="apinfo" class="sub"></span></div>
+      <div class="row"><button onclick="post('/api/approach',{at_boat:true}).then(poll1)">at the boat</button>
+        <button onclick="post('/api/approach',{clear:true}).then(poll1)">none (skip the drive)</button>
+        <span class="sub">or the &ldquo;set approach point&rdquo; map click</span></div>
+    </div>
+    <div class="card" id="uav"><h3>UAV position error</h3>
+      <div class="row sub">0 = exact (the default here: the field IS where you put it). R &gt; 0 gives each buoy a fixed random offset of up to R m (&lt; 1 m).</div>
+      <div class="row"><label>R <input id="uR" type="number" min="0" max="0.99" step="0.1" style="width:70px"> m</label>
+        <label>seed <input id="uSeed" type="number" min="0" max="2147483647" step="1" style="width:110px"></label>
+        <button id="uReroll" onclick="post('/api/reroll').then(poll1)">Re-roll</button>
+        <label>jitter &sigma; <input id="uJit" type="number" min="0" max="0.99" step="0.05" style="width:70px"> m</label></div>
+      <div id="uWarn" class="sub">Jitter 0 = each resend repeats the same field. Any change in the field's content makes the boat replan.</div>
+      <div id="uInfo" class="sub"></div><div id="uLock" class="sub w"></div>
+    </div>
+    <div class="card"><h3>Courses</h3>
+      <div class="row"><select id="tpl"></select><button id="tplgo" onclick="post('/api/template',{name:val('tpl')})">Load template</button>
+        <button id="clear" onclick="post('/api/clear')">Clear</button></div>
+      <div class="row"><select id="lays"></select><button id="laygo" onclick="post('/api/load',{name:val('lays')})">Load saved</button></div>
+      <div class="row"><input id="saveName" placeholder="course name" size="14">
+        <button onclick="saveCourse()">SAVE AS COURSE</button><a id="dl" style="display:none" download>download</a></div>
+      <div class="sub" id="saveInfo">Saves the field as a crusader_sim course YAML (origin = the datum, metres east/north of it): copy it into
+        crusader_sim/courses/ on the laptop to replay the same layout in Gazebo. A loaded course is placed from the datum, whatever its own origin.</div>
+    </div>
+    <div class="card"><h3>Boat</h3><div id="boatinfo" class="sub"></div></div>
+  </section>
+</main>
+<div id="pop"></div>
+<script src="/panel_common.js"></script>
+<script>
+var LAYDEFS=[{k:'costmap',src:'costmap',t:'Costmap',tip:"the Nav2 local costmap (panel_feed's costmap layer): violet squares = lethal/inscribed obstacles, cyan = LiDAR voxels"},
+  {k:'hazards',src:'hazards',t:'Hazards',tip:"/crsd/nav/hazards: the known field the planner avoids (red circles at their physical radius, keep-out ring dashed)"},
+  {k:'tracks',src:'tracks',t:"Boat's camera tracks",tip:"/crsd/world_targets: what the boat's tracker believes (squares; outline = its colour vote, fill = your colour where fused)"},
+  {k:'fused',src:'passage',t:"Boat's fused passage",tip:'/crsd/safe_passage_report: your field matched to the tracks (diamonds); published only while a goal is running'},
+  {k:'path',src:'leg',t:'Planned path',tip:'/crsd/nav/leg_status: the leg bt_runner is driving (drawn on top)'}];
+ORIGIN={label:'datum',arrow:false}; TABLE_LATLON=true; UAV_TEXT={commit:'COMMIT',locked:'a goal is running'};
+var unreachableSince=null;
+$('gcs').href='http://'+location.hostname+':8090'; $('gcs').textContent='ground station :8090';
+$('bt').href='http://'+location.hostname+':8085'; $('bt').textContent='tree :8085';
+initLogs(['radio','mission']);
+initPalette();
+initLayers(LAYDEFS,'lake_panel.layers');
+bindUav();
+function live(){return S&&S.mode==='live'}
+function editable(){return S&&S.mode==='build'}
+function feedIdle(){return false}
+function onUnreachable(){if(unreachableSince==null)unreachableSince=Date.now();renderDeadman()}
+function buoys(){return live()&&S.run?S.run.buoys:layout.map(function(b,i){var o=S&&S.uav&&S.uav.offsets[i]||[0,0];
+  return{x:b.x,y:b.y,ux:b.x+o[0],uy:b.y+o[1],staged:b.state,sent:b.state}})}
+function fitExtra(){var pts=[],hz=layData('hazards');
+  if(S&&S.approach)pts.push([S.approach.x,S.approach.y]);
+  if(hz)hz.items.forEach(function(h){if(h.kind===0)pts.push([h.x,h.y]);else if(h.pts)pts=pts.concat(h.pts)});
+  return pts}
+// ---- the map
+var MAPS=[{cv:$('map'),boat:true}];
+useCanvas(MAPS[0].cv);
+bindMaps();
+function drawMap(boat,dpr){
+  g.setTransform(1,0,0,1,0,0); g.clearRect(0,0,cv.width,cv.height);
+  drawGrid(dpr); drawTrail(dpr); drawBoatLayers(dpr); drawUav(dpr); drawBuoys(dpr); drawApproach(dpr);
+  if(S&&S.boat){var c=S.boat.age>5?'#666':'#fff';
+    if(S.boat.yaw==null){var p=W2S(S.boat.x,S.boat.y);g.strokeStyle=c;g.lineWidth=2*dpr;g.beginPath();g.arc(p[0],p[1],8*dpr,0,7);g.stroke()}   // no heading yet: a ring, not an arrow
+    else arrowAt(S.boat.x,S.boat.y,S.boat.yaw,c)}
+}
+function drawApproach(dpr){
+  var a=S&&S.approach;if(!a)return;var p=W2S(a.x,a.y),k=9*dpr;
+  g.strokeStyle='#F2D14B';g.lineWidth=2*dpr;g.beginPath();g.arc(p[0],p[1],k,0,7);g.moveTo(p[0]-k-4*dpr,p[1]);g.lineTo(p[0]+k+4*dpr,p[1]);
+  g.moveTo(p[0],p[1]-k-4*dpr);g.lineTo(p[0],p[1]+k+4*dpr);g.stroke();g.fillStyle='#F2D14B';g.fillText('approach',p[0]+k+6*dpr,p[1]-k);
+}
+// ---- the field: tracks -> buoys, click placement, typed lat/lon
+function tool(){return document.querySelector('input[name=tool]:checked').value}
+function trackNear(w){var d=layData('tracks'),best=null,bd=Math.max(1.5,14/view.s);
+  if(d)d.items.forEach(function(t){var q=Math.hypot(t.x-w[0],t.y-w[1]);if(q<=bd){bd=q;best=t}});
+  return best}
+function addBuoy(x,y,state){
+  x=Math.round(x*100)/100;y=Math.round(y*100)/100;
+  if(layout.length>=10){alert('10 buoys is the limit (RXL carries 10)');return}
+  var near=-1;layout.forEach(function(b,i){if(Math.hypot(b.x-x,b.y-y)<1.0)near=i});
+  if(near>=0){layout[near].state=state;selIdx=near}      // a buoy is already there: recolour it
+  else{layout.push({x:x,y:y,state:state});selIdx=layout.length-1}
+  pushLayout()}
+var toastT=null;
+function toast(msg){$('toast').textContent=msg;clearTimeout(toastT);toastT=setTimeout(function(){$('toast').textContent=''},5000)}
+function emptyClick(w,e){
+  var t=tool();
+  if(t==='approach'){post('/api/approach',{x:w[0],y:w[1]}).then(poll1);return}
+  if(t==='place'){addBuoy(w[0],w[1],pick);return}
+  var tr=trackNear(w);
+  if(!tr){toast('no camera track there: click a track square, or switch the map click to "place a buoy"');return}
+  addBuoy(tr.x,tr.y,pick)}
+function liveClick(w,e){if(tool()==='approach')post('/api/approach',{x:w[0],y:w[1]}).then(poll1)}
+function addLatLon(){var la=parseFloat(val('llat')),lo=parseFloat(val('llon'));
+  if(!isFinite(la)||!isFinite(lo)){alert('lat and lon must be numbers');return}
+  post('/api/add_latlon',{lat:la,lon:lo,state:pick}).then(function(d){if(d&&d.ok){$('llat').value='';$('llon').value=''}poll1()})}
+function saveCourse(){var n=val('saveName');post('/api/save',{name:n}).then(function(d){
+  if(d&&d.ok){var a=$('dl');a.href=d.download;a.textContent='download '+n+'.yaml';a.style.display='';$('saveInfo').textContent='saved '+d.path}poll1()})}
+// ---- render
+function pill(id,text,cls){var p=$(id);p.textContent=text;p.className='pill'+(cls?' '+cls:'')}
+function renderDeadman(){
+  var el=$('deadman'),dm=S&&S.deadman,r=S&&S.radio;
+  if(unreachableSince!=null){var s=((Date.now()-unreachableSince)/1000).toFixed(0);
+    el.className='dm bad';el.textContent='PANEL UNREACHABLE for '+s+' s: the field is NOT being resent. The boat aborts about 15 s after the last field it received.';
+    pill('dmpill','dead-man TRIPPED','bad');return}
+  if(!S)return;
+  if(!live()){el.className='dm';el.textContent='No field on the air. Build the field, then COMMIT FIELD.';pill('dmpill','no field on air','');return}
+  var age=r.last_tx_age;
+  if(age!=null&&age>8){el.className='dm warn';el.textContent='The last field went out '+age.toFixed(0)+' s ago: the boat aborts at 15 s.';pill('dmpill','resend OVERDUE','busy');return}
+  el.className='dm ok';el.textContent='DEAD-MAN armed: the field is resent every 5 s only while this page keeps polling (last '+(age==null?'-':age.toFixed(1)+' s ago')+
+    '). Close it or lose the WiFi and the boat aborts ~15 s later.'+(dm.last_trip?' (tripped once at '+new Date(dm.last_trip.at*1000).toLocaleTimeString()+', '+dm.withheld+' resends withheld)':'');
+  pill('dmpill','dead-man OK','up')}
+function renderTracks(){
+  var d=layData('tracks'),el=$('trk');
+  $('trkNote').textContent=d?'':'no fresh tracks from the boat ('+(S.feed.tracks?S.feed.tracks.status:'?')+'): is oak_detector running (GCS Nodes tab)?';
+  el.innerHTML=d?d.items.map(function(t){return '<tr><td>'+t.id+'</td><td>'+esc(t.label||'lidar only')+'</td><td>'+t.x+'</td><td>'+t.y+'</td><td>'+(t.unseen==null?'':t.unseen.toFixed(0)+' s')+'</td>'+
+    '<td>'+(editable()?'<button onclick="addBuoy('+t.x+','+t.y+',pick)">&rarr; buoy</button>':'')+'</td></tr>'}).join(''):''}
+function renderLive(){
+  var run=S.run;if(!run)return;
+  if(!($('ltable').contains(document.activeElement)))
+    $('ltable').innerHTML=run.buoys.map(function(b,i){
+      return '<tr><td>b'+i+'</td><td><select onchange="stage('+i+',this.value)">'+ORDER.map(function(s){
+        return '<option value="'+s+'"'+(s===b.staged?' selected':'')+'>'+LBL[s]+'</option>'}).join('')+'</select>'+
+        (b.staged!==b.sent?' <span class="w">was '+LBL[b.sent]+'</span>':'')+'</td><td>'+LBL[b.sent]+'</td><td>'+b.x+'</td><td>'+b.y+'</td></tr>'}).join('');
+  $('unsent').textContent=run.unsent+' unsent change'+(run.unsent===1?'':'s');$('send').disabled=!run.unsent||!!run.problem;$('problem').textContent=run.problem||''}
+function render(){
+  unreachableSince=null;
+  var m=S.mission,F=S.feed,fcu=F.fcu;
+  var errs=Object.keys(S.errors).map(function(k){return esc(S.errors[k])});
+  $('errors').innerHTML=errs.map(function(e){return'<div class="err">'+e+'</div>'}).join('');
+  $('datum').textContent=S.datum.lat.toFixed(7)+', '+S.datum.lon.toFixed(7)+(S.dry_run?' (DRY RUN)':'');
+  // header pills
+  if(fcu.status==='fresh'){var d=fcu.data,ok=d.armed&&String(d.mode).toUpperCase()==='GUIDED';
+    pill('fcupill',d.mode+' · '+(d.armed?'ARMED':'disarmed'),ok?'up':d.armed?'busy':'')}
+  else pill('fcupill','autopilot: no data','bad');
+  pill('feedpill',F.up?'feed OK':'feed OFFLINE',F.up?'up':'bad');
+  pill('radiopill',S.radio.up?'UAV transmitting':'UAV silent',S.radio.up?'up':'');
+  renderDeadman();
+  $('build').style.display=editable()?'':'none';$('live').style.display=live()?'':'none';
+  $('toolrow').style.display='';
+  $('hint').textContent=editable()?'click: place per the map-click choice · drag a buoy: move · drag water: pan · Del: delete the selected · wheel: zoom'
+    :'on the air: click a buoy to stage a colour · drag: pan · wheel: zoom';
+  renderUavFields();
+  if(S.layout.rev!==rev&&!(drag&&drag.moved)){rev=S.layout.rev;layout=S.layout.buoys.map(function(b){return{x:b.x,y:b.y,state:b.state}});renderTable()}
+  var n=S.layout.buoys.length,st=S.layout.buoys.map(function(b){return b.state}),
+      red=st.filter(function(s){return s==='flash_red'}).length,grn=st.filter(function(s){return s==='flash_green'}).length;
+  $('count').textContent=n+'/10 buoys · '+Math.min(red,grn)+' gate'+(Math.min(red,grn)===1?'':'s')+' (red/green pairs)';
+  $('valid').innerHTML=S.layout.errors.map(function(e){return'<div class="e">✗ '+esc(e)+'</div>'}).join('')+
+    S.layout.warnings.map(function(e){return'<div class="w">! '+esc(e)+'</div>'}).join('')+(S.layout.note?'<div class="sub">'+esc(S.layout.note)+'</div>':'');
+  $('commit').disabled=!editable()||S.layout.errors.length>0;
+  $('pinbtn').disabled=!editable()||!S.boat;
+  ['tplgo','clear','laygo'].forEach(function(id){$(id).disabled=!editable()});
+  fillSelect('tpl',S.templates,'task1_core');fillSelect('lays',S.layouts);
+  var a=S.approach;$('apinfo').textContent=a?'approach: '+a.x.toFixed(1)+', '+a.y.toFixed(1)+' m  ('+a.lat.toFixed(7)+', '+a.lon.toFixed(7)+')':'none: the goal skips the drive (the boat is on station)';
+  $('approach').querySelectorAll('button').forEach(function(b){b.disabled=m.running});
+  $('boatinfo').textContent=S.boat?'x '+S.boat.x.toFixed(1)+', y '+S.boat.y.toFixed(1)+' m'+(S.boat.yaw==null?', no heading yet':'')+' · pose '+fmtAge(S.boat.age)
+    :'no fresh pose from the feed (/crsd/pose): PIN AT BOAT is off, the boat is not drawn';
+  renderTracks();
+  // mission
+  $('start').disabled=!!S.start_block||!live()||m.running;$('abort').disabled=!live();
+  $('startwhy').textContent=live()&&S.start_block&&!m.running?S.start_block:'';
+  $('phase').textContent=m.phase?(m.phase+' '+m.pct.toFixed(0)+'%  buoys '+m.buoys+'  plan '+m.plan+'  '+m.warning):(m.running?m.operator:(m.operator||''));
+  $('pct').style.width=(m.pct||0)+'%';$('result').textContent=m.result;
+  $('abortban').style.display=m.aborted_at?'':'none';
+  if(m.aborted_at){$('abortAt').textContent=' at '+new Date(m.aborted_at*1000).toLocaleTimeString();
+    $('abortState').textContent=m.running?'lake_goal is cancelling the goal...':(m.exit_code!=null?'lake_goal has exited (code '+m.exit_code+'). Goal result: '+(m.result||'none').split('\n')[0]:'')}
+  if(live())renderLive();
+  $('auto').checked=S.radio.auto_ack;
+  $('radio').textContent=S.radio.up?('fields sent '+S.radio.sent+', resends '+S.radio.resends+', last '+fmtAge(S.radio.last_tx_age)):'radio down';
+  var c=S.checkpoint;$('ask').style.display=c?'':'none';
+  if(c){$('askText').textContent='Boat asks: checkpoint '+c.seq+' — '+c.label+' (waiting '+c.waiting_s.toFixed(0)+' s, re-asked '+(c.asks-1)+(c.asks===2?' time)':' times)');
+    $('askWhat').textContent=c.what||'';$('askSend').disabled=!S.run||!S.run.unsent||!!S.run.problem}
+  layPaint();
+  $('cps').innerHTML=S.checkpoints.map(function(r){var t=new Date(r.asked*1000).toLocaleTimeString();
+    return'<tr><td>'+r.seq+'</td><td>'+esc(r.label)+'</td><td>'+t+'</td><td>'+(r.reply?esc(r.reply)+' +'+(r.answered-r.asked).toFixed(0)+'s':'<b class="w">waiting</b>')+
+      '</td><td>'+r.asks+'</td></tr>'}).join('');
+  draw();
+}
+setInterval(function(){if(unreachableSince!=null)renderDeadman()},1000);
+startPolling();
+</script></body></html>
