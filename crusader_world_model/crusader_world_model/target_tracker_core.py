@@ -70,6 +70,20 @@ into the gate (a hard radius plus label compatibility) and the residual
 covariance propagation. An EMA whose gain decays as 1/hits IS the running mean
 for the first few sightings and a tracking filter after that, which is the
 right behaviour for a buoy that is not going anywhere.
+
+ONE BUOY, MANY COLOURS (the colour family). A Task 1 RoboBuoy is one object
+whose beacon changes state: lit red or green, a flashing or steady blue, or
+dark (an unlit side beacon, or the off half of a 1 s on / 1 s off flash). The
+detector names the STATE, so the same buoy arrives as red_buoy on one frame and
+black_buoy on the next. Keyed on the label that is two tracks a metre apart,
+and the duplicate is a phantom obstacle beside a real gate buoy. So the labels
+in `colour_family_labels` are compatible with each other at association, and
+the track's reported colour is decided by VOTING (resolve_label): the lit
+colour with enough votes and a clear lead, else `colour_unknown_label`. Dark
+votes carry no colour and are left out of the ratio, so a flashing red buoy
+(about half red, half dark) still resolves red. A buoy whose colour is not
+confidently known is reported as unknown and is STILL a track: an obstacle is
+an obstacle whatever colour it is, and the UAV's field supplies the colour.
 """
 import math
 from dataclasses import dataclass, field
@@ -127,6 +141,25 @@ class TrackerParams:
     tentative_timeout_s: float = 3.0  # unconfirmed tracks expire fast; ALWAYS
     track_timeout_s: float = 0.0     # confirmed: 0 = never expire. See _prune
     max_tracks: int = 64             # hard cap; see _prune
+
+    # -- colour voting (stage 3). See the module docstring, "ONE BUOY, MANY
+    # COLOURS". Tuples, because the node hands in whatever list rclpy gives it
+    # and membership is the only thing ever asked of them.
+    colour_vote_enable: bool = True  # False = the pre-voting behaviour: same
+                                     # label or one side empty to associate,
+                                     # plain majority to report.
+    colour_family_labels: tuple = ("red_buoy", "green_buoy", "black_buoy",
+                                   "flashing_blue_buoy", "steady_blue_buoy")
+                                     # ONE object type in different beacon
+                                     # states: associate with each other
+    colour_unlit_labels: tuple = ("black_buoy",)
+                                     # family votes that carry NO colour
+    colour_unknown_label: str = "unknown_buoy"
+                                     # reported when no lit colour wins. Must
+                                     # contain no colour word: bt_runner's
+                                     # beaconFromLabel() matches substrings
+    colour_min_votes: int = 5        # a lit colour needs at least this many
+    colour_min_ratio: float = 0.6    # ... and this share of the LIT votes
 
 
 # ------------------------------------------------------------------ inputs
@@ -421,14 +454,20 @@ class Track:
 
     Position is world ENU metres against the tracker's origin; the node turns
     it into lat/lon on the way out. `label_votes` is kept rather than a single
-    label so the reported name is a majority over the track's whole life —
-    see TrackedTarget.msg on why the most recent label is the wrong answer.
+    label so the reported name is a vote over the track's whole life — see
+    TrackedTarget.msg on why the most recent label is the wrong answer. It
+    holds EVERY label ever seen, dark ones included, so the raw counts stay
+    inspectable and a changed colour_* parameter re-resolves the whole history.
     """
     id: int
     x: float
     y: float
     z: float
     label_votes: dict = field(default_factory=dict)
+    # The REPORTED label: resolve_label() over label_votes, refreshed by
+    # TargetTracker.snapshot() because it depends on parameters that can change
+    # at runtime. "" = LiDAR-only. Not the raw majority — see resolve_label().
+    label: str = ""
     confidence: float = 0.0
     sources: int = 0
     extent: tuple = (0.0, 0.0, 0.0)
@@ -444,13 +483,6 @@ class Track:
     range_h: float = 0.0
     bearing_true: float = 0.0
 
-    @property
-    def label(self) -> str:
-        """Majority label, or "" if only the LiDAR has ever seen this."""
-        if not self.label_votes:
-            return ""
-        return max(self.label_votes.items(), key=lambda kv: kv[1])[0]
-
     def confirmed(self, p: TrackerParams) -> bool:
         return self.hits >= p.confirm_hits
 
@@ -459,22 +491,83 @@ class Track:
         return math.sqrt(self.var)
 
 
-def _label_ok(track: Track, obs: Observation) -> bool:
+def _majority(votes: dict) -> str:
+    """The label with the most votes ("" for none). Ties go to the first seen."""
+    if not votes:
+        return ""
+    return max(votes.items(), key=lambda kv: kv[1])[0]
+
+
+def _in_family(label: str, p: TrackerParams) -> bool:
+    return p.colour_vote_enable and label in p.colour_family_labels
+
+
+def _family_track(votes: dict, p: TrackerParams) -> bool:
+    """True when any of these votes is for a colour-family label."""
+    return any(_in_family(l, p) for l in votes)
+
+
+def resolve_label(votes: dict, p: TrackerParams) -> str:
+    """The label a track reports, from its complete vote tally.
+
+    A track with no family votes (a dock sign, a target boat, an unlabelled
+    LiDAR return) keeps the plain majority, exactly as before. A COLOUR-FAMILY
+    track reports the lit colour that has BOTH at least colour_min_votes votes
+    AND at least colour_min_ratio of the LIT family votes; anything else is
+    colour_unknown_label. The ratio's denominator leaves out the unlit labels:
+    a flashing red buoy is dark half the time, and counting those frames as
+    votes AGAINST red would make every flashing buoy unresolvable. A track whose
+    only votes are dark is therefore unknown, not "black": whether a buoy is
+    OFF or merely between flashes is not something one tally can tell apart.
+
+    A dead heat between the two leading colours is unknown whatever the ratio
+    parameter says — picking one would be a coin toss reported as a fact.
+    """
+    if not votes:
+        return ""
+    if not _family_track(votes, p):
+        return _majority(votes)
+    lit = sorted(((n, l) for l, n in votes.items()
+                  if _in_family(l, p) and l not in p.colour_unlit_labels),
+                 reverse=True)
+    if not lit:
+        return p.colour_unknown_label
+    n_top, top = lit[0]
+    if len(lit) > 1 and lit[1][0] == n_top:
+        return p.colour_unknown_label
+    share = n_top / sum(n for n, _ in lit)
+    if n_top >= p.colour_min_votes and share >= p.colour_min_ratio:
+        return top
+    return p.colour_unknown_label
+
+
+def _label_ok(track: Track, obs: Observation, p: TrackerParams) -> bool:
     """May this sighting be associated with this track?
 
-    Compatible means: same label, or one of the two has no label at all. The
-    empty case is not a loophole, it is the point — it is how a LiDAR-only
-    track picks up a name the first time the camera sees it, and how a
-    camera-only track picks up a footprint the first time the LiDAR does.
-    Requiring an exact match would keep the two halves of one object apart
-    forever, which is exactly the outcome fusion exists to prevent.
+    Compatible means: same label, both in the colour family, or one of the two
+    has no label at all. The empty case is not a loophole, it is the point — it
+    is how a LiDAR-only track picks up a name the first time the camera sees it,
+    and how a camera-only track picks up a footprint the first time the LiDAR
+    does. Requiring an exact match would keep the two halves of one object
+    apart forever, which is exactly the outcome fusion exists to prevent.
 
-    Two DIFFERENT labels never merge, however close: a red buoy and a green
-    buoy 2 m apart are a gate, and a tracker that averaged them into one
-    object at the midpoint would put a waypoint through the middle of nothing.
+    The family case is the same argument for colour: red_buoy and black_buoy
+    are one buoy in two beacon states, and keeping them apart would leave a
+    duplicate track beside every flashing buoy. The track side is read from its
+    RAW votes, not from its reported label — an unknown_buoy track still takes
+    sightings of any family colour, which is how it ever stops being unknown.
+
+    Two DIFFERENT labels outside the family never merge, however close: a dock
+    marker and a target boat are different things, and a tracker that averaged
+    them into one object at the midpoint would put a waypoint through the
+    middle of nothing. (Two family buoys of different colours DO merge inside
+    assoc_radius_m, so that radius must stay below the narrowest gate.)
     """
-    tl, ol = track.label, obs.label
-    return not tl or not ol or tl == ol
+    if not track.label_votes or not obs.label:
+        return True
+    if _in_family(obs.label, p):
+        return _family_track(track.label_votes, p)
+    return _majority(track.label_votes) == obs.label
 
 
 class TargetTracker:
@@ -525,18 +618,22 @@ class TargetTracker:
         self._associate(projected, now, stats)
 
         stats["expired"] = self._prune(now)
-        stats["tracks"] = len(self.tracks)
-        stats["confirmed"] = sum(1 for t in self.tracks if t.confirmed(self.p))
+        tracks = self.snapshot(boat)
+        stats["tracks"] = len(tracks)
+        stats["confirmed"] = sum(1 for t in tracks if t.confirmed(self.p))
+        stats["colour_unknown"] = sum(
+            1 for t in tracks if t.label == self.p.colour_unknown_label)
         self.stats = stats
-        return self.snapshot(boat)
+        return tracks
 
     def snapshot(self, boat: BoatState):
-        """Tracks with range/bearing refreshed against `boat`, nearest first.
+        """Tracks with range/bearing and label refreshed, nearest first.
 
         Split out from update() so the node can re-range the same track set
         against a newer pose without inventing sensor observations to do it.
         """
         for t in self.tracks:
+            t.label = resolve_label(t.label_votes, self.p)
             de, dn = t.x - boat.east, t.y - boat.north
             t.range_h = math.hypot(de, dn)
             # Absolute bearing in the LatLonHead convention: 0 = true north,
@@ -564,7 +661,7 @@ class TargetTracker:
         pairs = []
         for oi, (o, wx, wy, wz) in enumerate(projected):
             for ti, t in enumerate(self.tracks):
-                if not _label_ok(t, o):
+                if not _label_ok(t, o, self.p):
                     continue
                 d = math.hypot(wx - t.x, wy - t.y)
                 if d <= self.p.assoc_radius_m:

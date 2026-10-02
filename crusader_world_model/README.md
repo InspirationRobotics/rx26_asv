@@ -119,6 +119,41 @@ fixes a wrong association. So the effort goes into the gate (a hard radius **plu
 compatibility) and into making a bad gate visible (`position_stddev` grows loudly when one
 track is being fed two objects) rather than into covariance propagation.
 
+### Colour voting: one buoy, many beacon states
+
+A Task 1 RoboBuoy is one object whose beacon changes state, and the detector names the
+*state*. In Disruptive the side beacons are **off** (only the top beacon, which the UAV sees,
+is lit); in the lower tiers the beacon **flashes** 1 s on / 1 s off. So one buoy arrives as
+`red_buoy` on one frame and `black_buoy` on the next. Keyed on the label that was **two
+tracks a metre apart**, and the duplicate became a phantom obstacle beside a gate buoy.
+
+Now every label in `colour_family_labels` associates with every other, and the track's
+reported colour is a **vote** (`resolve_label`):
+
+- A lit colour is reported only if it has at least `colour_min_votes` votes (5) **and** at
+  least `colour_min_ratio` (0.6) of the *lit* family votes. A dead heat is unknown whatever
+  the ratio says.
+- Votes for `colour_unlit_labels` (`black_buoy`) carry no colour and are **left out of the
+  ratio**: a flashing red buoy is ~50% red / ~50% dark and still resolves red.
+- Anything else — no lit votes at all, too few, or no clear leader — is reported as
+  `colour_unknown_label` (`unknown_buoy`). **It is still a track and still an obstacle.**
+  The label contains no colour word on purpose: `bt_runner`'s `beaconFromLabel()` matches
+  the substrings red / green / blue / off / black, and maps this to `Beacon::Unknown`.
+  The UAV's field supplies the colour (`nav::fusePassage`: the UAV wins for matched buoys).
+- `label_votes` keeps **every** label, dark ones included; the reported label is recomputed
+  on every snapshot, so the two vote thresholds are `[DYN]` and re-resolve the whole history.
+  `colour_vote_enable: false` restores the old rule (same label to associate, plain
+  majority to report).
+- Labels outside the family (dock markers, target boats, unlabelled LiDAR returns) keep the
+  old rules exactly. `crsd/world_model_health` carries `colour_unknown`, the number of tracks
+  currently reporting the unknown label.
+
+**The price:** red and green are no longer kept apart by their labels, so
+`assoc_radius_m` (3.0) must stay **below the narrowest gate** (the sim's gates are 6 m;
+`nav::planPassage` accepts down to 2 m). A gate narrower than the radius would merge the
+buoy seen second into the one seen first. Also: the engine's own class is `blue_buoy`, which
+is not in the family; add it once the detector emits the flash / steady names.
+
 ### The invariants this node must keep
 
 1. **A detection with no supporting range from a second sensor is passed through with what
@@ -130,9 +165,11 @@ track is being fed two objects) rather than into covariance propagation.
    contributes an object of its own. That is a deliberate scope change, taken once at the top
    of `fuse()` and counted in `lidar_ignored`; it is not a detection quietly failing a gate,
    which is what this invariant exists to forbid.
-2. **Two different labels never merge**, however close. A red buoy and a green buoy 2 m
-   apart are a gate; averaging them into one object at the midpoint puts a waypoint through
-   the middle of nothing.
+2. **Two different labels never merge**, however close — *except* labels in
+   `colour_family_labels`, which are one buoy in different beacon states and DO merge (see
+   [Colour voting](#colour-voting-one-buoy-many-beacon-states)). A dock marker and a target
+   boat 2 m apart are different things; averaging them into one object at the midpoint puts
+   a waypoint through the middle of nothing.
 3. **Pose or attitude stale → no observations are ingested at all.** There is no honest
    place to put a detection when the boat's own position is unknown, and guessing writes
    targets at coordinates the boat has already left. Existing tracks still age and still
@@ -156,6 +193,9 @@ carries the full stereo error, so a buoy at 25 m can re-project a metre or more 
 bearing ray between sightings and split into a second track. At pool ranges that noise is
 ~0.4 m and 3.0 m is comfortable; if duplicates appear strung out along a bearing at long
 range, this gate is the one to widen.
+
+`assoc_radius_m` now also decides where colour-family buoys merge: see
+[Colour voting](#colour-voting-one-buoy-many-beacon-states).
 
 Then `confirm_hits` (default 3). With `track_timeout_s: 0` it is **the only thing between a
 detector false-positive and a permanent phantom.** Raise it if phantoms accumulate even with
@@ -322,6 +362,7 @@ a hull — which is a real return at a real height and is exactly what `use_lida
 | You changed | Re-run |
 |---|---|
 | `target_tracker_core.py` | `tools/bench/bench_world_model.py` and compare against the printed truth; it needs no hardware, so there is no excuse for skipping it |
+| `target_tracker_core.py`, the colour-vote params, or the node's `PARAM_SPEC` / `_CORE_PARAMS` | `python3 crusader_world_model/test/test_target_tracker_core.py` — stdlib only, no ROS; with PyYAML present it also checks the YAML keys against the node's declared params, which is the failure the node cannot show until it starts on the boat |
 | the fusion or association gates in `crusader_params.yaml` | `python3 tools/scripts/check_config.py`, then the bench with `--chop` — watch `position_stddev` on the map |
 | `use_lidar` | nothing to rebuild — it is `[DYN]`. Confirm in `crsd/world_model_health` that `lidar_ignored` moved, and re-run the bench with `--no-lidar` to exercise the same path it now takes by default. Note the default bench field's unlabelled member is invisible with it off: that buoy exists to prove the LiDAR-only path, and there is no longer one |
 | `cam_x/y/z/yaw/pitch` | every fused position shifts; re-check against real buoys at known ranges, and tighten `fuse_bearing_deg` |

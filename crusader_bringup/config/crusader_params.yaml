@@ -650,6 +650,46 @@ target_tracker:
     max_tracks: 64                         # [DYN] runaway guard, not a normal
                                            #       path (a shoreline clustering
                                            #       into hundreds of objects)
+    # -- colour voting: ONE buoy, many beacon states --
+    # Task 1 Disruptive: side beacons are OFF (only the top beacon, visible to
+    # the UAV, is lit) and in lower tiers beacons FLASH 1 s on / 1 s off. The
+    # detector names the beacon STATE, so one RoboBuoy arrives as red_buoy on
+    # one frame and black_buoy on the next. Keyed on the label that was two
+    # tracks a metre apart, and the duplicate became a phantom obstacle beside a
+    # gate buoy. Now every label in colour_family_labels associates with every
+    # other, and the colour is decided by VOTES. The UAV's field supplies the
+    # colour when this tracker cannot (bt_runner fusePassage: the UAV wins).
+    colour_vote_enable: true               # [DYN] false = the old behaviour:
+                                           #       same label to associate, plain
+                                           #       majority to report
+    colour_family_labels:                  # [RO] ONE object type in different
+      - "red_buoy"                         #      beacon states. Labels outside
+      - "green_buoy"                       #      this list keep the old rule
+      - "black_buoy"                       #      (same label, or one side empty).
+      - "flashing_blue_buoy"               #      NOTE the engine's own class is
+      - "steady_blue_buoy"                 #      blue_buoy (buoy_detector.labels):
+                                           #      add it here once the detector
+                                           #      is retrained to the flash /
+                                           #      steady names
+    colour_unlit_labels:                   # [RO] family votes that carry NO
+      - "black_buoy"                       #      colour (dark side beacon, or the
+                                           #      off half of a flash). Left out
+                                           #      of the ratio, so a flashing red
+                                           #      buoy (~50% red, ~50% dark)
+                                           #      still resolves red
+    colour_unknown_label: "unknown_buoy"   # [RO] reported when no lit colour
+                                           #      wins. MUST hold no colour word:
+                                           #      bt_runner beaconFromLabel()
+                                           #      matches the substrings red,
+                                           #      green, blue, off, black. A
+                                           #      track labelled this is still a
+                                           #      track and still an obstacle
+    colour_min_votes: 5                    # [DYN] a lit colour needs at least
+                                           #       this many votes ...
+    colour_min_ratio: 0.6                  # [DYN] ... and this share of the LIT
+                                           #       votes (dark ones excluded);
+                                           #       a dead heat is unknown
+                                           #       whatever this is set to
     health_period_s: 5.0                   # [DYN] JSON stats publish period
 
 # ---- Ground station: the operator's window onto the whole boat ----
