@@ -385,6 +385,9 @@ class LakePanel(Panel):
         return {"ok": True}
 
     # ---------------------------------------------------------- START / ABORT
+    def _on_run_begin(self):
+        self.aborted_at = None                  # a new run clears the last ABORT's banner; there is no referee here
+
     def _start_problem(self, feed):
         with self.lock:
             return start_problem(feed["fcu"], self.sim == "up", self.link is not None,
@@ -395,15 +398,7 @@ class LakePanel(Panel):
         why = self._start_problem(feed)
         if why:
             return {"ok": False, "error": why}
-        with self.tx_lock:
-            self.link.rewind()
-        with self.lock:
-            self.checkpoints = []
-            self.mission = self._fresh_mission()
-            self.mission["running"] = True
-            self.aborted_at = None
-            self.trail, self.trail_gen = [], self.trail_gen + 1
-            states = list(self.sent)
+        states = self._begin_run()
         self._transmit(states, "START")          # the field must be there before the goal
         self.logs["mission"].add("--- START: lake_goal (the pilot armed it and chose GUIDED) ---")
         try:

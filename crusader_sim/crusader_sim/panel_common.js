@@ -335,4 +335,21 @@ function poll1(){
   }).catch(function(){onUnreachable()});
 }
 function loop(){poll1().then(function(){setTimeout(loop,250)},function(){setTimeout(loop,1000)})}
+// ---- what both pages render the same way from S
+function renderValid(){   // the layout's errors, warnings and note under the buoy table
+  $('valid').innerHTML=S.layout.errors.map(function(e){return'<div class="e">✗ '+esc(e)+'</div>'}).join('')+
+    S.layout.warnings.map(function(e){return'<div class="w">! '+esc(e)+'</div>'}).join('')+(S.layout.note?'<div class="sub">'+esc(S.layout.note)+'</div>':'');
+}
+function renderRun(){     // with a field on the air: the unsent count, auto-ACK, the radio line, the boat's ask, the checkpoint table
+  var run=S.run;
+  if(run){$('unsent').textContent=run.unsent+' unsent change'+(run.unsent===1?'':'s');$('send').disabled=!run.unsent||!!run.problem;$('problem').textContent=run.problem||''}
+  $('auto').checked=S.radio.auto_ack;
+  $('radio').textContent=S.radio.up?('fields sent '+S.radio.sent+', resends '+S.radio.resends+', last '+fmtAge(S.radio.last_tx_age)):'radio down';
+  var c=S.checkpoint; $('ask').style.display=c?'':'none';
+  if(c){$('askText').textContent='Boat asks: checkpoint '+c.seq+' — '+c.label+' (waiting '+c.waiting_s.toFixed(0)+' s, re-asked '+(c.asks-1)+(c.asks===2?' time)':' times)');
+    $('askWhat').textContent=c.what||'';$('askSend').disabled=!run||!run.unsent||!!run.problem}
+  $('cps').innerHTML=S.checkpoints.map(function(r){var t=new Date(r.asked*1000).toLocaleTimeString();
+    return'<tr><td>'+r.seq+'</td><td>'+esc(r.label)+'</td><td>'+t+'</td><td>'+(r.reply?esc(r.reply)+' +'+(r.answered-r.asked).toFixed(0)+'s':'<b class="w">waiting</b>')+
+      '</td><td>'+r.asks+'</td></tr>'}).join('');
+}
 function startPolling(){window.onresize=draw; loop()}

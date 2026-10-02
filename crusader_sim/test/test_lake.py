@@ -212,6 +212,7 @@ class FakeRos:
 
         def spin_once(node, timeout_sec=0.0):
             ros.spins += 1
+            time.sleep(0.001)          # a real spin waits; lake_goal's FCU wait is wall-clock
             if ros.spins > 5000:       # a broken guard must FAIL the test, not hang the run
                 raise AssertionError("the fake goal never finished: lake_goal sent a goal it should not have, or never cancelled")
             if ros.spins == 1:

@@ -1062,24 +1062,34 @@ class Panel:
                 return {"ok": False, "error": "the sim/radio is not up"}
             if self.proc_mission and self.proc_mission.running():
                 return {"ok": False, "error": "a run is already going"}
-        with self.tx_lock:
-            self.link.rewind()
-        with self.lock:
-            self.checkpoints = []
-            course = course_of(PANEL_COURSE, [
-                {"x": e["x"], "y": e["y"], "state": s}
-                for e, s in zip(self.launched["elements"], self.sent)])
-            self.judge = Task1Judge(course, circle_radius_m=8.0, echo=False)
-            self.judge_seen, self.verdict = 0, None
-            self.mission = self._fresh_mission()
-            self.mission["running"] = True
-            self.trail, self.trail_gen = [], self.trail_gen + 1
-            states = list(self.sent)
+        states = self._begin_run()
         self.logs["judge"].add("--- new run ---")
         self._transmit(states, "START")          # the field must be there before the goal
         self.proc_mission = Proc("task1_goal", self._mission_argv(), self.logs["mission"],
                                  self._on_mission_line, self._on_mission_exit).start()
         return {"ok": True}
+
+    def _begin_run(self):
+        """What START does before the goal goes out, for both pages: forget the last run's checkpoints, mission
+        state and trail, and rewind the radio. Without the rewind, checkpoint 1 of a second run is answered from
+        the first run's cache (uav_link.py:220-232). Returns the SENT field. Call with neither lock held."""
+        with self.tx_lock:
+            self.link.rewind()
+        with self.lock:
+            self.checkpoints = []
+            self._on_run_begin()
+            self.mission = self._fresh_mission()
+            self.mission["running"] = True
+            self.trail, self.trail_gen = [], self.trail_gen + 1
+            return list(self.sent)
+
+    def _on_run_begin(self):
+        """The sim's referee starts watching the field as sent. Call with self.lock held."""
+        course = course_of(PANEL_COURSE, [
+            {"x": e["x"], "y": e["y"], "state": s}
+            for e, s in zip(self.launched["elements"], self.sent)])
+        self.judge = Task1Judge(course, circle_radius_m=8.0, echo=False)
+        self.judge_seen, self.verdict = 0, None
 
     def _on_mission_line(self, line):
         with self.lock:
