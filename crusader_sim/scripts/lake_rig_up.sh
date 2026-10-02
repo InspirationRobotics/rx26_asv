@@ -156,10 +156,14 @@ for port in (14555, 14556):
   exit 2
 fi
 
-up() {   # up <name> <logfile> <command...>: its own process group, pid recorded for lake_rig_down.sh
+up() {   # up <name> <logfile> <command...>: its own process group; its pid (= pgid) recorded for lake_rig_down.sh
   local name=$1 log=$2; shift 2
-  setsid nohup "$@" > "$log" 2>&1 &
-  echo "$name $!" >> "$PIDS"
+  local pf="$LAKE_LOGDIR/$name.pid"
+  rm -f "$pf"
+  # the inner shell writes its OWN pid inside the new session, then becomes the command: right even if setsid forks
+  setsid nohup bash -c 'echo $$ > "$0"; exec "$@"' "$pf" "$@" > "$log" 2>&1 &
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$pf" ] && break; sleep 0.1; done
+  echo "$name $(cat "$pf" 2>/dev/null)" >> "$PIDS"
   printf '  %-16s -> %s\n' "$name" "$log"
 }
 running() { pgrep -f -- "$1" >/dev/null; }
