@@ -1397,7 +1397,8 @@ def make_handler(panel):
             try:
                 # /api/state carries the costmap's cells (tens of KB) four times a second: over a lake's WiFi
                 # that is the dead-man's heartbeat, so it goes gzip'd (a browser asks for it and undoes it)
-                gz = len(body) > GZIP_MIN and "gzip" in (self.headers.get("Accept-Encoding") or "")
+                gz = (len(body) > GZIP_MIN and not (ctype or "").startswith("image/")      # a JPEG does not compress
+                      and "gzip" in (self.headers.get("Accept-Encoding") or ""))
                 if gz:
                     body = gzip.compress(body, 3)
                 self.send_response(code)
