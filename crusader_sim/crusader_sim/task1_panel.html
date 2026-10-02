@@ -37,8 +37,9 @@
     <div class="row sub" id="layers" title="the boat's own picture, from panel_feed (a node in crsd-sim)"></div>
     <div class="sub" id="layerkey">Boat's map, same pan/zoom as the map above; faint dots = the true buoys, to read it against &middot;
       costmap: red squares = lethal/inscribed obstacles, cyan = LiDAR voxels (STVL) &middot;
-      square = a track the boat made from its camera: the OUTLINE is the boat's own colour vote (grey + ? = unknown_buoy), the
-      FILL is the UAV's colour where the fused passage matched it, so a grey ? filled red reads "boat says ?, UAV says red"
+      square = a track the boat made from its camera: the FILL and the label's first word are the colour the boat USES, the UAV's,
+      where the fused passage matched it ("RED (UAV)"); the OUTLINE and "cam ..." are the camera's own vote (grey = unknown_buoy,
+      the normal case with the side beacons dark); a ? = no colour from either
       (dashed = tentative, fades with time since seen) &middot; diamond = the boat's fused passage: the UAV's colour, at the tracker's position where a track matched (else the UAV's) &middot;
       path (on top): dashed, coloured by the leg's state (green FOLLOWING, red BLOCKED, yellow PLANNING/DEGRADED,
       grey STRAIGHT), ring = the carrot, &times; = the goal &middot;

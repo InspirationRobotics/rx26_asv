@@ -280,6 +280,12 @@ class Task1Judge:
             changed = [f"{b[0]} {b[3]}->{states[b[0]]}" for b in self.buoys
                        if states.get(b[0], b[3]) != b[3]]
             if changed:
+                # a far pass (an orbit sweeping a buoy 40 m out) only stands in until the real,
+                # closer one replaces it; after a recolour that one never comes, so it goes
+                for b in self.buoys:
+                    rec = self.passes.get(b[0])
+                    if states.get(b[0], b[3]) != b[3] and rec is not None and rec["range"] > PASS_LOG_M:
+                        del self.passes[b[0]]
                 self.buoys = [b[:3] + (states.get(b[0], b[3]),) + b[4:] for b in self.buoys]
                 self._rebuild()
                 self._say("states changed: " + ", ".join(changed))
@@ -338,7 +344,8 @@ class Task1Judge:
         travel, is the result (red must be to starboard, green to port). Of several passes
         (an orbit sweeps the whole field) the CLOSEST one is the buoy's pass: a buoy the track
         goes past at 4 m and is circled at 12 m is judged at 4. Only buoys that are red or
-        green at the time are scored; a pass already earned survives a later recolour."""
+        green at the time are scored; a pass already earned within PASS_LOG_M survives a later
+        recolour (a farther one does not: set_states)."""
         d = self._travel_dir(p)
         if d is None:
             return

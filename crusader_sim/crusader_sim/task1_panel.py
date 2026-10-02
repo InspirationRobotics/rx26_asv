@@ -18,7 +18,7 @@ odometry; the sensor views on synthetic gz messages over a private
 GZ_PARTITION, lazy subscribe/unsubscribe included; the page in a browser.
 
 VERIFIED 2026-09-30 against the REAL sim (three runs, TASK1_PANEL.cmd):
-LAUNCH (--no-uav, all beacons unlit), ATTACH, STOP SIM, task1_goal through
+LAUNCH (--no-uav, side beacons dark, top beacons lit), ATTACH, STOP SIM, task1_goal through
 docker exec, and rxl_link_node + the tree on udp 14555 — ACK, SEND CHANGES +
 ACK at gate checkpoints (the boat replans: plan v2, v3, and circles the NEW
 exit), 5 s resends. Sensor views on a real render: RTF ~1.0 with all three
@@ -44,8 +44,12 @@ TODO — what is still unverified or missing:
     (4) task1_avoid itself: that Nav2 routes round all four obstacles.
   * saved layouts: save/load work; no delete.
 
-WHY A HUMAN UAV. In the Disruptive tier every beacon in the world is unlit, so
-the colours exist only in what the UAV reports (sim_uav.py:14-16). sim_uav plays
+WHY A HUMAN UAV. In the Disruptive tier only the TOP beacon is lit (handbook
+3.3.2: one beacon at a time, the upward one for the UAV), so the boat's camera
+sees no colour and the colours reach the boat only in what the UAV reports
+(sim_uav.py:14-16). The world is generated with each buoy's top beacon showing
+its launched colour; a colour changed mid-run goes out on the radio and to the
+referee but the world's light stays as launched. sim_uav plays
 a UAV that reports the course file and acknowledges every checkpoint by itself;
 this panel puts a person in that seat, so a colour can change halfway through a
 run — the case the boat's replanning exists for, and one sim_uav can never
@@ -285,7 +289,7 @@ def course_of(name, buoys, origin=None, boat_start=None, approach=None):
         c["approach"] = {"x": round(approach["x"], 2), "y": round(approach["y"], 2)}
     c["elements"] = [{"type": "robobuoy", "name": "b%d" % i, "x": round(b["x"], 2),
                       "y": round(b["y"], 2), "beacon": b["state"],
-                      "side_beacon": False, "up_beacon": False}
+                      "side_beacon": False, "up_beacon": True}
                      for i, b in enumerate(buoys)]
     return c
 
@@ -305,7 +309,7 @@ def course_yaml(c):
     out += ["", "elements:"]
     for e in c["elements"]:
         out.append('  - {type: robobuoy, name: %s, x: %.2f, y: %.2f, beacon: "%s", '
-                   "side_beacon: false, up_beacon: false}"
+                   "side_beacon: false, up_beacon: true}"
                    % (e["name"], e["x"], e["y"], e["beacon"]))
     return "\n".join(out) + "\n"
 

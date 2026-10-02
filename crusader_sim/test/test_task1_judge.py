@@ -125,6 +125,15 @@ class PerBuoySides(unittest.TestCase):
         self.assertEqual(v["buoys"], 1)
         self.assertTrue(v["pass"])
 
+    def test_a_far_pass_does_not_survive_a_recolour(self):
+        # the entry orbit sweeps a red 40 m out "past" the boat; the UAV then turns it black
+        j = judge(buoy("r", 10, 40, "flash_red"))
+        drive(j, [(0, 0), (20, 0)])
+        j.set_states({"r": "off"})
+        v = j.verdict()
+        self.assertEqual(v["buoys"], 0, v["buoys_detail"])
+        self.assertTrue(v["pass"])
+
     def test_a_recolour_before_the_pass_sets_the_rule(self):
         j = judge(buoy("r", 10, -3, "flash_red"))
         j.set_states({"r": "flash_green"})                   # now it must be to port: it is not

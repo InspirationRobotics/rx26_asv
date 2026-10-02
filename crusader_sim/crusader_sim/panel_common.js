@@ -118,10 +118,10 @@ function drawTracks(dpr){   // squares: what the boat BELIEVES, not the truth (s
     g.strokeStyle=uav?'#fff':ring;g.lineWidth=1*dpr;g.beginPath();g.moveTo(p[0]-3*dpr,p[1]);g.lineTo(p[0]+3*dpr,p[1]);   // the estimate itself
     g.moveTo(p[0],p[1]-3*dpr);g.lineTo(p[0],p[1]+3*dpr);g.stroke();
     g.fillStyle='#DFE8EF';
-    if(!vote){g.font='bold '+(14*dpr)+'px monospace';g.textAlign='center';g.fillText('?',p[0],p[1]-r*0.45);   // above the cross, inside the square
+    if(!vote&&!uav){g.font='bold '+(14*dpr)+'px monospace';g.textAlign='center';g.fillText('?',p[0],p[1]-r*0.45);   // above the cross, inside the square
       g.textAlign='left';g.font=(11*dpr)+'px monospace'}
     g.textAlign='right';
-    g.fillText('#'+t.id+' '+(t.label||'lidar only')+(uav?' · UAV '+LBL[uav]:''),p[0]-r-3*dpr,p[1]+r+8*dpr);
+    g.fillText('#'+t.id+' '+(uav?LBL[uav]+' (UAV) · cam ':'')+(t.label||'lidar only'),p[0]-r-3*dpr,p[1]+r+8*dpr);   // the colour the boat uses first
     if(un>2)g.fillText('seen '+un.toFixed(0)+' s ago',p[0]-r-3*dpr,p[1]+r+8*dpr+12*dpr);
     g.textAlign='left';g.globalAlpha=1;layDrawn.tracks++});
 }
