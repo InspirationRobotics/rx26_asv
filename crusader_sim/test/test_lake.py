@@ -664,6 +664,13 @@ class DeadmanTest(PanelCase):
         T.RESEND_S, LP.DEADMAN_S = self._resend, self._dm
         super().tearDown()
 
+    def go_away(self):
+        """The browser goes away; returns once the dead-man has actually tripped (a poll already in
+        flight, or a thread the OS did not schedule for a while, may land after clear())."""
+        self.polling.clear()
+        self.assertTrue(self.wait_for(lambda: not self.panel._operator_present(), 5.0), "the dead-man never tripped")
+        time.sleep(0.3)                               # any resend that was already going out lands
+
     def _poller(self):
         while not self.stop_poll.is_set():
             if self.polling.is_set():
@@ -677,8 +684,7 @@ class DeadmanTest(PanelCase):
         n0 = self.boat.n_plans()
         time.sleep(1.2)
         self.assertGreaterEqual(self.boat.n_plans() - n0, 3, "resends while polled: every 0.2 s")
-        self.polling.clear()                          # the browser goes away
-        time.sleep(LP.DEADMAN_S + 0.4)                # let the dead-man trip and any in-flight resend land
+        self.go_away()
         n1 = self.boat.n_plans()
         time.sleep(1.5)
         self.assertEqual(self.boat.n_plans(), n1, "no resend may go out while nothing polls")
@@ -692,11 +698,11 @@ class DeadmanTest(PanelCase):
         self.commit_field()
         self.assertTrue(self.wait_for(lambda: self.boat.n_plans() >= 1))
         self.assertTrue(self.panel.act_auto_ack({"on": True})["ok"])
-        self.polling.clear()
-        time.sleep(LP.DEADMAN_S + 0.4)
+        self.go_away()
         self.boat.ask(1)
         time.sleep(1.2)
-        self.assertEqual(self.boat.n_acks(), 0, "an unattended panel must not ACK for the UAV")
+        self.assertEqual(self.boat.n_acks(), 0, "an unattended panel must not ACK for the UAV: %s (last poll %.2f s ago, present %s)" % (
+            self.panel.logs["radio"].since(0)["lines"][-6:], time.time() - self.panel.last_poll, self.panel._operator_present()))
         self.polling.set()
         self.assertTrue(self.wait_for(lambda: self.boat.n_acks() >= 1, 3.0), "the ACK goes once a browser is back")
 
