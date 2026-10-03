@@ -14,7 +14,9 @@ the RXL handshake is the sim panel's (Panel, inherited): whole-field plans, 5 s 
 ACK / SEND+ACK / auto-ACK, checkpoint labels, the UAV position-error setting (default 0 here).
 This file adds only what the water changes:
 
-  field          clicked camera tracks, "PIN AT BOAT", typed lat/lon, a loaded course; each buoy is
+  field          clicked camera tracks, "PIN AT BOAT" (the boat's fresh pose averaged over the last ~2 s, with an
+                 optional "bow offset": that many metres ahead along the heading, to nose up to a buoy),
+                 typed lat/lon, a loaded course; each buoy is
                  ENTRY / EXIT / RED / GREEN / BLACK, at most 10 (RXL). COMMIT FIELD puts it on the
                  air (this is what LAUNCH SIM is in the sim); after that positions are locked and
                  colours change through SEND, exactly as in the sim.
@@ -68,6 +70,14 @@ TRAIL_MAX = 5000
 TRAIL_PERIOD_S = 0.25
 ORIGIN_TOL_DEG = 1e-6           # ~0.1 m: a datum that differs by more is another place
 DATUM_WARN_M = 0.5
+POSE_WINDOW_S = 2.0             # PIN AT BOAT averages the fresh pose samples of this long
+SAMPLE_GAP_S = 0.03             # two samples closer than this in message time are the same /crsd/pose message
+PIN_MIN_SAMPLES = 4             # fewer fresh samples than this in the window: refuse (the feed sends ~4 a second)
+PIN_WARN_SPREAD_M = 0.5         # the boat moved this far from its mean pose in the window: warn
+PIN_MAX_SPREAD_M = 1.5          # ... this far: refuse, the average is not where the boat is
+HEADING_MAX_AGE_S = 1.0         # the newest sample that HAD a heading must be this fresh for a bow offset
+PIN_MIN_HEADING_SAMPLES = 3
+MAX_BOW_OFFSET_M = 10.0
 GUIDED = "GUIDED"
 LAKE_TIERS = ("advanced", "disruptive")     # goal_client.TIERS minus core: with no UAV there is nothing to play
 DEFAULT_TIER = "disruptive"
@@ -89,6 +99,90 @@ def parse_datum(text):
     if (lat, lon) == (0.0, 0.0):
         raise ValueError("0,0 is not a datum")
     return {"lat": lat, "lon": lon}
+
+
+class PoseAverager:
+    """The boat's pose over the last `window_s`, for PIN AT BOAT: one sample per NEW feed packet whose pose layer
+    is fresh (blanks over guesses: a stale pose adds nothing, and a stale feed refuses the pin). `note()` is fed
+    by the panel's loop and by every pin / state call; it is idempotent per packet. A leaf lock: nothing is called
+    while it is held. The clock is wall time, like the layer's age it subtracts."""
+
+    def __init__(self, window_s=POSE_WINDOW_S, clock=time.time):
+        self.window_s, self.clock = window_s, clock
+        self.samples = []                       # [(message time, x, y, yaw or None)], oldest first
+        self._packets = None
+        self._lock = threading.Lock()
+
+    def note(self, feed):
+        """Offer the feed's current view (FeedReceiver.view()); keeps a sample when it is a new fresh pose."""
+        v = feed["pose"]
+        if v["status"] != "fresh" or not v["data"]:
+            return
+        with self._lock:
+            if feed["packets"] == self._packets:
+                return
+            self._packets = feed["packets"]
+            now = self.clock()
+            t = now - (v["age"] or 0.0)
+            if self.samples and t - self.samples[-1][0] < SAMPLE_GAP_S:
+                return
+            d = v["data"]
+            self.samples.append((t, d["x"], d["y"], d["yaw"]))
+            keep = now - 5.0 * self.window_s
+            self.samples = [s for s in self.samples if s[0] >= keep]
+
+    def average(self, feed):
+        """-> (summary, None), or (None, why a pin cannot be taken now). The summary: x, y (the mean), n, span_s,
+        spread_m (the farthest sample from the mean), yaw (ENU radians, the circular mean; None without a heading),
+        heading_deg (compass), heading_n, heading_age (s since the newest sample that had one), heading_spread_deg."""
+        self.note(feed)
+        v = feed["pose"]
+        if v["status"] != "fresh" or not v["data"]:
+            return None, "no fresh boat pose from the feed (%s): nothing to pin" % v["status"]
+        with self._lock:
+            now = self.clock()
+            win = [s for s in self.samples if s[0] >= now - self.window_s]
+        if len(win) < PIN_MIN_SAMPLES:
+            return None, "only %d fresh pose sample(s) in the last %.0f s (need %d): the feed is dropping out or has just started" % (
+                len(win), self.window_s, PIN_MIN_SAMPLES)
+        mx, my = sum(s[1] for s in win) / len(win), sum(s[2] for s in win) / len(win)
+        out = {"x": mx, "y": my, "n": len(win), "span_s": win[-1][0] - win[0][0],
+               "spread_m": max(math.hypot(s[1] - mx, s[2] - my) for s in win),
+               "yaw": None, "heading_deg": None, "heading_n": 0, "heading_age": None, "heading_spread_deg": None}
+        hs = [s for s in win if s[3] is not None]
+        if hs:
+            sx, sy = sum(math.cos(s[3]) for s in hs), sum(math.sin(s[3]) for s in hs)
+            yaw = math.atan2(sy, sx)
+            dev = max(abs(math.degrees(math.atan2(math.sin(s[3] - yaw), math.cos(s[3] - yaw)))) for s in hs)
+            out.update(yaw=yaw, heading_deg=(90.0 - math.degrees(yaw)) % 360.0, heading_n=len(hs),
+                       heading_age=now - hs[-1][0], heading_spread_deg=dev)
+        return out, None
+
+
+def pin_problem(avg):
+    """Why a pin must not be taken from this summary (a bow offset of 0), or None."""
+    if avg["spread_m"] > PIN_MAX_SPREAD_M:
+        return ("the boat moved %.1f m during the last %.0f s: hold it still alongside the buoy, then pin"
+                % (avg["spread_m"], POSE_WINDOW_S))
+    return None
+
+
+def heading_problem(avg):
+    """Why the bow offset must be refused (the heading is blank or stale), or None. The heading comes from GPS
+    yaw (the compass is disabled): it is null until the RTK moving baseline fixes."""
+    if avg["yaw"] is None:
+        return "no heading: the GPS yaw is not valid yet (RTK moving baseline), so the bow offset cannot be placed; pin with offset 0"
+    if avg["heading_age"] > HEADING_MAX_AGE_S or avg["heading_n"] < PIN_MIN_HEADING_SAMPLES:
+        return "the heading is stale (%.1f s old, %d sample(s)): the bow offset needs a heading younger than %.0f s; pin with offset 0 or wait" % (
+            avg["heading_age"], avg["heading_n"], HEADING_MAX_AGE_S)
+    return None
+
+
+def pin_place(avg, offset_m):
+    """(x, y) of a pin: the averaged position, `offset_m` ahead along the averaged heading (ENU: 0 rad = east)."""
+    if not offset_m:
+        return avg["x"], avg["y"]
+    return avg["x"] + offset_m * math.cos(avg["yaw"]), avg["y"] + offset_m * math.sin(avg["yaw"])
 
 
 def read_rig(path):
@@ -137,6 +231,7 @@ class LakePanel(Panel):
         self.approach = None
         self.aborted_at = None
         self.run_tier = None                    # the tier START chose for the current / last run
+        self.pose_avg = PoseAverager()
         self._trail_t = 0.0
         super().__init__(a)
         self.rig = read_rig(getattr(a, "rig_file", ""))
@@ -286,10 +381,12 @@ class LakePanel(Panel):
         if self._tripped and now - self._withheld_t >= RESEND_S:
             self._withheld_t = now              # one per resend period the field was NOT sent
             self.withheld += 1
+        feed = self.feed.view()
+        self.pose_avg.note(feed)
         if now - self._trail_t < TRAIL_PERIOD_S:
             return
         self._trail_t = now
-        boat = self._boat(self.feed.view())
+        boat = self._boat(feed)
         if boat is None:
             return
         with self.lock:
@@ -323,11 +420,41 @@ class LakePanel(Panel):
             return {"ok": True, "id": len(self.layout) - 1}
 
     def act_pin(self, body):
-        """PIN AT BOAT: a buoy where the boat is NOW (the feed's pose, fresh or nothing)."""
-        boat = self._boat(self.feed.view())
-        if boat is None:
-            return {"ok": False, "error": "no fresh boat pose from the feed: nothing to pin"}
-        return self._add_buoy(boat[0], boat[1], body.get("state", "off"), "at the boat")
+        """PIN AT BOAT {state, offset_m}: a buoy where the boat is, the feed's fresh pose averaged over the last
+        ~2 s; `offset_m` (default 0, at most 10) moves it that far AHEAD along the heading, so the operator can
+        nose the bow up to a buoy. Refused, never guessed: no fresh pose, too few samples, a boat that moved more
+        than PIN_MAX_SPREAD_M in the window, and for an offset a heading that is blank or stale."""
+        off = body.get("offset_m")
+        off = 0.0 if off is None else off
+        if not (_num(off) and 0.0 <= off <= MAX_BOW_OFFSET_M):
+            return {"ok": False, "error": "bow offset: a number of metres from 0 to %g" % MAX_BOW_OFFSET_M}
+        avg, why = self.pose_avg.average(self.feed.view())
+        why = why or pin_problem(avg) or (heading_problem(avg) if off > 0 else None)
+        if why:
+            return {"ok": False, "error": why}
+        x, y = pin_place(avg, float(off))
+        what = "at the boat (%d samples over %.1f s, spread %.2f m%s)" % (
+            avg["n"], avg["span_s"], avg["spread_m"],
+            ", %.1f m ahead on heading %03.0f deg, %.1f s old" % (off, avg["heading_deg"], avg["heading_age"]) if off > 0 else "")
+        r = self._add_buoy(x, y, body.get("state", "off"), what)
+        if r["ok"]:
+            self.logs["radio"].add("[panel] pin b%d %s" % (r["id"], what))
+            r["pin"] = self._pin_view(avg, None)
+            r["pin"]["offset_m"] = float(off)
+        return r
+
+    def _pin_view(self, avg, why):
+        """The `pin` block of /api/state (and of a pin's reply): what a pin taken now would be made of, and why not."""
+        if avg is None:
+            return {"problem": why, "n": 0, "window_s": POSE_WINDOW_S, "heading_problem": why}
+        warn = (None if avg["spread_m"] <= PIN_WARN_SPREAD_M else
+                "the boat moved %.2f m in the window: the pin is the AVERAGE, not where the bow is now" % avg["spread_m"])
+        return {"problem": pin_problem(avg), "warn": warn, "n": avg["n"], "window_s": POSE_WINDOW_S,
+                "span_s": round(avg["span_s"], 2), "spread_m": round(avg["spread_m"], 3),
+                "heading_deg": None if avg["yaw"] is None else round(avg["heading_deg"], 1),
+                "heading_age": None if avg["heading_age"] is None else round(avg["heading_age"], 2),
+                "heading_spread_deg": None if avg["yaw"] is None else round(avg["heading_spread_deg"], 1),
+                "heading_problem": heading_problem(avg), "max_offset_m": MAX_BOW_OFFSET_M}
 
     def act_add_latlon(self, body):
         lat, lon = body.get("lat"), body.get("lon")
@@ -506,6 +633,7 @@ class LakePanel(Panel):
         logs = self._logs_since(q)
         feed = self.feed.view()                  # its own leaf lock, never under self.lock
         boat = self._boat(feed)
+        pin = self._pin_view(*self.pose_avg.average(feed))
         problem = self._origin_problem(feed)
         with self.lock:
             errs, warns = check_layout(self.layout, start_clear_m=0.0)
@@ -533,7 +661,7 @@ class LakePanel(Panel):
                 "radio": self._radio_state(radio_up, pending),
                 "deadman": {"ok": True, "window_s": DEADMAN_S, "gap_s": round(self.prev_gap, 2),
                             "withheld": self.withheld, "last_trip": self.last_trip},
-                "fcu": feed["fcu"], "boat": None if boat is None else {
+                "fcu": feed["fcu"], "pin": pin, "boat": None if boat is None else {
                     "x": boat[0], "y": boat[1], "yaw": boat[2], "age": boat[3]},
                 "start_block": start_problem(feed["fcu"], self.sim == "up", radio_up,
                                              self.mission["running"], True),

@@ -480,6 +480,22 @@ class PanelCase(unittest.TestCase):
         t.start()
         self._threads.append(t)
 
+    def sample(self, x, y, heading_deg=90.0):
+        """One feed packet with the boat at (x, y), then what the panel's loop does with it (the loop is not
+        running in most tests): offer the feed's view to the pose averager."""
+        self.feed.pose(x, y, heading_deg)
+        self.feed.push()
+        self.panel.pose_avg.note(self.panel.feed.view())
+        time.sleep(0.04)
+
+    def settle(self, x, y, heading_deg=90.0, n=6, jitter=0.0, fresh=True):
+        """The boat sits at (x, y) for n packets 40 ms apart (the real feed sends ~4 a second); `fresh` forgets
+        the pose samples of any earlier moment, which the 2 s window would otherwise still hold."""
+        if fresh:
+            self.panel.pose_avg.samples.clear()
+        for i in range(n):
+            self.sample(x + (jitter if i % 2 else -jitter), y, heading_deg)
+
     def commit_field(self, field=None):
         r = self.panel.act_layout({"buoys": field or K.FIELD})
         self.assertTrue(r["ok"], r)
@@ -497,8 +513,7 @@ class PanelCase(unittest.TestCase):
 
 class FieldAndCourseTest(PanelCase):
     def test_the_field_is_built_from_a_pin_a_typed_latlon_and_a_track(self):
-        self.feed.pose(12.0, 3.0)
-        self.feed.push()
+        self.settle(12.0, 3.0)
         r = self.panel.act_pin({"state": "flash_blue"})
         self.assertTrue(r["ok"], r)
         la, lo = C.enu_to_latlon(40.0, -2.0, K.DATUM)
@@ -801,6 +816,261 @@ class StartAbortTest(PanelCase):
         self.assertNotEqual(self.panel._approach_arg(), "none")
         self.panel.act_approach({"clear": True})
         self.assertEqual(self.panel._approach_arg(), "none")
+
+
+class Clk:
+    """A clock the test moves."""
+    def __init__(self, t=1000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def feed_view(packets, x=10.0, y=0.0, yaw=0.0, age=0.0, status="fresh"):
+    """The slice of FeedReceiver.view() that PoseAverager reads."""
+    data = None if status != "fresh" else {"x": x, "y": y, "yaw": yaw}
+    return {"packets": packets, "pose": {"status": status, "age": age, "data": data}}
+
+
+class PoseAveragerTest(unittest.TestCase):
+    """PIN AT BOAT's averaging, on a fake clock: no sleeps, no panel."""
+
+    def setUp(self):
+        self.clk = Clk()
+        self.avg = LP.PoseAverager(clock=self.clk)
+        self.packets = 1
+
+    def feed_n(self, avg, clk, n, step_s=0.25, **kw):
+        """n new packets step_s apart, each noted."""
+        for _ in range(n):
+            avg.note(feed_view(self.packets, **kw))
+            self.packets += 1
+            clk.t += step_s
+
+    def test_the_mean_of_the_window_with_its_count_and_spread(self):
+        for x in (9.9, 10.1, 9.9, 10.1, 10.0):
+            self.feed_n(self.avg, self.clk, 1, x=x)
+        r, why = self.avg.average(feed_view(self.packets, x=10.0))
+        self.assertIsNone(why)
+        self.assertEqual(r["n"], 6)                      # average() itself offers the current packet too
+        self.assertAlmostEqual(r["x"], 10.0, delta=0.02)
+        self.assertAlmostEqual(r["spread_m"], 0.1, delta=0.01)
+        self.assertAlmostEqual(r["span_s"], 1.25, delta=0.01)
+
+    def test_samples_older_than_the_window_do_not_count(self):
+        self.feed_n(self.avg, self.clk, 8, x=50.0)       # the boat was at x=50 ...
+        self.clk.t += 3.0
+        self.feed_n(self.avg, self.clk, 6, x=10.0)       # ... then 3 s later at x=10
+        r, why = self.avg.average(feed_view(self.packets, x=10.0))
+        self.assertIsNone(why)
+        self.assertAlmostEqual(r["x"], 10.0, delta=0.01)
+        self.assertLessEqual(r["span_s"], LP.POSE_WINDOW_S)
+
+    def test_the_same_packet_is_one_sample_and_the_same_message_in_a_new_packet_too(self):
+        v = feed_view(5)
+        for _ in range(10):
+            self.avg.note(v)                             # the panel's loop polls far faster than the feed sends
+        self.assertEqual(len(self.avg.samples), 1)
+        self.avg.note(feed_view(6, age=0.0))             # a new packet carrying the SAME pose message ...
+        self.clk.t += 0.25
+        self.avg.note(feed_view(7, age=0.25))            # ... its age grew by the packet period: same message time
+        self.assertEqual(len(self.avg.samples), 1)
+
+    def test_too_few_samples_and_a_stale_pose_are_refused_not_guessed(self):
+        self.feed_n(self.avg, self.clk, 2)
+        r, why = self.avg.average(feed_view(99))         # the third sample, once average() has offered the current packet
+        self.assertIsNone(r)
+        self.assertIn("only 3 fresh pose sample(s) in the last 2 s (need 4)", why)
+        self.feed_n(self.avg, self.clk, 6)
+        self.assertIsNotNone(self.avg.average(feed_view(200))[0])
+        r, why = self.avg.average(feed_view(201, status="stale"))
+        self.assertIsNone(r)
+        self.assertIn("no fresh boat pose", why)
+        self.assertIn("stale", why)
+        n = len(self.avg.samples)                        # a stale layer adds nothing to the window either
+        self.avg.note(feed_view(300, status="stale"))
+        self.assertEqual(len(self.avg.samples), n)
+
+    def test_the_heading_is_a_circular_mean_with_its_age_and_spread(self):
+        import math
+        for deg in (359.0, 1.0, 359.0, 1.0, 0.0):
+            self.feed_n(self.avg, self.clk, 1, step_s=0.2, yaw=math.radians(90.0 - deg))   # compass 0 = north = ENU 90 deg
+        r, _ = self.avg.average(feed_view(self.packets, yaw=math.radians(90.0)))
+        self.assertTrue(r["heading_deg"] < 1.0 or r["heading_deg"] > 359.0, r["heading_deg"])     # not 180
+        self.assertAlmostEqual(r["heading_spread_deg"], 1.0, delta=0.2)
+        self.assertEqual(r["heading_n"], 6)
+        self.assertAlmostEqual(r["heading_age"], 0.0, delta=0.01)
+        self.assertIsNone(LP.heading_problem(r))
+
+    def test_a_blank_heading_refuses_the_offset_and_only_the_offset(self):
+        self.feed_n(self.avg, self.clk, 6, yaw=None)
+        r, why = self.avg.average(feed_view(self.packets, yaw=None))
+        self.assertIsNone(why)
+        self.assertIsNone(r["yaw"])
+        self.assertIsNone(LP.pin_problem(r))                                   # a pin at the boat is fine ...
+        self.assertIn("no heading", LP.heading_problem(r))                     # ... a bow offset is not
+
+    def test_a_heading_that_has_gone_stale_or_is_one_sample_refuses_the_offset(self):
+        clk = Clk()
+        avg = LP.PoseAverager(clock=clk)
+        self.feed_n(avg, clk, 3, step_s=0.2, yaw=0.0)                          # a heading until t = 0.4 ...
+        self.feed_n(avg, clk, 6, step_s=0.2, yaw=None)                         # ... blank since
+        r, _ = avg.average(feed_view(self.packets, yaw=None))
+        self.assertIsNotNone(r["yaw"])
+        self.assertGreater(r["heading_age"], LP.HEADING_MAX_AGE_S)
+        self.assertIn("stale", LP.heading_problem(r))
+        clk = Clk()
+        avg = LP.PoseAverager(clock=clk)
+        self.feed_n(avg, clk, 5, yaw=None)
+        self.feed_n(avg, clk, 1, yaw=0.0)                                      # one heading sample is not a heading
+        r, _ = avg.average(feed_view(self.packets, yaw=None))
+        self.assertLess(r["heading_n"], LP.PIN_MIN_HEADING_SAMPLES)
+        self.assertIn("stale", LP.heading_problem(r))
+
+    def test_placement_is_ahead_along_the_heading_in_enu(self):
+        import math
+        base = {"x": 10.0, "y": 0.0}
+        for deg, want in ((90.0, (12.0, 0.0)), (0.0, (10.0, 2.0)), (270.0, (8.0, 0.0)), (180.0, (10.0, -2.0))):
+            x, y = LP.pin_place(dict(base, yaw=math.radians(90.0 - deg)), 2.0)           # compass degrees -> ENU yaw
+            self.assertAlmostEqual(x, want[0], places=6, msg=deg)
+            self.assertAlmostEqual(y, want[1], places=6, msg=deg)
+        self.assertEqual(LP.pin_place(dict(base, yaw=None), 0.0), (10.0, 0.0))        # offset 0 needs no heading
+        x, y = LP.pin_place(dict(base, yaw=math.radians(45.0)), 2.0 * math.sqrt(2.0))  # north-east
+        self.assertAlmostEqual(x, 12.0, places=6)
+        self.assertAlmostEqual(y, 2.0, places=6)
+
+
+class PinTest(PanelCase):
+    def test_the_pin_is_the_average_of_the_last_two_seconds_and_says_so(self):
+        self.settle(12.0, 3.0, jitter=0.1, n=7)
+        r = self.panel.act_pin({"state": "flash_blue"})
+        self.assertTrue(r["ok"], r)
+        b = self.panel.state({})["layout"]["buoys"][-1]
+        self.assertAlmostEqual(b["x"], 12.0, delta=0.06)
+        self.assertAlmostEqual(b["y"], 3.0, delta=0.02)
+        self.assertEqual(r["pin"]["n"], 7)
+        self.assertAlmostEqual(r["pin"]["spread_m"], 0.1, delta=0.03)
+        self.assertEqual(r["pin"]["offset_m"], 0.0)
+        log = "\n".join(self.panel.logs["radio"].since(0)["lines"])
+        self.assertIn("7 samples over", log)
+        self.assertIn("spread", log)
+
+    def test_one_sample_is_not_an_average(self):
+        r = self.panel.act_pin({"state": "off"})                         # setUp pushed the feed once
+        self.assertFalse(r["ok"])
+        self.assertIn("only 1 fresh pose sample(s)", r["error"])
+        self.assertEqual(self.panel.state({})["layout"]["buoys"], [])
+        self.assertIn("only 1", self.panel.state({})["pin"]["problem"])
+
+    def test_a_stale_feed_refuses_the_pin_it_does_not_reuse_the_last_pose(self):
+        self.settle(5.0, 5.0)
+        self.assertTrue(self.panel.act_pin({"state": "off"})["ok"])
+        self.panel.act_clear({})
+        self.panel.feed.ingest(PF.encode(self.feed.f.packet(now=10.0)))      # every layer 10 s old: stale
+        r = self.panel.act_pin({"state": "off"})
+        self.assertFalse(r["ok"])
+        self.assertIn("no fresh boat pose", r["error"])
+        self.assertEqual(self.panel.state({})["layout"]["buoys"], [])
+        self.assertEqual(self.panel.state({})["pin"]["n"], 0)
+
+    def test_a_boat_that_is_moving_is_not_pinned_and_a_little_wander_is_pinned_with_a_warning(self):
+        self.panel.pose_avg.samples.clear()
+        for i in range(6):
+            self.sample(4.0 * i, 0.0)                                     # 4 m per packet
+        r = self.panel.act_pin({"state": "off"})
+        self.assertFalse(r["ok"])
+        self.assertIn("hold it still", r["error"])
+        self.assertIn("hold it still", self.panel.state({})["pin"]["problem"])
+        self.settle(3.0, 0.0, jitter=0.8, n=6)                            # 0.8 m either side: allowed, and said
+        pin = self.panel.state({})["pin"]
+        self.assertIsNone(pin["problem"])
+        self.assertIn("AVERAGE", pin["warn"])
+        self.assertTrue(self.panel.act_pin({"state": "off"})["ok"])
+
+    def test_the_bow_offset_places_the_pin_ahead_along_the_heading(self):
+        self.settle(10.0, 0.0, heading_deg=90.0, n=7)                       # facing east
+        r = self.panel.act_pin({"state": "flash_red", "offset_m": 2.5})
+        self.assertTrue(r["ok"], r)
+        b = self.panel.state({})["layout"]["buoys"][-1]
+        self.assertAlmostEqual(b["x"], 12.5, delta=0.03)
+        self.assertAlmostEqual(b["y"], 0.0, delta=0.03)
+        self.assertEqual(r["pin"]["offset_m"], 2.5)
+        self.assertIn("2.5 m ahead on heading 090 deg", "\n".join(self.panel.logs["radio"].since(0)["lines"]))
+        self.settle(10.0, 10.0, heading_deg=0.0, n=7)                       # facing north
+        r = self.panel.act_pin({"state": "flash_green", "offset_m": 3})
+        self.assertTrue(r["ok"], r)
+        b = self.panel.state({})["layout"]["buoys"][-1]
+        self.assertAlmostEqual(b["x"], 10.0, delta=0.03)
+        self.assertAlmostEqual(b["y"], 13.0, delta=0.03)
+
+    def test_offset_zero_and_a_missing_offset_are_the_old_pin(self):
+        for x, body in ((7.0, {}), (20.0, {"offset_m": 0}), (30.0, {"offset_m": None})):
+            self.settle(x, 2.0)
+            self.assertTrue(self.panel.act_pin(dict(body, state="off"))["ok"], body)
+        xs = [b["x"] for b in self.panel.state({})["layout"]["buoys"]]
+        for got, want in zip(xs, (7.0, 20.0, 30.0)):
+            self.assertAlmostEqual(got, want, delta=0.05)
+
+    def test_the_offset_is_refused_without_a_heading_but_the_plain_pin_still_works(self):
+        self.settle(10.0, 0.0, heading_deg=None)
+        r = self.panel.act_pin({"state": "off", "offset_m": 1.5})
+        self.assertFalse(r["ok"])
+        self.assertIn("no heading", r["error"])
+        self.assertEqual(self.panel.state({})["layout"]["buoys"], [])
+        st = self.panel.state({})["pin"]
+        self.assertIsNone(st["heading_deg"])
+        self.assertIsNone(st["heading_age"])
+        self.assertIn("no heading", st["heading_problem"])
+        self.assertIsNone(st["problem"])
+        self.assertTrue(self.panel.act_pin({"state": "off"})["ok"])
+
+    def test_a_bad_offset_is_refused(self):
+        self.settle(10.0, 0.0)
+        for bad in (-1, 10.5, float("nan"), float("inf"), "2", True, [1]):
+            r = self.panel.act_pin({"state": "off", "offset_m": bad})
+            self.assertFalse(r["ok"], bad)
+            self.assertIn("bow offset", r["error"])
+        self.assertEqual(self.panel.state({})["layout"]["buoys"], [])
+        self.assertTrue(self.panel.act_pin({"state": "off", "offset_m": 10})["ok"])
+
+    def test_the_state_says_what_a_pin_is_made_of_and_the_heading_age(self):
+        self.settle(10.0, 0.0, heading_deg=90.0, n=7)
+        pin = self.panel.state({})["pin"]
+        self.assertIsNone(pin["problem"])
+        self.assertIsNone(pin["heading_problem"])
+        self.assertEqual(pin["n"], 7)
+        self.assertEqual(pin["window_s"], LP.POSE_WINDOW_S)
+        self.assertAlmostEqual(pin["heading_deg"], 90.0, delta=0.2)
+        self.assertLess(pin["heading_age"], 0.5)
+        self.assertEqual(pin["max_offset_m"], LP.MAX_BOW_OFFSET_M)
+        self.assertEqual(pin["spread_m"], 0.0)
+        self.assertIsNone(pin["warn"])
+
+    def test_the_loop_samples_the_pose_without_anybody_pinning(self):
+        self.loop_in_thread()
+        for _ in range(8):
+            self.feed.pose(1.0, 1.0)
+            self.feed.push()
+            time.sleep(0.05)
+        self.assertTrue(self.wait_for(lambda: len(self.panel.pose_avg.samples) >= 4))
+        self.assertTrue(self.panel.act_pin({"state": "off"})["ok"])
+
+    def test_a_pin_only_edits_the_field_nothing_is_transmitted(self):
+        self.settle(10.0, 0.0)
+        n = self.boat.n_plans()
+        self.assertTrue(self.panel.act_pin({"state": "off", "offset_m": 2})["ok"])
+        self.assertEqual(self.boat.n_plans(), n)
+
+    def test_the_page_has_the_offset_input_and_the_readout(self):
+        html = read(os.path.join(SRC, "lake_panel.html"))
+        self.assertIn('id="pinOff"', html)
+        self.assertIn('value="0"', html)
+        self.assertIn("m ahead", html)
+        self.assertIn("{state:pick,offset_m:off}", html)
+        self.assertIn('id="pininfo"', html)
+        self.assertIn("PIN refused", html)
+        self.assertIn("heading '+pad3(P.heading_deg)", html)
 
 
 class TierTest(PanelCase):

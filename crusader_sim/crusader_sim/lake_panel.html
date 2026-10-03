@@ -74,8 +74,11 @@ button.big{padding:9px 16px;font-weight:700}
       <div class="card"><h3>Field: <span id="count"></span></h3>
         <div class="row sub">Role of the next buoy (keys 1-5):</div>
         <div class="row" id="palette"></div>
-        <div class="row"><button id="pinbtn" onclick="post('/api/pin',{state:pick}).then(poll1)" title="a buoy at the boat's position now (fresh pose only)">PIN AT BOAT</button>
+        <div class="row"><button id="pinbtn" onclick="pinAtBoat()" title="a buoy at the boat's pose, averaged over the last ~2 s (fresh pose only), optionally the bow offset ahead along its heading">PIN AT BOAT</button>
+          <label title="places the pin this many metres AHEAD of the boat along its heading, to nose the bow up to a buoy. 0 = at the boat. Needs a fresh heading (GPS yaw)">bow offset
+            <input id="pinOff" type="number" min="0" max="10" step="0.5" value="0" style="width:64px"> m ahead</label>
           <span class="sub">or click a camera track on the map</span></div>
+        <div id="pininfo" class="sub"></div>
         <div class="row"><input id="llat" placeholder="lat" size="11"><input id="llon" placeholder="lon" size="12">
           <button onclick="addLatLon()">ADD lat/lon</button></div>
         <table><thead><tr><th>id</th><th>x (E)</th><th>y (N)</th><th>lat</th><th>lon</th><th>role</th><th></th></tr></thead>
@@ -202,6 +205,26 @@ function emptyClick(w,e){
   if(!tr){toast('no camera track there: click a track square, or switch the map click to "place a buoy"');return}
   addBuoy(tr.x,tr.y,pick)}
 function liveClick(w,e){if(tool()==='approach')post('/api/approach',{x:w[0],y:w[1]}).then(poll1)}
+function pinOffset(){var v=val('pinOff').trim(),n=v===''?0:Number(v);return isFinite(n)&&n>=0&&n<=10?n:NaN}
+function pad3(d){return ('00'+Math.round(d)%360).slice(-3)}
+function pinAtBoat(){
+  var off=pinOffset();if(isNaN(off)){alert('bow offset: a number of metres from 0 to 10');return}
+  post('/api/pin',{state:pick,offset_m:off}).then(function(d){
+    if(d&&d.ok&&d.pin)toast('pinned b'+d.id+' from '+d.pin.n+' pose samples over '+d.pin.span_s.toFixed(1)+' s, spread '+d.pin.spread_m.toFixed(2)+' m'+
+      (off>0?', '+off+' m ahead on heading '+pad3(d.pin.heading_deg)+'° (heading '+d.pin.heading_age.toFixed(1)+' s old)':''));
+    poll1()})}
+// what a pin taken now is made of, and why not (the server decides; this only shows it)
+function renderPin(){
+  var P=S.pin,off=pinOffset(),why=null;
+  if(P.problem)why=P.problem;
+  else if(isNaN(off))why='bow offset: a number from 0 to 10 m';
+  else if(off>0&&P.heading_problem)why='bow offset '+off+' m: '+P.heading_problem;
+  $('pinbtn').disabled=!editable()||!!why;
+  var info=P.n?'pose average: '+P.n+' samples over '+P.span_s.toFixed(1)+' s · spread '+P.spread_m.toFixed(2)+' m · '+
+    (P.heading_deg==null?'no heading (GPS yaw not valid)':'heading '+pad3(P.heading_deg)+'° (age '+P.heading_age.toFixed(1)+' s, spread '+P.heading_spread_deg.toFixed(0)+'°)'):'pose average: none yet';
+  $('pininfo').textContent=info+(P.warn?' · '+P.warn:'')+(why?' · PIN refused: '+why:'');
+  $('pininfo').className='sub'+(why?' e':P.warn?' w':'')
+}
 function addLatLon(){var la=parseFloat(val('llat')),lo=parseFloat(val('llon'));
   if(!isFinite(la)||!isFinite(lo)){alert('lat and lon must be numbers');return}
   post('/api/add_latlon',{lat:la,lon:lo,state:pick}).then(function(d){if(d&&d.ok){$('llat').value='';$('llon').value=''}poll1()})}
@@ -290,7 +313,7 @@ function render(){
   $('count').textContent=n+'/10 buoys · '+Math.min(red,grn)+' gate'+(Math.min(red,grn)===1?'':'s')+' (red/green pairs)';
   renderValid();
   $('commit').disabled=!editable()||S.layout.errors.length>0;
-  $('pinbtn').disabled=!editable()||!S.boat;
+  renderPin();
   ['tplgo','clear','laygo'].forEach(function(id){$(id).disabled=!editable()});
   fillSelect('tpl',S.templates,'task1_core');fillSelect('lays',S.layouts);
   var a=S.approach;$('apinfo').textContent=a?'approach: '+a.x.toFixed(1)+', '+a.y.toFixed(1)+' m  ('+a.lat.toFixed(7)+', '+a.lon.toFixed(7)+')':'none: the goal skips the drive (the boat is on station)';
