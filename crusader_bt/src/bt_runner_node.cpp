@@ -121,6 +121,7 @@
 #include "crusader_bt/context.hpp"
 #include "crusader_bt/dock_math.hpp"
 #include "crusader_bt/nav_math.hpp"
+#include "crusader_bt/nav_params.hpp"
 #include "crusader_bt/ros_planner_port.hpp"
 
 namespace crusader_bt
@@ -226,6 +227,7 @@ public:
     ctx_->dock_face_dz = declare_parameter<double>("dock_face_dz_m", 0.39);
     dock_topic_ = declare_parameter<std::string>("dock_topic", "dock/observations");
     declareNavParams();
+    nav_set_cb_ = add_on_set_parameters_callback(&BtRunner::checkNavSet);
 
     // Latched: a subscriber that starts mid-mission must learn the current
     // value rather than sit on a default. avoidance_enable especially —
@@ -832,62 +834,54 @@ private:
 
   // ------------------------------------------------------- obstacle avoidance
 
-  /// bt_runner_node's nav_* parameters (spec 5.8), all [RO]. Every default is
-  /// path::NavParams{}'s, so the C++ and crusader_params.yaml cannot drift apart
-  /// unnoticed (check_config cross-checks the ones the costmap also depends on).
+  /// bt_runner_node's nav_* parameters (spec 5.8). Every default is path::NavParams{}'s, so the
+  /// C++ and crusader_params.yaml cannot drift apart unnoticed (check_config cross-checks the
+  /// ones the costmap also depends on).
+  ///
+  /// TWO KINDS, AND THE DESCRIPTOR SAYS WHICH. The planner knobs (path::kNavKnobs)
+  /// are dynamic: reloadNavParams() copies them into ctx_->nav when a goal is accepted, so a
+  /// `ros2 param set` or the ground station's Tuning tab applies at the next START. Everything
+  /// else further down (rates, frames, topic and service names, the planner id, nav_mode) is
+  /// wired into a timer, a topic or the planner port ONCE, so it is read_only: a live set of
+  /// those used to succeed and change nothing.
   void declareNavParams()
   {
     path::NavParams & n = ctx_->nav;
-    const std::pair<const char *, double *> reals[] = {
-      {"nav_hard_m", &n.hard_m}, {"nav_soft_m", &n.soft_m},
-      {"nav_buoy_radius_m", &n.buoy_radius_m}, {"nav_track_radius_m", &n.track_radius_m},
-      {"nav_exempt_radius_m", &n.exempt_radius_m},
-      {"nav_lookahead_m", &n.lookahead_m}, {"nav_lookahead_min_m", &n.lookahead_min_m},
-      {"nav_max_chord_dev_m", &n.max_chord_dev_m}, {"nav_wp_radius_m", &n.wp_radius_m},
-      {"nav_replan_period_s", &n.replan_period_s},
-      {"nav_min_request_gap_s", &n.min_request_gap_s},
-      {"nav_check_period_s", &n.check_period_s}, {"nav_plan_timeout_s", &n.plan_timeout_s},
-      {"nav_first_plan_wait_s", &n.first_plan_wait_s},
-      {"nav_hysteresis_frac", &n.hysteresis_frac}, {"nav_hysteresis_m", &n.hysteresis_m},
-      {"nav_goal_replan_m", &n.goal_replan_m}, {"nav_clip_radius_m", &n.clip_radius_m},
-      {"nav_clear_after_s", &n.clear_after_s}, {"nav_unblock_reset_s", &n.unblock_reset_s},
-      {"nav_escape_margin_m", &n.escape_margin_m}, {"nav_goal_margin_m", &n.goal_margin_m},
-      {"nav_local_check_tol_m", &n.local_check_tol_m},
-      {"nav_orbit_max_push_m", &n.orbit_max_push_m}, {"nav_orbit_clear_m", &n.orbit_clear_m},
-      {"nav_dock_finger_len_m", &n.dock_finger_len_m},
-      {"nav_dock_finger_w_m", &n.dock_finger_w_m}, {"nav_dock_slip_w_m", &n.dock_slip_w_m},
-      {"nav_dock_deck_depth_m", &n.dock_deck_depth_m},
-      {"nav_fence_len_m", &n.fence_len_m}, {"nav_fence_spacing_m", &n.fence_spacing_m},
-      {"nav_fence_radius_m", &n.fence_radius_m}, {"nav_fence_clear_m", &n.fence_clear_m},
-      {"nav_gate_clear_m", &n.gate_clear_m}, {"nav_gate_min_standoff_m", &n.gate_min_standoff_m},
-      {"nav_gate_min_approach_m", &n.gate_min_approach_m}, {"nav_gate_margin_m", &n.gate_margin_m},
-      {"nav_gate_step_m", &n.gate_step_m}, {"nav_goal_max_move_m", &n.goal_max_move_m},
-      {"nav_gate_tight_clear_m", &n.gate_tight_clear_m},
-      {"nav_gate_tight_margin_m", &n.gate_tight_margin_m},
-      {"nav_orbit_radius_m", &n.orbit_radius_m}, {"nav_orbit_tolerance_m", &n.orbit_tolerance_m},
-      {"nav_gate_standoff_m", &n.gate_standoff_m}, {"nav_gate_approach_m", &n.gate_approach_m}};
-    for (const auto & kv : reals) {*kv.second = declare_parameter<double>(kv.first, *kv.second);}
-    n.invalid_confirm = static_cast<int>(
-      declare_parameter<int64_t>("nav_invalid_confirm", n.invalid_confirm));
-    n.orbit_points = static_cast<int>(
-      declare_parameter<int64_t>("nav_orbit_points", n.orbit_points));
+    for (const path::NavKnob & k : path::kNavKnobs) {
+      const auto d = navKnobDescriptor(path::navRangeText(k));
+      if (k.isWhole()) {
+        const int64_t v = declare_parameter<int64_t>(k.name, static_cast<int64_t>(k.get(n)), d);
+        k.set(n, static_cast<double>(v));
+      } else {
+        k.set(n, declare_parameter<double>(k.name, k.get(n), d));
+      }
+    }
+    // A value the planner cannot work with stops the node here, like nav_mode below, rather than
+    // waiting for a mission to find it. (The set-callback guards every later change.)
+    const std::string bad_knob = path::checkNavParams(n);
+    if (!bad_knob.empty()) {
+      throw std::runtime_error(bad_knob + " (a nav_* value from crusader_params.yaml or -p)");
+    }
 
-    nav_hazard_rate_hz_ = declare_parameter<double>("nav_hazard_rate_hz", 2.0);
-    nav_status_hz_ = declare_parameter<double>("nav_status_hz", 2.0);
+    const rcl_interfaces::msg::ParameterDescriptor fixed = navFixedDescriptor();
+    nav_hazard_rate_hz_ = declare_parameter<double>("nav_hazard_rate_hz", 2.0, fixed);
+    nav_status_hz_ = declare_parameter<double>("nav_status_hz", 2.0, fixed);
     if (!(nav_hazard_rate_hz_ > 0.0) || !(nav_status_hz_ > 0.0)) {
       throw std::runtime_error("nav_hazard_rate_hz and nav_status_hz must be > 0");
     }
-    nav_map_frame_ = declare_parameter<std::string>("nav_map_frame", "map");
-    nav_datum_topic_ = declare_parameter<std::string>("nav_datum_topic", "/crsd/datum");
-    nav_hazards_topic_ = declare_parameter<std::string>("nav_hazards_topic", "/crsd/nav/hazards");
-    nav_leg_topic_ = declare_parameter<std::string>("nav_leg_topic", "/crsd/nav/leg_status");
+    nav_map_frame_ = declare_parameter<std::string>("nav_map_frame", "map", fixed);
+    nav_datum_topic_ = declare_parameter<std::string>("nav_datum_topic", "/crsd/datum", fixed);
+    nav_hazards_topic_ =
+      declare_parameter<std::string>("nav_hazards_topic", "/crsd/nav/hazards", fixed);
+    nav_leg_topic_ = declare_parameter<std::string>("nav_leg_topic", "/crsd/nav/leg_status", fixed);
     const std::string planner_action =
-      declare_parameter<std::string>("nav_planner_action", "/compute_path_to_pose");
+      declare_parameter<std::string>("nav_planner_action", "/compute_path_to_pose", fixed);
     const std::string valid_service =
-      declare_parameter<std::string>("nav_valid_service", "/is_path_valid");
+      declare_parameter<std::string>("nav_valid_service", "/is_path_valid", fixed);
     const std::string clear_service = declare_parameter<std::string>(
-      "nav_clear_service", "/global_costmap/clear_entirely_global_costmap");
-    const std::string planner_id = declare_parameter<std::string>("nav_planner_id", "GridBased");
+      "nav_clear_service", "/global_costmap/clear_entirely_global_costmap", fixed);
+    const std::string planner_id =
+      declare_parameter<std::string>("nav_planner_id", "GridBased", fixed);
 
     // A typo here must stop the node, never fall back to a mode nobody asked for.
     //
@@ -896,10 +890,11 @@ private:
     // parameter dies at startup with InvalidParameterTypeException - on exactly the
     // spelling the sim rig and the docs use. (The YAML params file quotes "off".)
     // Both spellings mean what they say; shadow was never ambiguous.
-    rcl_interfaces::msg::ParameterDescriptor mode_desc;
+    rcl_interfaces::msg::ParameterDescriptor mode_desc = fixed;
     mode_desc.dynamic_typing = true;
     mode_desc.description = "off | shadow | on (a bare on or off on the command line is a "
-      "YAML boolean and is accepted as that mode)";
+      "YAML boolean and is accepted as that mode). Fixed at startup: the planner port is built "
+      "from it once.";
     const rclcpp::ParameterValue & mode_value = declare_parameter(
       "nav_mode", rclcpp::ParameterValue(std::string("off")), mode_desc);
     std::string mode;
@@ -921,6 +916,99 @@ private:
     if (!ctx_->planner) {
       throw std::runtime_error(
         "bt_runner was built without nav2_msgs (image without Nav2); nav_mode must be off");
+    }
+  }
+
+  /// A planner knob's descriptor: when it applies, and what it may hold. The Tuning tab shows
+  /// the description beside the row.
+  static rcl_interfaces::msg::ParameterDescriptor navKnobDescriptor(const std::string & range)
+  {
+    rcl_interfaces::msg::ParameterDescriptor d;
+    d.description = "planner knob: applies at the next START (read when a goal is accepted, "
+      "never mid-mission). Range: " + range;
+    return d;
+  }
+
+  /// A nav_* key that is wired once at startup: refused live, in rclcpp's own words.
+  static rcl_interfaces::msg::ParameterDescriptor navFixedDescriptor()
+  {
+    rcl_interfaces::msg::ParameterDescriptor d;
+    d.read_only = true;
+    d.description = "fixed at startup (a timer, topic or the planner port is built from it "
+      "once): change it in crusader_params.yaml and restart bt_runner_node";
+    return d;
+  }
+
+  /// A numeric parameter as a double (a double or an integer); false for any other type.
+  static bool numericValue(const rclcpp::Parameter & p, double * v)
+  {
+    if (p.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) {
+      *v = p.as_double();
+    } else if (p.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER) {
+      *v = static_cast<double>(p.as_int());
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  /// The set-callback: a value the planner cannot work with is refused when it is SET, with the
+  /// reason, instead of sitting in the parameter until the next mission misbehaves. It judges
+  /// only the planner knobs (path::checkNavValue); every other parameter passes untouched.
+  static rcl_interfaces::msg::SetParametersResult checkNavSet(
+    const std::vector<rclcpp::Parameter> & params)
+  {
+    rcl_interfaces::msg::SetParametersResult r;
+    r.successful = true;
+    for (const rclcpp::Parameter & p : params) {
+      double v = 0.0;
+      if (!numericValue(p, &v)) {continue;}
+      const std::string why = path::checkNavValue(p.get_name(), v);
+      if (!why.empty()) {
+        r.successful = false;
+        r.reason = why;
+        return r;
+      }
+    }
+    return r;
+  }
+
+  /// Re-reads every planner knob into ctx_->nav and logs the ones that changed since the
+  /// previous goal. Called when a goal is ACCEPTED (execute(), before the tree is built) and
+  /// never while a mission runs: a `ros2 param set` or a Tuning-tab set changes the PARAMETER at
+  /// once, and the planner picks it up at the next START. Before this the knobs were copied once
+  /// at construction, so a live set succeeded and changed nothing.
+  void reloadNavParams()
+  {
+    path::NavParams fresh;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      fresh = ctx_->nav;
+    }
+    for (const path::NavKnob & k : path::kNavKnobs) {
+      double v = 0.0;
+      if (numericValue(get_parameter(k.name), &v)) {k.set(fresh, v);}
+    }
+    // checkNavSet refuses these when they are set, so this fires only for a value that got in
+    // another way. Keep the previous, known-good set rather than plan with it.
+    const std::string bad = path::checkNavParams(fresh);
+    if (!bad.empty()) {
+      RCLCPP_ERROR(
+        get_logger(), "nav_*: NOT reloading, keeping the previous goal's values - %s", bad.c_str());
+      return;
+    }
+    std::vector<path::NavChange> changes;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      changes = path::diffNavParams(ctx_->nav, fresh);
+      ctx_->nav = fresh;
+    }
+    if (changes.empty()) {
+      RCLCPP_INFO(get_logger(), "nav_*: unchanged since the previous goal");
+    } else {
+      RCLCPP_INFO(
+        get_logger(), "nav_*: %zu changed since the previous goal: %s", changes.size(),
+        path::describeNavChanges(changes).c_str());
     }
   }
 
@@ -1122,6 +1210,9 @@ private:
     result->exit_longitude = std::nan("");
 
     consumed_.clear();
+    // The planner knobs as they are NOW, before the tree is built: a change made since the last
+    // goal applies to this one, and none can apply to it once it runs.
+    reloadNavParams();
     // BEFORE reading pose_fresh below. It is computed by refreshFreshness(),
     // which otherwise only runs inside the tick loop — so at goal start it
     // still holds whatever the last mission left, which on a freshly started
@@ -1481,6 +1572,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr leg_pub_;
   rclcpp::Subscription<crusader_msgs::msg::LatLonHead>::SharedPtr datum_sub_;
   rclcpp::TimerBase::SharedPtr hazard_timer_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr nav_set_cb_;
 };
 
 }  // namespace crusader_bt

@@ -109,6 +109,10 @@ if(BUILD_TESTING)
   add_executable(test_planned_leg test/test_planned_leg.cpp)
   target_include_directories(test_planned_leg PRIVATE include)
   add_test(NAME planned_leg COMMAND test_planned_leg)
+  # nav_params: the nav_* planner knobs as one table - declared, re-read at goal accept, checked, diffed.
+  add_executable(test_nav_params test/test_nav_params.cpp)
+  target_include_directories(test_nav_params PRIVATE include)
+  add_test(NAME nav_params COMMAND test_nav_params)
 endif()
 
 ament_package()
