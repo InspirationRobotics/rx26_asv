@@ -749,6 +749,18 @@ private:
       leg_.halt();
       return BT::NodeStatus::SUCCESS;
     }
+    // The goal rule (path::clearPoint) against the field as it is NOW: adjustRing never
+    // moves ring[0], and a track can appear after the ring was built. Both once put the
+    // hop beside a buoy where it could never arrive (2026-10-02, the EXIT orbit by b9).
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      const Vec2 p = path::clearPoint(ring_[i_], knownHazards(*ctx_), ctx_->nav.orbit_clear_m);
+      if (nav::norm(p - ring_[i_]) > 1e-9) {
+        RCLCPP_INFO(log(), "CircleBuoy: hop %zu moved %.2f m clear of a known hazard", i_,
+          nav::norm(p - ring_[i_]));
+        ring_[i_] = p;
+      }
+    }
     return leg_.start(cfg_, ring_[i_], label(), log(), static_cast<int>(i_),
         static_cast<int>(ring_.size()));
   }
@@ -1280,25 +1292,42 @@ public:
 
     const int r = ctx_->gate_red_id;
     const int g = ctx_->gate_green_id;
-    const nav::Gate gate = nav::gateFromIds(ctx_->buoys, r, g, standoff, approach);
+    const nav::Gate plain = nav::gateFromIds(ctx_->buoys, r, g, standoff, approach);
+    const std::vector<path::Hazard> hz = knownHazards(*ctx_);
 
-    if (gate.valid) {
+    if (plain.valid) {
+      // Move the two points off anything on the straight crossing: the same hazard set and
+      // exemption the crossing leg checks (exempt="gate"). See path::clearGateWaypoints.
+      const nav::Gate gate = path::clearGateWaypoints(
+        nav::findById(ctx_->buoys, r)->p, nav::findById(ctx_->buoys, g)->p, standoff, approach,
+        path::exempt(hz, {r, g}, false, ctx_->nav.exempt_radius_m));
       target = (which == "approach") ? gate.approach : gate.through;
+      const nav::Vec2 was = (which == "approach") ? plain.approach : plain.through;
       why = "gate " + std::to_string(static_cast<int>(ctx_->gate_seq)) + " " +
-        which + " (red " + std::to_string(r) + ", green " + std::to_string(g) + ")";
+        which + " (red " + std::to_string(r) + ", green " + std::to_string(g) + ")" +
+        (nav::norm(target - was) > 0.01 ? ", moved clear" : "");
     } else {
       const nav::Buoy * lone = nav::findById(ctx_->buoys, r);
       if (lone == nullptr) {lone = nav::findById(ctx_->buoys, g);}
       if (lone == nullptr || !ctx_->have_exit) {
         RCLCPP_WARN(log(), "gate %u unusable: %s",
-          static_cast<unsigned>(ctx_->gate_seq), gate.why);
+          static_cast<unsigned>(ctx_->gate_seq), plain.why);
         return BT::NodeStatus::FAILURE;
       }
       const nav::Vec2 travel = ctx_->exitp - ctx_->boat;
       target = nav::sideWaypoint(lone->p, travel, lone->state, offset);
-      why = "lone buoy " + std::to_string(lone->id) + " (" + gate.why + ")";
+      why = "lone buoy " + std::to_string(lone->id) + " (" + plain.why + ")";
       RCLCPP_WARN(log(), "gate %u: %s - steering past the one we have",
-        static_cast<unsigned>(ctx_->gate_seq), gate.why);
+        static_cast<unsigned>(ctx_->gate_seq), plain.why);
+    }
+
+    // the goal rule, whatever branch chose the point: a no-op for a gate point that
+    // clearGateWaypoints placed, a last resort when nothing on the gate fitted
+    const nav::Vec2 clear = path::clearPoint(target, hz, path::GateClear{}.clear_m);
+    if (nav::norm(clear - target) > 1e-9) {
+      why += ", nudged " + std::to_string(static_cast<int>(nav::norm(clear - target) * 100.0)) +
+        " cm off a hazard";
+      target = clear;
     }
 
     const nav::LatLon ll = nav::toLatLon(target, ctx_->origin);

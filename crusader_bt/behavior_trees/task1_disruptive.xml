@@ -169,7 +169,13 @@
                          gate's own two buoys: ANY OTHER known object on the line
                          still holds the boat, and 15 s of that fails the leg.
                          Water inside a gate is the one place on this course
-                         meant to be clear (handbook 3.3.1). -->
+                         meant to be clear (handbook 3.3.1).
+                         The standoff/approach distances are the most GateWaypoint
+                         uses: when anything else is on the crossing it backs the
+                         two points off toward the gate (to 3.5 / 4 m) and, if that
+                         is not enough, crosses the gap off-centre, so the line keeps
+                         1.5 m from everything (path::clearGateWaypoints). -->
+
                     <GateWaypoint point="through" standoff="6.0" approach="8.0" out="{goal}"/>
                     <NavigateTo target="port" goal="{goal}" tolerance="2.5"
                                 avoid="false" exempt="gate"/>

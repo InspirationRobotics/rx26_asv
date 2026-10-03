@@ -397,6 +397,92 @@ inline bool segmentClear(
     a, b, step_m, [&](Vec2 q) {return !(minClearance(hz, q) < clearance_m);});
 }
 
+/// THE GOAL RULE: no Task 1 waypoint is put where the boat cannot arrive. A point closer than
+/// clear_m to any hazard's edge moves to the nearest one that is not, searched outward in
+/// step_m rings of 24 bearings up to max_move_m (of the candidates at the first distance that
+/// has any, the one with the most clearance). Already clear: returned unchanged. Nothing clear
+/// within max_move_m: also unchanged, and the leg's own guard holds the boat as before.
+inline Vec2 clearPoint(
+  Vec2 p, const std::vector<Hazard> & hz, double clear_m, double max_move_m = 3.0,
+  double step_m = 0.25)
+{
+  if (!detail::finite(p) || !(minClearance(hz, p) < clear_m) || !(step_m > 0.0)) {return p;}
+  for (double d = step_m; d <= max_move_m + 1e-9; d += step_m) {
+    Vec2 best = p;
+    double best_c = -detail::kInf;
+    for (int k = 0; k < 24; ++k) {
+      const double a = k * 2.0 * nav::kPi / 24.0;
+      const Vec2 q = p + Vec2{std::cos(a), std::sin(a)} * d;
+      const double c = minClearance(hz, q);
+      if (c >= clear_m && c > best_c) {
+        best = q;
+        best_c = c;
+      }
+    }
+    if (best_c > -detail::kInf) {return best;}
+  }
+  return p;
+}
+
+/// How far GateWaypoint may move a gate's two points to keep the crossing clear.
+struct GateClear
+{
+  double clear_m = 1.5;            ///< from every hazard's edge: hard 0.8 + 0.7 for a boat off the line
+  double min_standoff_m = 3.5;     ///< through point: > its NavigateTo tolerance (2.5), so arriving is past the line
+  double min_approach_m = 4.0;     ///< approach point: room to line up before the gap
+  double step_m = 0.5;             ///< search pitch, along the crossing and along the gate line
+  double gate_margin_m = 1.8;      ///< a shifted crossing stays this far from both gate buoys
+};
+
+/// nav::gateWaypoints(), moved only as far as it takes to keep the STRAIGHT crossing clear.
+///
+/// The crossing (approach -> through) is driven straight with only the gate's own pair exempt,
+/// so a buoy, a fence or a track on that line holds the boat for good. A gate is a gap, not a
+/// point: the boat may cross it anywhere between the pair. So: the centre line first, then
+/// lines shifted along the gate, step_m at a time, alternating sides, never closer than
+/// gate_margin_m to either buoy. On each line the through point backs off from standoff_m
+/// toward the gate (down to min_standoff_m) and the approach point from approach_m (down to
+/// min_approach_m) until each half of the crossing keeps clear_m from every hazard in `hz`.
+/// The first line where both halves fit wins. If none does, the plain centre-line waypoints
+/// come back and the leg's own guard holds the boat, exactly as before. `hz` must already
+/// exempt the gate's pair. *shift_out (optional) gets the shift, + toward the red.
+inline nav::Gate clearGateWaypoints(
+  Vec2 red, Vec2 green, double standoff_m, double approach_m, const std::vector<Hazard> & hz,
+  const GateClear & c = GateClear{}, double * shift_out = nullptr)
+{
+  const nav::Gate plain = nav::gateWaypoints(red, green, standoff_m, approach_m);
+  if (shift_out != nullptr) {*shift_out = 0.0;}
+  if (!plain.valid || !(c.step_m > 0.0)) {return plain;}
+  const Vec2 mid = (red + green) * 0.5;
+  const Vec2 u = nav::headingVec(plain.heading_deg);     // the direction of the crossing
+  const Vec2 v = nav::unit(red - green);                  // along the gate line, toward the red
+
+  // the farthest point from `from` along `dir`, hi down to lo, whose segment from `from` is clear
+  const auto reach = [&](Vec2 from, Vec2 dir, double hi, double lo, Vec2 & out) {
+      for (double d = hi; d >= std::min(lo, hi) - 1e-9; d -= c.step_m) {
+        if (segmentClear(from, from + dir * d, hz, c.clear_m)) {
+          out = from + dir * d;
+          return true;
+        }
+      }
+      return false;
+    };
+  const double room = 0.5 * nav::norm(red - green) - c.gate_margin_m;
+  const int n = room > 0.0 ? static_cast<int>(std::floor(room / c.step_m + 1e-9)) : 0;
+  for (int k = 0; k <= 2 * n; ++k) {                      // shifts 0, +1, -1, +2, -2 ... steps
+    const double shift = k == 0 ? 0.0 : (k % 2 == 1 ? 1.0 : -1.0) * ((k + 1) / 2) * c.step_m;
+    const Vec2 cross = mid + v * shift;
+    nav::Gate g = plain;
+    if (reach(cross, u, standoff_m, c.min_standoff_m, g.through) &&
+      reach(cross, u * -1.0, approach_m, c.min_approach_m, g.approach))
+    {
+      if (shift_out != nullptr) {*shift_out = shift;}
+      return g;
+    }
+  }
+  return plain;
+}
+
 /// First index >= from_i whose point is within clearance_m of any hazard; -1 = none.
 inline int firstConflict(
   const std::vector<Vec2> & path, std::size_t from_i, const std::vector<Hazard> & hz,
