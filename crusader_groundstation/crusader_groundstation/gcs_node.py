@@ -64,11 +64,13 @@ from crusader_msgs.msg import (Attitude, Cluster3DArray, FcuStatus,
 from crusader_common import config as crsd_config
 from crusader_common import geo
 from crusader_common.node_main import run_node
-from crusader_common.param_utils import declare_from_config, make_set_callback
+from crusader_common.param_utils import (declare, declare_from_config,
+                                        make_set_callback)
 from crusader_common.stream_cache import StreamCache
 
 from crusader_groundstation import node_registry as reg
 from crusader_groundstation import bag_recorder, camera_profiles, param_client
+from crusader_groundstation import planner_profiles
 from crusader_groundstation import power_client, proc_scan, radio_core
 from crusader_groundstation import system_info
 from crusader_groundstation.log_buffer import LogBuffer
@@ -143,6 +145,26 @@ PARAM_SPEC = {
 }
 
 
+# Parameters whose default lives HERE rather than in crusader_params.yaml: tooling paths for the
+# Tuning tab's planner profiles. The params file is the team's and is not edited for them; a
+# ground_station section that does name them wins, because declare() takes the override.
+CODE_DEFAULTS = {
+    "planner_profiles_dir": planner_profiles.DEFAULT_SHIPPED_DIR,
+    "planner_profiles_save_dir": planner_profiles.DEFAULT_SAVE_DIR,
+}
+PARAM_SPEC.update({
+    "planner_profiles_dir": dict(
+        read_only=True,
+        description="*.yaml planner-tuning profiles the Tuning tab can load "
+                    "(crusader_sim/config/tuning_profiles); blank or missing -> an empty "
+                    "list, with the reason"),
+    "planner_profiles_save_dir": dict(
+        read_only=True,
+        description="where 'Save as profile' writes; also listed in the picker. "
+                    "~ is the user's home (in asv: /root)"),
+})
+
+
 # The frame keys, and where each one's stream comes from. Module level, and
 # published in the snapshot, because the Record tab needs the KEYS to lay out
 # one fps control per viewer — a second list of them in the page is how a third
@@ -160,6 +182,9 @@ class GroundStation(Node):
         super().__init__("ground_station")
         p = declare_from_config(self, crsd_config.node_params("ground_station"),
                                 PARAM_SPEC)
+        for name, default in CODE_DEFAULTS.items():
+            if name not in p:
+                p[name] = declare(self, name, default, **PARAM_SPEC[name])
         self.p = p
 
         ranges = {n: (s["lo"], s["hi"]) for n, s in PARAM_SPEC.items()
@@ -765,6 +790,10 @@ class GroundStation(Node):
             return self._params_list(payload)
         if path == "/params/set":
             return self._params_set(payload)
+        if path == "/planner/profile/list":
+            return self._planner_profiles()
+        if path == "/planner/profile/save":
+            return self._planner_profile_save(payload)
         if path == "/logs":
             return self._logs(payload)
         if path == "/logs/clear":
@@ -929,6 +958,50 @@ class GroundStation(Node):
                    else f"applied {', '.join(sorted(values))} on "
                         f"{name.lstrip('/')}")
         return {"ok": not bad, "message": message, "results": results}
+
+    def _planner_sources(self):
+        """[(origin, directory)] the planner profiles are listed from, ~ expanded."""
+        return [(planner_profiles.SHIPPED,
+                 os.path.expanduser(self.p["planner_profiles_dir"])),
+                (planner_profiles.SAVED,
+                 os.path.expanduser(self.p["planner_profiles_save_dir"]))]
+
+    def _planner_profiles(self):
+        """The planner profiles on disk, and why a directory is empty if it is.
+
+        THERE IS NO /planner/profile/load, for the camera tab's reason: loading one is
+        /params/set on bt_runner_node with the keys listed here, so the node's own
+        set-callback judges every value and the operator reads one kind of refusal.
+        """
+        return {"ok": True, "message": "",
+                **planner_profiles.listing(self._planner_sources())}
+
+    def _planner_profile_save(self, payload):
+        """Save bt_runner_node's LIVE drifted planner keys under a name.
+
+        The browser sends a name, never values, for the camera tab's reason: what the
+        page is showing may be a poll old or another browser's set, and a profile is a
+        claim about what the planner was actually using. The node is read here, at save
+        time, and "drifted" means differing from crusader_params.yaml -- the same marker
+        the Tuning tab draws -- so the file holds exactly the lines a person would
+        otherwise write back by hand, and loads with LAKE_TUNING= as it is.
+        """
+        node, params, err = self._param_call(
+            {"node": planner_profiles.NODE_PATH},
+            lambda n: self.tuning.list(n, _yaml_defaults(n)))
+        if err:
+            return err
+        values, note = planner_profiles.drifted_planner_values(params)
+        if not values:
+            return {"ok": False, "message": note or "no planner key differs from "
+                    "crusader_params.yaml - nothing to save"}
+        save_dir = self._planner_sources()[1][1]
+        ok, message, _path = planner_profiles.save(
+            save_dir, payload.get("name"), values)
+        if ok:
+            self.get_logger().info(f"planner profile {payload.get('name')!r}: {message}")
+        return {"ok": ok, "message": message,
+                **planner_profiles.listing(self._planner_sources())}
 
     def _camera_profiles(self):
         """The stored profiles, plus which parameters count as camera controls.
