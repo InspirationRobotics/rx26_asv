@@ -352,4 +352,120 @@ function renderRun(){     // with a field on the air: the unsent count, auto-ACK
     return'<tr><td>'+r.seq+'</td><td>'+esc(r.label)+'</td><td>'+t+'</td><td>'+(r.reply?esc(r.reply)+' +'+(r.answered-r.asked).toFixed(0)+'s':'<b class="w">waiting</b>')+
       '</td><td>'+r.asks+'</td></tr>'}).join('');
 }
+// ---- planner tuning (the sim page's card; the lake page has none and never calls these). The catalogue is fetched from
+// GET /api/tuning when the card's body is first opened and after every save/reset, and again only when the state poll's
+// small `tuning` summary stops matching the last fetch: never at the poll rate. Unsaved edits live in tuneEdits
+// ({id: the text typed}), so no rebuild of the rows can lose them; a rebuild waits while a field in the card has focus.
+var TUNE=null, tuneEdits={}, tuneOpen={Goals:true,Hazards:true}, tuneBusy=false, tuneAgain=false, tuneAt=0, tuneSigNow='', tuneHold=false;
+var TUNE_OPEN_KEY='task1_panel.tuning.open';
+function tuneNum(s){var t=String(s).trim();return t===''||!isFinite(Number(t))?NaN:Number(t)}
+function tuneA(s){return esc(s).replace(/"/g,'&quot;')}          // esc() plus quotes, for an attribute
+function tuneSig(saved,launched,pending){return saved+'/'+(launched==null?'-':launched)+'/'+pending}
+function tuneEntry(id){var r=null;if(TUNE)TUNE.catalogue.forEach(function(e){if(e.id===id)r=e});return r}
+function tuneButtons(){
+  var n=Object.keys(tuneEdits).length;
+  $('tuneSave').disabled=!n;$('tuneSave').textContent=n?'SAVE ('+n+')':'SAVE';$('tuneDiscard').disabled=!n;
+  $('tuneResetAll').disabled=!TUNE||!Object.keys(TUNE.saved).length;
+}
+function tuneRowClass(row,e){   // the highlight follows what is in the field now, edited or saved
+  var id=e.id,t=tuneEdits[id]!==undefined?tuneEdits[id]:String(e.value),n=tuneNum(t);
+  row.className='trow'+(isNaN(n)?' bad':n!==e.default?' ovr':'')+(e.overridden?' sv':'');
+}
+function tuneRow(e){
+  var t=tuneEdits[e.id]!==undefined?tuneEdits[e.id]:String(e.value),d=e.desc||'',L=TUNE.launched,
+      ran=L?(e.id in L?L[e.id]:e.default):null,
+      note=ran!==null&&ran!==e.value?'<span class="w" title="what the running sim was launched with">run used '+ran+'</span>':'';
+  return '<div class="trow" data-id="'+tuneA(e.id)+'"><div class="tk"><code>'+esc(e.key)+'</code>'+
+    '<button class="tre" title="back to the default (saved at once)">reset</button></div>'+
+    '<div class="tv"><input type="number" step="'+(e.type==='int'?'1':'any')+'"'+(e.default>=0?' min="0"':'')+
+    ' value="'+tuneA(t)+'" data-id="'+tuneA(e.id)+'"><span class="sub">'+esc(e.unit)+'</span>'+
+    '<span class="sub">default '+e.default+'</span>'+note+'</div>'+
+    (d?'<div class="td sub" title="'+tuneA(d)+'">'+esc(d.length>110?d.slice(0,107)+'\u2026':d)+'</div>':'')+'</div>';
+}
+function tuneProfAbout(){
+  var p=(TUNE.profiles||[]).filter(function(q){return q.name===$('tuneProf').value})[0];
+  $('tuneProfAbout').textContent=p?p.about:'';
+}
+function tuneProfiles(){   // the Profile row, from TUNE.profiles; hidden when there are none; the choice survives a refresh
+  var P=TUNE.profiles||[],sel=$('tuneProf'),cur=sel.value,key=P.map(function(p){return p.name+'|'+p.title}).join('/');
+  $('tuneProfBox').style.display=P.length?'':'none';
+  if(sel.dataset.k!==key){sel.dataset.k=key;
+    sel.innerHTML=P.map(function(p){return'<option value="'+tuneA(p.name)+'">'+esc(p.title)+(p.title!==p.name?' ('+esc(p.name)+')':'')+'</option>'}).join('');
+    if(P.some(function(p){return p.name===cur}))sel.value=cur}
+  tuneProfAbout();
+}
+function tuneLoad(){   // replaces the saved overrides with the profile's; the rows refresh from the next fetch
+  var name=$('tuneProf').value,edits=Object.keys(tuneEdits).length;if(!name||!TUNE)return;
+  if((Object.keys(TUNE.saved).length||edits)&&
+      !confirm('Replace the saved overrides with profile '+name+'?'+(edits?' Your unsaved edits are discarded too.':'')))return;
+  post('/api/tuning',{profile:name}).then(function(d){if(d&&d.ok){tuneEdits={};tuneFetch()}});
+}
+function tuneBuild(force){
+  if(!TUNE)return;
+  tuneProfiles();
+  var box=$('tuneGroups');
+  if(!force&&box.contains(document.activeElement)){tuneHold=true;return}   // someone is typing: show it when they leave
+  tuneHold=false;
+  var by={};TUNE.catalogue.forEach(function(e){(by[e.group]=by[e.group]||[]).push(e)});
+  box.innerHTML=TUNE.groups.map(function(g){var es=by[g]||[],n=es.filter(function(e){return e.overridden}).length;
+    return '<details class="tgrp" data-g="'+tuneA(g)+'"'+(tuneOpen[g]?' open':'')+'><summary>'+esc(g)+' <span class="sub">'+es.length+
+      ' numbers'+(n?' \u00b7 <b class="w">'+n+' overridden</b>':'')+'</span></summary>'+es.map(tuneRow).join('')+'</details>'}).join('');
+  Array.prototype.forEach.call(box.querySelectorAll('.trow'),function(row){tuneRowClass(row,tuneEntry(row.getAttribute('data-id')))});
+  $('tuneErr').textContent=TUNE.errors.length?TUNE.errors.join(' \u00b7 ')+' (saving new numbers is refused until this is fixed)':'';
+  $('tuneUnk').textContent=TUNE.unknown.length?'saved but no longer in the YAML files (the next save drops them): '+TUNE.unknown.join(', '):'';
+  $('tuneYaml').textContent=TUNE.yaml;$('tuneYamlBox').style.display=TUNE.yaml?'':'none';
+  tuneButtons();
+}
+function tuneFetch(){
+  if(tuneBusy){tuneAgain=true;return}
+  tuneBusy=true;tuneAgain=false;tuneAt=Date.now();
+  fetch('/api/tuning',{cache:'no-store'}).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}).then(function(d){
+    TUNE=d;tuneSigNow=tuneSig(Object.keys(d.saved).length,d.launched==null?null:Object.keys(d.launched).length,d.pending);tuneBuild();
+  }).catch(function(e){$('tuneErr').textContent='could not load the tuning numbers: '+e}).then(function(){
+    tuneBusy=false;if(tuneAgain)tuneFetch()});
+}
+function tuneAfter(d){if(d&&d.ok)tuneFetch()}   // after any POST that worked
+function tuneSave(){
+  var set={},bad=null;
+  Object.keys(tuneEdits).forEach(function(id){var n=tuneNum(tuneEdits[id]);if(isNaN(n))bad=id;else set[id]=n});
+  if(bad){alert(bad+': not a number');return}
+  post('/api/tuning',{set:set}).then(function(d){if(d&&d.ok){tuneEdits={};tuneFetch()}});   // a refused save keeps the edits
+}
+function tuneReset(id){
+  var e=tuneEntry(id);delete tuneEdits[id];
+  if(e&&e.overridden)post('/api/tuning',{reset:[id]}).then(tuneAfter);else tuneBuild(true);
+}
+function initTuning(){
+  var box=$('tuneBox'),groups=$('tuneGroups');
+  try{if(localStorage.getItem(TUNE_OPEN_KEY)==='1')box.open=true}catch(e){}
+  box.addEventListener('toggle',function(){
+    try{localStorage.setItem(TUNE_OPEN_KEY,box.open?'1':'0')}catch(e){}
+    if(box.open&&!TUNE&&!tuneBusy)tuneFetch()});
+  groups.addEventListener('toggle',function(ev){var d=ev.target;if(d.className==='tgrp')tuneOpen[d.getAttribute('data-g')]=d.open},true);   // toggle does not bubble
+  groups.addEventListener('input',function(ev){
+    var el=ev.target,id=el.getAttribute&&el.getAttribute('data-id'),e=id&&tuneEntry(id);if(!e||el.tagName!=='INPUT')return;
+    var n=tuneNum(el.value);if(!isNaN(n)&&n===e.value)delete tuneEdits[id];else tuneEdits[id]=el.value;
+    tuneRowClass(el.closest('.trow'),e);tuneButtons()});
+  groups.addEventListener('click',function(ev){var el=ev.target;
+    if(el.className==='tre'){el.blur();tuneReset(el.closest('.trow').getAttribute('data-id'));return}
+    if(el.classList.contains('td')){var e=tuneEntry(el.closest('.trow').getAttribute('data-id'));
+      el.textContent=el.textContent.slice(-1)==='\u2026'?e.desc:(e.desc.length>110?e.desc.slice(0,107)+'\u2026':e.desc)}});
+  groups.addEventListener('focusout',function(){setTimeout(function(){if(tuneHold&&!groups.contains(document.activeElement))tuneBuild()},0)});
+  $('tuneProfLoad').onclick=tuneLoad;
+  $('tuneProf').onchange=function(){if(TUNE)tuneProfAbout()};
+  $('tuneSave').onclick=tuneSave;
+  $('tuneDiscard').onclick=function(){tuneEdits={};tuneBuild(true)};
+  $('tuneResetAll').onclick=function(){
+    if(TUNE&&confirm('Remove all '+Object.keys(TUNE.saved).length+' saved overrides (back to the team\'s defaults)?'))
+      post('/api/tuning',{reset:'all'}).then(function(d){if(d&&d.ok){tuneEdits={};tuneFetch()}})};
+  tuneButtons();
+}
+function renderTuning(){   // every poll: the status line from S.tuning; a refetch only when it stops matching the last fetch
+  var T=S.tuning;if(!T||!$('tuning'))return;
+  var run=T.launched!=null?'this run launched with '+T.launched:S.sim.state==='down'||S.sim.state==='failed'?'no sim running':
+    'this run was attached (not launched here): what it used is unknown';
+  $('tuneStatus').textContent='saved '+T.saved+(T.saved===1?' override':' overrides')+' \u00b7 '+run;
+  $('tuneNeed').style.display=T.pending?'':'none';
+  if($('tuneBox').open&&TUNE&&!tuneBusy&&Date.now()-tuneAt>1500&&tuneSig(T.saved,T.launched,T.pending)!==tuneSigNow)tuneFetch();
+}
 function startPolling(){window.onresize=draw; loop()}

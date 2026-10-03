@@ -1,0 +1,148 @@
+<?xml version="1.0"?>
+<!--
+  Task 1 Safe Passage, ADVANCED and DISRUPTIVE tier, planned over the WHOLE field at once.
+
+  Alongside task1_disruptive.xml (the per-gate tree), not replacing it: the runner loads one
+  file by its tree_file parameter, and the goal's tier picks the subtree below.
+
+  WHY A WHOLE-FIELD PLAN. Above Core the aircraft hands the boat every buoy, its colour, the
+  ENTRY and the EXIT before the boat moves (handbook 3.3.2). The per-gate tree still drives
+  the field one gate at a time, from points placed round each pair, with side fences for Nav2
+  and a fixed-radius orbit; in a field with 3-5 m between buoys those pieces land on top of
+  each other and no leg finds a path. Here one search (crusader_bt/global_passage.hpp) solves
+  the whole task from the boat: round the ENTRY clockwise, through the field with every RED to
+  starboard and every GREEN to port and clear of everything else, round the EXIT counter-
+  clockwise. The sides are kept by topology (each red casts a ray to starboard, each green to
+  port, and the path must cross every ray an even number of times), so ANY passage that can
+  be driven is found: winding, crowded, unpaired, a hairpin. The orbits shrink to fit the
+  water round each blue buoy. Nothing is planned by Nav2: the boat follows its own plan with
+  GUIDED setpoints in every nav_mode.
+
+  ADVANCED: the passage does not change during a run, and the aircraft need not stay on
+  station (handbook: "the UAV is not required to remain on station"). So: wait for its field,
+  plan ONCE, drive the four phases. The plan is re-made only if what is left of it stops being
+  good (a hazard moved onto it, the boat is pushed off it), and a phase that stays blocked
+  fails after 15 s and the Retry re-plans from wherever the boat is. No checkpoints, and no
+  freshness guard on the aircraft's field: losing the radio after the report is allowed.
+
+  DISRUPTIVE: the passage may change mid-run and only the aircraft can see it. The plan still
+  covers the whole mission at all times, so the boat always has somewhere safe to go, and it
+  stops to ASK at checkpoints: after the entry orbit (seq 1) and just past every gate the path
+  drives through (seq 2, 3, ...; the last gate's is the exit confirmation, as before). A field
+  that changes - at a checkpoint or at any moment - re-plans the rest from where the boat is,
+  counting which buoys it has already passed on which side (the parity of the track driven so
+  far), and drives on. The aircraft must stay on station: PassagePlanFresh guards it.
+
+  CORE has no aircraft: use task1_safe_passage.xml. A Core goal sent to this tree waits for a
+  field that never comes, until the mission timeout.
+-->
+<root BTCPP_format="4" main_tree_to_execute="Task1Global">
+
+  <BehaviorTree ID="Task1Global">
+    <IfThenElse>
+      <TierIs tier="disruptive"/>
+      <SubTree ID="Task1GlobalDisruptive" _autoremap="true"/>
+      <SubTree ID="Task1GlobalAdvanced" _autoremap="true"/>
+    </IfThenElse>
+  </BehaviorTree>
+
+  <!-- ======================================================================= ADVANCED -->
+  <BehaviorTree ID="Task1GlobalAdvanced">
+    <ReactiveSequence name="guard_band">
+      <IsAutonomous/>
+      <ResolveBuoyStates/>
+      <PublishSafePassageReport min_period_s="1.0"/>
+
+      <Sequence name="passage">
+        <SetTask token="TASK_SAFE_PASSAGE"/>
+        <!-- handbook 3.3.2: the aircraft reports before the boat transits -->
+        <WaitForField/>
+        <!-- Plan once, then drive. A phase that fails (blocked 15 s) comes back here:
+             PlanGlobalPassage re-plans from the boat and the phases already done return
+             SUCCESS at once, so the mission resumes where it is. -->
+        <RetryUntilSuccessful num_attempts="4">
+          <Sequence>
+            <PlanGlobalPassage/>
+            <DrivePlanPhase phase="approach"/>
+            <DrivePlanPhase phase="entry_orbit"/>
+            <DrivePlanPhase phase="transit"/>
+            <DrivePlanPhase phase="exit_orbit"/>
+          </Sequence>
+        </RetryUntilSuccessful>
+      </Sequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <!-- ===================================================================== DISRUPTIVE -->
+  <BehaviorTree ID="Task1GlobalDisruptive">
+    <ReactiveSequence name="guard_band">
+      <IsAutonomous/>
+      <!-- the aircraft must stay on station: a dead link stops the boat -->
+      <PassagePlanFresh max_age_s="15.0"/>
+      <ResolveBuoyStates/>
+      <PublishSafePassageReport min_period_s="1.0"/>
+
+      <Sequence name="passage">
+        <SetTask token="TASK_SAFE_PASSAGE"/>
+        <WaitForField/>
+
+        <RetryUntilSuccessful num_attempts="4">
+          <Sequence>
+            <PlanGlobalPassage/>
+            <DrivePlanPhase phase="approach"/>
+            <!-- stop on the orbit's last point: the next thing is a question -->
+            <DrivePlanPhase phase="entry_orbit" stop_at_end="true"/>
+          </Sequence>
+        </RetryUntilSuccessful>
+
+        <!-- checkpoint 1: "is the field still what you said?" A changed field ends the wait
+             as an answer would (release_on_change) and the transit is re-planned against it. -->
+        <RequestConfirmation what="entry orbit"/>
+        <ForceSuccess>
+          <AwaitConfirmation timeout_s="120.0" retry_s="3.0" release_on_change="true"/>
+        </ForceSuccess>
+
+        <!-- The transit, one gate at a time: drive to the checkpoint just past the next gate
+             the plan goes through, ask, repeat. The plan is kept between stretches unless the
+             field changed (then it is re-made from the boat, sides already passed counted).
+             TransitComplete ends the loop; anything that gives up inside it ends it too, and
+             the TransitComplete after it then fails the mission instead of orbiting an exit
+             the boat never reached. -->
+        <ForceSuccess>
+          <KeepRunningUntilFailure name="transit">
+            <Sequence>
+              <Inverter>
+                <TransitComplete/>
+              </Inverter>
+              <RetryUntilSuccessful num_attempts="4">
+                <Sequence>
+                  <PlanGlobalPassage/>
+                  <DrivePlanPhase phase="transit" stop_at_checkpoints="true"/>
+                </Sequence>
+              </RetryUntilSuccessful>
+              <IfThenElse>
+                <AtCheckpoint/>
+                <Sequence>
+                  <RequestConfirmation what="gate"/>
+                  <ForceSuccess>
+                    <AwaitConfirmation timeout_s="120.0" retry_s="3.0" release_on_change="true"/>
+                  </ForceSuccess>
+                </Sequence>
+                <AlwaysSuccess/>
+              </IfThenElse>
+            </Sequence>
+          </KeepRunningUntilFailure>
+        </ForceSuccess>
+        <TransitComplete/>
+
+        <RetryUntilSuccessful num_attempts="4">
+          <Sequence>
+            <PlanGlobalPassage/>
+            <DrivePlanPhase phase="exit_orbit"/>
+          </Sequence>
+        </RetryUntilSuccessful>
+      </Sequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+</root>

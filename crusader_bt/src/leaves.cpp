@@ -51,25 +51,7 @@ using nav::Vec2;
 // now also share one PlannedLeg driver, so there is exactly one place that turns a
 // leg's output into a setpoint, a log line and a status for the map.
 
-/// Send `p` as the GUIDED setpoint when publish_setpoints allows it, and log
-/// "<what> lat, lon", marked [NOT SENT] when it did not go out. `what` empty =
-/// no log line. The local point is converted under the lock; the publish is not.
-void sendSetpoint(
-  Context & c, const rclcpp::Logger & lg, Vec2 p, const std::string & what)
-{
-  nav::LatLon ll;
-  {
-    std::lock_guard<std::mutex> lk(c.mu);
-    ll = nav::toLatLon(p, c.origin);
-  }
-  const bool sent = c.publish_setpoints && c.send_setpoint;
-  if (sent) {c.send_setpoint(ll);}
-  if (!what.empty()) {
-    RCLCPP_INFO(
-      lg, "%s %.7f, %.7f%s", what.c_str(), ll.lat, ll.lon,
-      sent ? "" : "  [NOT SENT: publish_setpoints is false]");
-  }
-}
+// sendSetpoint() is in context.hpp: the whole-field leaves (global_leaves.cpp) send the same way.
 
 /// The world a PlannedLeg needs this tick, read under ONE lock: the clock, the
 /// pose and its freshness, the datum verdict and the known hazards (the same
@@ -648,14 +630,14 @@ public:
       BT::InputPort<std::string>("anchor", "entry", "entry | exit | fix"),
       BT::InputPort<double>("lat", 0.0, "with anchor=fix: latitude"),
       BT::InputPort<double>("lon", 0.0, "with anchor=fix: longitude"),
-      BT::InputPort<double>("radius", 6.0, "orbit radius, metres"),
-      BT::InputPort<int>("points", 8, "waypoints around the circle"),
+      BT::InputPort<double>("radius", "orbit radius, metres (absent: nav_orbit_radius_m)"),
+      BT::InputPort<int>("points", "waypoints around the circle (absent: nav_orbit_points)"),
       BT::InputPort<double>("overshoot_deg", kOvershootDeg,
         "degrees to keep going past one full turn, the same way round, so a boat that "
         "takes each hop early (tolerance 2 m is ~19 deg at 6 m) still sweeps >= 360; "
         "45 = one extra point at 8 points; 0 = stop at exactly 360; clamped to 0..360"),
       BT::InputPort<std::string>("direction", "cw", "cw | ccw"),
-      BT::InputPort<double>("tolerance", 2.0, "arrival radius, metres"),
+      BT::InputPort<double>("tolerance", "hop arrival radius, metres (absent: nav_orbit_tolerance_m)"),
       BT::InputPort<bool>("avoid", true,
         "plan each hop around known hazards (needs nav_mode shadow or on)"),
       BT::InputPort<double>("blocked_timeout_s", 15.0,
@@ -666,8 +648,8 @@ public:
   {
     const std::string anchor = getInput<std::string>("anchor").value_or("entry");
     const bool cw = getInput<std::string>("direction").value_or("cw") != "ccw";
-    const double radius = getInput<double>("radius").value_or(6.0);
-    const int points = getInput<int>("points").value_or(8);
+    const double radius = getInput<double>("radius").value_or(ctx_->nav.orbit_radius_m);
+    const int points = getInput<int>("points").value_or(ctx_->nav.orbit_points);
     const double overshoot = getInput<double>("overshoot_deg").value_or(kOvershootDeg);
 
     Vec2 a, from;
@@ -712,6 +694,7 @@ public:
       nav::sweepDeg(a, std::vector<Vec2>(ring_.begin() + 1, ring_.end()), ring_.front()),
       overshoot, dropped);
     cfg_ = legConfigFromPorts(*this);
+    if (!getInput<double>("tolerance")) {cfg_.tolerance = ctx_->nav.orbit_tolerance_m;}
     return startHop();
   }
 
@@ -754,7 +737,8 @@ private:
     // hop beside a buoy where it could never arrive (2026-10-02, the EXIT orbit by b9).
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
-      const Vec2 p = path::clearPoint(ring_[i_], knownHazards(*ctx_), ctx_->nav.orbit_clear_m);
+      const Vec2 p = path::clearPoint(
+        ring_[i_], knownHazards(*ctx_), ctx_->nav.orbit_clear_m, ctx_->nav.goal_max_move_m);
       if (nav::norm(p - ring_[i_]) > 1e-9) {
         RCLCPP_INFO(log(), "CircleBuoy: hop %zu moved %.2f m clear of a known hazard", i_,
           nav::norm(p - ring_[i_]));
@@ -1209,13 +1193,23 @@ public:
       BT::InputPort<double>("timeout_s", 120.0,
         "give up waiting and drive on with the last field"),
       BT::InputPort<double>("retry_s", 3.0,
-        "how often to re-send the request while waiting")};
+        "how often to re-send the request while waiting"),
+      BT::InputPort<bool>("release_on_change", false,
+        "true: a CHANGED field also ends the wait - the aircraft re-tasked instead of acking, "
+        "and the tree re-plans against it. Changed = a colour, a buoy, or a move beyond "
+        "retask_move_m (gp::fieldChange); the aircraft's own re-report scatter is not one"),
+      BT::InputPort<double>("retask_move_m", 2.0,
+        "with release_on_change: a buoy that moved less than this has not changed")};
   }
 
   BT::NodeStatus onStart() override
   {
     t0_ = std::chrono::steady_clock::now();
     last_ask_ = t0_;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      field0_ = gp::fieldSig(ctx_->plan, ctx_->entry, ctx_->exitp);
+    }
     return onRunning();
   }
 
@@ -1229,6 +1223,17 @@ public:
           log(), "checkpoint %u confirmed by the aircraft",
           static_cast<unsigned>(ctx_->gate_seq));
         return BT::NodeStatus::SUCCESS;
+      }
+      if (getInput<bool>("release_on_change").value_or(false)) {
+        const std::string change = gp::fieldChange(
+          field0_, gp::fieldSig(ctx_->plan, ctx_->entry, ctx_->exitp),
+          getInput<double>("retask_move_m").value_or(2.0));
+        if (!change.empty()) {
+          RCLCPP_INFO(
+            log(), "checkpoint %u: the aircraft changed the field (%s) - re-planning",
+            static_cast<unsigned>(ctx_->gate_seq), change.c_str());
+          return BT::NodeStatus::SUCCESS;
+        }
       }
       seq = ctx_->gate_seq;
     }
@@ -1261,6 +1266,7 @@ public:
 private:
   std::chrono::steady_clock::time_point t0_;
   std::chrono::steady_clock::time_point last_ask_;
+  gp::FieldSig field0_;          ///< the aircraft's field when the wait began
 };
 
 class GateWaypoint : public CrusaderSyncAction
@@ -1272,8 +1278,8 @@ public:
   {
     return {
       BT::InputPort<std::string>("point", "through", "approach | through"),
-      BT::InputPort<double>("standoff", 6.0, "metres past the middle"),
-      BT::InputPort<double>("approach", 8.0, "metres short of the middle"),
+      BT::InputPort<double>("standoff", "metres past the middle (absent: nav_gate_standoff_m)"),
+      BT::InputPort<double>("approach", "metres short of the middle (absent: nav_gate_approach_m)"),
       BT::InputPort<double>("offset", 4.0, "metres to clear a LONE buoy by"),
       BT::OutputPort<Waypoint>("out", "where the next action should drive")};
   }
@@ -1281,8 +1287,8 @@ public:
   BT::NodeStatus tick() override
   {
     const std::string which = getInput<std::string>("point").value_or("through");
-    const double standoff = getInput<double>("standoff").value_or(6.0);
-    const double approach = getInput<double>("approach").value_or(8.0);
+    const double standoff = getInput<double>("standoff").value_or(ctx_->nav.gate_standoff_m);
+    const double approach = getInput<double>("approach").value_or(ctx_->nav.gate_approach_m);
     const double offset = getInput<double>("offset").value_or(4.0);
 
     nav::Vec2 target;
@@ -1298,14 +1304,15 @@ public:
     if (plain.valid) {
       // Move the two points off anything on the straight crossing: the same hazard set and
       // exemption the crossing leg checks (exempt="gate"). See path::clearGateWaypoints.
+      bool tight = false;
       const nav::Gate gate = path::clearGateWaypoints(
         nav::findById(ctx_->buoys, r)->p, nav::findById(ctx_->buoys, g)->p, standoff, approach,
-        path::exempt(hz, {r, g}, false, ctx_->nav.exempt_radius_m));
+        path::exempt(hz, {r, g}, false, ctx_->nav.exempt_radius_m), ctx_->nav, nullptr, &tight);
       target = (which == "approach") ? gate.approach : gate.through;
       const nav::Vec2 was = (which == "approach") ? plain.approach : plain.through;
       why = "gate " + std::to_string(static_cast<int>(ctx_->gate_seq)) + " " +
         which + " (red " + std::to_string(r) + ", green " + std::to_string(g) + ")" +
-        (nav::norm(target - was) > 0.01 ? ", moved clear" : "");
+        (nav::norm(target - was) > 0.01 ? (tight ? ", moved clear (tight)" : ", moved clear") : "");
     } else {
       const nav::Buoy * lone = nav::findById(ctx_->buoys, r);
       if (lone == nullptr) {lone = nav::findById(ctx_->buoys, g);}
@@ -1322,8 +1329,9 @@ public:
     }
 
     // the goal rule, whatever branch chose the point: a no-op for a gate point that
-    // clearGateWaypoints placed, a last resort when nothing on the gate fitted
-    const nav::Vec2 clear = path::clearPoint(target, hz, path::GateClear{}.clear_m);
+    // clearGateWaypoints placed (at least the tight clearance), a last resort when nothing fitted
+    const nav::Vec2 clear =
+      path::clearPoint(target, hz, ctx_->nav.gate_tight_clear_m, ctx_->nav.goal_max_move_m);
     if (nav::norm(clear - target) > 1e-9) {
       why += ", nudged " + std::to_string(static_cast<int>(nav::norm(clear - target) * 100.0)) +
         " cm off a hazard";
@@ -1364,6 +1372,8 @@ void registerCrusaderNodes(BT::BehaviorTreeFactory & factory)
   // Task 3, in their own file (src/task3_leaves.cpp).
   registerTask3Nodes(factory);
   registerFireNodes(factory);
+  // Task 1 above Core, planned over the whole field (src/global_leaves.cpp).
+  registerGlobalPassageNodes(factory);
 }
 
 }  // namespace crusader_bt

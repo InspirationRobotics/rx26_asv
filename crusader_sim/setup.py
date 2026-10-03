@@ -7,7 +7,9 @@ PKG = "crusader_sim"
 
 
 def data(sub, pattern="*"):
-    return (os.path.join("share", PKG, sub), glob(os.path.join(sub, pattern)))
+    # files only: a sub-directory in the glob (config/tuning_profiles) fails the install
+    return (os.path.join("share", PKG, sub),
+            [f for f in glob(os.path.join(sub, pattern)) if os.path.isfile(f)])
 
 
 setup(
@@ -20,6 +22,7 @@ setup(
         ("share/ament_index/resource_index/packages", ["resource/" + PKG]),
         ("share/" + PKG, ["package.xml"]),
         data("config"),
+        data("config/tuning_profiles"),
         data("courses"),
         data("scripts"),
         data("docker"),

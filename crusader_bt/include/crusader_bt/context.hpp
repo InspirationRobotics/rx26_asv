@@ -39,6 +39,7 @@
 
 #include "crusader_bt/dock_math.hpp"
 #include "crusader_bt/fire_math.hpp"
+#include "crusader_bt/global_passage.hpp"
 #include "crusader_bt/nav_math.hpp"
 #include "crusader_bt/path_math.hpp"
 #include "crusader_bt/planned_leg.hpp"
@@ -247,6 +248,24 @@ struct Context
   /// it before each tick and RELEASES the sticks if they were commanded last
   /// tick and not this one.
   bool sticks_commanded = false;
+
+  // ---- the whole-field Task 1 plan (global_passage.hpp; src/global_leaves.cpp) ----
+  //
+  // task1_global.xml plans the WHOLE passage at once (approach, entry orbit, transit, exit
+  // orbit) and drives it phase by phase. Per mission: reset with the goal, like the gates.
+  struct GlobalPassage
+  {
+    gp::Phase phase = gp::Phase::Approach;   ///< the phase being driven, or the next one
+    gp::Plan plan;                           ///< ok = false until one was made
+    gp::Params params;                       ///< PlanGlobalPassage's, reused by every replan
+    gp::FieldSig field;                      ///< the aircraft's report the plan was made against
+    double transit_s = 0.0;                  ///< progress along plan.legs[Transit] at the last stop
+    std::vector<nav::Vec2> traj;             ///< the transit as driven, first point = its start
+    std::vector<nav::Vec2> entry_ring;       ///< the ring the boat orbited (or is about to)
+    bool at_checkpoint = false;              ///< the last transit stretch stopped at a gate
+    int plans = 0;
+  };
+  GlobalPassage global_passage;
 
   // ---- written by NextWaypoint, read by NavigateTo ----
   nav::Vec2 waypoint;
@@ -576,6 +595,25 @@ struct LegStatusPacer
 };
 
 /// Back to "no leg running". CALL UNDER ctx.mu.
+/// Send `p` as the GUIDED setpoint when publish_setpoints allows it, and log
+/// "<what> lat, lon", marked [NOT SENT] when it did not go out. `what` empty = no log line.
+/// The local point is converted under the lock; the publish is not. TAKES ctx.mu ITSELF.
+inline void sendSetpoint(Context & c, const rclcpp::Logger & lg, nav::Vec2 p, const std::string & what)
+{
+  nav::LatLon ll;
+  {
+    std::lock_guard<std::mutex> lk(c.mu);
+    ll = nav::toLatLon(p, c.origin);
+  }
+  const bool sent = c.publish_setpoints && c.send_setpoint;
+  if (sent) {c.send_setpoint(ll);}
+  if (!what.empty()) {
+    RCLCPP_INFO(
+      lg, "%s %.7f, %.7f%s", what.c_str(), ll.lat, ll.lon,
+      sent ? "" : "  [NOT SENT: publish_setpoints is false]");
+  }
+}
+
 inline void clearLeg(Context & c)
 {
   c.leg = Context::LegStatus{};
@@ -830,6 +868,9 @@ void registerCrusaderNodes(BT::BehaviorTreeFactory & factory);
 void registerTask3Nodes(BT::BehaviorTreeFactory & factory);
 /// The fixed-nozzle shot's leaves (src/fire_leaves.cpp).
 void registerFireNodes(BT::BehaviorTreeFactory & factory);
+/// The whole-field Task 1 leaves (src/global_leaves.cpp, task1_global.xml). Also called by
+/// registerCrusaderNodes.
+void registerGlobalPassageNodes(BT::BehaviorTreeFactory & factory);
 
 }  // namespace crusader_bt
 

@@ -51,3 +51,16 @@ pre{margin:0;white-space:pre-wrap;font:12px/1.4 monospace}
 .tabs button{border-radius:5px 5px 0 0}
 #pop{position:fixed;display:none;background:var(--panel);border:1px solid var(--accent);border-radius:6px;padding:6px;z-index:5}
 #pop button{display:block;width:100%;margin:2px 0;text-align:left}
+/* the sim page's Planner tuning card (initTuning/renderTuning in panel_common.js) */
+#tuning{min-width:0;overflow-wrap:anywhere}
+#tuning summary{cursor:pointer;padding:3px 0}
+#tuneProf{min-width:0;max-width:100%}
+#tuning .tgrp{margin:2px 0}.tgrp>summary{font-weight:600}
+.trow{padding:4px 0 4px 8px;border-left:3px solid transparent;border-bottom:1px solid #ffffff0a}
+.trow.ovr{border-left-color:var(--warn);background:#e0a24512}.trow.bad{border-left-color:var(--bad)}
+.trow .tk{display:flex;gap:8px;align-items:center;justify-content:space-between}
+.trow code{font:12px monospace}
+.trow .tv{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:2px}
+.trow input{width:96px;min-width:0}.trow.ovr input{border-color:var(--warn)}.trow.bad input{border-color:var(--bad)}
+.trow .tre{display:none;padding:0 6px;font-size:11px}.trow.ovr .tre,.trow.sv .tre{display:inline-block}
+.trow .td{margin-top:2px;cursor:pointer}

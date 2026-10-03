@@ -1,0 +1,31 @@
+# Task 1 Safe Passage — TIGHT layout: 3-5 m of water between buoys everywhere.
+#
+# Built 2026-10-02 to prove the "Tight (3-5 m)" planner tuning profile
+# (crusader_sim/config/tuning_profiles/tight_3to5m.yaml). With the default
+# tuning (6 m orbits, gate points 6/8 m out, 10 m fences) this field does not
+# fit; with the profile it should.
+#
+# Geometry (ENU metres; boat starts at the origin heading east, so starboard is
+# SOUTH and every red sits on -y of its green):
+#   gates 3.5-3.8 m wide, 4.5 m apart along the course;
+#   a black buoy 2.7-3.0 m from a gate buoy on the course side of each gap;
+#   ENTRY and EXIT 5 m from the nearest gate buoy (room for a ~2 m orbit).
+# Disruptive tier: side beacons dark, top beacons lit (only the UAV sees colour).
+name: task1_tight
+origin: {lat: 1.28060, lon: 103.85570}   # = tools/sitl/start_sitl.sh SITL_HOME
+draft_m: 0.24
+depth_m: 5.0
+boat_start: {x: 0.0, y: 0.0, yaw_deg: 0.0}
+tier: disruptive
+
+elements:
+  - {type: robobuoy, name: entry,  x:  6.0, y:  2.0, beacon: flash_blue,  side_beacon: false, up_beacon: true}
+  - {type: robobuoy, name: g1_red, x: 11.0, y: -1.8, beacon: flash_red,   side_beacon: false, up_beacon: true}
+  - {type: robobuoy, name: g1_grn, x: 11.0, y:  1.8, beacon: flash_green, side_beacon: false, up_beacon: true}
+  - {type: robobuoy, name: g2_red, x: 15.5, y: -1.5, beacon: flash_red,   side_beacon: false, up_beacon: true}
+  - {type: robobuoy, name: g2_grn, x: 15.5, y:  2.0, beacon: flash_green, side_beacon: false, up_beacon: true}
+  - {type: robobuoy, name: g3_red, x: 20.0, y:  0.0, beacon: flash_red,   side_beacon: false, up_beacon: true}
+  - {type: robobuoy, name: g3_grn, x: 20.0, y:  3.8, beacon: flash_green, side_beacon: false, up_beacon: true}
+  - {type: robobuoy, name: exit,   x: 25.0, y:  1.0, beacon: steady_blue, side_beacon: false, up_beacon: true}
+  - {type: robobuoy, name: black1, x: 13.5, y:  3.5, beacon: "off", side_beacon: false, up_beacon: true}
+  - {type: robobuoy, name: black2, x: 18.0, y: -2.5, beacon: "off", side_beacon: false, up_beacon: true}

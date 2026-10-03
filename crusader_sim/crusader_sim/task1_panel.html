@@ -71,6 +71,23 @@
         <div id="uInfo" class="sub" style="margin-top:4px"></div>
         <div id="uLock" class="sub w"></div>
       </div>
+      <div class="card" id="tuning"><h3>Planner tuning</h3>
+        <div class="sub">Applies at the next LAUNCH (STOP SIM, then LAUNCH). Sim only: the team's YAML files are not changed.</div>
+        <div class="row"><span id="tuneStatus" class="sub"></span><b id="tuneNeed" class="w" style="display:none">relaunch needed</b></div>
+        <div id="tuneUnk" class="sub w"></div>
+        <details id="tuneBox"><summary>edit the numbers</summary>
+          <div id="tuneErr" class="e"></div>
+          <div id="tuneProfBox" style="display:none">
+            <div class="row"><label for="tuneProf">Profile:</label><select id="tuneProf"></select><button id="tuneProfLoad">LOAD</button></div>
+            <div id="tuneProfAbout" class="sub"></div></div>
+          <div id="tuneGroups" class="sub">loading...</div>
+          <div class="row"><button id="tuneSave" class="go">SAVE</button><button id="tuneDiscard">DISCARD EDITS</button>
+            <button id="tuneResetAll" class="stop">RESET ALL</button></div>
+          <div id="tuneYamlBox" style="display:none">
+            <div class="sub">overrides as YAML (paste into crusader_params.yaml / nav2_params.yaml when you are happy)</div>
+            <pre id="tuneYaml"></pre></div>
+        </details>
+      </div>
       <div class="card" id="uav-anchor-setup"><h3>Layout</h3>
         <div class="row"><select id="tpl"></select><button onclick="post('/api/template',{name:val('tpl')})">Load template</button>
           <button onclick="post('/api/clear')">Clear</button></div>
@@ -83,7 +100,8 @@
     </div>
     <div id="run" style="display:none">
       <div class="card"><h3>Mission</h3>
-        <div class="row"><button id="start" class="go" onclick="post('/api/start')">START TASK 1</button>
+        <div class="row"><select id="tier" title="the goal's tier: task1_global.xml drives Advanced (plan once, no checkpoints) or Disruptive (checkpoints, re-plans on any change)"><option value="advanced">Advanced</option><option value="disruptive" selected>Disruptive</option></select>
+          <button id="start" class="go" onclick="post('/api/start',{tier:document.getElementById('tier').value})">START TASK 1</button>
           <button id="abort" onclick="post('/api/abort')" title="stops task1_goal, which cancels the tree's goal and waits for it to finish (SIGINT)">abort</button></div>
         <div id="phase" class="sub"></div><div class="bar"><i id="pct" style="width:0"></i></div>
         <div id="judge" class="sub" title="the referee (task1_judge) grading the TRUE path against the colours as sent; dashed lines on the map are its gate pairs"></div>
@@ -121,6 +139,7 @@ initLogs(['sim','radio','mission','judge']);
 initPalette();
 initLayers(LAYDEFS,'task1_panel.layers');
 bindUav();
+initTuning();
 function editable(){return S&&(S.sim.state==='down'||S.sim.state==='failed')}
 function buoys(){return editable()||!S||!S.run?layout.map(function(b,i){var o=S&&S.uav&&S.uav.offsets[i]||[0,0];
   return{x:b.x,y:b.y,ux:b.x+o[0],uy:b.y+o[1],staged:b.state,sent:b.state}}):S.run.buoys}
@@ -153,7 +172,7 @@ function drawGhosts(dpr){   // the true buoys on the boat's map: faint dots, onl
 }
 function renderUav(inSetup){
   var card=$('uav'), home=inSetup?$('setup'):$('run'), before=inSetup?$('uav-anchor-setup'):$('uav-anchor-run');
-  if(card.parentNode!==home)home.insertBefore(card,before);
+  if(card.parentNode!==home){home.insertBefore(card,before);home.insertBefore($('tuning'),before)}   // the tuning card follows it
   renderUavFields();
 }
 function render(){
@@ -176,7 +195,7 @@ function render(){
   $('pct').style.width=(m.pct||0)+'%'; $('result').textContent=m.result; $('verdict').textContent=S.verdict||'';
   var J=S.judge; $('judge').textContent=!J?'':'referee: gates '+J.gates_correct+'/'+J.gates+' correct'+
     (J.contacts.length?' · CONTACT '+J.contacts.join(' '):'')+Object.keys(J.circles).map(function(k){return' · '+k+' '+J.circles[k]}).join('');
-  renderRun();layPaint();
+  renderRun();layPaint();renderTuning();
   draw();
 }
 startPolling();

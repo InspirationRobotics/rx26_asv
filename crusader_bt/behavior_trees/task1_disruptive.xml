@@ -110,7 +110,7 @@
         <!-- A hop that cannot be driven FAILS after 15 s and the Retry starts
              the orbit again, from wherever the boat is. -->
         <RetryUntilSuccessful num_attempts="3">
-          <CircleBuoy anchor="entry" radius="6.0" points="8" direction="cw"/>
+          <CircleBuoy anchor="entry" direction="cw"/>
         </RetryUntilSuccessful>
 
         <!-- CONFIRM BEFORE THE TRANSIT STARTS, not only after each gate.
@@ -156,8 +156,12 @@
                          and HOLDS if it cannot. Blocked for 15 s it FAILS, which
                          fails the leg Sequence below, and the ForceSuccess around
                          the leg restarts it against the SAME gate. -->
-                    <GateWaypoint point="approach" standoff="6.0" approach="8.0" out="{goal}"/>
-                    <NavigateTo target="port" goal="{goal}" tolerance="3.0"/>
+                    <!-- tolerance 1.0, not 3: the straight crossing below starts
+                         from wherever this leg stopped, and GateWaypoint cleared the
+                         line from THIS point. 3 m off it, in a crowded field, the
+                         crossing ran through a black buoy (2026-10-02). -->
+                    <GateWaypoint point="approach" out="{goal}"/>
+                    <NavigateTo target="port" goal="{goal}" tolerance="1.0"/>
 
                     <!-- The crossing itself is driven STRAIGHT, deliberately.
                          It is between two buoys the boat must pass on given
@@ -176,8 +180,10 @@
                          is not enough, crosses the gap off-centre, so the line keeps
                          1.5 m from everything (path::clearGateWaypoints). -->
 
-                    <GateWaypoint point="through" standoff="6.0" approach="8.0" out="{goal}"/>
-                    <NavigateTo target="port" goal="{goal}" tolerance="2.5"
+                    <GateWaypoint point="through" out="{goal}"/>
+                    <!-- tolerance 1.0: the through point may sit only nav_gate_min_standoff_m
+                         past the gate line, and arriving must mean being past it -->
+                    <NavigateTo target="port" goal="{goal}" tolerance="1.0"
                                 avoid="false" exempt="gate"/>
                     <MarkGateCleared/>
 
@@ -235,7 +241,7 @@
              aircraft never sent an exit at all. -->
         <ExitResolved/>
         <RetryUntilSuccessful num_attempts="3">
-          <CircleBuoy anchor="exit" radius="6.0" points="8" direction="ccw"/>
+          <CircleBuoy anchor="exit" direction="ccw"/>
         </RetryUntilSuccessful>
 
       </Sequence>

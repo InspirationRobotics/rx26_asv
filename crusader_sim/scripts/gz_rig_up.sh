@@ -39,9 +39,16 @@ UAV=1
 WS=/root/robotx_ws
 SRC=$WS/src/rx26_asv
 CFG=$WS/install/crusader_bringup/share/crusader_bringup/config/crusader_params.yaml
+# SIM_TUNING (gz_sim_up.sh --tuning): a params file of overrides, layered on top of $CFG for
+# bt_runner and of nav2_params.yaml for Nav2. Empty = none, and the run is exactly as before.
+BT_TUNE=(); NAV_TUNE=()
+if [ -n "${SIM_TUNING:-}" ]; then
+  [ -f "$SIM_TUNING" ] || { echo "*** FAILED: SIM_TUNING=$SIM_TUNING: no such file" >&2; exit 2; }
+  BT_TUNE=(--params-file "$SIM_TUNING"); NAV_TUNE=("nav2_overlay:=$SIM_TUNING")
+fi
 SIMSHARE=$WS/install/crusader_sim/share/crusader_sim
 BT=$WS/install/crusader_bt/share/crusader_bt/behavior_trees
-TREE="${TREE:-task1_disruptive.xml}"
+TREE="${TREE:-task1_global.xml}"    # the whole-field planner; TREE=task1_disruptive.xml = the per-gate tree
 case "$TREE" in */*) ;; *) TREE="$BT/$TREE" ;; esac     # a bare name means crusader_bt's
 export GZ_PARTITION=crusader_sim
 export RX26_SRC=$SRC
@@ -132,7 +139,7 @@ else
     NAV_MODE=off
   else
     up nav /tmp/nav.log ros2 launch crusader_nav nav.launch.py \
-      datum_source:=param datum_lat:=$DLAT datum_lon:=$DLON
+      datum_source:=param datum_lat:=$DLAT datum_lon:=$DLON "${NAV_TUNE[@]}"
   fi
 fi
 
@@ -145,7 +152,7 @@ up ground_station /tmp/gcs.log \
 up panel_feed /tmp/panel_feed.log ros2 run crusader_sim panel_feed --ros-args -p course:="$COURSE"
 sleep 6
 up bt_runner /tmp/bt.log \
-  ros2 run crusader_bt bt_runner_node --ros-args --params-file "$CFG" \
+  ros2 run crusader_bt bt_runner_node --ros-args --params-file "$CFG" "${BT_TUNE[@]}" \
   -p tree_file:="$TREE" -p publish_setpoints:=true -p default_timeout_s:=400.0 \
   -p nav_mode:="$NAV_MODE"
 sleep 6

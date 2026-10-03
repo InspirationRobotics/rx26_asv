@@ -10,6 +10,8 @@ bt_runner_node. Source /opt/ros/humble/setup.bash and the workspace first.
 
 Arguments
   nav2_params   Nav2 parameter file          (default: this package's config/nav2_params.yaml)
+  nav2_overlay  a second Nav2 parameter file layered on top of nav2_params, only the keys
+                it names (default '': none). The sim panel's planner tuning uses it.
   crsd_params   crusader_params.yaml         (default: crusader_bringup's)
   datum_source  param | first_fix            ('' = whatever crsd_params says)
   datum_lat, datum_lon                       used with datum_source:=param
@@ -48,7 +50,9 @@ def _yaml_datum_source(crsd_params):
 
 def _nodes(context):
     arg = {k: LaunchConfiguration(k).perform(context)
-           for k in ("nav2_params", "crsd_params", "datum_source", "datum_lat", "datum_lon")}
+           for k in ("nav2_params", "nav2_overlay", "crsd_params", "datum_source", "datum_lat",
+                     "datum_lon")}
+    nav2 = [arg["nav2_params"]] + ([arg["nav2_overlay"]] if arg["nav2_overlay"] else [])
     frames_params = [arg["crsd_params"]]
     source = _yaml_datum_source(arg["crsd_params"])
     if arg["datum_source"]:
@@ -65,11 +69,11 @@ def _nodes(context):
         # nav_lifecycle configures and activates a respawned planner_server again
         # within a few check periods of it coming back (nav_lifecycle in nav2_params.yaml).
         Node(package="nav2_planner", executable="planner_server", name="planner_server",
-             output="screen", parameters=[arg["nav2_params"]],
+             output="screen", parameters=nav2,
              respawn=True, respawn_delay=RESPAWN_DELAY_S),
         # Stateless: a respawned one just looks at the planner again.
         Node(package="crusader_nav", executable="nav_lifecycle", name="nav_lifecycle",
-             output="screen", parameters=[arg["nav2_params"]],
+             output="screen", parameters=nav2,
              respawn=True, respawn_delay=RESPAWN_DELAY_S),
     ]
 
@@ -87,6 +91,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("nav2_params", default_value=os.path.join(
             nav_share, "config", "nav2_params.yaml")),
+        DeclareLaunchArgument("nav2_overlay", default_value="",
+                              description="extra Nav2 params file on top; empty = none"),
         DeclareLaunchArgument("crsd_params", default_value=default_crsd_params()),
         DeclareLaunchArgument("datum_source", default_value="",
                               description="param | first_fix; empty = crsd_params"),

@@ -74,7 +74,7 @@ static void userField(const NavParams & P)
     const std::vector<Hazard> hz = crossingHazards(f, entry, exitp, pg.red_id, pg.green_id, P);
     const nav::Gate plain = nav::gateWaypoints(red, green, 6.0, 8.0);
     double shift = 0.0;
-    const nav::Gate g = clearGateWaypoints(red, green, 6.0, 8.0, hz, GateClear{}, &shift);
+    const nav::Gate g = clearGateWaypoints(red, green, 6.0, 8.0, hz, P, &shift);
     const std::string tag = "gate (" + std::to_string(pg.red_id) + "," + std::to_string(pg.green_id) + ")";
     const Vec2 mid = (red + green) * 0.5, u = nav::headingVec(g.heading_deg), v = nav::unit(red - green);
     std::printf("    %s plain approach (%.1f, %.1f) through (%.1f, %.1f) -> approach (%.1f, %.1f) "
@@ -98,7 +98,7 @@ static void clearField(const NavParams & P)
   const Vec2 red{30.0, -4.5}, green{30.0, 4.5};
   const std::vector<Hazard> hz = {detail::circleHazard(HazardSource::PlanBuoy, 9, {60.0, 20.0}, P.buoy_radius_m)};
   const nav::Gate plain = nav::gateWaypoints(red, green, 6.0, 8.0);
-  const nav::Gate g = clearGateWaypoints(red, green, 6.0, 8.0, hz);
+  const nav::Gate g = clearGateWaypoints(red, green, 6.0, 8.0, hz, P);
   chk("same approach", nav::norm(g.approach - plain.approach) < 1e-9);
   chk("same through", nav::norm(g.through - plain.through) < 1e-9);
 }
@@ -109,7 +109,7 @@ static void shorterBeforeSideways(const NavParams & P)
   const Vec2 red{30.0, -4.5}, green{30.0, 4.5};      // crossing east, through at (36, 0)
   const std::vector<Hazard> hz = {detail::circleHazard(HazardSource::PlanBuoy, 9, {37.0, 0.0}, P.buoy_radius_m)};
   double shift = 9.0;
-  const nav::Gate g = clearGateWaypoints(red, green, 6.0, 8.0, hz, GateClear{}, &shift);
+  const nav::Gate g = clearGateWaypoints(red, green, 6.0, 8.0, hz, P, &shift);
   chk("no shift", std::fabs(shift) < 1e-9);
   chk("through backed off to (35, 0): the 0.5 m step that keeps 1.5 m off the buoy",
     std::fabs(g.through.x - 35.0) < 1e-6 && std::fabs(g.through.y) < 1e-6);
@@ -121,7 +121,7 @@ static void nothingFits(const NavParams & P)
   const Vec2 red{30.0, -1.5}, green{30.0, 1.5};      // 3 m wide: no room to shift
   const std::vector<Hazard> hz = {detail::circleHazard(HazardSource::PlanBuoy, 9, {33.0, 0.0}, P.buoy_radius_m)};
   const nav::Gate plain = nav::gateWaypoints(red, green, 6.0, 8.0);
-  const nav::Gate g = clearGateWaypoints(red, green, 6.0, 8.0, hz);
+  const nav::Gate g = clearGateWaypoints(red, green, 6.0, 8.0, hz, P);
   chk("plain through", nav::norm(g.through - plain.through) < 1e-9);
   chk("plain approach", nav::norm(g.approach - plain.approach) < 1e-9);
 }
@@ -138,7 +138,7 @@ static void exitOrbitStart(const NavParams & P)
   std::printf("    ring[0] (%.2f, %.2f) clearance %.2f m\n", ring[0].x, ring[0].y, minClearance(hz, ring[0]));
   chk("ring[0] lands inside the orbit clearance (adjustRing never moves it)",
     minClearance(hz, ring[0]) < P.orbit_clear_m);
-  const Vec2 q = clearPoint(ring[0], hz, P.orbit_clear_m);
+  const Vec2 q = clearPoint(ring[0], hz, P.orbit_clear_m, P.goal_max_move_m);
   std::printf("    moved to (%.2f, %.2f), %.2f m, clearance %.2f m\n", q.x, q.y, nav::norm(q - ring[0]),
     minClearance(hz, q));
   chk("clearPoint moves it out to the orbit clearance", minClearance(hz, q) >= P.orbit_clear_m);
@@ -148,9 +148,113 @@ static void exitOrbitStart(const NavParams & P)
   chk("a clear point is not moved", nav::norm(clearPoint({0.0, 0.0}, hz, 1.4) - Vec2{0.0, 0.0}) < 1e-12);
 }
 
+static void crowdedField(const NavParams & P)
+{
+  std::printf("the crowded field (2026-10-02 evening): a black in front of gate (1,2), another behind\n");
+  const std::vector<Buoy> truth = {
+    mk(0, 6.8, 7.2, Beacon::FlashingBlue), mk(1, 13.3, 14.6, Beacon::FlashingRed),
+    mk(2, 8.1, 14.8, Beacon::FlashingGreen), mk(3, 8.8, 24.1, Beacon::FlashingRed),
+    mk(4, 3.2, 17.7, Beacon::FlashingGreen), mk(5, 7.4, 29.8, Beacon::SteadyBlue),
+    mk(6, 10.3, 10.3, Beacon::Off), mk(7, 3.4, 24.5, Beacon::Off),
+    mk(8, 6.2, 20.8, Beacon::FlashingRed), mk(9, 9.8, 18.1, Beacon::Off)};
+  // ... and as the boat had it in the sim (UAV error <= 0.8 m): gate (1,2) 4.99 m wide, whose
+  // only clear line is +1.25 m in a 1.40 m room, between two 0.5 m search steps
+  std::vector<Buoy> live = truth;
+  live[1].p = {13.23, 14.27}; live[2].p = {8.24, 14.46}; live[6].p = {10.33, 10.13};
+  live[9].p = {9.88, 18.03};
+  const std::vector<const std::vector<Buoy> *> fields{&truth, &live};
+  for (const std::vector<Buoy> * fp : fields) {
+  const std::vector<Buoy> & f = *fp;
+  std::printf("  %s positions\n", fp == &truth ? "true" : "the boat's live");
+  const Vec2 entry = f[0].p, exitp = f[5].p;
+  const nav::Passage pa = nav::planPassage(f, entry, exitp);
+  chk("two gates, (8,4) and (1,2)", pa.gates.size() == 2);
+  for (const nav::PlannedGate & pg : pa.gates) {
+    const Vec2 red = nav::findById(f, pg.red_id)->p, green = nav::findById(f, pg.green_id)->p;
+    const std::vector<Hazard> hz = crossingHazards(f, entry, exitp, pg.red_id, pg.green_id, P);
+    double shift = 0.0;
+    bool tight = false;
+    const nav::Gate g = clearGateWaypoints(red, green, 6.0, 8.0, hz, P, &shift, &tight);
+    const std::string tag = "gate (" + std::to_string(pg.red_id) + "," + std::to_string(pg.green_id) + ")";
+    const Vec2 mid = (red + green) * 0.5, v = nav::unit(red - green);
+    std::printf("    %s approach (%.1f, %.1f) through (%.1f, %.1f), shift %+.1f m, %s\n", tag.c_str(),
+      g.approach.x, g.approach.y, g.through.x, g.through.y, shift, tight ? "TIGHT" : "comfortable");
+    chk(tag + ": drivable", crossingDrivable(g, hz, P));
+    chk(tag + ": keeps the tight clearance", segmentClear(g.approach, g.through, hz, P.gate_tight_clear_m));
+    chk(tag + ": inside the gap by the tight margin",
+      std::fabs(dot(g.approach - mid, v)) <= 0.5 * nav::norm(red - green) - P.gate_tight_margin_m + 1e-9);
+    if (pg.red_id == 1) {chk(tag + ": needed the tight try (b6 in front, b9 behind)", tight);}
+  }
+  }
+}
+
+/// crusader_sim/config/tuning_profiles/tight_3to5m.yaml's bt_runner numbers.
+static NavParams tightProfile()
+{
+  NavParams T;
+  T.orbit_radius_m = 3.0; T.orbit_points = 12; T.orbit_tolerance_m = 0.8; T.orbit_clear_m = 1.0;
+  T.orbit_max_push_m = 1.5; T.fence_len_m = 3.0; T.fence_clear_m = 4.5;
+  T.gate_standoff_m = 3.0; T.gate_approach_m = 3.0; T.gate_min_standoff_m = 1.5;
+  T.gate_min_approach_m = 1.5; T.gate_clear_m = 1.0; T.gate_margin_m = 1.0;
+  T.gate_tight_clear_m = 0.9; T.gate_tight_margin_m = 0.9; T.goal_max_move_m = 1.5; T.soft_m = 1.2;
+  T.lookahead_m = 3.0; T.lookahead_min_m = 2.5;
+  return T;
+}
+
+static void tightCourse()
+{
+  std::printf("courses/task1_tight.yaml under the tight profile (3-5 m between buoys)\n");
+  const NavParams T = tightProfile();
+  const std::vector<Buoy> f = {
+    mk(0, 6.0, 2.0, Beacon::FlashingBlue), mk(1, 11.0, -1.8, Beacon::FlashingRed),
+    mk(2, 11.0, 1.8, Beacon::FlashingGreen), mk(3, 15.5, -1.5, Beacon::FlashingRed),
+    mk(4, 15.5, 2.0, Beacon::FlashingGreen), mk(5, 20.0, 0.0, Beacon::FlashingRed),
+    mk(6, 20.0, 3.8, Beacon::FlashingGreen), mk(7, 25.0, 1.0, Beacon::SteadyBlue),
+    mk(8, 13.5, 3.5, Beacon::Off), mk(9, 18.0, -2.5, Beacon::Off)};
+  const Vec2 entry = f[0].p, exitp = f[7].p;
+  const nav::Passage pa = nav::planPassage(f, entry, exitp);
+  chk("three gates, no singles", pa.gates.size() == 3 && pa.unpaired.empty());
+  for (const nav::PlannedGate & pg : pa.gates) {
+    const Vec2 red = nav::findById(f, pg.red_id)->p, green = nav::findById(f, pg.green_id)->p;
+    const std::vector<Hazard> hz = crossingHazards(f, entry, exitp, pg.red_id, pg.green_id, T);
+    double shift = 0.0;
+    bool tight = false;
+    const nav::Gate g = clearGateWaypoints(red, green, T.gate_standoff_m, T.gate_approach_m, hz, T,
+      &shift, &tight);
+    const std::string tag = "gate (" + std::to_string(pg.red_id) + "," + std::to_string(pg.green_id) + ")";
+    std::printf("    %s width %.1f: approach (%.1f, %.1f) through (%.1f, %.1f), shift %+.2f m, %s\n",
+      tag.c_str(), nav::norm(red - green), g.approach.x, g.approach.y, g.through.x, g.through.y, shift,
+      tight ? "TIGHT" : "comfortable");
+    chk(tag + ": drivable", crossingDrivable(g, hz, T));
+  }
+  // the orbits: every ring point (after adjustRing, then the goal rule) keeps orbit_clear_m
+  std::vector<Hazard> all = buildHazards(f, {}, dock::DockBook{}, 0, T);
+  const std::vector<Hazard> fz = sideFences(f, pa, entry, exitp, T);
+  all.insert(all.end(), fz.begin(), fz.end());
+  for (const bool at_exit : {false, true}) {
+    const Vec2 a = at_exit ? exitp : entry;
+    const Vec2 from = at_exit ? Vec2{20.5, 1.9} : Vec2{0.0, 0.0};
+    int dropped = 0;
+    const std::vector<Vec2> ring = adjustRing(
+      orbitRing(a, from, T.orbit_radius_m, T.orbit_points, !at_exit, 45.0), a, all, T, &dropped);
+    double worst = 1e9, rmax = 0.0;
+    for (const Vec2 & q0 : ring) {
+      const Vec2 q = clearPoint(q0, all, T.orbit_clear_m, T.goal_max_move_m);
+      worst = std::min(worst, minClearance(all, q));
+      rmax = std::max(rmax, nav::norm(q - a));
+    }
+    std::printf("    %s orbit: %zu points, %d dropped, worst clearance %.2f m, max radius %.2f m\n",
+      at_exit ? "EXIT" : "ENTRY", ring.size(), dropped, worst, rmax);
+    chk(std::string(at_exit ? "EXIT" : "ENTRY") + " orbit: nothing dropped, every point clear",
+      dropped == 0 && worst >= T.orbit_clear_m - 1e-9);
+  }
+}
+
 int main()
 {
   const NavParams P;
+  tightCourse();
+  crowdedField(P);
   exitOrbitStart(P);
   userField(P);
   clearField(P);

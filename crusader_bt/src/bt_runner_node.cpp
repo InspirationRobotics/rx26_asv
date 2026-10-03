@@ -858,10 +858,19 @@ private:
       {"nav_dock_finger_w_m", &n.dock_finger_w_m}, {"nav_dock_slip_w_m", &n.dock_slip_w_m},
       {"nav_dock_deck_depth_m", &n.dock_deck_depth_m},
       {"nav_fence_len_m", &n.fence_len_m}, {"nav_fence_spacing_m", &n.fence_spacing_m},
-      {"nav_fence_radius_m", &n.fence_radius_m}, {"nav_fence_clear_m", &n.fence_clear_m}};
+      {"nav_fence_radius_m", &n.fence_radius_m}, {"nav_fence_clear_m", &n.fence_clear_m},
+      {"nav_gate_clear_m", &n.gate_clear_m}, {"nav_gate_min_standoff_m", &n.gate_min_standoff_m},
+      {"nav_gate_min_approach_m", &n.gate_min_approach_m}, {"nav_gate_margin_m", &n.gate_margin_m},
+      {"nav_gate_step_m", &n.gate_step_m}, {"nav_goal_max_move_m", &n.goal_max_move_m},
+      {"nav_gate_tight_clear_m", &n.gate_tight_clear_m},
+      {"nav_gate_tight_margin_m", &n.gate_tight_margin_m},
+      {"nav_orbit_radius_m", &n.orbit_radius_m}, {"nav_orbit_tolerance_m", &n.orbit_tolerance_m},
+      {"nav_gate_standoff_m", &n.gate_standoff_m}, {"nav_gate_approach_m", &n.gate_approach_m}};
     for (const auto & kv : reals) {*kv.second = declare_parameter<double>(kv.first, *kv.second);}
     n.invalid_confirm = static_cast<int>(
       declare_parameter<int64_t>("nav_invalid_confirm", n.invalid_confirm));
+    n.orbit_points = static_cast<int>(
+      declare_parameter<int64_t>("nav_orbit_points", n.orbit_points));
 
     nav_hazard_rate_hz_ = declare_parameter<double>("nav_hazard_rate_hz", 2.0);
     nav_status_hz_ = declare_parameter<double>("nav_status_hz", 2.0);
@@ -999,16 +1008,29 @@ private:
       snap = ctx_->buoys;
       he = ctx_->have_entry; e = ctx_->entry;
       hx = ctx_->have_exit;  x = ctx_->exitp;
-      // The tree plans only once the transit starts; before that (the entry orbit) the same
-      // planner with the tree's own defaults says what it is going to find.
-      nav::Passage pa = ctx_->passage;
-      if (!pa.valid && ctx_->have_entry && ctx_->have_exit) {
-        pa = nav::planPassage(ctx_->buoys, ctx_->entry, ctx_->exitp);
-      }
-      gates = pa.gates.size();
-      singles = pa.unpaired.size();
-      for (const nav::PlannedGate & g : pa.gates) {
-        if (nav::gateCleared(ctx_->cleared_gates, g.red_id, g.green_id)) {++cleared;}
+      const gp::Plan & whole = ctx_->global_passage.plan;
+      if (whole.ok) {
+        // task1_global.xml: its gates are the pairs its path drives between (a checkpoint
+        // each); cleared ones have left the plan and are counted from cleared_gates.
+        // (a checkpoint driven since the plan was made is in both: count it once)
+        cleared = ctx_->cleared_gates.size();
+        gates = cleared;
+        for (const gp::Checkpoint & cp : whole.checkpoints) {
+          if (!nav::gateCleared(ctx_->cleared_gates, cp.red_id, cp.green_id)) {++gates;}
+        }
+        singles = whole.rays.size() >= 2 * gates ? whole.rays.size() - 2 * gates : 0;
+      } else {
+        // The tree plans only once the transit starts; before that (the entry orbit) the same
+        // planner with the tree's own defaults says what it is going to find.
+        nav::Passage pa = ctx_->passage;
+        if (!pa.valid && ctx_->have_entry && ctx_->have_exit) {
+          pa = nav::planPassage(ctx_->buoys, ctx_->entry, ctx_->exitp);
+        }
+        gates = pa.gates.size();
+        singles = pa.unpaired.size();
+        for (const nav::PlannedGate & g : pa.gates) {
+          if (nav::gateCleared(ctx_->cleared_gates, g.red_id, g.green_id)) {++cleared;}
+        }
       }
     }
     for (const auto & b : snap) {
@@ -1137,6 +1159,9 @@ private:
       ctx_->gate_green_id = -1;
       ctx_->cleared_gates.clear();
       ctx_->passage = nav::Passage{};
+      // The whole-field plan (task1_global.xml) is per mission too: phase, plan, the track
+      // its parity is counted on, the orbited ring.
+      ctx_->global_passage = Context::GlobalPassage{};
       // Task 3's per-mission state, for the same reason: a second attempt must
       // not inherit the first one's bays, votes or committed bay.
       ctx_->tier = goal->tier;
@@ -1303,6 +1328,7 @@ private:
       // The side fences are drawn from this plan: a finished mission leaves no walls behind.
       std::lock_guard<std::mutex> lk(ctx_->mu);
       ctx_->passage = nav::Passage{};
+      ctx_->global_passage.plan = gp::Plan{};
     }
     stopIfSilent(true);                 // the boat stopped, if we were driving it
     resetLeg(result->elapsed_s);        // and no leg is running any more

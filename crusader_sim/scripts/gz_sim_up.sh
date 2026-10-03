@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # gz_sim_up.sh — the whole Gazebo sim, in order. Runs in: WSL2 Ubuntu-22.04.
 #
-#     bash crusader_sim/scripts/gz_sim_up.sh [course | --course-file PATH] [--no-gui] [--no-uav] [--no-rig]
+#     bash crusader_sim/scripts/gz_sim_up.sh [course | --course-file PATH] [--tuning FILE] [--no-gui] [--no-uav] [--no-rig]
 #                                            [--recreate-container] [--detector truth|yolo]
 #
 #     NAV_MODE=off|shadow|on  (environment) the tree's Nav2 planning; default on
@@ -24,6 +24,13 @@
 #                is copied in as courses/<its stem>.yaml after the sync, so the
 #                container's colcon build installs it and every node finds it
 #                by name, exactly like a checked-in course
+#     --tuning FILE
+#                a ROS params file of OVERRIDES (the Task 1 panel's planner
+#                tuning writes one): layered on top of crusader_params.yaml for
+#                bt_runner and of nav2_params.yaml for Nav2 (nav2_overlay:=), so
+#                only the keys it names change. Sim only; it is copied to
+#                ~/robotx_ws/sim_tuning.yaml and listed in this log. Without it
+#                that copy is deleted, so an old tuning never leaks into a run
 #     --no-gui   Gazebo server only (the sim runs the same; you just can't watch)
 #     --no-uav   no Ekko stand-in: the boat is on its own camera (Core tier)
 #     --no-rig   stop after Gazebo + SITL (for check_motion, or your own nodes)
@@ -42,7 +49,7 @@
 #   7. rig        the boat's nodes + sim shims in the crsd-sim container
 set -uo pipefail
 
-COURSE=task1_core; COURSE_FILE=""; GUI=1; UAV_ARG=""; RIG=1; RECREATE=0
+COURSE=task1_core; COURSE_FILE=""; TUNING_FILE=""; GUI=1; UAV_ARG=""; RIG=1; RECREATE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --recreate-container) RECREATE=1 ;;
@@ -55,6 +62,9 @@ while [ $# -gt 0 ]; do
     --course-file)
       [ $# -ge 2 ] || { echo "--course-file needs a path" >&2; exit 2; }
       COURSE_FILE="$2"; shift ;;
+    --tuning)
+      [ $# -ge 2 ] || { echo "--tuning needs a path" >&2; exit 2; }
+      TUNING_FILE="$2"; shift ;;
     -*) echo "unknown flag $1" >&2; exit 2 ;;
     *) COURSE="$1" ;;
   esac
@@ -158,6 +168,29 @@ if [ -n "$COURSE_FILE" ]; then
     || cp "$COURSE_FILE" "$SIM/courses/$COURSE.yaml" || die "copying $COURSE_FILE into courses/"
   echo "  course file $COURSE_FILE -> courses/$COURSE.yaml"
 fi
+# planner tuning overrides: the container sees ~/robotx_ws as /root/robotx_ws
+SIM_TUNING_C=""
+rm -f "$HOME/robotx_ws/sim_tuning.yaml"
+if [ -n "$TUNING_FILE" ]; then
+  [ -f "$TUNING_FILE" ] || die "--tuning $TUNING_FILE: no such file"
+  cp "$TUNING_FILE" "$HOME/robotx_ws/sim_tuning.yaml" || die "copying $TUNING_FILE"
+  SIM_TUNING_C=/root/robotx_ws/sim_tuning.yaml
+  echo "  TUNING overrides from $TUNING_FILE (on top of crusader_params.yaml / nav2_params.yaml):"
+  python3 - "$TUNING_FILE" <<'PY' || die "--tuning $TUNING_FILE is not a params file"
+import sys, yaml
+def leaves(d, path):
+    for k, v in d.items():
+        if isinstance(v, dict):
+            yield from leaves(v, path + [str(k)])
+        else:
+            yield ".".join(p for p in path + [str(k)] if p != "ros__parameters"), v
+doc = yaml.safe_load(open(sys.argv[1])) or {}
+if not isinstance(doc, dict):
+    sys.exit(1)
+for key, v in leaves(doc, []):
+    print("    %s = %s" % (key, v))
+PY
+fi
 
 step "2/7  generate  (course: $COURSE)"
 cd /tmp
@@ -212,8 +245,8 @@ if [ "$FULL_BUILD" = 1 ] || ! docker exec "$CONTAINER" bash -c \
   # a plain build made is a colcon error on the next build
   echo "  full colcon build (first run, new image or new packages: a few minutes)"
   docker exec "$CONTAINER" bash -lc \
-    "cd /root/robotx_ws && source /opt/ros/humble/setup.bash && flock /root/robotx_ws/.colcon.lock colcon build 2>&1 | tail -5" \
-    | sed 's/^/  /'
+    "set -o pipefail; cd /root/robotx_ws && source /opt/ros/humble/setup.bash && flock /root/robotx_ws/.colcon.lock colcon build 2>&1 | tail -5" \
+    | sed 's/^/  /' || die "colcon build failed: not starting the sim on a stale install"
 else
   # every package a sim run exercises, every run: nodes run from install/, and a stale
   # crusader_bt silently ignores nav_mode and runs legacy legs (the review of
@@ -222,12 +255,12 @@ else
   # keys ('no declared posture for params') and the sim ran with no camera tracks at all.
   # Only the packages the checkout has: --packages-select refuses an unknown name.
   docker exec "$CONTAINER" bash -lc \
-    "cd /root/robotx_ws && source install/setup.bash && P=''; for p in crusader_msgs crusader_common crusader_bringup crusader_world_model crusader_bt crusader_perception crusader_sim crusader_nav crusader_nav_layers crusader_groundstation; do [ -d src/rx26_asv/\$p ] && P=\"\$P \$p\"; done; flock /root/robotx_ws/.colcon.lock colcon build --packages-select \$P 2>&1 | tail -2" \
-    | sed 's/^/  /'
+    "set -o pipefail; cd /root/robotx_ws && source install/setup.bash && P=''; for p in crusader_msgs crusader_common crusader_bringup crusader_world_model crusader_bt crusader_perception crusader_sim crusader_nav crusader_nav_layers crusader_groundstation; do [ -d src/rx26_asv/\$p ] && P=\"\$P \$p\"; done; flock /root/robotx_ws/.colcon.lock colcon build --packages-select \$P 2>&1 | tail -2" \
+    | sed 's/^/  /' || die "colcon build failed (a crusader_* package did not build): not starting the sim on the previous build"
 fi
-# docker exec does not inherit this shell's environment: TREE, NAV_MODE and SIM_* cross explicitly
+# docker exec does not inherit this shell's environment: TREE, NAV_MODE and SIM_* (SIM_TUNING too) cross explicitly
 docker exec -e TREE="${TREE:-}" -e NAV_MODE="${NAV_MODE:-}" -e SIM_DETECTOR="${SIM_DETECTOR:-}" \
-  -e SIM_CAMERA_ARGS="${SIM_CAMERA_ARGS:-}" "$CONTAINER" bash -lc \
+  -e SIM_CAMERA_ARGS="${SIM_CAMERA_ARGS:-}" -e SIM_TUNING="$SIM_TUNING_C" "$CONTAINER" bash -lc \
   "bash /root/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_rig_up.sh $COURSE $UAV_ARG" 2>&1 | sed 's/^/  /'
 
 if [ "$GUI" = 1 ]; then

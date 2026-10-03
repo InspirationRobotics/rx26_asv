@@ -208,6 +208,7 @@ def runner():
     srcs = [os.path.join(BT_PKG, "src", "leaves.cpp"),
             os.path.join(BT_PKG, "src", "task3_leaves.cpp"),
             os.path.join(BT_PKG, "src", "fire_leaves.cpp"),
+            os.path.join(BT_PKG, "src", "global_leaves.cpp"),
             os.path.join(BT_PKG, "offros", "offros_runner.cpp")]
     objs = [os.path.join(BUILD, "crusader_bt", os.path.basename(s) + ".o") for s in srcs]
     # Every object depends on every crusader_bt header, so touch-rebuild them all

@@ -180,6 +180,35 @@ POSTs take a JSON object and return {"ok": bool, "error": str?}.
                                      is going. With the sim up it redraws the
                                      offsets and sends the new field at once
     POST /api/reroll                 a new random seed, same rules
+    GET  /api/tuning                 the planner-tuning catalogue, the saved overrides, the ones
+                                     the current sim was launched with (below); read from disk
+                                     on every request
+    POST /api/tuning   {set: {id: n}, reset: [id] | "all"}
+                                     validate, then save the overrides; any time (it only
+                                     affects the next LAUNCH)
+    POST /api/tuning   {profile: name}
+                                     replace the saved overrides with a profile's (below)
+
+PLANNER TUNING (sim only). The Planner tuning card edits the numbers that shape the boat's
+avoidance without touching the team's files: every numeric `nav_*` key of bt_runner_node in
+crusader_bringup/config/crusader_params.yaml, and every numeric leaf of planner_server and
+global_costmap in crusader_nav/config/nav2_params.yaml (nested maps keyed with dots, e.g.
+GridBased.tolerance), read from the workspace source tree this panel runs from, on every
+request, with each key's comments as its description. The overrides are saved as
+<panel dir>/tuning.yaml (~/.cache/crusader_sim/panel), in ROS 2 params-file format, only the
+overridden keys, nested exactly like the source files (bt_runner_node.ros__parameters.nav_hard_m;
+planner_server.ros__parameters.GridBased.tolerance;
+global_costmap.global_costmap.ros__parameters.inflation_layer.inflation_radius) and deleted when
+there are none. They are applied at LAUNCH only, on top of the team's files, because the nodes
+read their parameters at start: LAUNCH passes `gz_sim_up.sh --tuning <that file>` when at least
+one is saved (otherwise the command line is what it always was) and remembers what it passed, so
+the page can say "relaunch needed" once the saved set differs from the run's. ATTACH did not
+launch, so what that run used is unknown. An override equal to its default is dropped; one whose
+key has left the catalogue is reported as unknown and dropped by the next save.
+A PROFILE is a ready set of overrides: crusader_sim/config/tuning_profiles/<name>.yaml in the same source
+tree, in tuning.yaml's own format, its leading comment lines `# title: ...` and `# about: ...` naming it
+for the page (GET /api/tuning lists them). Loading one REPLACES the saved overrides (no merge) after every
+leaf is checked like a `set`; one bad leaf refuses the whole load and writes nothing.
 
 Test hooks: --rxl-endpoint, --feed-port and --port (keep a test clear of a real
 run's 14555, 14556 and 8095); --dry-run (every child process is a harmless stub,
@@ -210,6 +239,8 @@ import traceback
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+
+import yaml
 
 from crusader_sim import course as C
 from crusader_sim.panel_feed import FEED_PORT, FeedReceiver
@@ -442,6 +473,306 @@ def check_uav(body):
     return out, None
 
 
+# ------------------------------------------------------------------ planner tuning
+
+TUNING_FILE = "tuning.yaml"
+BT_NODE, PLANNER_NODE, COSTMAP_NODE = "bt_runner_node", "planner_server", "global_costmap"
+# where each node's ros__parameters sit in its source file: the nesting tuning.yaml repeats
+TUNING_PATHS = {BT_NODE: (BT_NODE, "ros__parameters"),
+                PLANNER_NODE: (PLANNER_NODE, "ros__parameters"),
+                COSTMAP_NODE: (COSTMAP_NODE, COSTMAP_NODE, "ros__parameters")}
+BT_PARAMS = ("crusader_bringup", "config", "crusader_params.yaml")    # under the workspace's rx26_asv
+NAV_PARAMS = ("crusader_nav", "config", "nav2_params.yaml")
+PROFILES = ("crusader_sim", "config", "tuning_profiles")              # <name>.yaml: tuning.yaml's format, a ready set
+TUNING_GROUPS = ("Goals", "Hazards", "Fences", "Leg following", "Task 3 dock", "Nav2 planner", "Nav2 costmap")
+BT_GOAL_PREFIXES = ("nav_gate_", "nav_goal_", "nav_orbit_")
+BT_HAZARD_KEYS = frozenset(("nav_hard_m", "nav_soft_m", "nav_buoy_radius_m", "nav_track_radius_m",
+                            "nav_exempt_radius_m", "nav_local_check_tol_m", "nav_escape_margin_m",
+                            "nav_clip_radius_m"))
+UNIT_SUFFIXES = (("_m", "m"), ("_s", "s"), ("_hz", "Hz"), ("_deg", "deg"))
+TUNING_HEADER = (
+    "# Written by the Task 1 panel (crusader_sim.task1_panel): planner-tuning overrides. SIM ONLY.\n"
+    "# Applied at LAUNCH, layered on top of crusader_params.yaml / nav2_params.yaml (gz_sim_up.sh --tuning);\n"
+    "# only the overridden keys are here and the team's files are not changed. Edit it from the panel.\n")
+_KEY_LINE = re.compile(r"^( *)([A-Za-z_][\w.-]*) *:(?: +(.*))?$")
+_TAG_RE = re.compile(r"^\[(?:RO|DYN)\]\s*")
+
+
+def _yaml_load(text):
+    """yaml.safe_load, on libyaml when PyYAML has it: crusader_params.yaml is 1500+ lines and is read per request."""
+    return yaml.load(text, Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader))
+
+
+def _inline_comment(rest):
+    """The comment on a `key: value  # comment` line, from what follows the colon. A # starts one only
+    outside quotes and after whitespace; a quote opens one only at the start of a token, so an apostrophe
+    in a plain scalar is not a quote."""
+    quote = None
+    for i, ch in enumerate(rest):
+        if quote:
+            quote = None if ch == quote else quote
+        elif ch in "\"'" and (i == 0 or rest[i - 1] in " [{,"):
+            quote = ch
+        elif ch == "#" and (i == 0 or rest[i - 1] in " \t"):
+            return rest[i + 1:].strip()
+    return ""
+
+
+def _comment_only(raw):
+    """(indent, text) of a line that is only a comment, else None."""
+    t = raw.lstrip(" ")
+    return (len(raw) - len(t), t.lstrip("#").strip()) if t.startswith("#") else None
+
+
+def scan_comments(text):
+    """{key path: (own, before)} for every `key:` line of a block-style YAML text, from the raw text (PyYAML
+    drops comments). The path is the tuple of enclosing keys (found by indentation) ending in the key.
+    own    = the inline comment plus the comment-only lines right under the key that are indented deeper than it
+             (crusader_params.yaml's style: a [RO] tag, then the sentence continued down the column);
+    before = the comment-only block right above the key, at its indent or deeper (nav2_params.yaml's style).
+    Each is one line of text, whitespace collapsed; "" when there is none."""
+    lines, stack, out = text.splitlines(), [], {}
+    for n, raw in enumerate(lines):
+        m = _KEY_LINE.match(raw.rstrip())
+        if not m:
+            continue
+        ind, key = len(m.group(1)), m.group(2)
+        while stack and stack[-1][0] >= ind:
+            stack.pop()
+        stack.append((ind, key))
+        own, j = [_inline_comment(m.group(3) or "")], n + 1
+        while j < len(lines) and (c := _comment_only(lines[j])) is not None and c[0] > ind:
+            own.append(c[1])
+            j += 1
+        before, j = [], n - 1
+        while j >= 0 and (c := _comment_only(lines[j])) is not None and c[0] >= ind:
+            before.insert(0, c[1])
+            j -= 1
+        out[tuple(k for _, k in stack)] = tuple(" ".join(" ".join(parts).split()) for parts in (own, before))
+    return out
+
+
+def _describe(own, before=""):
+    """A catalogue description: the key's own comment with its [RO]/[DYN] tag taken off, else the one before it."""
+    return _TAG_RE.sub("", own).strip() or before
+
+
+def _unit(key):
+    last = key.rsplit(".", 1)[-1]
+    return next((u for suffix, u in UNIT_SUFFIXES if last.endswith(suffix)), "")
+
+
+def _section(doc, path):
+    """The dict at `path` in a nested dict, or {}."""
+    for k in path:
+        doc = doc.get(k) if isinstance(doc, dict) else None
+    return doc if isinstance(doc, dict) else {}
+
+
+def _numeric_leaves(d, prefix=()):
+    """(key tuple, number) for every int/float leaf of nested dicts; bools, strings and lists are not
+    parameters the panel tunes."""
+    for k, v in d.items():
+        if isinstance(v, dict):
+            yield from _numeric_leaves(v, prefix + (str(k),))
+        elif _num(v):
+            yield prefix + (str(k),), v
+
+
+def bt_group(key):
+    """The tuning group of a bt_runner_node nav_* key."""
+    if key.startswith("nav_dock_"):
+        return "Task 3 dock"
+    if key.startswith(BT_GOAL_PREFIXES):
+        return "Goals"
+    if key in BT_HAZARD_KEYS:
+        return "Hazards"
+    return "Fences" if key.startswith("nav_fence_") else "Leg following"
+
+
+def _tuning_entry(node, key, default, group, desc):
+    return {"id": "%s/%s" % (node, key), "node": node, "key": key, "default": default,
+            "type": "int" if isinstance(default, int) else "float", "unit": _unit(key),
+            "group": group, "desc": desc}
+
+
+def tuning_catalogue(src_repo):
+    """([entry], [error text]): the numbers the panel can tune, read from the two YAML files under src_repo (the
+    workspace's rx26_asv) as they are NOW. An unreadable file adds an error and leaves its entries out. Entries
+    are in group order (TUNING_GROUPS), file order within a group."""
+    entries, errors = [], []
+
+    def load(rel):
+        try:
+            with open(os.path.join(src_repo, *rel), encoding="utf-8") as f:
+                text = f.read()
+            doc = _yaml_load(text)
+            if not isinstance(doc, dict):
+                raise ValueError("not a YAML mapping")
+            return doc, scan_comments(text)
+        except (OSError, ValueError, yaml.YAMLError) as e:
+            errors.append("%s: %s" % (rel[-1], (str(e).splitlines() or [type(e).__name__])[0]))
+            return None, {}
+
+    doc, notes = load(BT_PARAMS)
+    for key, v in _section(doc, TUNING_PATHS[BT_NODE]).items():
+        if isinstance(key, str) and key.startswith("nav_") and _num(v):
+            own, _before = notes.get(TUNING_PATHS[BT_NODE] + (key,), ("", ""))
+            entries.append(_tuning_entry(BT_NODE, key, v, bt_group(key), _describe(own)))
+    doc, notes = load(NAV_PARAMS)
+    for node, group in ((PLANNER_NODE, "Nav2 planner"), (COSTMAP_NODE, "Nav2 costmap")):
+        for kt, v in _numeric_leaves(_section(doc, TUNING_PATHS[node])):
+            entries.append(_tuning_entry(node, ".".join(kt), v, group,
+                                         _describe(*notes.get(TUNING_PATHS[node] + kt, ("", "")))))
+    entries.sort(key=lambda e: TUNING_GROUPS.index(e["group"]))
+    return entries, errors
+
+
+def tuning_value(entry, v):
+    """(value, error) for a number proposed for a catalogue entry: a real finite number, whole if the entry
+    is an int, and not negative where the default is not (a distance or a time has no negative)."""
+    try:
+        ok = _num(v)
+    except OverflowError:                                   # an int too big for a float
+        ok = False
+    if not ok:
+        return None, "%s: must be a finite number" % entry["id"]
+    if entry["type"] == "int":
+        if v != int(v):
+            return None, "%s: must be a whole number" % entry["id"]
+        v = int(v)
+    else:
+        v = float(v)                                        # rcl will not take 3 for a double: stay a float
+    if entry["default"] >= 0 and v < 0:
+        return None, "%s: must not be negative (its default is %g)" % (entry["id"], entry["default"])
+    return v, None
+
+
+def _all_leaves(d, prefix=()):
+    """(key tuple, value) for every non-dict leaf of nested dicts: numbers, but also the bools, strings and
+    lists a profile must not contain."""
+    for k, v in d.items():
+        if isinstance(v, dict):
+            yield from _all_leaves(v, prefix + (str(k),))
+        else:
+            yield prefix + (str(k),), v
+
+
+def list_profiles(profiles_dir):
+    """[{name, title, about}] of the profiles in profiles_dir, sorted by name; [] when the directory is missing.
+    title/about come from the file's leading comment lines `# title: ...` and `# about: ...` (the title
+    defaults to the name, the about to "")."""
+    out = []
+    for name in _names(profiles_dir):
+        if not NAME_RE.match(name):
+            continue
+        meta = {"title": name, "about": ""}
+        try:
+            with open(os.path.join(profiles_dir, name + ".yaml"), encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        break                                   # the header is the comments before the first key
+                    m = re.match(r"^#\s*(title|about)\s*:\s*(.*)$", line, re.IGNORECASE)
+                    if m and m.group(2).strip():
+                        meta[m.group(1).lower()] = m.group(2).strip()
+        except (OSError, ValueError):
+            continue                                            # unreadable: not offered
+        out.append(dict(name=name, **meta))
+    return out
+
+
+def load_profile(profiles_dir, name, cat):
+    """({id: value}, error): a profile's overrides, every leaf checked like a `set` against cat. The file is
+    in tuning.yaml's own format (nested like the source files); a leaf anywhere else, or one that is not a
+    catalogue id with a valid value, is an error."""
+    if not (isinstance(name, str) and NAME_RE.match(name)):
+        return None, "profile name: letters, digits, - and _ (max 40)"
+    try:
+        with open(os.path.join(profiles_dir, name + ".yaml"), encoding="utf-8") as f:
+            doc = _yaml_load(f.read())
+    except OSError:
+        return None, "no profile %s" % name
+    except (ValueError, yaml.YAMLError) as e:
+        return None, "profile %s: %s" % (name, (str(e).splitlines() or ["unreadable"])[0])
+    if doc is not None and not isinstance(doc, dict):
+        return None, "profile %s: not a YAML mapping" % name
+    sets = {}
+    for path, v in _all_leaves(doc or {}):
+        node = next((n for n, where in TUNING_PATHS.items() if path[:len(where)] == where and len(path) > len(where)), None)
+        if node is None:
+            return None, ("profile %s: unexpected key %s (nest it under bt_runner_node, planner_server or "
+                          "global_costmap.global_costmap, then ros__parameters)" % (name, ".".join(path)))
+        id_ = "%s/%s" % (node, ".".join(path[len(TUNING_PATHS[node]):]))
+        if id_ not in cat:
+            return None, "profile %s: unknown parameter %s" % (name, id_)
+        sets[id_], err = tuning_value(cat[id_], v)
+        if err:
+            return None, "profile %s: %s" % (name, err)
+    return sets, None
+
+
+def check_tuning(body, cat, profiles_dir):
+    """(sets, resets, error): a POST /api/tuning body checked against cat ({id: entry}). sets = {id: value},
+    validated; resets = [id] or "all". {profile: name} stands for reset "all" plus that profile's overrides, and
+    takes no other field. Any problem is an error and the caller writes nothing."""
+    extra = sorted(set(body) - {"set", "reset", "profile"})
+    if extra:
+        return None, None, "unknown field: " + ", ".join(map(str, extra))
+    if "profile" in body:
+        if len(body) > 1:
+            return None, None, "profile cannot be combined with set or reset"
+        sets, err = load_profile(profiles_dir, body["profile"], cat)
+        return (None, None, err) if err else (sets, "all", None)
+    raw, resets = body.get("set", {}), body.get("reset", [])
+    if not isinstance(raw, dict):
+        return None, None, "set must be an object {id: number}"
+    if resets != "all" and not (isinstance(resets, list) and all(isinstance(i, str) for i in resets)):
+        return None, None, 'reset must be a list of ids or "all"'
+    sets = {}
+    for id_, v in raw.items():
+        if id_ not in cat:
+            return None, None, "unknown parameter %s" % id_
+        sets[id_], err = tuning_value(cat[id_], v)
+        if err:
+            return None, None, err
+    return sets, resets, None
+
+
+def tuning_text(saved):
+    """tuning.yaml's text for {id: number}: a ROS 2 params file with ONLY those keys, nested exactly like the
+    source files (a dotted key is a nested map). "" for none: the file is then not written at all."""
+    if not saved:
+        return ""
+    order = list(TUNING_PATHS)
+    doc = {}
+    for id_ in sorted(saved, key=lambda i: (order.index(i.split("/", 1)[0]), i)):
+        node, key = id_.split("/", 1)
+        *parents, leaf = key.split(".")
+        d = doc
+        for k in TUNING_PATHS[node] + tuple(parents):
+            d = d.setdefault(k, {})
+        d[leaf] = saved[id_]
+    return TUNING_HEADER + yaml.safe_dump(doc, default_flow_style=False, sort_keys=False)
+
+
+def read_tuning(path):
+    """({id: number}, text, error) of a tuning.yaml: all empty for no file; what is not a number under
+    the three nodes is ignored; an unparseable file reads as none, with the reason."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return {}, "", None
+    try:
+        doc = _yaml_load(text)
+    except yaml.YAMLError as e:
+        return {}, text, "%s: %s" % (os.path.basename(path), (str(e).splitlines() or ["unreadable"])[0])
+    saved = {"%s/%s" % (node, ".".join(kt)): v for node, where in TUNING_PATHS.items()
+             for kt, v in _numeric_leaves(_section(doc, where))}
+    return saved, text, None
+
+
 # ------------------------------------------------------------------ radio
 
 def open_link(endpoint, on_log, on_ask):
@@ -590,6 +921,10 @@ class Panel:
         self.layout, self.layout_rev, self.layout_note = [], 0, ""
         self.sim, self.sim_step, self.sim_detail, self.sim_up_t = "down", "", "", None
         self.launched = None
+        # the planner-tuning overrides ({id: number}) the CURRENT sim was launched with: {} = launched
+        # with none, None = no sim, or one this panel did not launch (ATTACH)
+        self.tuning_launched = None
+        self._tuning_lock = threading.Lock()         # one writer of tuning.yaml at a time
         self.proc_sim = self.proc_mission = None
         self.link = None
         self.sent, self.staged = [], []
@@ -658,9 +993,11 @@ class Panel:
     def _mission_argv(self):
         if self.a.dry_run:
             return [sys.executable, "-u", "-c", STUB_MISSION, str(self.a.dry_run_mission_s)]
+        tier = getattr(self, "run_tier", None)          # START's choice; None = the course's tier
         return ["docker", "exec", self.a.container, "bash", "-c",
                 "source /opt/ros/humble/setup.bash && source /root/robotx_ws/install/setup.bash"
-                " && python3 -u -m crusader_sim.task1_goal --course %s --no-judge" % PANEL_COURSE]
+                " && python3 -u -m crusader_sim.task1_goal --course %s --no-judge%s"
+                % (PANEL_COURSE, " --tier %s" % tier if tier else "")]
 
     # ---------------------------------------------------------- setup
     def _set_layout(self, buoys, note=""):
@@ -735,18 +1072,21 @@ class Panel:
             errs, _ = check_layout(self.layout)
             if errs:
                 return {"ok": False, "error": "; ".join(errs)}
+            saved = self._saved_overrides()                  # the file as it is now: what the sim is given
             course = course_of(PANEL_COURSE, self.layout)
             path = os.path.join(self.dir, PANEL_COURSE + ".yaml")
             write_atomic(path, course_yaml(course))
             self.launched, self.sim, self.sim_step, self.sim_detail = course, "launching", "starting", ""
+            self.tuning_launched = dict(saved)
             self._reset_boat()
-            argv = self._script("gz_sim_up.sh", "--course-file", path, "--no-uav")
-        self.logs["sim"].add("[panel] launching: " + " ".join(argv[-4:]))
+            tuning = ["--tuning", self._tuning_path()] if saved else []     # none saved: argv as it always was
+            argv = self._script("gz_sim_up.sh", "--course-file", path, "--no-uav", *tuning)
+        self.logs["sim"].add("[panel] launching: " + " ".join(argv[-(4 + len(tuning)):]))
         try:
             self.proc_sim = Proc("gz_sim_up.sh", argv, self.logs["sim"], self._on_sim_line, self._on_sim_exit).start()
         except OSError as e:
             with self.lock:
-                self.sim, self.sim_detail = "failed", str(e)
+                self.sim, self.sim_detail, self.tuning_launched = "failed", str(e), None
             return {"ok": False, "error": str(e)}
         return {"ok": True}
 
@@ -762,6 +1102,7 @@ class Panel:
                 return                          # stopped while launching
             if code != 0:
                 self.sim, self.sim_detail = "failed", "gz_sim_up.sh exited %d, see the Sim log" % code
+                self.tuning_launched = None
                 return
             self.sim, self.sim_up_t = "up", time.time()
         self._radio_up()
@@ -776,6 +1117,7 @@ class Panel:
             buoys, note = layout_of(C.load(path))
             self._set_layout(buoys, "attached to " + path + ("; " + note if note else ""))
             self.launched = course_of(PANEL_COURSE, buoys)
+            self.tuning_launched = None                     # not launched here: what it was given is unknown
             self.sim, self.sim_step, self.sim_up_t = "up", "attached", time.time()
             self._reset_boat()
         self._radio_up()
@@ -793,9 +1135,78 @@ class Panel:
 
         def done(_code):
             with self.lock:
-                self.sim, self.sim_step = "down", ""
+                self.sim, self.sim_step, self.tuning_launched = "down", "", None
         Proc("gz_sim_down.sh", self._script("gz_sim_down.sh"), self.logs["sim"], on_exit=done).start()
         return {"ok": True}
+
+    # ---------------------------------------------------------- planner tuning
+    def _tuning_path(self):
+        return os.path.abspath(os.path.join(self.dir, TUNING_FILE))
+
+    def _saved_overrides(self):
+        """{id: number} saved in tuning.yaml right now (a few lines: read per call, never cached)."""
+        return read_tuning(self._tuning_path())[0]
+
+    def _profiles_dir(self):
+        return os.path.join(self._src_repo(), *PROFILES)
+
+    def _src_repo(self):
+        """The workspace's rx26_asv whose two YAML files the catalogue reads: the tree this panel runs from."""
+        return getattr(self.a, "src_repo", None) or _SRC_REPO
+
+    def _tuning_launched(self):
+        """A copy of the overrides the current sim was launched with, None for none (see tuning_launched)."""
+        with self.lock:
+            return None if self.tuning_launched is None else dict(self.tuning_launched)
+
+    def _tuning_summary(self):
+        """The `tuning` block of /api/state. Reads only tuning.yaml (a few lines), never the two big YAMLs;
+        call without self.lock held."""
+        saved, run = self._saved_overrides(), self._tuning_launched()
+        return {"saved": len(saved), "launched": None if run is None else len(run),
+                "pending": run is not None and saved != run}
+
+    def tuning_view(self):
+        """GET /api/tuning: everything the Planner tuning card needs, all read from disk now. `launched` is
+        {} for a sim launched with none and null for no sim (or an ATTACHed one); `pending`: a sim is up and
+        what is saved is not what it was launched with; `unknown`: saved ids no longer in the catalogue."""
+        entries, errors = tuning_catalogue(self._src_repo())
+        saved, text, err = read_tuning(self._tuning_path())
+        if err:
+            errors.append(err)
+        run = self._tuning_launched()
+        rows = []
+        for e in entries:
+            v = saved.get(e["id"], e["default"])
+            rows.append(dict(e, value=v, overridden=v != e["default"]))
+        return {"catalogue": rows, "groups": [g for g in TUNING_GROUPS if any(e["group"] == g for e in entries)],
+                "saved": saved, "launched": run, "pending": run is not None and saved != run,
+                "yaml": text, "unknown": [] if errors else sorted(set(saved) - {e["id"] for e in entries}),
+                "errors": errors, "path": self._tuning_path(), "profiles": list_profiles(self._profiles_dir())}
+
+    def act_tuning(self, body):
+        """POST /api/tuning {set: {id: n}, reset: [id] | "all"} or {profile: name}: validate EVERYTHING first,
+        then write tuning.yaml (or delete it when nothing is left). Resets apply before sets, and a profile is
+        a reset of everything plus its own sets (it replaces, never merges); an override equal to its default,
+        and one whose id has left the catalogue, is dropped."""
+        entries, errors = tuning_catalogue(self._src_repo())
+        cat = {e["id"]: e for e in entries}
+        if errors and (body.get("set") or body.get("profile") is not None):      # nothing to check values against
+            return {"ok": False, "error": "cannot check the values: " + "; ".join(errors)}
+        sets, resets, err = check_tuning(body, cat, self._profiles_dir())
+        if err:
+            return {"ok": False, "error": err}
+        path = self._tuning_path()
+        with self._tuning_lock:
+            saved = {} if resets == "all" else {i: v for i, v in self._saved_overrides().items() if i not in resets}
+            saved.update(sets)
+            # with a source file unreadable the catalogue is partial: then nothing may be called unknown or default
+            saved = {i: v for i, v in saved.items() if (i in cat or errors) and not (i in cat and cat[i]["default"] == v)}
+            if saved:
+                write_atomic(path, tuning_text(saved))
+            elif os.path.exists(path):
+                os.remove(path)
+        return {"ok": True, "saved": len(saved)}
 
     # ---------------------------------------------------------- radio
     def _radio_up(self):
@@ -1062,12 +1473,18 @@ class Panel:
         return {"ok": True}
 
     # ---------------------------------------------------------- mission
-    def act_start(self, _body):
+    def act_start(self, body):
+        # {"tier": "advanced" | "disruptive"}: the goal's tier (task1_global.xml picks its subtree
+        # by it); absent = the course's, as before
+        tier = (body or {}).get("tier")
+        if tier not in (None, "advanced", "disruptive"):
+            return {"ok": False, "error": "tier must be advanced or disruptive"}
         with self.lock:
             if self.sim != "up" or self.link is None:
                 return {"ok": False, "error": "the sim/radio is not up"}
             if self.proc_mission and self.proc_mission.running():
                 return {"ok": False, "error": "a run is already going"}
+            self.run_tier = tier
         states = self._begin_run()
         self.logs["judge"].add("--- new run ---")
         self._transmit(states, "START")          # the field must be there before the goal
@@ -1267,6 +1684,7 @@ class Panel:
         logs = self._logs_since(q)
         now = time.time()
         feed = self.feed.view()                  # its own leaf lock, never under self.lock
+        tuning = self._tuning_summary()          # file I/O: not under self.lock either
         with self.lock:
             errs, warns = check_layout(self.layout)
             odom_age = now - self.odom_t if self.odom_t else None
@@ -1283,7 +1701,7 @@ class Panel:
                            "errors": errs, "warnings": warns},
                 "templates": _names(courses_dir()), "default_template": DEFAULT_TEMPLATE,
                 "layouts": _names(os.path.join(self.dir, "layouts")),
-                "radio": self._radio_state(radio_up, pending),
+                "radio": self._radio_state(radio_up, pending), "tuning": tuning,
                 "mission": dict(self.mission), "verdict": self.verdict,
                 # the referee's live view, so the page (and a test) can see a
                 # colour change re-pair the gates the moment it goes on the air
@@ -1357,6 +1775,8 @@ def make_handler(panel):
             if u.path == "/api/state":
                 return self._send(json.dumps(panel.state(parse_qs(u.query))).encode(),
                                   "application/json")
+            if u.path == "/api/tuning" and "tuning" in names:        # a panel without act_tuning (the lake's) has no catalogue
+                return self._send(json.dumps(panel.tuning_view()).encode(), "application/json")
             m = DOWNLOAD_RE.match(u.path)
             if m:
                 got = panel.download(m.group(1))

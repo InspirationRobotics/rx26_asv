@@ -1,0 +1,54 @@
+# title: Tight field (3-5 m between buoys)
+# about: 3 m orbits, gate points 3 m out, 3 m fences, 1.2 m inflation, for courses/task1_tight.yaml.
+#
+# A planner-tuning profile for the Task 1 panel (load it in PLANNER TUNING, then
+# STOP SIM + LAUNCH). Same format as the panel's tuning.yaml: only the keys that
+# differ from crusader_params.yaml / nav2_params.yaml. SIM ONLY.
+#
+# Why each number (buoy radius 0.3, robot_radius 0.82, hard 0.8 are unchanged):
+#   orbit 3.0 m      2.0 was tried and FAILED (2026-10-02): the hull touched the
+#                    ENTRY buoy. The orbit is centred on the UAV's report of the
+#                    buoy (up to 0.8 m off; the boat does not re-centre it on its
+#                    own camera fix), and the 2.5-3 m carrot cuts inside a 2 m
+#                    circle. 3.0 = 0.8 UAV error + hull 0.5 + buoy 0.3 + 1.4 slack
+#   12 points        a 1.55 m chord at r = 3, so a hop stays on the circle
+#   tolerance 0.8    under the chord, so no hop is skipped
+#   fence_clear 4.5  orbit 3.0 + orbit_clear 1.0 + fence radius 0.3 (+0.2)
+#   fence_len 3.0    one gap's width: a 10 m wall crosses the whole field
+#   gate 3 / 3 m     the gate points must stay inside a 4-5 m bay; the minima
+#                    (1.5) stay above the crossing's 1.0 m arrival tolerance
+#   inflation 1.2 m  with scaling 4: the middle of a 3 m gap is cheap again;
+#                    nav_soft_m follows it (check_config pairs the two)
+#   lookahead 3/2.5  shorter carrot for tight turns, still above WP_RADIUS 2.0
+bt_runner_node:
+  ros__parameters:
+    nav_orbit_radius_m: 3.0
+    nav_orbit_points: 12
+    nav_orbit_tolerance_m: 0.8
+    nav_orbit_clear_m: 1.0
+    nav_orbit_max_push_m: 1.5
+    nav_fence_len_m: 3.0
+    nav_fence_clear_m: 4.5
+    nav_gate_standoff_m: 3.0
+    nav_gate_approach_m: 3.0
+    nav_gate_min_standoff_m: 1.5
+    nav_gate_min_approach_m: 1.5
+    nav_gate_clear_m: 1.0
+    nav_gate_margin_m: 1.0
+    nav_gate_tight_clear_m: 0.9
+    nav_gate_tight_margin_m: 0.9
+    nav_goal_max_move_m: 1.5
+    nav_soft_m: 1.2
+    nav_lookahead_m: 3.0
+    nav_lookahead_min_m: 2.5
+planner_server:
+  ros__parameters:
+    GridBased:
+      tolerance: 0.3
+      cost_travel_multiplier: 1.5
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      inflation_layer:
+        inflation_radius: 1.2
+        cost_scaling_factor: 4.0

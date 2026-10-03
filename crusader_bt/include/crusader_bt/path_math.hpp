@@ -81,6 +81,21 @@ struct NavParams
     dock_deck_depth_m = 1.0;
   // Side fences (sideFences). fence_len_m <= 0 switches them off.
   double fence_len_m = 10.0, fence_spacing_m = 0.5, fence_radius_m = 0.3, fence_clear_m = 8.0;
+  // The goal rule (clearGateWaypoints, clearPoint): how far a Task 1 goal keeps from hazards.
+  double gate_clear_m = 1.5;         ///< gate crossing + its points, from every hazard's edge
+  double gate_min_standoff_m = 3.5;  ///< through point: > its NavigateTo tolerance (2.5)
+  double gate_min_approach_m = 4.0;  ///< approach point: room to line up before the gap
+  double gate_margin_m = 1.8;        ///< an off-centre crossing stays this far from both buoys
+  double gate_step_m = 0.25;         ///< search pitch, along the crossing and along the gate
+  double gate_tight_clear_m = 1.0;   ///< second try when nothing fits: hard_m + 0.2 ...
+  double gate_tight_margin_m = 1.1;  ///< ... and hard_m + buoy_radius_m from the gate buoys
+  // Sizes the Task 1 tree used to hard-code (an XML attribute still wins where one is given).
+  double orbit_radius_m = 6.0;       ///< CircleBuoy radius
+  int orbit_points = 8;              ///< CircleBuoy ring points (more for a small radius)
+  double orbit_tolerance_m = 2.0;    ///< CircleBuoy hop arrival radius (< the ring's chord)
+  double gate_standoff_m = 6.0;      ///< GateWaypoint: through point, metres past the middle
+  double gate_approach_m = 8.0;      ///< GateWaypoint: approach point, metres short of it
+  double goal_max_move_m = 3.0;      ///< clearPoint moves a goal at most this far
 };
 
 namespace detail
@@ -424,63 +439,100 @@ inline Vec2 clearPoint(
   return p;
 }
 
-/// How far GateWaypoint may move a gate's two points to keep the crossing clear.
-struct GateClear
+namespace detail
 {
-  double clear_m = 1.5;            ///< from every hazard's edge: hard 0.8 + 0.7 for a boat off the line
-  double min_standoff_m = 3.5;     ///< through point: > its NavigateTo tolerance (2.5), so arriving is past the line
-  double min_approach_m = 4.0;     ///< approach point: room to line up before the gap
-  double step_m = 0.5;             ///< search pitch, along the crossing and along the gate line
-  double gate_margin_m = 1.8;      ///< a shifted crossing stays this far from both gate buoys
-};
-
-/// nav::gateWaypoints(), moved only as far as it takes to keep the STRAIGHT crossing clear.
-///
-/// The crossing (approach -> through) is driven straight with only the gate's own pair exempt,
-/// so a buoy, a fence or a track on that line holds the boat for good. A gate is a gap, not a
-/// point: the boat may cross it anywhere between the pair. So: the centre line first, then
-/// lines shifted along the gate, step_m at a time, alternating sides, never closer than
-/// gate_margin_m to either buoy. On each line the through point backs off from standoff_m
-/// toward the gate (down to min_standoff_m) and the approach point from approach_m (down to
-/// min_approach_m) until each half of the crossing keeps clear_m from every hazard in `hz`.
-/// The first line where both halves fit wins. If none does, the plain centre-line waypoints
-/// come back and the leg's own guard holds the boat, exactly as before. `hz` must already
-/// exempt the gate's pair. *shift_out (optional) gets the shift, + toward the red.
-inline nav::Gate clearGateWaypoints(
+/// One search of clearGateWaypoints at one clearance and gate margin. valid = false when no
+/// line fits (the caller decides what then).
+inline nav::Gate gateSearch(
   Vec2 red, Vec2 green, double standoff_m, double approach_m, const std::vector<Hazard> & hz,
-  const GateClear & c = GateClear{}, double * shift_out = nullptr)
+  const NavParams & p, double clear_m, double margin_m, double * shift_out)
 {
-  const nav::Gate plain = nav::gateWaypoints(red, green, standoff_m, approach_m);
-  if (shift_out != nullptr) {*shift_out = 0.0;}
-  if (!plain.valid || !(c.step_m > 0.0)) {return plain;}
+  nav::Gate g = nav::gateWaypoints(red, green, standoff_m, approach_m);
+  if (!g.valid || !(p.gate_step_m > 0.0)) {return g;}
   const Vec2 mid = (red + green) * 0.5;
-  const Vec2 u = nav::headingVec(plain.heading_deg);     // the direction of the crossing
+  const Vec2 u = nav::headingVec(g.heading_deg);         // the direction of the crossing
   const Vec2 v = nav::unit(red - green);                  // along the gate line, toward the red
 
   // the farthest point from `from` along `dir`, hi down to lo, whose segment from `from` is clear
   const auto reach = [&](Vec2 from, Vec2 dir, double hi, double lo, Vec2 & out) {
-      for (double d = hi; d >= std::min(lo, hi) - 1e-9; d -= c.step_m) {
-        if (segmentClear(from, from + dir * d, hz, c.clear_m)) {
+      for (double d = hi; d >= std::min(lo, hi) - 1e-9; d -= p.gate_step_m) {
+        if (segmentClear(from, from + dir * d, hz, clear_m)) {
           out = from + dir * d;
           return true;
         }
       }
       return false;
     };
-  const double room = 0.5 * nav::norm(red - green) - c.gate_margin_m;
-  const int n = room > 0.0 ? static_cast<int>(std::floor(room / c.step_m + 1e-9)) : 0;
-  for (int k = 0; k <= 2 * n; ++k) {                      // shifts 0, +1, -1, +2, -2 ... steps
-    const double shift = k == 0 ? 0.0 : (k % 2 == 1 ? 1.0 : -1.0) * ((k + 1) / 2) * c.step_m;
+  // shifts 0, +1, -1, +2, -2 ... steps, then the edge of the room itself: a gap whose room is
+  // not a whole number of steps would otherwise never try its widest line (2026-10-02: the
+  // clear line was at +1.25 of a 1.40 m room searched in 0.5 m steps)
+  const double room = 0.5 * nav::norm(red - green) - margin_m;
+  std::vector<double> shifts{0.0};
+  for (double s = p.gate_step_m; room > 0.0 && s <= room + 1e-9; s += p.gate_step_m) {
+    shifts.push_back(s);
+    shifts.push_back(-s);
+  }
+  if (room > 0.0 && room - (shifts.size() > 1 ? shifts[shifts.size() - 2] : 0.0) > 1e-6) {
+    shifts.push_back(room);
+    shifts.push_back(-room);
+  }
+  for (const double shift : shifts) {
     const Vec2 cross = mid + v * shift;
-    nav::Gate g = plain;
-    if (reach(cross, u, standoff_m, c.min_standoff_m, g.through) &&
-      reach(cross, u * -1.0, approach_m, c.min_approach_m, g.approach))
+    if (reach(cross, u, standoff_m, p.gate_min_standoff_m, g.through) &&
+      reach(cross, u * -1.0, approach_m, p.gate_min_approach_m, g.approach))
     {
-      if (shift_out != nullptr) {*shift_out = shift;}
+      *shift_out = shift;
       return g;
     }
   }
-  return plain;
+  g.valid = false;
+  g.why = "no clear straight crossing";
+  return g;
+}
+}  // namespace detail
+
+/// nav::gateWaypoints(), moved only as far as it takes to keep the STRAIGHT crossing clear.
+///
+/// The crossing (approach -> through) is driven straight with only the gate's own pair exempt,
+/// so a buoy, a fence or a track on that line holds the boat for good. A gate is a gap, not a
+/// point: the boat may cross it anywhere between the pair. So: the centre line first, then
+/// lines shifted along the gate, gate_step_m at a time, alternating sides, never closer than
+/// the gate margin to either buoy. On each line the through point backs off from standoff_m
+/// toward the gate (down to gate_min_standoff_m) and the approach point from approach_m (down
+/// to gate_min_approach_m) until each half of the crossing keeps the clearance from every
+/// hazard in `hz`. The first line where both halves fit wins.
+///
+/// TWO TRIES. The comfortable numbers first (gate_clear_m, gate_margin_m); if no line fits, the
+/// same search with the tight ones (gate_tight_clear_m, gate_tight_margin_m), which still keep
+/// the guard's own hard_m - local_check_tol_m with room. A crowded gate (a black buoy a few
+/// metres in front of it and another behind, 2026-10-02) is driven tight rather than not at
+/// all. Neither fits: the plain centre-line points, and the leg's own guard holds the boat as
+/// before. `hz` must already exempt the gate's pair. *shift_out (optional): the shift, + toward
+/// the red; *tight_out (optional): the tight try won. All numbers are NavParams' gate_*
+/// (nav_gate_* in crusader_params.yaml).
+inline nav::Gate clearGateWaypoints(
+  Vec2 red, Vec2 green, double standoff_m, double approach_m, const std::vector<Hazard> & hz,
+  const NavParams & p, double * shift_out = nullptr, bool * tight_out = nullptr)
+{
+  double shift = 0.0;
+  bool tight = false;
+  nav::Gate g = detail::gateSearch(
+    red, green, standoff_m, approach_m, hz, p, p.gate_clear_m, p.gate_margin_m, &shift);
+  if (!g.valid && std::string(g.why) == "no clear straight crossing" &&
+    (p.gate_tight_clear_m < p.gate_clear_m || p.gate_tight_margin_m < p.gate_margin_m))
+  {
+    tight = true;
+    g = detail::gateSearch(
+      red, green, standoff_m, approach_m, hz, p, p.gate_tight_clear_m, p.gate_tight_margin_m, &shift);
+  }
+  if (!g.valid) {
+    shift = 0.0;
+    tight = false;
+    g = nav::gateWaypoints(red, green, standoff_m, approach_m);    // valid unless the pair is not a gate
+  }
+  if (shift_out != nullptr) {*shift_out = shift;}
+  if (tight_out != nullptr) {*tight_out = tight && g.valid;}
+  return g;
 }
 
 /// First index >= from_i whose point is within clearance_m of any hazard; -1 = none.

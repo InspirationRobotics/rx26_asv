@@ -1,0 +1,27 @@
+# Task 1 Safe Passage — the user's CROWDED field (panel layout user_crowded_1002, 2026-10-02).
+#
+# 4-5 m between buoys, and the passage zig-zags: through b1/b2 heading north, then WEST
+# between b4 (green) and b8 (red), then back east past b3 (red) with b7 (black) on the other
+# hand, to the EXIT. The per-gate tree (task1_disruptive.xml) could not find a path here; the
+# whole-field tree (task1_global.xml) is the one this course is for.
+#
+# ENU metres; the boat starts at the origin heading east. Top beacons lit, side beacons dark:
+# only the UAV sees colour (Advanced / Disruptive).
+name: task1_crowded
+origin: {lat: 1.28060, lon: 103.85570}   # = tools/sitl/start_sitl.sh SITL_HOME
+draft_m: 0.24
+depth_m: 5.0
+boat_start: {x: 0.0, y: 0.0, yaw_deg: 0.0}
+tier: advanced
+
+elements:
+  - {type: robobuoy, name: b0, x:  6.80, y:  7.20, beacon: "flash_blue",  side_beacon: false, up_beacon: true}
+  - {type: robobuoy, name: b1, x: 13.30, y: 14.60, beacon: "flash_red",   side_beacon: false, up_beacon: true}
+  - {type: robobuoy, name: b2, x:  8.10, y: 14.80, beacon: "flash_green", side_beacon: false, up_beacon: true}
+  - {type: robobuoy, name: b3, x:  8.80, y: 24.10, beacon: "flash_red",   side_beacon: false, up_beacon: true}
+  - {type: robobuoy, name: b4, x:  3.20, y: 17.70, beacon: "flash_green", side_beacon: false, up_beacon: true}
+  - {type: robobuoy, name: b5, x:  7.40, y: 29.80, beacon: "steady_blue", side_beacon: false, up_beacon: true}
+  - {type: robobuoy, name: b6, x: 10.30, y: 10.30, beacon: "off",         side_beacon: false, up_beacon: true}
+  - {type: robobuoy, name: b7, x:  3.40, y: 24.50, beacon: "off",         side_beacon: false, up_beacon: true}
+  - {type: robobuoy, name: b8, x:  6.20, y: 20.80, beacon: "flash_red",   side_beacon: false, up_beacon: true}
+  - {type: robobuoy, name: b9, x:  9.80, y: 18.10, beacon: "off",         side_beacon: false, up_beacon: true}

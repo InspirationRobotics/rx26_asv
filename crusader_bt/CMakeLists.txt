@@ -47,8 +47,12 @@ endif()
 # fire_leaves.cpp likewise (registerFireNodes). ros_planner_port.cpp is always
 # compiled: with Nav2 it is the planner port, without it a stub.
 add_executable(bt_runner_node src/bt_runner_node.cpp src/leaves.cpp src/task3_leaves.cpp
-  src/fire_leaves.cpp src/ros_planner_port.cpp)
+  src/fire_leaves.cpp src/global_leaves.cpp src/ros_planner_port.cpp)
 target_include_directories(bt_runner_node PRIVATE include)
+# The whole-field Task 1 planner (global_passage.hpp, instantiated in global_leaves.cpp) is a
+# grid A* run inside the tick: ~50 ms optimised, ~10x that at the default -O0 (SITL
+# 2026-10-02: 300-700 ms per plan). Optimise that one file whatever the build type says.
+set_source_files_properties(src/global_leaves.cpp PROPERTIES COMPILE_OPTIONS "-O2")
 ament_target_dependencies(bt_runner_node ${DEPS})
 if(CRSD_HAVE_NAV2)
   target_compile_definitions(bt_runner_node PRIVATE CRSD_HAVE_NAV2)
@@ -98,6 +102,10 @@ if(BUILD_TESTING)
   add_executable(test_gate_waypoints test/test_gate_waypoints.cpp)
   target_include_directories(test_gate_waypoints PRIVATE include)
   add_test(NAME gate_waypoints COMMAND test_gate_waypoints)
+  # global_passage: the whole-field Task 1 planner and its follower, closed loop.
+  add_executable(test_global_passage test/test_global_passage.cpp)
+  target_include_directories(test_global_passage PRIVATE include)
+  add_test(NAME global_passage COMMAND test_global_passage)
   add_executable(test_planned_leg test/test_planned_leg.cpp)
   target_include_directories(test_planned_leg PRIVATE include)
   add_test(NAME planned_leg COMMAND test_planned_leg)

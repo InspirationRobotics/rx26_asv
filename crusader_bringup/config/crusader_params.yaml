@@ -1465,7 +1465,48 @@ bt_runner_node:
                                             #      hard - this, for quantisation
     nav_orbit_max_push_m: 3.0               # [RO] an orbit point near a hazard is
                                             #      pushed out by at most this
-    nav_orbit_clear_m: 1.4                  # [RO] ... until it is this clear
+    nav_orbit_clear_m: 1.4                  # [RO] ... until it is this clear. Also the
+                                            #      goal rule for every orbit hop as it
+                                            #      starts, ring[0] included (clearPoint)
+    nav_orbit_radius_m: 6.0                 # [RO] ENTRY/EXIT orbit radius (CircleBuoy;
+                                            #      an XML radius= still wins). Tight
+                                            #      fields: ~2 (buoy 0.3 + hard 0.8 +
+                                            #      the hull's half-length, with room)
+    nav_orbit_points: 8                     # [RO] ring points; more for a small radius
+                                            #      so a hop stays short and on the circle
+    nav_orbit_tolerance_m: 2.0              # [RO] a ring hop counts as arrived within
+                                            #      this; keep it under the chord
+                                            #      (2 r sin(180/points)) or hops are skipped
+    nav_gate_standoff_m: 6.0                # [RO] gate through point, metres past the
+                                            #      middle (the most; see nav_gate_min_*)
+    nav_gate_approach_m: 8.0                # [RO] gate approach point, metres short of it
+    nav_gate_clear_m: 1.5                   # [RO] THE GOAL RULE for gates: the straight
+                                            #      crossing and both gate points keep
+                                            #      this from every hazard's EDGE (a buoy
+                                            #      centre: + nav_buoy_radius_m)
+    nav_gate_min_standoff_m: 3.5            # [RO] a crowded gate's through point may
+                                            #      back off from the tree's standoff
+                                            #      (6) to this; keep it > the through
+                                            #      leg's tolerance (2.5) or the boat
+                                            #      "arrives" before the gate line
+    nav_gate_min_approach_m: 4.0            # [RO] ... and its approach point from 8 to
+                                            #      this, the room to line up
+    nav_gate_margin_m: 1.8                  # [RO] then the crossing may move off-centre
+                                            #      in the gap, never closer than this
+                                            #      to either gate buoy
+    nav_gate_step_m: 0.25                   # [RO] search pitch for both of the above
+                                            #      (the widest shift the margin allows
+                                            #      is always tried as well)
+    nav_gate_tight_clear_m: 1.0             # [RO] nothing fits? the same search again
+                                            #      with this clearance (hard_m + 0.2;
+                                            #      the guard needs hard - tol = 0.7) ...
+    nav_gate_tight_margin_m: 1.1            # [RO] ... and this from the gate buoys
+                                            #      (hard_m + buoy_radius_m). Tight is
+                                            #      better than sitting still
+    nav_goal_max_move_m: 3.0                # [RO] the goal rule moves a goal at most
+                                            #      this far to clear it; nothing clear
+                                            #      that close -> the goal stays and the
+                                            #      leg's guard holds the boat
     nav_dock_finger_len_m: 2.0              # [RO] build guide: dock fingers
     nav_dock_finger_w_m: 0.5                # [RO]
     nav_dock_slip_w_m: 1.5                  # [RO]
