@@ -376,6 +376,18 @@ private:
         "camera window position: median over this many s (tree: 0.6)"},
       {"rate_window_s", &fire::StrafeTune::rate_window_s, 2.0,
         "camera window rate: fit over this many s, needs 4 samples (tree: 0.8)"},
+      {"coast_s", &fire::StrafeTune::coast_s, 5.0,
+        "sideways coasting window, s - stop pushing when arrival is this close (tree: 1.5; 0 = never)"},
+      {"lat_min_us", &fire::StrafeTune::lat_min_us, 120.0,
+        "sideways deadband offset added to every correction, us (tree: = min_us, 30)"},
+      {"est_enable", &fire::StrafeTune::est_enable, 1.0,
+        "1 = the lateral ESTIMATOR on (camera + compass Kalman filter, yaw taken out); -1/0 = off"},
+      {"est_q", &fire::StrafeTune::est_q, 10.0,
+        "estimator process noise, m^2/s^3 - higher follows faster, noisier (default 0.01)"},
+      {"est_r", &fire::StrafeTune::est_r, 1.0,
+        "estimator camera noise per frame, m (default 0.03)"},
+      {"track_s", &fire::StrafeTune::track_s, 5.0,
+        "estimator rides through camera dropouts this long, s (default 1.0)"},
     };
     for (const auto & r : rows) {
       rcl_interfaces::msg::ParameterDescriptor d;
@@ -498,6 +510,7 @@ private:
     }
     ctx_->boat = nav::toLocal({m->latitude, m->longitude}, ctx_->origin);
     ctx_->heading_deg = m->heading;      // NaN when GPS yaw is unresolved
+    ingestHeading(*ctx_, nowS());
     pose_t_ = now();
   }
 
@@ -818,7 +831,14 @@ private:
     // Freshness at THIS instant: ingest places bays only on a fresh pose.
     ctx_->pose_fresh = ctx_->origin_set && (t - pose_t_).seconds() < stream_timeout_s_;
     ingestDockObservation(*ctx_, f);
-    ingestFireWindows(*ctx_, nowS(), f);
+    // The fire windows on now_s's clock, at the frame's CAPTURE instant: its age
+    // (receipt minus the header stamp, which dock_view sets when the frame is in
+    // hand) taken off. The lateral estimator rotates each frame with the heading
+    // of that instant. An age outside 0-1 s is a clock problem, not a frame that
+    // old: then receipt time, as before.
+    double age = (t - rclcpp::Time(m->header.stamp, t.get_clock_type())).seconds();
+    if (!(age >= 0.0 && age <= 1.0)) {age = 0.0;}
+    ingestFireWindows(*ctx_, nowS() - age, f);
     dock_t_ = t;
     have_dock_ = true;
   }

@@ -277,6 +277,7 @@ private:
     }
     ctx_->boat = nav::toLocal({lat, lon}, ctx_->origin);
     ctx_->heading_deg = num(j, "heading", dock::kNaN);   // null = GPS yaw unresolved
+    ingestHeading(*ctx_, nowS());
     pose_t_ = Clock::now();
     have_pose_ = true;
   }

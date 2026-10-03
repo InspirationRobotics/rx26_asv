@@ -363,6 +363,10 @@ def main(argv=None):
             t = msgs["rgb"].getTimestamp().total_seconds()   # device clock: timing layer
             t0 = t if t0 is None else t0
             tf = time.monotonic()                          # frame in hand
+            # The message is stamped HERE, not at publish: the tree takes the
+            # frame's age off its own clock and rotates the window with the
+            # heading of this instant (crusader_bt lateral estimator).
+            stamp_tf = node.get_clock().now().to_msg()
             small = cv2.resize(bgr, (DET_W, DET_H), interpolation=cv2.INTER_AREA)
             f = bgr.shape[1] / float(DET_W)
             t1 = time.monotonic()
@@ -400,7 +404,7 @@ def main(argv=None):
                     w["xyz"] = pos.get(w["index"])
             if pub is not None:
                 try:
-                    pub.publish(to_msg(obs, node.get_clock().now().to_msg(), "camera_link"))
+                    pub.publish(to_msg(obs, stamp_tf, "camera_link"))
                 except Exception as e:                  # never let a message stop the camera
                     log.error(f"DockObservation not published: {e}")
             t3 = time.monotonic()

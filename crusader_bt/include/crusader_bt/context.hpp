@@ -244,6 +244,14 @@ struct Context
   /// Live gain overrides, set by bt_runner_node's strafe.* parameter callback.
   /// NOT cleared per goal: it is the node's parameters, not the run's state.
   fire::StrafeTune strafe_tune;
+  /// Compass heading by time (ingestHeading), so the lateral estimator can take
+  /// each camera frame's yaw out with the heading AT that frame's capture time.
+  fire::HeadingHistory heading_hist;
+  /// The lateral estimator (strafe.est_enable): which window it tracks, and
+  /// the newest camera sample it has taken in. Cleared per goal (resetFire).
+  fire::LateralEstimator lat_est;
+  int lat_est_widx = -1;
+  double lat_est_seen_t = -1e18;
   /// Set by StrafeKeep on every tick it commands the sticks; the runner clears
   /// it before each tick and RELEASES the sticks if they were commanded last
   /// tick and not this one.
@@ -334,6 +342,14 @@ inline void ingestWallRange(
   c.wall.add(s);
 }
 
+/// The heading just set on ctx (heading_deg, from /crsd/pose), into the
+/// history the lateral estimator reads. CALL UNDER ctx.mu, after setting it,
+/// with `t` on now_s's clock. Both runners call it from their pose handler.
+inline void ingestHeading(Context & c, double t)
+{
+  c.heading_hist.add(t, c.heading_deg);
+}
+
 /// One /crsd/attitude message (radians, the autopilot's axes). CALL UNDER ctx.mu.
 /// Only magnitudes and swings matter to "steady", so the axes' signs do not.
 inline void ingestAttitude(
@@ -403,6 +419,9 @@ inline void resetFire(Context & c)
   c.last_strafe_t = -1.0;
   c.face_target = fire::kNaN;
   c.sticks_commanded = false;
+  c.lat_est.reset();
+  c.lat_est_widx = -1;
+  c.lat_est_seen_t = -1e18;
 }
 
 /// Forget everything Task 3 learned. Called at goal start: a second attempt

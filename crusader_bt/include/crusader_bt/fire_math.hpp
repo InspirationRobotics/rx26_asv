@@ -50,6 +50,7 @@
 #define CRUSADER_BT__FIRE_MATH_HPP_
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <deque>
@@ -518,9 +519,178 @@ public:
 
   void reset() {buf_.clear();}
 
+  /// The samples newer than t, oldest first: for a consumer that must see
+  /// each one exactly once (the lateral estimator).
+  std::vector<std::pair<double, double>> since(double t) const
+  {
+    std::vector<std::pair<double, double>> out;
+    for (const auto & s : buf_) {if (s.first > t) {out.push_back(s);}}
+    return out;
+  }
+
 private:
   bool circular_;
   std::deque<std::pair<double, double>> buf_;
+};
+
+// ------------------------------------------------------ the lateral estimator
+//
+// WHY. The strafe keep steered on the camera's window position in the BOW
+// frame, a 0.6 s median, and a 0.8 s slope for the rate. On the water
+// (2026-10-02) that held +-0.3-0.5 m: every degree of yaw wobble moves a window
+// 1.6 m away ~3 cm sideways in the bow frame, so D braked against motion the
+// hull never made; and the frames are 50-100 ms old on arrival.
+//
+// WHAT. Track the window's sideways offset AS IF THE BOW WERE SQUARE to the
+// face (yaw taken out with the compass heading AT EACH FRAME's capture time),
+// and its rate, with a constant-velocity Kalman filter; project it to now; then
+// put the CURRENT yaw back for the aim (the nozzle is fixed, so the shot needs
+// the window in the bow frame now). The rate handed to D is the square-frame
+// rate: the hull's sideways motion, not the yaw's.
+
+// Compass headings by time, so a frame is rotated with the heading the boat had
+// when the frame was taken. Ordered; wrap-aware interpolation.
+class HeadingHistory
+{
+public:
+  void add(double t, double deg)
+  {
+    if (!std::isfinite(deg) || !std::isfinite(t)) {return;}
+    if (!buf_.empty() && t <= buf_.back().first) {return;}
+    buf_.push_back({t, wrap360(deg)});
+    while (!buf_.empty() && buf_.front().first < t - 5.0) {buf_.pop_front();}
+  }
+
+  /// The heading at t: interpolated inside the span, the nearest end within
+  /// max_gap_s outside it, NaN when nothing is that close.
+  double at(double t, double max_gap_s = 0.5) const
+  {
+    if (buf_.empty() || !std::isfinite(t)) {return kNaN;}
+    if (t <= buf_.front().first) {
+      return buf_.front().first - t <= max_gap_s ? buf_.front().second : kNaN;
+    }
+    if (t >= buf_.back().first) {
+      return t - buf_.back().first <= max_gap_s ? buf_.back().second : kNaN;
+    }
+    for (std::size_t i = 1; i < buf_.size(); ++i) {
+      if (buf_[i].first >= t) {
+        const auto & a = buf_[i - 1];
+        const auto & b = buf_[i];
+        const double f = (t - a.first) / std::max(b.first - a.first, 1e-9);
+        return wrap360(a.second + f * wrap180(b.second - a.second));
+      }
+    }
+    return kNaN;
+  }
+
+  void reset() {buf_.clear();}
+
+private:
+  std::deque<std::pair<double, double>> buf_;
+};
+
+// A window at (x_body, y_body) [m, REP-103: x ahead, y LEFT] seen with the bow
+// yaw_err_deg LEFT of square (+ = turn right to square, StrafeInputs'
+// convention): its sideways offset in the square frame. And back.
+inline double squareOffset(double x_body, double y_body, double yaw_err_deg)
+{
+  const double d = yaw_err_deg * kDeg;
+  return x_body * std::sin(d) + y_body * std::cos(d);
+}
+
+inline double bodyOffset(double x_body, double y_square, double yaw_err_deg)
+{
+  const double d = yaw_err_deg * kDeg;
+  const double c = std::cos(d);
+  return std::fabs(c) < 1e-3 ? kNaN : (y_square - x_body * std::sin(d)) / c;
+}
+
+struct LateralEstParams
+{
+  double q = 0.01;        // process noise (white acceleration), m^2/s^3: 0.03 m/s of
+                          // rate noise at 2 cm camera noise, sees a 0.1 m/s start in 0.4 s
+  double r = 0.03;        // camera noise per frame, m
+  double gate = 4.0;      // innovation beyond this many sigma: rejected
+  double v0_sigma = 0.3;  // rate uncertainty at (re)start, m/s
+  int reinit_after = 3;   // that many rejections in a row: restart on the new value
+};
+
+// Constant-velocity Kalman filter on one coordinate. update() takes the
+// measurements in time order (older ones are ignored); at() projects to any
+// later time without changing the filter.
+class LateralEstimator
+{
+public:
+  void reset() {inited_ = false; n_rej_ = 0;}
+  bool inited() const {return inited_;}
+  double lastMeasT() const {return tm_;}
+  int rejectedInARow() const {return n_rej_;}
+  double sigmaP() const {return std::sqrt(std::max(P_[0][0], 0.0));}
+
+  /// true = accepted (or restarted on it); false = rejected or out of order
+  bool update(double t, double z, const LateralEstParams & k)
+  {
+    if (!std::isfinite(z) || !std::isfinite(t)) {return false;}
+    if (!inited_) {init(t, z, k); return true;}
+    if (t < t_ - 1e-9) {return false;}
+    predict(t, k);
+    const double S = P_[0][0] + k.r * k.r;
+    const double y = z - x_[0];
+    if (y * y > k.gate * k.gate * S) {
+      if (++n_rej_ >= k.reinit_after) {init(t, z, k); return true;}
+      return false;
+    }
+    n_rej_ = 0;
+    const double K0 = P_[0][0] / S, K1 = P_[1][0] / S;
+    x_[0] += K0 * y;
+    x_[1] += K1 * y;
+    const double p00 = P_[0][0], p01 = P_[0][1], p10 = P_[1][0], p11 = P_[1][1];
+    P_[0][0] = (1.0 - K0) * p00;
+    P_[0][1] = (1.0 - K0) * p01;
+    P_[1][0] = p10 - K1 * p00;
+    P_[1][1] = p11 - K1 * p01;
+    tm_ = t;
+    return true;
+  }
+
+  /// (position, rate) projected to `now`
+  std::pair<double, double> at(double now) const
+  {
+    const double dt = std::max(0.0, now - t_);
+    return {x_[0] + x_[1] * dt, x_[1]};
+  }
+
+private:
+  void init(double t, double z, const LateralEstParams & k)
+  {
+    x_ = {z, 0.0};
+    P_ = {{{k.r * k.r, 0.0}, {0.0, k.v0_sigma * k.v0_sigma}}};
+    t_ = tm_ = t;
+    inited_ = true;
+    n_rej_ = 0;
+  }
+
+  void predict(double t, const LateralEstParams & k)
+  {
+    const double dt = t - t_;
+    if (dt <= 0.0) {return;}
+    x_[0] += x_[1] * dt;
+    const double p00 = P_[0][0], p01 = P_[0][1], p10 = P_[1][0], p11 = P_[1][1];
+    double n00 = p00 + dt * (p10 + p01) + dt * dt * p11;
+    double n01 = p01 + dt * p11, n10 = p10 + dt * p11, n11 = p11;
+    n00 += k.q * dt * dt * dt / 3.0;
+    n01 += k.q * dt * dt / 2.0;
+    n10 += k.q * dt * dt / 2.0;
+    n11 += k.q * dt;
+    P_ = {{{n00, n01}, {n10, n11}}};
+    t_ = t;
+  }
+
+  bool inited_ = false;
+  double t_ = 0.0, tm_ = -1e18;
+  std::array<double, 2> x_{{0.0, 0.0}};
+  std::array<std::array<double, 2>, 2> P_{};
+  int n_rej_ = 0;
 };
 
 struct P3 {double x = kNaN, y = kNaN, z = kNaN;};
@@ -606,6 +776,12 @@ struct StrafeParams
   double slew_us_s = 200.0;      // per axis: gentle, thrust rocks the hull
   double min_range_m = 1.5;      // never push AHEAD inside this
   double square_first_deg = 10.0;  // further off square than this: turn only
+  // Lateral only. coast_lat_s: axisLaw's coasting window (0 = never coast - on
+  // water, drag stops the hull short of a target it was "coasting" to, then a
+  // fresh kick; 2026-10-02). lat_min_us: the deadband offset for the lateral
+  // axis alone (-1 = min_us): this hull barely slides below ~50 us.
+  double coast_lat_s = 1.5;
+  double lat_min_us = -1.0;
 };
 
 // Live overrides of the keep's gains, from bt_runner_node's strafe.* parameters
@@ -624,6 +800,16 @@ struct StrafeTune
   double i_max_us = -1.0;
   double window_median_s = -1.0;   // tree default 0.6 s
   double rate_window_s = -1.0;     // tree default 0.8 s
+  double coast_s = -1.0;           // lateral coasting window, tree default 1.5 s
+  double lat_min_us = -1.0;        // lateral deadband offset, tree default = min_us
+  // The lateral estimator (LateralEstimator): est_enable >= 0.5 switches the
+  // window's sideways position and rate from the camera median/slope to it.
+  double est_enable = -1.0;        // off unless set
+  double est_q = -1.0;             // process noise, m^2/s^3 (default 0.01)
+  double est_r = -1.0;             // camera noise per frame, m (default 0.03)
+  double track_s = -1.0;           // ride through dropouts this long (default 1.0 s)
+
+  bool estOn() const {return est_enable >= 0.5;}
 
   /// Overwrite sp's gains where an override is set; "" when none is, else the
   /// overridden ones as "kd_lat 80 kp_lat 60" for the log.
@@ -634,7 +820,8 @@ struct StrafeTune
       {"ki_fwd", {ki_fwd, &sp.ki_fwd}}, {"kp_lat", {kp_lat, &sp.kp_lat}},
       {"kd_lat", {kd_lat, &sp.kd_lat}}, {"ki_lat", {ki_lat, &sp.ki_lat}},
       {"kp_yaw", {kp_yaw, &sp.kp_yaw}}, {"kd_yaw", {kd_yaw, &sp.kd_yaw}},
-      {"i_max_us", {i_max_us, &sp.i_max_us}},
+      {"i_max_us", {i_max_us, &sp.i_max_us}}, {"coast_s", {coast_s, &sp.coast_lat_s}},
+      {"lat_min_us", {lat_min_us, &sp.lat_min_us}},
     };
     std::string out;
     char buf[40];
@@ -645,7 +832,9 @@ struct StrafeTune
       out += buf;
     }
     for (const auto & w : {std::make_pair("median_s", window_median_s),
-                           std::make_pair("rate_s", rate_window_s)}) {
+                           std::make_pair("rate_s", rate_window_s),
+                           std::make_pair("est", est_enable), std::make_pair("est_q", est_q),
+                           std::make_pair("est_r", est_r), std::make_pair("track_s", track_s)}) {
       if (w.second < 0.0) {continue;}
       std::snprintf(buf, sizeof(buf), "%s%s %g", out.empty() ? "" : " ", w.first, w.second);
       out += buf;
@@ -725,7 +914,7 @@ inline StrafeCmd strafeKeep(
         p.min_us, p.max_us);
     // window LEFT of the line -> slide left -> lateral stick NEGATIVE (+ = starboard)
     const double pd_lat = -axisLaw(in.lat_err_m, in.lat_rate, p.kp_lat, p.kd_lat,
-        p.deadband_lat_m, p.min_us, p.max_us);
+        p.deadband_lat_m, p.lat_min_us >= 0.0 ? p.lat_min_us : p.min_us, p.max_us, p.coast_lat_s);
     c.correcting = yawing || pd_fwd != 0.0 || pd_lat != 0.0;
     const double h = std::max(0.0, dt);
     auto still = [&p](double r) {return !std::isfinite(r) || std::fabs(r) < p.i_rate_mps;};

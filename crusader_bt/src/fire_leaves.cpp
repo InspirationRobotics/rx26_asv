@@ -567,6 +567,8 @@ public:
     bool publish = false;
     double heading_now = fire::kNaN;
     std::string block, tuned;
+    bool est_on = false;
+    double est_p = fire::kNaN, est_v = fire::kNaN, est_age = fire::kNaN, cam_y = fire::kNaN;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       const double now = ctx_->now_s;
@@ -589,6 +591,7 @@ public:
       if (fresh) {
         si.lat_err_m = wy - noz_y - bias;
         si.lat_rate = ctx_->fire_win_y[widx].slope(now, rate_s);
+        cam_y = si.lat_err_m;               // the raw camera value, for the log
       }
       if (ctx_->face_heading.age(now) <= face_to) {
         ctx_->face_target = ctx_->face_heading.median(now, 2.0);
@@ -597,6 +600,47 @@ public:
         si.yaw_err_deg = fire::wrap180(ctx_->face_target - heading_now);
       }
       si.yaw_rate_dps = ctx_->yaw_rate_dps;
+      // THE LATERAL ESTIMATOR (strafe.est_enable). Every new camera sample of
+      // this window, yaw taken out with the heading at ITS capture time, into
+      // the filter; the result projected to now and the current yaw put back.
+      // Replaces the median/slope above; rides through dropouts up to track_s.
+      const fire::StrafeTune & tn = ctx_->strafe_tune;
+      if (tn.estOn()) {
+        fire::LateralEstParams kp;
+        if (tn.est_q >= 0.0) {kp.q = tn.est_q;}
+        if (tn.est_r >= 0.0) {kp.r = std::max(tn.est_r, 1e-3);}
+        const double track = tn.track_s >= 0.0 ? tn.track_s : 1.0;
+        auto & E = ctx_->lat_est;
+        if (ctx_->lat_est_widx != widx) {
+          E.reset();
+          ctx_->lat_est_widx = widx;
+          ctx_->lat_est_seen_t = -1e18;
+        }
+        // the window's distance ahead: slow, so a median is right for it
+        const double xw = ctx_->fire_win_x[widx].median(now, 1.0);
+        const double x_use = std::isfinite(xw) ? xw : 0.0;
+        for (const auto & s : ctx_->fire_win_y[widx].since(ctx_->lat_est_seen_t)) {
+          ctx_->lat_est_seen_t = s.first;
+          const double h = ctx_->heading_hist.at(s.first);
+          // no square reference or heading yet: no yaw to take out
+          const double ye = (std::isfinite(ctx_->face_target) && std::isfinite(h)) ?
+            fire::wrap180(ctx_->face_target - h) : 0.0;
+          E.update(s.first, fire::squareOffset(x_use, s.second, ye), kp);
+        }
+        est_age = E.inited() ? now - E.lastMeasT() : fire::kNaN;
+        if (E.inited() && est_age <= track) {
+          const auto pv = E.at(now);
+          est_p = pv.first;
+          est_v = pv.second;
+          const double ye_now = std::isfinite(si.yaw_err_deg) ? si.yaw_err_deg : 0.0;
+          si.lat_err_m = fire::bodyOffset(x_use, est_p, ye_now) - noz_y - bias;
+          si.lat_rate = est_v;
+        } else {
+          si.lat_err_m = fire::kNaN;              // lost for longer than track_s
+          si.lat_rate = fire::kNaN;
+        }
+        est_on = true;
+      }
       // the camera's distance to the face against the LiDAR's to the edge
       // (no LiDAR range - water in the air - is not a disagreement)
       if (std::isfinite(wx) && std::isfinite(si.range_m) &&
@@ -638,11 +682,18 @@ public:
     }
     if (ctx_->node) {
       const std::string live = tuned.empty() ? "" : " [live: " + tuned + "]";
+      // with the estimator on: what it holds (square-frame offset, rate, age of
+      // the last frame) beside the raw camera value it replaced
+      char est[96] = "";
+      if (est_on) {
+        std::snprintf(est, sizeof(est), " {est p %+.2f v %+.2f age %.2f | cam %+.2f}",
+          est_p, est_v, est_age, cam_y);
+      }
       RCLCPP_INFO_THROTTLE(log(), *ctx_->node->get_clock(), 1000,
         "strafe: range %.2f m, window %+.2f m left, square %+.1f deg | sticks fwd %+.0f "
-        "lat %+.0f yaw %+.0f us (%s)%s%s",
+        "lat %+.0f yaw %+.0f us (%s)%s%s%s",
         si.range_m, si.lat_err_m, si.yaw_err_deg, cmd.sticks.fwd_us, cmd.sticks.lat_us,
-        cmd.sticks.yaw_us, cmd.why.c_str(),
+        cmd.sticks.yaw_us, cmd.why.c_str(), est,
         publish ? "" : " [shadow: publish_setpoints is off]", live.c_str());
     }
     return BT::NodeStatus::SUCCESS;

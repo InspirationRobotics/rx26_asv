@@ -104,7 +104,7 @@ FIRE #100001 (DRY: fire_pump is off) 0.50 s
 - hull steady (roll/pitch rate under 4°/s; no thrust in the last moment)
 
 **Aim offset:** `lateral_bias_m` in the tree XML. **+ aims further LEFT.** The 1.6 m variant has
-−0.10 (10 cm right, by eye on 2026-10-02).
+-0.03 (3 cm right; settled by eye on 2026-10-02 after trying -0.10, +0.10 and 0).
 
 ### Tuning the gains live
 
@@ -144,6 +144,27 @@ That is the tune that held best on 2026-10-02. **Tree defaults:**
 | `strafe.kp_yaw` / `kd_yaw` | µs per deg (/s) | square up |
 | `strafe.window_median_s` | s | median on the camera's window position; lower = quicker, twitchier |
 | `strafe.rate_window_s` | s | fit for the sideways speed the brake acts on (needs ≥4 frames) |
+| `strafe.coast_s` | s | lateral stops pushing when arrival looks under this far away (tree: 1.5; 0 = never coast) |
+| `strafe.lat_min_us` | µs | smallest lateral command that isn't zero (tree: the shared `min_us`) |
+| `strafe.est_enable` | 0/1 | **sideways estimator** (below); 0 = the median/rate fit above |
+| `strafe.est_q` / `est_r` | m²/s³ / m | estimator: how fast the drift may change / camera noise (0.01 / 0.03) |
+| `strafe.track_s` | s | estimator: how long it coasts with no camera frame before it gives up (1.0) |
+
+**The sideways estimator (`strafe.est_enable 1`, off by default).** The camera sees the window in
+the bow's frame, so every degree of yaw wobble at 1.6 m looks like ~3 cm of sideways slide, and
+the brake fights it. The estimator:
+
+- undoes the yaw at each frame's **capture time**, using the compass history, and filters in the
+  square-to-wall frame
+- uses `dock_view`'s frame-in-hand stamp, so the 45–100 ms detection delay is corrected
+- adds the **current** yaw back, so `lat_err` is where the nozzle points now
+- gives the brake a smoothed speed with no yaw-made motion in it
+- rides out camera dropouts up to `track_s`
+
+In the unit test (1.6 m, ±2° yaw wobble at 0.5 Hz, 3 cm camera noise), the fake sideways speed
+fell from 0.22 m/s RMS (bow frame) to 0.02 m/s. **Not yet tried on the water.** A/B it live with
+`est_enable` 0 ↔ 1 under the same gains. The strafe log line shows `{est p v age | cam}`: the
+estimate next to the raw camera value.
 
 **What the 2026-10-02 tuning showed:**
 
