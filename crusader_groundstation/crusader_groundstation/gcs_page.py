@@ -1612,7 +1612,9 @@ function t1Build(){
     + '<div id="t1warn"><b>Leaving this tab stops the UAV heartbeat: the boat aborts a '
     + 'running mission about 15 s later.</b> The panel resends the field only while a '
     + 'browser is polling it. Keep this tab open and in front during a run. The RC SB '
-    + 'switch is the only e-stop; nothing here is one.</div>'
+    + 'switch is the only e-stop; nothing here is one. STOP UAV asks you to confirm: if '
+    + 'it does nothing, your browser is refusing dialogs from a framed page &mdash; use '
+    + '<b>open on its own</b>.</div>'
     + '<div id="t1body"></div>';
   el('t1go').onclick = function(){ t1Load(); };
   el('t1reset').onclick = function(){

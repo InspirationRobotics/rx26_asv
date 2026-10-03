@@ -156,6 +156,12 @@ class Fake:
 
 PANEL_PAGE = b"""<!doctype html><title>fake lake panel</title><body>fake lake panel
 <script>setInterval(function(){fetch('/api/state').catch(function(){})},250)</script>"""
+# The real lake page asks confirm() before STOP UAV and alert()s on errors. /probe is a page that calls
+# confirm() inside the frame and reports the answer and how long it took to /confirm_result, so a
+# browser that silently refuses dialogs from a framed page shows up as an instant false.
+PROBE_PAGE = b"""<!doctype html><title>dialog probe</title><body>dialog probe
+<script>setTimeout(function(){var t=performance.now(),r=confirm('dialog probe: OK?'),ms=Math.round(performance.now()-t);
+fetch('/confirm_result?r='+r+'&ms='+ms)},300)</script>"""
 
 
 def panel_server(port, counter):
@@ -167,6 +173,13 @@ def panel_server(port, counter):
         def do_GET(self):
             if self.path == "/polls":
                 body, ctype = json.dumps({"polls": counter["n"], "t": time.time()}).encode(), "application/json"
+            elif self.path == "/probe":
+                body, ctype = PROBE_PAGE, "text/html"
+            elif self.path.startswith("/confirm_result"):
+                counter["confirm"] = self.path.split("?", 1)[-1]
+                body, ctype = b"{}", "application/json"
+            elif self.path == "/confirmed":
+                body, ctype = json.dumps({"confirm": counter.get("confirm")}).encode(), "application/json"
             elif self.path.startswith("/api/state"):
                 counter["n"] += 1
                 body, ctype = b"{}", "application/json"

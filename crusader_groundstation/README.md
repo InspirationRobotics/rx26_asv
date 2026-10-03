@@ -265,6 +265,9 @@ The lake panel stays its own server; this tab frames `http://<this host>:8095/`,
 is in the URL field (remembered in the browser; type a laptop address to use a laptop-hosted
 panel). It sends no `X-Frame-Options` or CSP (a test reads its code to keep it that way).
 When nothing answers, the tab says how to start it instead of showing a blank frame.
+The lake page asks `confirm()` before STOP UAV; some browsers refuse dialogs from a framed
+cross-origin page (not verified: the bench browser auto-denies every dialog), so the strip says
+what to do if it does nothing - "open on its own".
 
 **The frame exists only while the tab is in front.** The panel's dead-man resends the field
 only while a browser is polling it, and the boat aborts about 15 s after the last field, so a
