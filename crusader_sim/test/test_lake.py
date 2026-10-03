@@ -488,6 +488,14 @@ class PanelCase(unittest.TestCase):
         self.panel.pose_avg.note(self.panel.feed.view())
         time.sleep(0.04)
 
+    def argv_of_next_goal(self):
+        """lake_goal's real command line (the panel is a dry run, so it would otherwise be the stub)."""
+        self.panel.a.dry_run = False
+        try:
+            return self.panel._mission_argv()
+        finally:
+            self.panel.a.dry_run = True
+
     def settle(self, x, y, heading_deg=90.0, n=6, jitter=0.0, fresh=True):
         """The boat sits at (x, y) for n packets 40 ms apart (the real feed sends ~4 a second); `fresh` forgets
         the pose samples of any earlier moment, which the 2 s window would otherwise still hold."""
@@ -788,9 +796,7 @@ class StartAbortTest(PanelCase):
         self.commit_field()
         self.start_state()
         self.panel.act_approach({"x": 8.0, "y": 1.0})
-        self.panel.a.dry_run = False                    # only to see the real command line
-        argv = self.panel._mission_argv()
-        self.panel.a.dry_run = True
+        argv = self.argv_of_next_goal()
         self.assertEqual(argv[1:4], ["-u", "-m", "crusader_sim.lake_goal"])
         self.assertEqual(argv[argv.index("--timeout-s") + 1], "600")
         la, lo = C.enu_to_latlon(8.0, 1.0, K.DATUM)
@@ -1075,13 +1081,6 @@ class PinTest(PanelCase):
 
 class TierTest(PanelCase):
     """START chooses Advanced or Disruptive (default Disruptive); the page says what that means for the checkpoints."""
-
-    def argv_of_next_goal(self):
-        self.panel.a.dry_run = False                    # only to see the real command line
-        try:
-            return self.panel._mission_argv()
-        finally:
-            self.panel.a.dry_run = True
 
     def ready(self):
         self.commit_field()
