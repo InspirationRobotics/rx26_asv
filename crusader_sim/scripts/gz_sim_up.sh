@@ -245,7 +245,7 @@ if [ "$FULL_BUILD" = 1 ] || ! docker exec "$CONTAINER" bash -c \
   # a plain build made is a colcon error on the next build
   echo "  full colcon build (first run, new image or new packages: a few minutes)"
   docker exec "$CONTAINER" bash -lc \
-    "set -o pipefail; cd /root/robotx_ws && source /opt/ros/humble/setup.bash && flock /root/robotx_ws/.colcon.lock colcon build 2>&1 | tail -5" \
+    "set -o pipefail; cd /root/robotx_ws && source /opt/ros/humble/setup.bash && flock /root/robotx_ws/.colcon.lock colcon build --base-paths src 2>&1 | tail -5" \
     | sed 's/^/  /' || die "colcon build failed: not starting the sim on a stale install"
 else
   # every package a sim run exercises, every run: nodes run from install/, and a stale
@@ -254,8 +254,10 @@ else
   # crusader_world_model/_bringup/_common are here since 2026-10-02: a stale target_tracker install crashed on the YAML's colour-vote
   # keys ('no declared posture for params') and the sim ran with no camera tracks at all.
   # Only the packages the checkout has: --packages-select refuses an unknown name.
+  # --base-paths src: colcon crawls /root/robotx_ws otherwise, and a second workspace under it (gcs_ws/src/rx26_asv, made
+  # 2026-10-02 for the ground-station work) is a "duplicate package names" failure; so are venvs/ and yolo_dev/ for the crawl itself.
   docker exec "$CONTAINER" bash -lc \
-    "set -o pipefail; cd /root/robotx_ws && source install/setup.bash && P=''; for p in crusader_msgs crusader_common crusader_bringup crusader_world_model crusader_bt crusader_perception crusader_sim crusader_nav crusader_nav_layers crusader_groundstation; do [ -d src/rx26_asv/\$p ] && P=\"\$P \$p\"; done; flock /root/robotx_ws/.colcon.lock colcon build --packages-select \$P 2>&1 | tail -2" \
+    "set -o pipefail; cd /root/robotx_ws && source install/setup.bash && P=''; for p in crusader_msgs crusader_common crusader_bringup crusader_world_model crusader_bt crusader_perception crusader_sim crusader_nav crusader_nav_layers crusader_groundstation; do [ -d src/rx26_asv/\$p ] && P=\"\$P \$p\"; done; flock /root/robotx_ws/.colcon.lock colcon build --base-paths src --packages-select \$P 2>&1 | tail -2" \
     | sed 's/^/  /' || die "colcon build failed (a crusader_* package did not build): not starting the sim on the previous build"
 fi
 # docker exec does not inherit this shell's environment: TREE, NAV_MODE and SIM_* (SIM_TUNING too) cross explicitly
