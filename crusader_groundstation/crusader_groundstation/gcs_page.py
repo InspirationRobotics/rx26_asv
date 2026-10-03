@@ -79,6 +79,18 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
  .pane{display:none;padding:12px 14px}
  .pane.on{display:block}
  #p-map.on,#p-cam.on,#p-lidar.on{padding:0;height:100%;display:flex}
+ /* The Task 1 pane is the lake panel in a frame, under a strip of its own
+    controls and the warning about leaving. Padding 0 and a column, so the frame
+    takes everything the strip does not. The stale-pose banner is moved to the
+    bottom while it is up: at the top it would sit on the strip. */
+ #p-task1.on{padding:0;height:100%;display:flex;flex-direction:column}
+ #p-task1.on ~ #banner{top:auto;bottom:56px}
+ #t1bar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:6px 10px;
+   background:var(--panel);border-bottom:1px solid var(--line)}
+ #t1warn{padding:5px 10px;font-size:12px;color:var(--warn);
+   border-bottom:1px solid var(--line)}
+ #t1body{flex:1;min-height:0;position:relative;overflow:auto}
+ #t1body iframe{display:block;width:100%;height:100%;border:0;background:var(--bg)}
  /* The controls sit BESIDE the picture, not on another tab. The whole reason
     the camera was four stops under for weeks is that nobody could see what a
     setting did while they were setting it; a knob and its result on two
@@ -161,6 +173,7 @@ try{ if(localStorage.getItem('crsd-theme') === 'day')
   <button class="tab" data-t="cam">Camera</button>
   <button class="tab" data-t="lidar">LiDAR</button>
   <button class="tab" data-t="map">Map</button>
+  <button class="tab" data-t="task1">Task 1</button>
   <button class="tab" data-t="tune">Tuning</button>
   <button class="tab" data-t="rec">Record</button>
   <button class="tab" data-t="logs">Logs</button>
@@ -192,6 +205,7 @@ try{ if(localStorage.getItem('crsd-theme') === 'day')
     </div>
     <div id="maplegend"><div id="navbadge"></div><span id="maplegendtxt"></span></div></div>
   </div>
+  <div class="pane" id="p-task1"></div>
   <div class="pane" id="p-tune"></div>
   <div class="pane" id="p-rec"></div>
   <div class="pane" id="p-logs"></div>
@@ -219,12 +233,13 @@ function ago(s){
   if(s < 3600) return Math.floor(s/60)+'m';
   return Math.floor(s/3600)+'h';
 }
-function toast(msg, bad){
+function toast(msg, bad, ms){
   var t = el('toast');
   t.textContent = msg;
   t.style.borderColor = bad ? 'var(--danger)' : 'var(--line)';
   t.style.display = 'block';
-  clearTimeout(t._h); t._h = setTimeout(function(){ t.style.display='none'; }, 4500);
+  clearTimeout(t._h);
+  t._h = setTimeout(function(){ t.style.display='none'; }, ms || 4500);
 }
 
 /* Every mutating action goes through here so the reply is always surfaced. A
@@ -273,7 +288,7 @@ function setTheme(mode){
 
 function show(t){
   tab = t;
-  ['nodes','tel','cam','lidar','map','tune','rec','logs','radio','sys'].forEach(function(p){
+  ['nodes','tel','cam','lidar','map','task1','tune','rec','logs','radio','sys'].forEach(function(p){
     el('p-'+p).className = 'pane' + (p===t ? ' on' : ''); });
   document.querySelectorAll('#bar button.tab').forEach(function(b){
     b.className = 'tab' + (b.dataset.t===t ? ' on' : ''); });
@@ -283,6 +298,8 @@ function show(t){
      merely hidden. A display:none <img> keeps its connection open. */
   if(t!=='logs') el('p-logs').innerHTML = '';   /* rebuild with fresh nodes */
   if(t!=='radio') el('p-radio').innerHTML = '';  /* same: fresh system list */
+  /* The Task 1 frame exists only while its tab is in front: see task1Leave. */
+  if(t==='task1') task1Enter(); else task1Leave();
   render();
   if(t==='map') resize();
   /* Values are re-read on every entry to the tab. A parameter panel that shows
@@ -1190,15 +1207,22 @@ function tuneRevert(name){
 /* THE one /params/set caller. A profile recall is this with several values in
    it rather than one, which is why there is no /camera/profile/load endpoint:
    the same path, the same per-value refusals, the same log lines per knob. */
-function paramPost(node, values, after){
+function paramPost(node, values, after, done){
   fetch('/params/set', {method:'POST', headers:{'Content-Type':'application/json'},
                         body: JSON.stringify({node: node, values: values})})
     .then(function(r){ return r.json(); })
     .then(function(j){
-      toast(j.message || (j.ok ? 'applied' : 'refused'), !j.ok);
+      var msg = j.message || (j.ok ? 'applied' : 'refused');
+      /* A planner knob is accepted at once and used at the next START. Saying so
+         here, where the operator reads the answer, is what keeps "applied" from
+         being heard as "the boat is doing that now". */
+      if(j.ok && node === PLANNER_NODE && Object.keys(values).some(isPlannerName))
+        msg += ' — planner: applies at the next START';
+      toast(msg, !j.ok);
       /* Re-read rather than assume. A node may accept a set and clamp it, and
          the value worth showing is the one it is now running on. */
       if(after) after();
+      if(done) done(j);
     })
     .catch(function(err){ toast('request failed: ' + err, true); });
 }
@@ -1287,10 +1311,15 @@ function paintTune(){
       + '</div>';
     return;
   }
-  var dyn = tuneRows.filter(function(p){ return p.editable; });
+  /* bt_runner_node's planner knobs get their own group, ABOVE the rest, because
+     they do not behave like the rest: see plannerSection. */
+  var planner = tuneNode === PLANNER_NODE ? tuneRows.filter(isPlannerRow) : [];
+  var dyn = tuneRows.filter(function(p){
+    return p.editable && planner.indexOf(p) < 0; });
   var fixed = tuneRows.filter(function(p){ return !p.editable; });
+  if(planner.length && !plProf.loaded) plannerProfilesLoad();
 
-  b.innerHTML = '<h3>Tunable while running</h3>'
+  b.innerHTML = plannerSection(planner) + '<h3>Tunable while running</h3>'
     + '<div class="hint">Applied to the running node immediately and <b>lost on '
     + 'restart</b>. crusader_params.yaml is the source of truth; a row showing '
     + '<span style="color:var(--warn)">yaml &lt;value&gt;</span> is one to write '
@@ -1310,12 +1339,350 @@ function paintTune(){
   b.querySelectorAll('button[data-revert]').forEach(function(x){
     x.onclick = function(){ tuneRevert(x.dataset.revert); }; });
   /* Enter applies the row you are in. Reaching for the mouse after every number
-     is the difference between sweeping a gate and giving up on it. */
+     is the difference between sweeping a gate and giving up on it. The profile
+     name box has its own Enter (plannerWire), and no tv_ id. */
   b.querySelectorAll('input').forEach(function(x){
-    if(x.type === 'checkbox') return;
+    if(x.type === 'checkbox' || x.id.indexOf('tv_') !== 0) return;
     x.onkeydown = function(ev){
       if(ev.key === 'Enter'){ ev.preventDefault(); tuneApply(x.id.slice(3)); } };
   });
+  plannerWire(b);
+}
+
+/* ---------------- the planner group of the Tuning tab ----------------
+   bt_runner_node's nav_* knobs are the one set of parameters that is both
+   tuned on the water and NOT applied the moment it is set. The node copies them
+   into the planner when a mission goal is ACCEPTED, so a change lands at the
+   next START and never mid-mission. Before that was true they were copied once
+   at startup, and a set here "worked" -- the number on this page changed -- while
+   the planner kept running on the old one. The group says so, in its heading,
+   because the difference between "applied" and "applies next START" is the
+   difference between a result and a wasted lap.
+
+   THE ONE PLACE THIS PAGE NAMES A NODE. Every other row is built from the
+   descriptors and this page is told nothing; the grouping is by node name and
+   prefix because a descriptor has no field for "applies at the next START" and
+   inventing one in the page would be the second copy of a rule. What the page
+   does NOT assume is that the node is new enough: bt_runner_node's descriptors
+   carry PLANNER_MARK once it re-reads at goal accept, and a node without it is
+   an old build on which a set here still changes nothing -- that is shown, in
+   red, rather than left to be found out on the water.
+
+   Profiles are files (planner_profiles.py): ONLY bt_runner_node's nav_* keys are
+   applied, through the ordinary /params/set; the rest is listed as skipped. */
+var PLANNER_NODE = '/bt_runner_node', PLANNER_PREFIX = 'nav_';
+var PLANNER_MARK = 'applies at the next START';
+var plProf = {profiles:[], sources:[], err:'', busy:false, loaded:false};
+var plSel = '', plName = '', plLast = '';
+
+function isPlannerName(name){ return name.indexOf(PLANNER_PREFIX) === 0; }
+function isPlannerRow(p){ return isPlannerName(p.name) && p.editable; }
+function plannerStale(rows){
+  return rows.length > 0 && !rows.some(function(p){
+    return (p.description || '').indexOf(PLANNER_MARK) >= 0; });
+}
+function plannerId(p){ return p.origin + '/' + p.name; }
+function plannerCurrent(){
+  var ok = plProf.profiles.filter(function(p){ return !p.error; });
+  return ok.filter(function(p){ return plannerId(p) === plSel; })[0] || ok[0];
+}
+
+/* One POST of a JSON body, answered with the parsed reply. The planner group makes
+   two such calls and the page already had a dozen spelled out in full; a helper
+   here keeps the next one from being a fourteenth. */
+function postJson(path, body){
+  return fetch(path, {method:'POST', headers:{'Content-Type':'application/json'},
+                      body: JSON.stringify(body || {})})
+    .then(function(r){ return r.json(); });
+}
+/* A hint line. `color` is a CSS value, or none for the default dim text. */
+function hintDiv(html, color){
+  return '<div class="hint"' + (color ? ' style="color:' + color + '"' : '') + '>'
+       + html + '</div>';
+}
+function plural(n, word){ return n + ' ' + word + (n === 1 ? '' : 's'); }
+
+function plannerProfilesTake(j){
+  plProf.busy = false; plProf.loaded = true;
+  plProf.err = j.ok === false ? (j.message || 'no answer') : '';
+  if(j.profiles) plProf.profiles = j.profiles;
+  if(j.sources) plProf.sources = j.sources;
+  paintTune();
+}
+function plannerProfilesLoad(){
+  if(plProf.busy) return;
+  plProf.busy = true;
+  postJson('/planner/profile/list')
+    .then(plannerProfilesTake)
+    .catch(function(err){
+      plannerProfilesTake({ok:false, message:'request failed: ' + err}); });
+}
+
+/* What loading the picked profile would do, shown BEFORE the button is pressed:
+   the keys it applies, and every key it leaves alone with the reason. */
+function plannerPreview(p){
+  if(!p) return '';
+  var keys = Object.keys(p.values);
+  var out = (p.about ? esc(p.about) + '<br>' : '')
+    + 'Applies <b>' + plural(keys.length, 'planner key') + '</b>'
+    + (keys.length ? ': ' + keys.map(esc).join(', ') : '') + '.';
+  if(p.skipped.length)
+    out += '<br><span style="color:var(--warn)">Skips ' + p.skipped.length + ':</span> '
+      + p.skipped.map(function(x){
+          return esc(x.key) + ' <span style="color:var(--muted)">(' + esc(x.why)
+               + ')</span>'; }).join('; ');
+  return hintDiv(out);
+}
+
+function plannerSection(planner){
+  if(!planner.length) return '';
+  var out = '<h3>Planner (applies at the next START)</h3>'
+    + hintDiv('bt_runner_node reads these when a mission goal is accepted. '
+    + 'A change is <b>kept now and used at the next START</b> &mdash; never part-way '
+    + 'through a mission &mdash; and is lost when the node restarts. Nav2\u2019s own '
+    + 'settings (inflation, planner_server) are not here: they are fixed when the rig '
+    + 'launches.');
+  if(plannerStale(planner))
+    out += hintDiv('<b>This bt_runner_node is an old build.</b> It copies these once at '
+      + 'startup, so a set here changes the number below and NOT the planner. Rebuild '
+      + 'crusader_bt and restart it before trusting any of them.', 'var(--bad)');
+
+  /* profiles */
+  var ps = plProf.profiles, cur = plannerCurrent();
+  out += '<div class="row" style="flex-wrap:wrap;gap:6px"><label class="meta">profile</label>';
+  if(ps.length)
+    out += '<select id="plsel" style="max-width:320px">' + ps.map(function(p){
+        return '<option value="' + esc(plannerId(p)) + '"' + (p.error ? ' disabled' : '')
+          + ((cur && plannerId(p) === plannerId(cur)) ? ' selected' : '') + '>'
+          + esc(p.title) + ' (' + esc(p.origin) + ')'
+          + (p.error ? ' \u2014 unreadable' : '') + '</option>'; }).join('') + '</select>'
+      + '<button class="go" id="plload">Load profile</button>';
+  else
+    out += '<span class="meta">' + (plProf.loaded ? 'none found' : 'reading\u2026')
+        + '</span>';
+  out += '<button id="plreload" title="read the profile directories again">&#8635;</button>'
+      + '</div>';
+  if(plProf.err) out += hintDiv(esc(plProf.err), 'var(--bad)');
+  /* A directory that is missing is the answer to "why is the list empty". */
+  plProf.sources.filter(function(x){ return !x.ok; }).forEach(function(x){
+    out += hintDiv(esc(x.origin) + ' profiles: ' + esc(x.reason), 'var(--warn)'); });
+  ps.filter(function(p){ return p.error; }).forEach(function(p){
+    out += hintDiv(esc(plannerId(p)) + ': ' + esc(p.error), 'var(--bad)'); });
+  out += plannerPreview(cur);
+  if(plLast) out += hintDiv(plLast, 'var(--strong)');
+
+  var saved = plProf.sources.filter(function(x){ return x.origin === 'saved'; })[0];
+  var drifted = planner.filter(tuneDrift).length;
+  out += '<div class="row" style="flex-wrap:wrap;gap:6px">'
+    + '<label class="meta">save</label>'
+    + '<input id="plname" maxlength="40" placeholder="name" value="' + esc(plName)
+    + '" style="width:150px">'
+    + '<button id="plsave">Save as profile</button>'
+    + '<span class="meta">the ' + plural(drifted, 'planner key')
+    + ' that differ from the YAML'
+    + (saved ? ' \u2192 ' + esc(saved.dir) + '/&lt;name&gt;.yaml' : '')
+    + ' (<code>LAKE_TUNING=</code> takes that file)</span></div>';
+  return out + planner.map(function(p){ return tuneRow(p, 'tv_'); }).join('');
+}
+
+function plannerLoadProfile(){
+  var p = plannerCurrent();
+  if(!p) return;
+  var keys = Object.keys(p.values);
+  if(!keys.length){ toast('that profile has no planner keys', true); return; }
+  paramPost(PLANNER_NODE, p.values, function(){ tuneLoad(); }, function(j){
+    var res = j.results || [], bad = res.filter(function(r){ return !r.ok; });
+    plLast = 'Loaded <b>' + esc(p.title) + '</b>: ' + (res.length - bad.length) + ' of '
+      + keys.length + ' keys applied (they take effect at the next START).'
+      + bad.slice(0, 3).map(function(r){
+          return ' <span class="stale">' + esc(r.name) + ' refused: ' + esc(r.reason)
+               + '</span>'; }).join('')
+      + (bad.length > 3 ? ' <span class="stale">(+' + (bad.length - 3) + ' more refused)</span>' : '')
+      + (p.skipped.length ? '<br>Skipped ' + p.skipped.length + ' (Nav2 keys need a rig '
+        + 'restart): ' + p.skipped.map(function(x){ return esc(x.key); }).join(', ') : '');
+    paintTune();
+  });
+}
+
+function plannerSaveProfile(){
+  var name = plName.trim();
+  if(!name){ toast('name the profile first', true); return; }
+  if(plProf.profiles.some(function(x){ return x.origin === 'saved' && x.name === name; })
+     && !confirm('Overwrite the saved profile "' + name + '"?')) return;
+  /* Only the NAME goes up: the node reads the live values itself (see
+     gcs_node._planner_profile_save). */
+  postJson('/planner/profile/save', {name: name})
+    .then(function(j){
+      toast(j.message || (j.ok ? 'saved' : 'refused'), !j.ok, j.ok ? 9000 : 0);
+      if(j.ok){ plName = ''; plSel = 'saved/' + name; plLast = ''; }
+      plannerProfilesTake(j);
+    })
+    .catch(function(err){ toast('request failed: ' + err, true); });
+}
+
+function plannerWire(b){
+  var sel = b.querySelector('#plsel');
+  if(sel) sel.onchange = function(){ plSel = this.value; paintTune(); };
+  var load = b.querySelector('#plload');
+  if(load) load.onclick = plannerLoadProfile;
+  var rl = b.querySelector('#plreload');
+  if(rl) rl.onclick = function(){ plProf.loaded = false; plannerProfilesLoad(); };
+  var save = b.querySelector('#plsave'), box = b.querySelector('#plname');
+  if(save) save.onclick = plannerSaveProfile;
+  if(box){
+    box.oninput = function(){ plName = this.value; };
+    box.onkeydown = function(ev){
+      if(ev.key === 'Enter'){ ev.preventDefault(); plannerSaveProfile(); } };
+  }
+}
+
+/* ---------------- tab: Task 1 (the lake panel, in a frame) ----------------
+   The lake panel (crusader_sim task1_panel --lake, :8095 on the Jetson) is where
+   a Task 1 run is driven: the operator plays the UAV, builds the field, answers
+   the boat's checkpoints. It is its own server and stays one; this tab only
+   frames it, so there is one page to open on the day and nothing to keep in step.
+   It sends no X-Frame-Options and no CSP (task1_panel.py's _send), so framing
+   works, and the URL is a field because the panel may later be served from the
+   laptop instead.
+
+   THE FRAME EXISTS ONLY WHILE THIS TAB IS IN FRONT, and that is a safety
+   decision before it is a bandwidth one. The panel's DEAD-MAN counts browser
+   polls: it resends the field every 5 s only while a browser has polled it in the
+   last 3 s, and the boat's own plan-freshness guard aborts the mission about 15 s
+   after the last field. A frame that stayed loaded behind another tab would keep
+   that heartbeat going while the operator cannot see the panel's banners -- the
+   dead-man state, a checkpoint waiting for an answer, the ABORT notice -- and
+   whether it kept polling at all would be up to the browser's throttling of
+   hidden frames, which is not a rule anybody can state. So leaving the tab
+   removes the frame, the heartbeat stops, and the tab says so in advance and
+   again on the way out. Deterministic and said out loud beats convenient and
+   sometimes true. It also means an operator on another tab adds no load to a
+   long WiFi link.
+
+   REACHABLE OR NOT is asked with a HEAD to the panel's root, no-cors: that
+   resolves on ANY answer and rejects only when nothing answered, which is the
+   one thing a cross-origin page can learn about a refused connection (the frame
+   itself fires `load` for the browser's error page too). It is NOT a poll of the
+   panel's state route, so it cannot feed the dead-man. */
+var T1_KEY = 'crsd-task1-url', T1_PORT = 8095, T1_PROBE_MS = 4000;
+var t1Token = 0;
+var T1_START = 'LAKE_DATUM=&lt;lat,lon&gt; bash /root/robotx_ws/src/rx26_asv/'
+             + 'crusader_sim/scripts/lake_rig_up.sh';
+
+function t1Default(){
+  return location.protocol + '//' + location.hostname + ':' + T1_PORT + '/'; }
+function t1Saved(){
+  try{ return localStorage.getItem(T1_KEY) || ''; }catch(e){ return ''; } }
+/* Only a URL that is NOT the default is remembered: the default follows the host
+   this page was opened from, and a stored copy of it would go on pointing at the
+   old host after the Jetson changes address. */
+function t1Store(u){
+  try{
+    if(u && u !== t1Default()) localStorage.setItem(T1_KEY, u);
+    else localStorage.removeItem(T1_KEY);
+  }catch(e){}
+}
+/* http(s) only, normalised; '' for anything else (a javascript: URL typed into a
+   box that becomes a frame's src is not a feature). */
+function t1Valid(u){
+  try{
+    var x = new URL(u);
+    return (x.protocol === 'http:' || x.protocol === 'https:') ? x.href : '';
+  }catch(e){ return ''; }
+}
+
+function t1Probe(u){
+  var ctl = ('AbortController' in window) ? new AbortController() : null;
+  var timer = setTimeout(function(){ if(ctl) ctl.abort(); }, T1_PROBE_MS);
+  return fetch(u, {method:'HEAD', mode:'no-cors', cache:'no-store',
+                   signal: ctl ? ctl.signal : undefined})
+    .then(function(){ clearTimeout(timer); return true; })
+    .catch(function(){ clearTimeout(timer); return false; });
+}
+
+function t1Build(){
+  if(el('t1body')) return;
+  el('p-task1').innerHTML =
+      '<div id="t1bar"><label class="meta">panel</label>'
+    + '<input id="t1url" spellcheck="false" style="flex:1;min-width:220px;max-width:460px">'
+    + '<button id="t1go">Load</button>'
+    + '<button id="t1reset" title="back to this host, port ' + T1_PORT + '">default</button>'
+    + '<a id="t1open" class="meta" target="_blank" rel="noopener">open on its own</a>'
+    + '<span class="meta" id="t1st" style="margin-left:auto"></span></div>'
+    + '<div id="t1warn"><b>Leaving this tab stops the UAV heartbeat: the boat aborts a '
+    + 'running mission about 15 s later.</b> The panel resends the field only while a '
+    + 'browser is polling it. Keep this tab open and in front during a run. The RC SB '
+    + 'switch is the only e-stop; nothing here is one.</div>'
+    + '<div id="t1body"></div>';
+  el('t1go').onclick = function(){ t1Load(); };
+  el('t1reset').onclick = function(){
+    el('t1url').value = t1Default(); t1Store(''); t1Load(); };
+  el('t1url').onkeydown = function(ev){
+    if(ev.key === 'Enter'){ ev.preventDefault(); t1Load(); } };
+}
+
+function t1Status(msg){ var e = el('t1st'); if(e) e.textContent = msg; }
+
+function t1Mount(u){
+  var b = el('t1body'), f = document.createElement('iframe');
+  /* Built through the DOM, not innerHTML: the URL is whatever was typed. */
+  f.id = 't1frame';
+  f.src = u;
+  b.innerHTML = '';
+  b.appendChild(f);
+  t1Status('framing ' + u);
+}
+
+function t1Unreachable(u){
+  el('t1body').innerHTML = viewerPanel(
+    'The Task 1 panel did not answer',
+    'Nothing is listening at <b>' + esc(u) + '</b>. The panel is not part of core: it '
+      + 'runs inside the <b>asv</b> container and is started by hand. On the Jetson host '
+      + 'run <code>docker exec -it asv bash</code>, then in asv:'
+      + '<pre style="text-align:left">' + T1_START + '</pre>'
+      + 'Use the same <b>LAKE_DATUM</b> every time you restart it. A panel on another '
+      + 'machine: type its address above.',
+    '<button class="go" id="t1retry">Retry</button> '
+      + '<button id="t1force" title="frame it anyway: the probe can be wrong from '
+      + 'a laptop-hosted panel">Load anyway</button>');
+  el('t1retry').onclick = function(){ t1Load(); };
+  el('t1force').onclick = function(){ t1Load(true); };
+  t1Status('no answer from ' + u);
+}
+
+function t1Load(force){
+  var box = el('t1url'), u = t1Valid(box.value.trim());
+  if(!u){ toast('not an http(s) address', true); return; }
+  box.value = u;
+  t1Store(u);
+  el('t1open').href = u;
+  var mine = ++t1Token;
+  if(force){ t1Mount(u); return; }
+  t1Status('looking for the panel\u2026');
+  t1Probe(u).then(function(ok){
+    /* Answered after the operator left, or after a newer Load: a frame mounted
+       now would be a heartbeat on a tab nobody is looking at. */
+    if(mine !== t1Token || tab !== 'task1') return;
+    if(ok) t1Mount(u); else t1Unreachable(u);
+  });
+}
+
+function task1Enter(){
+  t1Build();
+  /* Clicking the tab you are already on must not reload a running panel. */
+  if(el('t1body').querySelector('iframe')) return;
+  if(!el('t1url').value) el('t1url').value = t1Saved() || t1Default();
+  t1Load();
+}
+
+function task1Leave(){
+  t1Token++;                                  /* a probe still in flight must not mount */
+  var b = el('t1body');
+  if(!b || !b.querySelector('iframe')) return;
+  b.innerHTML = '';
+  t1Status('');
+  toast('Task 1 panel closed: the UAV heartbeat has stopped. A running mission aborts '
+        + 'about 15 s after its last field. Open the Task 1 tab to resume it.', true, 12000);
 }
 
 /* ---------------- the camera pane ----------------

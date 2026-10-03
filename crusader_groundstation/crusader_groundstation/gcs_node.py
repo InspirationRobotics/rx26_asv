@@ -959,12 +959,16 @@ class GroundStation(Node):
                         f"{name.lstrip('/')}")
         return {"ok": not bad, "message": message, "results": results}
 
-    def _planner_sources(self):
-        """[(origin, directory)] the planner profiles are listed from, ~ expanded."""
-        return [(planner_profiles.SHIPPED,
-                 os.path.expanduser(self.p["planner_profiles_dir"])),
-                (planner_profiles.SAVED,
-                 os.path.expanduser(self.p["planner_profiles_save_dir"]))]
+    def _planner_save_dir(self):
+        return os.path.expanduser(self.p["planner_profiles_save_dir"])
+
+    def _planner_listing(self):
+        """The planner profiles on disk, from both directories, ~ expanded. Every
+        profile endpoint answers with this, so each refreshes the page the same way."""
+        return planner_profiles.listing([
+            (planner_profiles.SHIPPED,
+             os.path.expanduser(self.p["planner_profiles_dir"])),
+            (planner_profiles.SAVED, self._planner_save_dir())])
 
     def _planner_profiles(self):
         """The planner profiles on disk, and why a directory is empty if it is.
@@ -973,8 +977,7 @@ class GroundStation(Node):
         /params/set on bt_runner_node with the keys listed here, so the node's own
         set-callback judges every value and the operator reads one kind of refusal.
         """
-        return {"ok": True, "message": "",
-                **planner_profiles.listing(self._planner_sources())}
+        return {"ok": True, "message": "", **self._planner_listing()}
 
     def _planner_profile_save(self, payload):
         """Save bt_runner_node's LIVE drifted planner keys under a name.
@@ -995,13 +998,11 @@ class GroundStation(Node):
         if not values:
             return {"ok": False, "message": note or "no planner key differs from "
                     "crusader_params.yaml - nothing to save"}
-        save_dir = self._planner_sources()[1][1]
         ok, message, _path = planner_profiles.save(
-            save_dir, payload.get("name"), values)
+            self._planner_save_dir(), payload.get("name"), values)
         if ok:
             self.get_logger().info(f"planner profile {payload.get('name')!r}: {message}")
-        return {"ok": ok, "message": message,
-                **planner_profiles.listing(self._planner_sources())}
+        return {"ok": ok, "message": message, **self._planner_listing()}
 
     def _camera_profiles(self):
         """The stored profiles, plus which parameters count as camera controls.

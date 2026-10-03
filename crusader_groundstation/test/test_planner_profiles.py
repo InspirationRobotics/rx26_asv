@@ -12,6 +12,11 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+try:
+    import yaml  # noqa: F401
+except ImportError:
+    raise unittest.SkipTest("PyYAML not installed (it is in asv, crsd-sim and WSL)")
+
 from crusader_groundstation import planner_profiles as pp  # noqa: E402
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))

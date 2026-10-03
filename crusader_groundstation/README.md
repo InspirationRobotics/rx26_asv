@@ -16,7 +16,8 @@ header and is not in `core.launch.py`.
 | Camera | whether `buoy_detector`/`oak_view` is up on :8080, **and the OAK-D's live settings beside the picture** | **show/stop the stream** (off by default), start whichever is missing, **tune any camera control, apply/save/delete a named profile** |
 | LiDAR | whether `lidar_view` is up on :8081 | **show/stop the stream**, start it |
 | Map | vessel, wake, `crsd/world_targets`, and optionally raw clusters and the PRX1 sectors | pan, zoom, follow, **bow-up**, **layer toggles**, clear trail |
-| Tuning | any running node's parameters, with its own descriptions and ranges | set a dynamic value live; revert one to the YAML |
+| Task 1 | the lake panel (`task1_panel --lake`, :8095) in a frame, with a URL field | drive a Task 1 run from the same page. **Leaving the tab removes the frame, which stops the UAV heartbeat: the boat aborts a running mission about 15 s later** |
+| Tuning | any running node's parameters, with its own descriptions and ranges | set a dynamic value live; revert one to the YAML; on `bt_runner_node`, the **Planner** group (applies at the next START) with **Load profile** / **Save as profile** |
 | Record | sessions on disk, sizes, live capture state, **live bag growth rate** | tick topics, **set camera and LiDAR fps for the session**, start/stop a session **with a rosbag**, download a `.tar.gz`, delete |
 | Logs | every node's `/rosout` output, filterable by level and node | clear the buffer |
 | Radio | every frame `rxl_link_node` put on the RFD900 mesh or heard on it, when each system was last heard, and an **estimate** of how fast the aircraft's periodic message is arriving — scored for BOTH formats, so a quiet link is distinguishable from one talking in the other one | filter; **send a test frame** (TUNNEL `0x80FE`, acted on by nobody); clear |
@@ -232,6 +233,50 @@ value changed from a browser and nowhere else is still findable afterwards.
 Costs nothing when unopened: values are fetched by `POST /params/list` on demand, never in
 `/state`, so the poll budget below is unchanged, and the service clients are created on
 first use.
+
+### The planner group and profiles (`bt_runner_node`)
+
+`bt_runner_node`'s `nav_*` planner knobs are the one set tuned on the water that is **not**
+applied the moment it is set: the node copies them into the planner when a mission goal is
+**accepted**, so a change made here is kept at once and used at the **next START**, never
+part-way through a mission. (Before this change they were copied once at startup: a set
+here changed the number on this page and nothing about the boat.) The group says so in its
+heading. A `bt_runner_node` that predates that fix is detected from its descriptors and
+shown with a red warning, because on it a set here still does nothing. The nav_* keys that
+are wired once (rates, frames, topics, `nav_mode`) are read-only on the node and listed
+under "Fixed at startup".
+
+**Load profile** lists `*.yaml` from two directories: the shipped one
+(`planner_profiles_dir`, default `/root/robotx_ws/src/rx26_asv/crusader_sim/config/tuning_profiles`)
+and the one **Save as profile** writes to (`planner_profiles_save_dir`, default
+`~/.cache/crusader_lake/tuning`). A directory that is absent is an empty list **with the
+reason**, not a silent empty. The picker shows what a load will do before you press it. Loading
+applies **only** `bt_runner_node`'s `nav_*` numbers, through the ordinary `/params/set`, so the
+node's own set-callback judges every value; everything else in the file (Nav2's
+`planner_server` / `global_costmap`, which are fixed when the rig launches, and any other
+bt_runner key) is listed as **skipped** with the reason. **Save as profile** reads the
+node's live values itself (the page sends only a name) and writes the `nav_*` keys that differ
+from `crusader_params.yaml` in the same format as the shipped files, so `LAKE_TUNING=<file>`
+takes it unchanged. Code: `planner_profiles.py` (pure; `test/test_planner_profiles.py`).
+
+### The Task 1 tab
+
+The lake panel stays its own server; this tab frames `http://<this host>:8095/`, or whatever
+is in the URL field (remembered in the browser; type a laptop address to use a laptop-hosted
+panel). It sends no `X-Frame-Options` or CSP (a test reads its code to keep it that way).
+When nothing answers, the tab says how to start it instead of showing a blank frame.
+
+**The frame exists only while the tab is in front.** The panel's dead-man resends the field
+only while a browser is polling it, and the boat aborts about 15 s after the last field, so a
+frame left loaded behind another tab would keep the heartbeat alive while nobody can see the
+panel's banners (dead-man state, a checkpoint waiting, the ABORT notice) - and whether a hidden
+frame keeps polling is up to the browser's throttling. Leaving the tab therefore stops the heartbeat,
+says so on the way out, and costs a long WiFi link nothing. It is a safety rule, not a
+convenience: do not "fix" it by keeping the frame mounted.
+
+`test/fake_gcs.py` serves the real page against invented state (and a stand-in lake panel with
+a poll counter) for browser checks by DOM reads; `test/test_gcs_page.py` covers the markup and the
+couplings.
 
 ## Why this is its own package
 
