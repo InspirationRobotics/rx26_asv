@@ -1861,6 +1861,9 @@ def main():
     ap.add_argument("--datum", default=os.environ.get("LAKE_DATUM", ""),
                     help="lake mode: the map origin 'lat,lon' = the nav datum = panel_feed's origin "
                          "(default: $LAKE_DATUM)")
+    ap.add_argument("--rig-file", default="",
+                    help="lake mode: rig.json, what lake_rig_up.sh chose (tree, nav_mode and why, POOL, tuning keys); "
+                         "the page shows it. Absent or unreadable = the page says nothing about the rig")
     ap.add_argument("--bind", default="0.0.0.0", help="the HTTP server's address")
     ap.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--dry-run-mission-s", type=float, default=20.0, help=argparse.SUPPRESS)
