@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -468,6 +469,64 @@ class RigScriptTest(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             with open(path, "rb") as f:
                 self.assertNotIn(b"\r", f.read(), path)
+
+
+@unittest.skipUnless(BASH, "needs bash")
+class RigDownTest(unittest.TestCase):
+    """lake_rig_down.sh stops what the rig recorded, and only that, and does not wait on corpses."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="lake_down_")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.procs = []
+        self.addCleanup(self.reap)
+
+    def reap(self):
+        for p in self.procs:
+            if p.poll() is None:
+                p.kill()
+            p.wait()
+
+    def spawn(self, argv, **kw):
+        p = subprocess.Popen(argv, **kw)
+        self.procs.append(p)
+        return p
+
+    def run_down(self, recorded):
+        write_text(os.path.join(self.tmp, "pids"), "".join("%s %d\n" % (n, p.pid) for n, p in recorded))
+        t0 = time.time()
+        r = subprocess.run([BASH, DOWN], env=dict(os.environ, LAKE_LOGDIR=self.tmp), capture_output=True, text=True, timeout=30)
+        return r, time.time() - t0
+
+    def test_a_live_group_gets_sigint_and_a_zombie_leader_is_already_gone_without_the_8_second_wait(self):
+        live = self.spawn(["bash", "-c", "trap 'exit 0' INT; sleep 60 & wait"], start_new_session=True)
+        corpse = self.spawn(["true"], start_new_session=True)     # exits at once; we do not reap it: a zombie, as in the container
+        time.sleep(0.5)
+        r, took = self.run_down([("live", live), ("corpse", corpse)])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("live (%d): SIGINT" % live.pid, r.stdout)
+        self.assertIn("corpse (%d): already gone" % corpse.pid, r.stdout)
+        self.assertNotIn("SIGTERM", r.stdout)
+        self.assertNotIn("SIGKILL", r.stdout)
+        self.assertLess(took, 6.0, "a corpse must not cost the 8 s escalation")
+        self.assertEqual(live.wait(timeout=5), 0)
+        self.assertEqual(read_text(os.path.join(self.tmp, "pids")), "")
+
+    def test_a_process_that_ignores_sigint_is_escalated_to_term_then_kill(self):
+        stubborn = self.spawn(["bash", "-c", "trap '' INT TERM; while true; do sleep 1; done"], start_new_session=True)
+        time.sleep(0.5)
+        r, took = self.run_down([("stubborn", stubborn)])
+        self.assertIn("SIGINT", r.stdout)
+        self.assertIn("SIGTERM", r.stdout)
+        self.assertIn("SIGKILL", r.stdout)
+        self.assertLess(took, 15.0)
+        self.assertLess(stubborn.wait(timeout=5), 0)               # killed by a signal
+
+    def test_a_recycled_pid_that_is_not_a_group_leader_of_ours_is_left_alone(self):
+        other = self.spawn(["sleep", "30"])                         # same process group as this test: not a leader
+        r, _ = self.run_down([("old", other)])
+        self.assertIn("pid reused by something else", r.stdout)
+        self.assertIsNone(other.poll(), "an unrelated process must never be stopped")
 
 
 class PoolTrackerContractTest(unittest.TestCase):
