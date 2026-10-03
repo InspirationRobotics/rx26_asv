@@ -1,0 +1,512 @@
+<title>Crusader Test Weekend</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+/* Layout: a field checklist. One reading column, a sticky section bar, steps as rows with a context tag (where the command runs). */
+:root{
+  --bg:#f2f4f6; --surface:#ffffff; --ink:#15212c; --muted:#5a6774; --line:#d6dce2;
+  --accent:#1d5d9b; --accent-ink:#ffffff; --code-bg:#e9edf1;
+  --ok:#1e7a45; --ok-bg:#e2f2e8; --warn:#8a5a00; --warn-bg:#fbf0d6; --bad:#b03a2e; --bad-bg:#f8e3e0;
+  --info-bg:#e3edf7; --idle-bg:#e8ebee;
+  --port:#c0392b; --stbd:#1e8449;
+  --display:"IBM Plex Sans Condensed","Arial Narrow",Arial,sans-serif;
+  --body:"IBM Plex Sans",-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Consolas,"Courier New",monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0f161d; --surface:#16202a; --ink:#e3e9ef; --muted:#9aa8b5; --line:#2a3846;
+  --accent:#6aa7e3; --accent-ink:#0b1219; --code-bg:#1c2834;
+  --ok:#6cc792; --ok-bg:#183326; --warn:#e2b55a; --warn-bg:#3a2e13; --bad:#ef8a7e; --bad-bg:#3d1f1b;
+  --info-bg:#1a2b3c; --idle-bg:#222d38; --port:#ef7f72; --stbd:#62c48a; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0f161d; --surface:#16202a; --ink:#e3e9ef; --muted:#9aa8b5; --line:#2a3846;
+  --accent:#6aa7e3; --accent-ink:#0b1219; --code-bg:#1c2834;
+  --ok:#6cc792; --ok-bg:#183326; --warn:#e2b55a; --warn-bg:#3a2e13; --bad:#ef8a7e; --bad-bg:#3d1f1b;
+  --info-bg:#1a2b3c; --idle-bg:#222d38; --port:#ef7f72; --stbd:#62c48a; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:15px/1.55 var(--body);padding-inline:16px;padding-block:0 48px}
+.wrap{max-width:860px;margin:0 auto}
+h1,h2,h3{font-family:var(--display);text-wrap:balance;line-height:1.15;margin:0}
+h1{font-size:2rem;font-weight:700;letter-spacing:.005em}
+h2{font-size:1.45rem;font-weight:600}
+h3{font-size:1.08rem;font-weight:600}
+p{margin:0}
+code,.mono{font-family:var(--mono);font-size:.86em}
+a{color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+header.top{padding-block:28px 18px;display:grid;gap:12px}
+.eyebrow{font:600 .74rem/1 var(--display);letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.lede{color:var(--muted);max-width:65ch}
+.safety{display:flex;gap:10px;align-items:flex-start;background:var(--bad-bg);color:var(--ink);border:1px solid var(--bad);border-radius:6px;padding:10px 12px}
+.safety b{color:var(--bad)}
+.meter{display:flex;flex-wrap:wrap;gap:8px 18px;font-variant-numeric:tabular-nums;color:var(--muted);font-size:.9rem}
+.meter strong{color:var(--ink)}
+.banner{border:1px dashed var(--line);border-radius:6px;padding:8px 12px;color:var(--muted);font-size:.88rem}
+
+nav.bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);border-bottom:1px solid var(--line);margin-inline:-16px;padding:8px 16px;overflow-x:auto;white-space:nowrap}
+nav.bar a{display:inline-block;padding:5px 10px;border-radius:4px;color:var(--ink);text-decoration:none;font:600 .9rem var(--display);letter-spacing:.02em}
+nav.bar a:hover{background:var(--idle-bg)}
+
+section{padding-block:28px 6px;display:grid;gap:14px;scroll-margin-top:52px}
+.sec-head{display:grid;gap:6px}
+.sec-head p{color:var(--muted);max-width:65ch}
+
+.status{width:100%;border-collapse:collapse;font-size:.92rem}
+.tablebox{overflow-x:auto;border:1px solid var(--line);border-radius:6px;background:var(--surface)}
+.status th,.status td{text-align:left;vertical-align:top;padding:9px 10px;border-bottom:1px solid var(--line)}
+.status tr:last-child td{border-bottom:0}
+.status th{font:600 .74rem var(--display);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.status td:first-child{min-width:11rem;font-weight:500}
+.pill{display:inline-block;font:600 .72rem/1 var(--display);letter-spacing:.06em;text-transform:uppercase;padding:4px 7px;border-radius:3px;white-space:nowrap}
+.p-ready{background:var(--ok-bg);color:var(--ok)}
+.p-boat{background:var(--info-bg);color:var(--accent)}
+.p-you{background:var(--warn-bg);color:var(--warn)}
+.p-later{background:var(--idle-bg);color:var(--muted)}
+.p-risk{background:var(--bad-bg);color:var(--bad)}
+
+.block{background:var(--surface);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.block>header{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:baseline;justify-content:space-between;padding:12px 14px;border-bottom:1px solid var(--line)}
+.block>header .when{color:var(--muted);font-size:.85rem;font-variant-numeric:tabular-nums}
+.block .why{padding:10px 14px 0;color:var(--muted);font-size:.9rem;max-width:70ch}
+ol.steps{list-style:none;margin:0;padding:4px 0}
+.step{display:grid;grid-template-columns:28px 1fr;gap:4px 10px;padding:10px 14px;border-top:1px solid var(--line)}
+.step:first-child{border-top:0}
+.step.safety-step{box-shadow:inset 3px 0 0 var(--warn)}
+.step input[type=checkbox]{width:18px;height:18px;margin:3px 0 0;accent-color:var(--accent)}
+.step .body{min-width:0;display:grid;gap:6px}
+.step .line{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline}
+.step.done .txt{color:var(--muted)}
+.ctx{font:500 .72rem/1 var(--mono);padding:3px 6px;border-radius:3px;background:var(--idle-bg);color:var(--ink);white-space:nowrap}
+.pass{font-size:.88rem;color:var(--muted)}
+.pass b{color:var(--ink);font-weight:600}
+.who{font-size:.78rem;color:var(--muted);font-variant-numeric:tabular-nums}
+.cmd{position:relative;background:var(--code-bg);border-radius:5px;overflow-x:auto}
+.cmd pre{margin:0;padding:8px 64px 8px 10px;font:13px/1.45 var(--mono);white-space:pre}
+.cmd .tag{position:absolute;left:10px;top:-9px;font:500 .66rem var(--mono);color:var(--muted)}
+.copy{position:absolute;right:6px;top:6px;font:600 .72rem var(--display);letter-spacing:.04em;border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:4px;padding:3px 7px;cursor:pointer}
+.red{color:var(--port);font-weight:600}.green{color:var(--stbd);font-weight:600}
+
+.runs{display:grid;gap:12px}
+.run{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:12px 14px;display:grid;gap:8px}
+.run .hd{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:baseline}
+.run .id{font:700 1.05rem var(--display);font-variant-numeric:tabular-nums}
+.run .cfg{font:500 .78rem var(--mono);color:var(--muted)}
+.res{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.res button{font:600 .8rem var(--display);letter-spacing:.04em;border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:4px;padding:5px 12px;cursor:pointer}
+.res button[aria-pressed=true][data-r=pass]{background:var(--ok-bg);color:var(--ok);border-color:var(--ok)}
+.res button[aria-pressed=true][data-r=fail]{background:var(--bad-bg);color:var(--bad);border-color:var(--bad)}
+.res button[aria-pressed=true][data-r=skip]{background:var(--idle-bg);color:var(--muted);border-color:var(--muted)}
+input[type=text],textarea{font:14px var(--body);color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:4px;padding:6px 8px;width:100%}
+textarea{min-height:2.4em;resize:vertical}
+
+.values{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr));gap:10px}
+.val{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:10px 12px;display:grid;gap:5px}
+.val label{font:600 .8rem var(--display);letter-spacing:.03em}
+.val .hint{font-size:.78rem;color:var(--muted)}
+.val .age{font-size:.76rem;color:var(--muted);font-variant-numeric:tabular-nums}
+
+ul.plain{margin:0;padding-left:1.1rem;display:grid;gap:8px;max-width:72ch}
+.note{font-size:.88rem;color:var(--muted)}
+footer{padding-block:30px 0;color:var(--muted);font-size:.85rem}
+@media (max-width:520px){h1{font-size:1.6rem}.step{grid-template-columns:24px 1fr}}
+@media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+</style>
+
+<div class="wrap">
+<header class="top">
+  <span class="eyebrow">Crusader USV · Team Inspiration · RobotX 2026</span>
+  <h1>Test weekend, Sat 3 – Sun 4 October</h1>
+  <p class="lede">Saturday gets the boat ready: latest code and vision engines on the Jetson, sensors and radio checked, then a camera-only Task&nbsp;1 in the pool. Sunday is the lake: you play Ekko from the operator GUI and the boat runs the same whole-field planner you ran in the sim.</p>
+  <div class="safety" role="note"><span><b>The RC SB switch is the only e-stop.</b> It cuts the relay in every mode. Nothing on the laptop or in the GUI is a stop, and ABORT does not stop the boat: the pilot takes over with the RC.</span></div>
+  <div class="meter" id="meter"><span>Saturday <strong id="m-sat">0/0</strong></span><span>Sunday <strong id="m-sun">0/0</strong></span><span>Runs logged <strong id="m-runs">0/0</strong></span></div>
+  <p class="banner" id="dbstate">Connecting to the shared checklist…</p>
+</header>
+
+<nav class="bar" aria-label="Sections">
+  <a href="#status">Status</a><a href="#saturday">Saturday</a><a href="#pool">Pool</a><a href="#sunday">Sunday</a><a href="#runs">Run log</a><a href="#values">Readings</a><a href="#decisions">Decisions</a>
+</nav>
+
+<section id="status">
+  <div class="sec-head"><h2>Your list, item by item</h2>
+  <p>What got done on the PC tonight (Fri 2 Oct), and where the rest happens. Everything is committed on branch <code>sim/gazebo</code> and pushed to GitHub (<code>InspirationRobotics/rx26_asv</code>) on Sat 3 Oct. It is not merged into <code>main</code>.</p></div>
+  <div class="tablebox"><table class="status" id="statusTable"><thead><tr><th>Item</th><th>State</th><th>What it means</th></tr></thead><tbody></tbody></table></div>
+  <p class="note">Context tags on every step say where it runs: <span class="ctx">laptop</span> Windows PowerShell 5.1 · <span class="ctx">jetson</span> Jetson host over SSH · <span class="ctx">asv</span> inside the Jetson's <code>asv</code> container (<code>docker exec -it asv bash</code>) · <span class="ctx">qgc</span> QGroundControl · <span class="ctx">gcs</span> the operator GUI at <code>:8090</code> · <span class="ctx">yard</span> <span class="ctx">pool</span> <span class="ctx">lake</span> physical work.</p>
+</section>
+
+<section id="saturday">
+  <div class="sec-head"><h2>Saturday 3 Oct · get the boat ready</h2>
+  <p>Order matters: code and engines first, then sensors and radio on the stand, then the yard, then water. Ticks are shared with everyone who opens this page.</p></div>
+  <div id="sat"></div>
+</section>
+
+<section id="pool">
+  <div class="sec-head"><h2>Saturday afternoon · pool</h2>
+  <p>Small pool, so the boat uses the camera only: no Nav2, no LiDAR in the plan, small orbits. The pool layout is still a blank: send Claude the satellite image and this block gets distances.</p></div>
+  <div id="poolBlocks"></div>
+</section>
+
+<section id="sunday">
+  <div class="sec-head"><h2>Sunday 4 Oct · the lake, sim to real</h2>
+  <p>No drone today. You drive the boat to each buoy to capture the field, then act as the UAV: send the buoy positions and colours, answer checkpoints, recolour for Disruptive.</p></div>
+  <div id="sun"></div>
+</section>
+
+<section id="runs">
+  <div class="sec-head"><h2>Run log</h2>
+  <p>In order. Do not start the next run until the previous one is clean. Record the result and a one-line note; the bag and <code>~/.cache/crusader_lake/</code> logs carry the rest.</p></div>
+  <div class="runs" id="runList"></div>
+</section>
+
+<section id="values">
+  <div class="sec-head"><h2>Readings to take</h2>
+  <p>Type what you measure. A field left empty stays empty: a blank is a fact, a remembered number is a guess. Each reading shows who entered it and how long ago.</p></div>
+  <div class="values" id="valueList"></div>
+</section>
+
+<section id="decisions">
+  <div class="sec-head"><h2>Decisions for the team</h2>
+  <p>Things tonight's work found that need a person to decide. None of them was changed on the boat.</p></div>
+  <ul class="plain" id="decisionList"></ul>
+</section>
+
+<footer>Source: <code>Boat/rx26_asv</code> branch <code>sim/gazebo</code>; lake operator guide <code>crusader_sim/LAKE_MODE.md</code>; handbook 3.3.2 (ENTRY clockwise, EXIT counter-clockwise) and 5.3.1 (kill switch, visual feedback). Written Fri 2 Oct 2026, night.</footer>
+</div>
+
+<script>
+(function(){
+"use strict";
+var BUNDLE = "C:\\Users\\Chaser\\crusader-20261003.bundle";
+var RUNS_DIR = "C:\\Users\\Chaser\\Documents\\dev\\RobotX_2026\\Boat\\crusader_vision\\runs";
+var J = "crusader@192.168.100.109";
+var SRC = "/root/robotx_ws/src/rx26_asv";
+
+/* ---------- content ---------- */
+var STATUS = [
+  ["Vision model as .engine", "boat", "Script ready: <code>tools/scripts/export_engines.py</code> checks class order against the YAML, exports, smoke-tests and keeps the old engines. Verified on the laptop with the real .pt files. A .engine must be built on the Jetson itself, so the build is step <a href='#s-eng'>S2.5</a>."],
+  ["Latest code on the boat", "boat", "Tonight's work is on <code>sim/gazebo</code> (code as of <code>2997b02</code>; later commits on the branch are documents only). Deploy is a git bundle into a new branch, steps S2.1–S2.4, or a fetch from GitHub if the Jetson has internet."],
+  ["Rocket Prism AC ↔ Bullet AC", "you", "Nothing in the repo records the radios' IPs, SSID or frequency. Block S4 records them, then measures ping, throughput and range."],
+  ["Pool test, camera only", "boat", "<code>POOL=1</code> on the lake rig: the tracker runs camera-only, there is no Nav2 and no LiDAR in the plan, and the tight-field profile is on (3 m orbits). Rehearsed in Gazebo on a 3–5 m field: PASS in 162 s. The pool layout stays blank until you send the satellite image."],
+  ["Basic waypoint nav by hand", "you", "Pool block P2: GUIDED clicks, then a 4-point AUTO square in QGC."],
+  ["All sensors reading correctly", "you", "Block S3, using the GUI's Telemetry, LiDAR and Camera tabs."],
+  ["Look-ahead vs WP_RADIUS stall check", "ready", "Analysed (ArduRover 4.6.3 source + our follower). With the boat's last known <code>WP_RADIUS</code> 0.5 it will not stall. At 2.0 (the baseline file and the sim) it can stall at the end of a stopping leg. Confirm the live value in S2.6."],
+  ["Operator GUI: Task 1 tab", "boat", "Built and tested on the PC. The GUI at <code>:8090</code> has a <b>Task 1</b> tab that shows the lake panel: capture buoys by driving, send positions and colours as the UAV, recolour for Disruptive, answer checkpoints. <b>Leaving the tab during a run stops the UAV heartbeat and the boat aborts about 15 s later.</b> That is deliberate: a hidden panel would hide the dead-man and the checkpoint prompts. To watch other tabs during a run, use the tab's <i>open on its own</i> link and keep the panel in its own window."],
+  ["Planner tuning in the Tuning page", "boat", "Tuning tab, <code>/bt_runner_node</code>: a <b>Planner (applies at the next START)</b> group, plus Load profile and Save as profile. Before tonight a live change to these knobs did nothing until the node restarted. Now the boat re-reads them each time a goal is accepted, never mid-mission, and logs which ones changed. NaN, infinite and out-of-range values are refused. Note: a bad value in the YAML now stops the node at startup instead of being accepted silently."],
+  ["Sim run against Sunday's GUI", "ready", "Sunday's rig and panel were driven against Gazebo, start to finish, with setpoints on and the whole-field tree: <b>Disruptive</b> PASS (4 checkpoints incl. EXIT, 246 s), <b>Advanced</b> PASS (228 s), <b>recolour</b> at a checkpoint replanned and PASSED (247 s), <b>dead-man</b> aborted 15 s after the page stopped, <b>pool mode</b> PASS (162 s). After merging tonight's GUI and lake branches, one more Disruptive run on the final branch: PASS, 253 s, 6/6 buoys on their side, no contact. 273 offline tests pass."],
+  ["Sim in the GUI / GUI on localhost", "later", "In the sim the same GUI already runs on the laptop: the sim starts the ground station at <code>localhost:8090</code>, and its new Task 1 tab frames the sim's panel at <code>localhost:8095</code>. For the real boat the GUI stays on the Jetson for Sunday. Moving it onto the laptop needs boat-side node changes, so it waits until the S4 range walk shows the link actually needs it. See Decisions."]
+];
+
+var SAT = [
+ {id:"s1", title:"S1 · Laptop, before you leave", when:"≈ 20 min", steps:[
+  {id:"s1-bundle", ctx:["laptop"], t:"Make the code bundle from the committed branch.", code:[
+    ["powershell","cd C:\\Users\\Chaser\\Documents\\dev\\RobotX_2026\\Boat\\rx26_asv"],
+    ["powershell","git bundle create "+BUNDLE+" sim/gazebo"]],
+   pass:"<b>Pass:</b> the file exists; <code>git bundle verify</code> on it says okay."},
+  {id:"s1-models", ctx:["laptop"], t:"Take the models: <code>crusader_det_yolo26n.pt</code> (detector, circle/diamond) and <code>crusader_led_cls.pt</code> (LED colour, blue/green/off/red) from <code>Boat\\crusader_vision\\runs\\</code>, plus the fallback detector <code>det_yolo11n\\weights\\best.pt</code>."},
+  {id:"s1-pool", ctx:["laptop"], t:"Send Claude the pool's satellite image (where the boat launches, the pool's size, where you stand). The pool block below has no distances until then."}
+ ]},
+ {id:"s2", title:"S2 · Deploy on the stand", when:"≈ 1.5 h · stop at 1 pm if stuck", why:"Riskiest part of the day. If the build fails, keep what is running and skip to S3: the GUI and sensors still get checked.", steps:[
+  {id:"s2-state", ctx:["jetson"], t:"Record the starting state before touching anything.", code:[
+    ["jetson bash","cd ~/robotx_ws/src/rx26_asv; { git branch --show-current; git rev-parse HEAD; git status --short; docker ps -a; df -h /; } > ~/state-20261003.txt 2>&1; cat ~/state-20261003.txt"]],
+   pass:"If <code>git status</code> lists changes, <b>stop</b>: commit them to a branch <code>boat-local-20261003</code> first. Never reset them."},
+  {id:"s2-copy", ctx:["laptop"], t:"Copy the bundle and the two models. Use <code>pscp</code>; OpenSSH password login fails on this PC (crusader-net skill).", code:[
+    ["powershell","pscp "+BUNDLE+" "+J+":/home/crusader/"],
+    ["powershell","pscp "+RUNS_DIR+"\\crusader_det_yolo26n.pt "+RUNS_DIR+"\\crusader_led_cls.pt "+J+":/home/crusader/robotx_ws/models/"]]},
+  {id:"s2-fetch", ctx:["jetson"], t:"Fetch into a <b>new</b> branch, check for boat-only commits, switch.", code:[
+    ["jetson bash","cd ~/robotx_ws/src/rx26_asv; git fetch ~/crusader-20261003.bundle sim/gazebo:lake-20261004"],
+    ["jetson bash (with internet, instead of the bundle)","cd ~/robotx_ws/src/rx26_asv; git fetch origin sim/gazebo:lake-20261004"],
+    ["jetson bash","git log --oneline lake-20261004..HEAD | head -20"],
+    ["jetson bash","git switch lake-20261004"]],
+   pass:"Use the bundle fetch or the GitHub fetch, not both. The log command lists commits the boat has and the branch does not. <b>Empty is expected.</b> If not, merge them into <code>lake-20261004</code> before building. A git checkout writes LF endings here, so no CRLF strip is needed for files that came through git."},
+  {id:"s2-build", ctx:["jetson"], t:"Build on the host (it fails inside asv with a misleading message), then restart core.", code:[
+    ["jetson bash","cd ~/robotx_ws/src/rx26_asv; tools/scripts/rebuild.sh"],
+    ["jetson bash","sudo systemctl restart crsd-ros; systemctl status crsd-ros --no-pager | head -5"]],
+   pass:"<b>Pass:</b> <code>check_config</code> PASS inside rebuild.sh, build without errors, <code>crsd-ros</code> active."},
+  {id:"s2-eng", anchor:"s-eng", ctx:["asv"], t:"Vision engines. Check first, then build (several minutes each). Never <code>pip install</code> in asv: protobuf is pinned at 5.29 and the detector stack breaks if it moves.", code:[
+    ["asv bash","python3 "+SRC+"/tools/scripts/export_engines.py --det /root/robotx_ws/models/crusader_det_yolo26n.pt --cls /root/robotx_ws/models/crusader_led_cls.pt --check-only"],
+    ["asv bash","python3 "+SRC+"/tools/scripts/export_engines.py --det /root/robotx_ws/models/crusader_det_yolo26n.pt --cls /root/robotx_ws/models/crusader_led_cls.pt"]],
+   pass:"If the YOLO26 file will not load (ultralytics in asv too old), copy <code>det_yolo11n\\weights\\best.pt</code> over and pass it as <code>--det</code>. Then restart <code>oak_detector</code> from the GUI's Nodes tab. <b>Pass:</b> its log says <code>engines ready</code>. The previous engines stay as <code>*.bak-&lt;time&gt;</code>."},
+  {id:"s2-params", ctx:["qgc"], t:"Pull a fresh parameter file into <code>Boat\\QGC params\\</code> (named 2026-10-03…) and fill in <a href='#values'>Readings</a>: <code>WP_RADIUS</code>, <code>LOIT_RADIUS</code>, <code>GUID_OPTIONS</code>, <code>WP_SPEED</code>, <code>CRUISE_SPEED</code>, <code>CRUISE_THROTTLE</code>.",
+   pass:"<b>Pass:</b> <code>WP_RADIUS ≤ 0.5</code> and <code>GUID_OPTIONS = 0</code>. Why: in GUIDED a setpoint counts as reached once the boat is within WP_RADIUS, and then a boat loiters. The whole-field follower ends a stopping leg only within 0.8 m, so a larger WP_RADIUS can leave the boat parked short of the end with nothing re-sending: a stall until the mission timeout. The last dump (7 Sep) had 0.5. The baseline file and the sim use 2.0."},
+  {id:"s2-rig", ctx:["asv"], t:"Lake rig preflight. It starts nothing and lists what is missing.", code:[
+    ["asv bash","LAKE_DATUM=1.3000000,103.8500000 bash "+SRC+"/crusader_sim/scripts/lake_rig_up.sh --check"]],
+   pass:"<b>Pass:</b> it reports tree <code>task1_global.xml</code> with nav_mode <code>off</code>, says Nav2 is not needed, and lists nothing missing. The datum is a placeholder; <code>--check</code> only parses it. The Nav2 container rebuild in the old plan is no longer needed for Sunday."}
+ ]},
+ {id:"s3", title:"S3 · Sensors, in the GUI", when:"≈ 30 min", why:"Open the operator GUI at <code>http://&lt;jetson&gt;:8090</code>. Every reading goes into the Readings section.", steps:[
+  {id:"s3-gps", ctx:["gcs"], t:"Telemetry tab: GPS fix type is RTK fixed, GPS yaw valid, and the heading matches where the bow points (the compass is disabled by design). HEARTBEAT about 5 Hz.", pass:"No valid GPS yaw = no heading = the boat cannot plan. Check this before blaming the planner."},
+  {id:"s3-lidar", ctx:["gcs"], t:"LiDAR tab: about 10 Hz, about 20k points. Stand off the <b>starboard</b> side: you must appear to starboard (the MID360 is mounted upside down; both y and z are negated)."},
+  {id:"s3-cam", ctx:["gcs"], t:"Camera tab with the new engines: walk a RoboBuoy past the bow at 5, 10 and 15 m. Boxes on the buoy; with its beacon lit, the right colour. Note the range where detections stop."},
+  {id:"s3-rc", ctx:["yard"], safety:true, t:"RC: the SB e-stop shows in RC_CHANNELS (ch7) and actually drops the relay in MANUAL and in GUIDED. Do the G1 bench checks (<code>docs/G1_bench_procedure.md</code>) before any run with setpoints on."},
+  {id:"s3-batt", ctx:["yard"], t:"Battery: measure the pack with a meter and write it next to the reported voltage. The reported number is disputed and nothing protects the pack automatically."},
+  {id:"s3-led", ctx:["yard"], safety:true, t:"LED strip plugged back in and showing RED / YELLOW / GREEN. Handbook 5.3.1 makes it mandatory, and it has been unplugged since 3 Sep."}
+ ]},
+ {id:"s4", title:"S4 · Radio: Rocket Prism AC ↔ Bullet AC", when:"≈ 45 min", why:"The repo has no record of either radio's settings. What you write here decides whether the GUI needs to move to the laptop. The Jetson side of the Bullet is <code>192.168.8.109</code> (wired port <code>enP8p1s0</code>, gateway 192.168.8.1).", steps:[
+  {id:"s4-cfg", ctx:["laptop"], t:"Both radios on the bench, within 5 m. Open each web UI and record: management IP, mode (Rocket = access point, Bullet = station), SSID, frequency and channel width, output power, firmware.", pass:"Watch out: the airMAX factory address 192.168.1.20 sits on the boat's LiDAR subnet (192.168.1.x shares the same cable). Give the radios addresses on 192.168.8.x."},
+  {id:"s4-ping", ctx:["laptop"], t:"Laptop on the Rocket's LAN, 100 pings to the Jetson through the link.", code:[["powershell","ping -n 100 192.168.8.109"]], pass:"<b>Pass:</b> 0 % loss and an average under 10 ms at bench range."},
+  {id:"s4-iperf", ctx:["jetson","laptop"], t:"Throughput. <code>iperf3</code> is not known to be installed on either side. If it is: run the server on the Jetson host, the client on the laptop. If not, time a <code>pscp</code> of the bundle back to the laptop instead.", code:[["jetson bash","iperf3 -s -1"],["powershell","iperf3 -c 192.168.8.109 -t 10"]]},
+  {id:"s4-gui", ctx:["laptop"], t:"Through the radio only (laptop WiFi off): the GUI at <code>http://192.168.8.109:8090</code> loads, and QGC gets telemetry. MAVProxy broadcasts to 192.168.8.255; if QGC stays silent, the laptop's address must be added to <code>GCS_IPS</code>."},
+  {id:"s4-range", ctx:["yard"], t:"Range walk with the Bullet end (or the boat on its cart): 50, 100, 200 m in line of sight. At each: signal (dBm) on both radios, ping loss and average, and whether the GUI's Map tab still updates smoothly."},
+  {id:"s4-loss", ctx:["yard"], t:"Unplug the Rocket for 20 s during the S5 stand test: the GUI reconnects by itself afterwards, and the boat's mission aborts about 15 s after the last field (the dead-man). The RC stays the only stop."}
+ ]},
+ {id:"s5", title:"S5 · Yard, RC in hand, setpoints off", when:"≈ 45 min", steps:[
+  {id:"s5-tab", ctx:["asv","gcs"], t:"Start the rig in stand mode and open the GUI's <b>Task 1</b> tab.", code:[["asv bash","LAKE_DATUM=<lat>,<lon> bash "+SRC+"/crusader_sim/scripts/lake_rig_up.sh"]], pass:"Defaults: the whole-field tree, nav_mode off, setpoints off (stand test). The panel header shows which tree and mode the rig chose and why."},
+  {id:"s5-rehearse", ctx:["gcs","yard"], t:"Stand rehearsal: PIN AT BOAT a few fake buoys (walk the boat, or type lat/lon), COMMIT FIELD, the pilot arms and selects GUIDED, START, ACK the checkpoints, ABORT. Repeat once and close the tab: the mission must abort within about 18 s.", pass:"Keep the Task 1 tab in front. A browser slows a hidden tab, and slow polls look like a lost operator to the dead-man."},
+  {id:"s5-tune", ctx:["gcs"], t:"Tuning tab, <code>/bt_runner_node</code>, <b>Planner</b> group: change <code>nav_orbit_radius_m</code> (e.g. 6 → 4), START, and read <code>~/.cache/crusader_lake/bt.log</code>. Then set it back. Also try Load profile <code>tight_3to5m</code>: it previews which keys it applies and which Nav2 keys it skips.", pass:"<b>Pass:</b> the log shows <code>nav_*: 1 changed since the previous goal: nav_orbit_radius_m 6 -> 4</code>. A red warning in the tab means the running bt_runner is an old build: S2.4 did not take."}
+ ]}
+];
+
+var POOL = [
+ {id:"p1", title:"P1 · Pool setup", when:"≈ 30 min", why:"Distances are blank until the satellite image arrives. Size the field to the pool: gate 3–5 m wide, at least 3 m from ENTRY/EXIT to anything else.", steps:[
+  {id:"p1-gps", ctx:["gcs","pool"], t:"At the pool: RTK fixed and GPS yaw valid. Walls, fences and buildings can spoil RTK, and Task 1 needs it."},
+  {id:"p1-manual", ctx:["pool"], t:"RC in MANUAL: each thruster pushes the right way; translate forward, back, left, right; rotate both ways. Nothing spins on its own."}
+ ]},
+ {id:"p2", title:"P2 · Basic waypoint navigation, by hand", when:"≈ 30 min", steps:[
+  {id:"p2-guided", ctx:["qgc","pool"], t:"GUIDED: click-to-go to three points about 4 m apart.", pass:"<b>Pass:</b> it drives to each and stops within WP_RADIUS; no spin; no stall short of the point."},
+  {id:"p2-auto", ctx:["qgc","pool"], t:"AUTO: a 4-waypoint square sized to the pool.", pass:"<b>Pass:</b> all four reached in order, holds after the last. Perfect in MANUAL but spinning in AUTO means steering inversion: it is fixed in <code>SERVOx_*</code>, never <code>RCx_REVERSED</code>."},
+  {id:"p2-stall", ctx:["qgc","pool"], t:"Stall probe: a GUIDED target 1.5 m away (the follower's look-ahead). After it arrives, push the boat about 1 m with a pole.", pass:"Note whether it comes back. With <code>LOIT_RADIUS</code> 2.0 it will not: after arriving, a boat only corrects once it is pushed outside that radius. That is the drift you would see at a Task 1 checkpoint hold."}
+ ]},
+ {id:"p3", title:"P3 · Task 1, camera only", when:"≈ 1 h", why:"<code>POOL=1</code> forces nav off, starts the tracker with <code>use_lidar:=false</code>, and loads the tight-field profile unless <code>LAKE_TUNING</code> names another file. Capture the field with setpoints off, then restart with <code>PUBLISH=1</code> for the runs.", steps:[
+  {id:"p3-rig", ctx:["asv"], t:"Restart the rig in pool mode.", code:[["asv bash","POOL=1 LAKE_DATUM=<lat>,<lon> bash "+SRC+"/crusader_sim/scripts/lake_rig_up.sh"],["asv bash","POOL=1 PUBLISH=1 LAKE_DATUM=<lat>,<lon> bash "+SRC+"/crusader_sim/scripts/lake_rig_up.sh"]], pass:"<b>Pass:</b> the banner says <code>POOL: camera-only, LiDAR not used for planning</code> and lists the profile keys it read back from the running node. No <code>planner_server</code> runs. Use the same datum for both commands."},
+  {id:"p3-field", ctx:["pool","gcs"], t:"Buoys: ENTRY, one <span class='red'>red</span>–<span class='green'>green</span> gate, EXIT (a black between if there is room). Capture each in the Task 1 tab: click its camera track, or bring the bow alongside and PIN AT BOAT. COMMIT FIELD."},
+  {id:"p3-adv", ctx:["pool","gcs"], t:"Advanced run: setpoints on, the pilot arms and selects GUIDED, START with tier <b>Advanced</b>. Log it as run P-A in the run log."},
+  {id:"p3-dis", ctx:["pool","gcs"], t:"Disruptive run: ACK each checkpoint; on the second run, recolour one buoy at a checkpoint and SEND CHANGES + ACK. Log P-D."},
+  {id:"p3-data", ctx:["asv"], t:"After each run keep <code>~/.cache/crusader_lake/</code> (logs, layouts) and a bag from the GUI's Record tab."}
+ ]},
+ {id:"p4", title:"P4 · Pack for Sunday", when:"evening", steps:[
+  {id:"p4-pack", ctx:["yard"], t:"LED strip in · charged packs · RC · laptop and charger · Rocket Prism AC with mast or tripod, PoE and power · 10 buoys with anchors and lines · tape measure · kayak or safety boat · phone GPS. <b>Unplug the RFD900</b>: on lake day RXL runs on loopback."}
+ ]}
+];
+
+var SUN = [
+ {id:"u1", title:"U1 · Set up", when:"first hour", steps:[
+  {id:"u1-radio", ctx:["lake","laptop"], t:"Rocket on the shore mast aimed at the field; laptop on its LAN; <code>ping -n 20 192.168.8.109</code> clean."},
+  {id:"u1-datum", ctx:["lake"], t:"Pick one datum you can name again (dock corner, pier). Write it in Readings. Use the same <code>LAKE_DATUM</code> every time the rig restarts."},
+  {id:"u1-field", ctx:["lake"], t:"Lay the field: ENTRY, gate 1 (8–10 m wide), two blacks between, gate 2, two blacks, EXIT, about 70 m long. Later variants: swap one red for a green (unpaired: 3 green + 2 red), then a tight 3–5 m version."}
+ ]},
+ {id:"u2", title:"U2 · Capture the field by driving", when:"≈ 45 min", why:"You are the UAV. The positions you pin are what the boat plans around, so take them carefully. The UAV error requirement is under 1 m.", steps:[
+  {id:"u2-rig", ctx:["asv","gcs"], t:"Rig up in stand mode (setpoints off), start <code>oak_detector</code> from the Nodes tab, open the <b>Task 1</b> tab.", code:[["asv bash","LAKE_DATUM=<lat>,<lon> bash "+SRC+"/crusader_sim/scripts/lake_rig_up.sh"]]},
+  {id:"u2-pin", ctx:["lake","gcs"], t:"Drive in MANUAL to each buoy, nose up to it, and press PIN AT BOAT. Set its role and colour. The pin is the boat's position averaged over 2 s, so hold still a moment. It refuses a stale pose, fewer than 4 samples, or more than 1.5 m of movement. Set <i>bow offset</i> to the distance from the boat's reference point to the bow (measured Saturday) and the pin lands at the bow; that needs a heading less than 1 s old. Cross-check against the camera track if one shows.", pass:"<b>Pass:</b> each pin within about 1 m of where the buoy really is (the camera track agrees, or you measured)."},
+  {id:"u2-commit", ctx:["gcs"], t:"COMMIT FIELD, then <b>SAVE AS COURSE</b> and download the YAML."}
+ ]},
+ {id:"u3", title:"U3 · Sim to real", when:"≈ 30 min, if the sim PC is with you", steps:[
+  {id:"u3-sim", ctx:["laptop"], t:"Put the YAML in <code>Boat\\rx26_asv\\crusader_sim\\courses\\</code>, load it in the sim's Task 1 panel and run it Advanced, then Disruptive. If the sim fails on your real layout, fix that before the water. Without the sim PC, do this Sunday night and note it."}
+ ]},
+ {id:"u4", title:"U4 · Runs", when:"rest of the day", why:"Go to the <a href='#runs'>run log</a>. Before each run the pilot confirms SB is in reach. After each run keep the logs and a bag.", steps:[
+  {id:"u4-pub", ctx:["asv"], t:"For runs with setpoints, restart the rig with PUBLISH on.", code:[["asv bash","PUBLISH=1 LAKE_DATUM=<lat>,<lon> bash "+SRC+"/crusader_sim/scripts/lake_rig_up.sh"]], pass:"Choose the tier at START: <b>Disruptive</b> (default, checkpoints) or <b>Advanced</b> (no checkpoints). <b>In Advanced the dead-man does not apply:</b> closing the page or losing the radio does not end the mission. The pilot ends it with the RC."},
+  {id:"u4-data", ctx:["asv"], t:"After every run: copy <code>~/.cache/crusader_lake/</code>, take the bag from the Record tab, write the result here."}
+ ]}
+];
+
+var RUNS = [
+ {id:"P-A", cfg:"pool · camera only · Advanced", what:"ENTRY orbit, the gate, EXIT orbit.", pass:"Full clockwise orbit round ENTRY, gate crossed with <span class='red'>red</span> to starboard, full counter-clockwise orbit round EXIT, no contact."},
+ {id:"P-D", cfg:"pool · camera only · Disruptive", what:"Same field, ACK each checkpoint; second try with a recolour.", pass:"It asks after the ENTRY orbit, after the gate and before EXIT, and replans after the recolour."},
+ {id:"R0", cfg:"lake · stand mode, setpoints off · MANUAL", what:"START, then the pilot drives while you watch the plan in the Task 1 tab.", pass:"The drawn path keeps every <span class='red'>red</span> to starboard and every <span class='green'>green</span> to port, and goes round the blacks."},
+ {id:"R1", cfg:"lake · PUBLISH=1 · Advanced", what:"START; ABORT right after the ENTRY orbit.", pass:"A full clockwise orbit; after ABORT the banner says to take over, and the pilot does."},
+ {id:"R2", cfg:"lake · PUBLISH=1 · Advanced", what:"Full run.", pass:"Both orbits in the right direction, every gate on the right side, no contact, no stall at any stop."},
+ {id:"R3", cfg:"lake · PUBLISH=1 · Disruptive", what:"Full run, ACK every checkpoint by hand.", pass:"Asks after the ENTRY orbit, after each gate and once before EXIT; continues on each ACK."},
+ {id:"R4", cfg:"lake · PUBLISH=1 · Disruptive", what:"At a gate checkpoint, recolour a buoy, then SEND CHANGES + ACK.", pass:"The boat replans to the new colours and passes the recoloured buoy on its new side."},
+ {id:"R5", cfg:"lake · unpaired field (3 green, 2 red)", what:"Disruptive or Advanced.", pass:"Every <span class='red'>red</span> to starboard and every <span class='green'>green</span> to port, single buoys included."},
+ {id:"R6", cfg:"lake · tight 3–5 m field · tuning profile", what:"Only if R2–R5 are clean.", pass:"No contact; orbits still complete."},
+ {id:"RF", cfg:"fallback · TREE=task1_disruptive.xml NAV_MODE=off", what:"Only if the whole-field tree misbehaves.", pass:"The older per-gate tree's guarded straight legs complete."}
+];
+
+var VALUES = [
+ ["wp_radius","WP_RADIUS (m)","must be ≤ 0.5"],["loit_radius","LOIT_RADIUS (m)","7 Sep dump: 2.0"],["guid_options","GUID_OPTIONS","must be 0"],
+ ["wp_speed","WP_SPEED (m/s)",""],["cruise","CRUISE_SPEED / CRUISE_THROTTLE","7 Sep dump: 0.1 / 1 (baseline 2.0 / 50)"],
+ ["head","Branch and HEAD on the boat after deploy",""],["engines","Engines built (detector, classifier)","which .pt, FP16, time to build"],
+ ["versions","L4T / TensorRT / ultralytics in asv","printed by export_engines.py"],
+ ["gps","GPS fix and yaw (yard)","e.g. RTK fixed, yaw valid"],["gps_pool","GPS fix and yaw (pool)",""],
+ ["lidar","LiDAR rate and starboard check",""],["cam_range","Detector range on a RoboBuoy (m)","where boxes stop"],
+ ["batt","Pack: meter vs reported (V)",""],
+ ["radio_cfg","Radio IPs, SSID, frequency, width","Rocket / Bullet"],["radio_bench","Bench: ping loss, avg RTT, throughput",""],
+ ["radio_50","50 m: dBm both ends, ping",""],["radio_100","100 m: dBm both ends, ping",""],["radio_200","200 m: dBm both ends, ping",""],
+ ["pool_size","Pool size and buoy spacing used",""],["bow","Bow offset: reference point to bow (m)","for PIN AT BOAT"],["datum","Lake datum (lat, lon) and what it is",""]
+];
+
+var DECISIONS = [
+ "<b>WP_RADIUS in the baseline.</b> The boat had 0.5 on 7 Sep; <code>params/working_crusader.params</code> and the sim say 2.0, and <code>check_config.py</code> enforces <code>nav_wp_radius_m</code> = 2.0. Rule from tonight's analysis: WP_RADIUS must stay below min(stop tolerance 0.8, orbit tolerance 0.8, look-ahead minus re-send 1.2). Proposal: set the baseline and <code>nav_wp_radius_m</code> to 0.5 so the sim matches the boat.",
+ "<b>LOIT_RADIUS 2.0.</b> After every arrival and every hold the boat may drift up to 2 m with no correction, including toward a buoy at a checkpoint. Proposal: 0.75–1.0, tried in the pool first.",
+ "<b>CRUISE_SPEED 0.1 / CRUISE_THROTTLE 1</b> on the boat (7 Sep) against 2.0 / 50 in the baseline. That leaves almost no throttle feed-forward, so the boat lags its target. Find out who set it and why before changing it.",
+ "<b>Follower stall guard (code, not changed).</b> The whole-field follower re-sends a setpoint only when the target moves 0.3 m; nothing re-sends on time or watches for no progress. Proposal: in <code>global_leaves.cpp</code>, forget the last sent point if 1 s has passed, and log a warning when progress stalls about 5 s. It is a node change, so it waits for your yes.",
+ "<b>Merging <code>sim/gazebo</code> into <code>main</code>.</b> The branch holds the sim, the whole-field planner, lake mode and tonight's GUI work. It was pushed to GitHub on 3 Oct but not merged. Merging is the team's call, ideally after Sunday shows it works on the water.",
+ "<b>GUI on the laptop for the real boat (not built).</b> The lake panel needs no ROS except START/ABORT, so it could run on the laptop: the boat would send its feed to the laptop and accept the UAV radio messages over the link, the way a real Ekko would talk to it. That means changing <code>panel_feed</code> and adding a small goal relay on the boat. Worth it only if S4 shows the GUI struggling at range.",
+ "<b>Advanced has no dead-man.</b> The Advanced tree has no plan-freshness check, so a lost page or link does not end the run. Fine for Sunday because the RC is the safety path. Decide whether competition Advanced should get one.",
+ "<b>Two cosmetic boat bugs (not fixed).</b> The goal feedback says TRANSIT from the start (<code>bt_runner_node.cpp:1349</code>), and the result line says <i>passed correctly 0</i> with the whole-field tree (<code>bt_runner_node.cpp:1373</code>). Ignore both on Sunday; trust the run log.",
+ "<b>Real Ekko's radio protocol.</b> The team's RXL link is still not what Ekko speaks (TUNNEL 32772/32773). Sunday is unaffected because you play the UAV. It blocks competition."
+];
+
+/* ---------- rendering ---------- */
+var $ = function(s,r){return (r||document).querySelector(s)};
+var esc = function(s){var d=document.createElement("div");d.textContent=s;return d.innerHTML};
+var state = {checks:{}, runs:{}, values:{}};
+var db=null, user=null, uid=null, names={}, canWrite=true;
+var allSteps = {sat:[], sun:[]};
+
+function pillClass(s){return {ready:"p-ready",boat:"p-boat",you:"p-you",later:"p-later",risk:"p-risk"}[s]||"p-later"}
+function pillText(s){return {ready:"Done tonight",boat:"On the boat",you:"Needs you",later:"Later",risk:"At risk"}[s]||s}
+
+function renderStatus(){
+  var tb=$("#statusTable tbody");
+  STATUS.forEach(function(r){
+    var tr=document.createElement("tr");
+    tr.innerHTML="<td>"+esc(r[0])+"</td><td><span class='pill "+pillClass(r[1])+"'>"+pillText(r[1])+"</span></td><td>"+r[2]+"</td>";
+    tb.appendChild(tr);
+  });
+}
+
+function cmdBlock(c){
+  var box=document.createElement("div");box.className="cmd";
+  var pre=document.createElement("pre");pre.textContent=c[1];
+  var tag=document.createElement("span");tag.className="tag";tag.textContent=c[0];
+  var b=document.createElement("button");b.type="button";b.className="copy";b.textContent="Copy";
+  b.addEventListener("click",function(){
+    var done=function(){b.textContent="Copied";setTimeout(function(){b.textContent="Copy"},1400)};
+    try{navigator.clipboard.writeText(c[1]).then(done,function(){selectText(pre)})}catch(e){selectText(pre)}
+  });
+  box.appendChild(pre);box.appendChild(b);
+  var wrap=document.createElement("div");wrap.style.position="relative";wrap.style.paddingTop="8px";
+  wrap.appendChild(tag);wrap.appendChild(box);return wrap;
+}
+function selectText(el){var r=document.createRange();r.selectNodeContents(el);var s=getSelection();s.removeAllRanges();s.addRange(r)}
+
+function renderBlocks(blocks, host, day){
+  blocks.forEach(function(bl){
+    var art=document.createElement("article");art.className="block";art.id=bl.id;
+    art.innerHTML="<header><h3>"+esc(bl.title)+"</h3><span class='when'>"+esc(bl.when||"")+"</span></header>"+(bl.why?"<p class='why'>"+bl.why+"</p>":"");
+    var ol=document.createElement("ol");ol.className="steps";
+    bl.steps.forEach(function(s){
+      allSteps[day].push(s.id);
+      var li=document.createElement("li");li.className="step"+(s.safety?" safety-step":"");li.dataset.id=s.id;
+      if(s.anchor)li.id=s.anchor;
+      var cb=document.createElement("input");cb.type="checkbox";cb.id="chk-"+s.id;cb.setAttribute("aria-label","Done: "+s.id);
+      cb.addEventListener("change",function(){setCheck(s.id,cb.checked)});
+      var body=document.createElement("div");body.className="body";
+      var line=document.createElement("div");line.className="line";
+      s.ctx.forEach(function(c){var t=document.createElement("span");t.className="ctx";t.textContent=c;line.appendChild(t)});
+      var txt=document.createElement("label");txt.className="txt";txt.htmlFor=cb.id;txt.innerHTML=s.t;line.appendChild(txt);
+      body.appendChild(line);
+      (s.code||[]).forEach(function(c){body.appendChild(cmdBlock(c))});
+      if(s.pass){var p=document.createElement("p");p.className="pass";p.innerHTML=s.pass;body.appendChild(p)}
+      var who=document.createElement("p");who.className="who";who.id="who-"+s.id;body.appendChild(who);
+      li.appendChild(cb);li.appendChild(body);ol.appendChild(li);
+    });
+    art.appendChild(ol);host.appendChild(art);
+  });
+}
+
+function renderRuns(){
+  var host=$("#runList");
+  RUNS.forEach(function(r){
+    var d=document.createElement("article");d.className="run";d.dataset.id=r.id;
+    d.innerHTML="<div class='hd'><span class='id'>"+esc(r.id)+"</span><span class='cfg'>"+esc(r.cfg)+"</span></div>"+
+      "<p>"+r.what+"</p><p class='pass'><b>Pass when:</b> "+r.pass+"</p>";
+    var res=document.createElement("div");res.className="res";
+    ["pass","fail","skip"].forEach(function(k){
+      var b=document.createElement("button");b.type="button";b.dataset.r=k;b.textContent=k[0].toUpperCase()+k.slice(1);
+      b.setAttribute("aria-pressed","false");
+      b.addEventListener("click",function(){var cur=(state.runs[r.id]||{}).result;setRun(r.id,{result:cur===k?"":k})});
+      res.appendChild(b);
+    });
+    var who=document.createElement("span");who.className="who";who.id="whor-"+r.id;res.appendChild(who);
+    var note=document.createElement("textarea");note.id="note-"+r.id;note.placeholder="What happened: time, what you saw, the bag name";note.setAttribute("aria-label","Note for "+r.id);
+    note.addEventListener("change",function(){setRun(r.id,{note:note.value})});
+    d.appendChild(res);d.appendChild(note);host.appendChild(d);
+  });
+}
+
+function renderValues(){
+  var host=$("#valueList");
+  VALUES.forEach(function(v){
+    var d=document.createElement("div");d.className="val";
+    d.innerHTML="<label for='val-"+v[0]+"'>"+esc(v[1])+"</label>"+(v[2]?"<span class='hint'>"+esc(v[2])+"</span>":"");
+    var i=document.createElement("input");i.type="text";i.id="val-"+v[0];i.autocomplete="off";
+    i.addEventListener("change",function(){setValue(v[0],i.value.trim())});
+    var age=document.createElement("span");age.className="age";age.id="age-"+v[0];age.textContent="blank";
+    d.appendChild(i);d.appendChild(age);host.appendChild(d);
+  });
+}
+
+function renderDecisions(){var ul=$("#decisionList");DECISIONS.forEach(function(t){var li=document.createElement("li");li.innerHTML=t;ul.appendChild(li)})}
+
+function ago(iso){
+  if(!iso)return "";var s=(Date.now()-Date.parse(iso))/1000;if(!(s>=0))return "";
+  if(s<90)return "just now";if(s<5400)return Math.round(s/60)+" min ago";if(s<172800)return Math.round(s/3600)+" h ago";return Math.round(s/86400)+" days ago";
+}
+function stamp(o){if(!o||!o.at)return "";var n=o.by&&names[o.by]?names[o.by]:"";return (n?n+" · ":"")+ago(o.at)}
+
+function paint(){
+  ["sat","sun"].forEach(function(day){
+    var ids=allSteps[day],n=0;
+    ids.forEach(function(id){
+      var c=state.checks[id],cb=$("#chk-"+id),li=cb&&cb.closest(".step");
+      var on=!!(c&&c.done);if(on)n++;
+      if(cb&&document.activeElement!==cb)cb.checked=on;
+      if(li)li.classList.toggle("done",on);
+      var w=$("#who-"+id);if(w)w.textContent=on?"Done "+stamp(c):"";
+    });
+    $("#m-"+day).textContent=n+"/"+ids.length;
+  });
+  var logged=0;
+  RUNS.forEach(function(r){
+    var o=state.runs[r.id]||{},art=document.querySelector(".run[data-id='"+r.id+"']");
+    if(o.result)logged++;
+    art.querySelectorAll(".res button").forEach(function(b){b.setAttribute("aria-pressed",String(b.dataset.r===o.result))});
+    var note=$("#note-"+r.id);if(note&&document.activeElement!==note)note.value=o.note||"";
+    $("#whor-"+r.id).textContent=o.at?stamp(o):"";
+  });
+  $("#m-runs").textContent=logged+"/"+RUNS.length;
+  VALUES.forEach(function(v){
+    var o=state.values[v[0]],i=$("#val-"+v[0]);
+    if(i&&document.activeElement!==i)i.value=(o&&o.value)||"";
+    $("#age-"+v[0]).textContent=(o&&o.value)?"entered "+stamp(o):"blank";
+  });
+}
+
+/* ---------- shared state ---------- */
+var queues={};
+function enqueue(path,fn){var q=queues[path]||Promise.resolve();queues[path]=q.then(fn,fn);return queues[path]}
+function writeDoc(col,id,body){
+  body.at=new Date().toISOString();if(uid)body.by=uid;
+  var key=col==="checks"?"checks":col;state[key][id]=Object.assign({},state[key][id]||{},body);paint();
+  if(!db||!canWrite)return;
+  var full=Object.assign({},state[key][id]);
+  enqueue(col+"/"+id,function(){return db.collection(col).doc(id).set(full).catch(onWriteError)});
+}
+function onWriteError(e){
+  if(e&&e.code==="invalid_argument"){canWrite=false;$("#dbstate").textContent="You can read this checklist but not change it. Ask the owner for Contributor access.";}
+  else{$("#dbstate").textContent="A change did not save ("+(e&&e.code||"error")+"). It is still shown here; try again in a moment.";}
+}
+function setCheck(id,on){writeDoc("checks",id,{done:on})}
+function setRun(id,patch){writeDoc("runs",id,patch)}
+function setValue(id,v){writeDoc("values",id,{value:v})}
+
+function resolveNames(){
+  if(!user)return;var ids={};
+  ["checks","runs","values"].forEach(function(k){Object.keys(state[k]).forEach(function(i){var b=state[k][i].by;if(b)ids[b]=1})});
+  var list=Object.keys(ids);if(!list.length)return;
+  user.profiles(list).then(function(ps){var changed=false;list.forEach(function(i){var n=(ps[i]&&ps[i].name)||"";if(names[i]!==n){names[i]=n;changed=true}});if(changed)paint()});
+}
+function subscribe(col){
+  db.collection(col).onSnapshot(function(snap){
+    var m={};snap.docs.forEach(function(d){if(d.exists)m[d.id]=d.data()});
+    state[col]=m;paint();resolveNames();
+  },function(e){$("#dbstate").textContent="Live updates stopped ("+e.code+"). Reload the page to reconnect.";});
+}
+
+renderStatus();renderBlocks(SAT,$("#sat"),"sat");renderBlocks(POOL,$("#poolBlocks"),"sat");renderBlocks(SUN,$("#sun"),"sun");
+renderRuns();renderValues();renderDecisions();paint();
+
+(async function(){
+  var c=window.claude;
+  if(!c||!c.use){$("#dbstate").textContent="Ticks and notes stay in this tab only: this copy of the page is not connected to the shared checklist.";return}
+  try{db=await c.use("db")}catch(e){db=null}
+  try{user=await c.use("user")}catch(e){user=null}
+  if(!db){$("#dbstate").textContent="Ticks and notes stay in this tab only: sign in to claude.ai to share them with the team.";return}
+  try{uid=user?await user.id():null}catch(e){uid=null}
+  try{if(user&&user.can){var w=await user.can("data.write");if(w===false)canWrite=false}}catch(e){}
+  $("#dbstate").textContent=canWrite?"Shared checklist: ticks, run results and readings save for everyone who opens this page.":"You can read this checklist but not change it. Ask the owner for Contributor access.";
+  subscribe("checks");subscribe("runs");subscribe("values");
+  setInterval(paint,60000);
+})();
+})();
+</script>
