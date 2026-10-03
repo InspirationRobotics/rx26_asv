@@ -138,9 +138,10 @@ REGISTRY = (
              stream_path="/stream/annotated",
              views=(("annotated", "Annotated"), ("raw", "Raw")),
              record_stream_path="/stream/raw",
-             note="the Task 3 dock detector: the CV team's model (INTERIM, "
-                  "mock-up bay) + colour rule; owns the OAK-D; publishes "
-                  "DockObservation (window x,y,z) on /dock/observations"),
+             note="the Task 3 dock detector: the CV model (rebuilt bay, "
+                  "~/robotx_ws/models/ffcv) + colour rule; owns the OAK-D; "
+                  "publishes DockObservation (window x,y,z) on "
+                  "/dock/observations and its latency on crsd/dock_view_health"),
     NodeSpec("lidar_view", "lidar_view", "tools", "lidar_view.py", "viewers",
              kind="script", port=8081,
              stream_path="/stream/plan",      # views: plan / elev / both

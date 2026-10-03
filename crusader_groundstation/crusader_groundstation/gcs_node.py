@@ -54,6 +54,7 @@ from collections import deque
 from rclpy.node import Node
 
 from rcl_interfaces.msg import Log
+from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 from crusader_msgs.msg import (Attitude, Cluster3DArray, FcuStatus,
@@ -224,6 +225,11 @@ class GroundStation(Node):
         self.create_timer(p["graph_period_s"], self._scan_graph)
 
         self.create_subscription(LatLonHead, "/crsd/pose", self._on_pose, 10)
+        # dock_view's per-stage latency (crsd/dock_view_health, JSON, 1 Hz), for
+        # the Telemetry tab. Kept with its arrival time so a stopped dock_view
+        # shows as stopped rather than as its last numbers.
+        self._dock_health, self._dock_health_t = None, None
+        self.create_subscription(String, "crsd/dock_view_health", self._on_dock_health, 10)
         self.create_subscription(Attitude, "/crsd/attitude", self._on_att, 10)
         self.create_subscription(FcuStatus, "/crsd/fcu_status",
                                  self._on_status, 10)
@@ -271,6 +277,21 @@ class GroundStation(Node):
         self.p.update(changes)
 
     # ---------- inputs ----------
+
+    def _on_dock_health(self, msg: String):
+        try:
+            self._dock_health = json.loads(msg.data)
+            self._dock_health_t = time.monotonic()
+        except ValueError:
+            pass                       # a malformed report is no report
+
+    def _dock_latency(self):
+        """dock_view's last latency report, marked stale after 3 s (it
+        publishes at 1 Hz, so 3 missed reports means it has stopped)."""
+        if self._dock_health_t is None:
+            return {"ok": False, "age": None}
+        age = time.monotonic() - self._dock_health_t
+        return dict(self._dock_health, ok=age < 3.0, age=round(age, 1))
 
     def _on_pose(self, msg: LatLonHead):
         if math.isnan(msg.heading):
@@ -538,6 +559,7 @@ class GroundStation(Node):
             "power": self._power_state(),
             "logs": {"counts": self.logs.counts(),
                      "nodes": self.logs.nodes()},
+            "dock_latency": self._dock_latency(),
             "layers": {"clusters": "clusters" in layers,
                        "prox": "prox" in layers},
             "record": {

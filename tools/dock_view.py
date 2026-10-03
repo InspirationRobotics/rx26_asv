@@ -26,8 +26,12 @@ it a viewer again. It runs, per frame, the chain the CV team runs offline
 and draws it on :8080 (/stream/annotated, /stream/raw) where oak_detector serves,
 so the Camera tab shows it and the Record tab can record the raw view.
 
-THE MODEL IS INTERIM: its own model card says it was trained on the incorrectly
-built mock-up bay. Expect misses on the rebuilt one; that is what this is for.
+THE MODEL is whatever bundle sits in --ffcv (default ~/robotx_ws/models/ffcv).
+Since 2026-10-02 that is the REBUILT-bay model (firefighting-cv
+deploy/ffcv_rebuilt_2026-10-02_bayfix); the interim mock-up model is kept beside
+it as models/ffcv_interim_2026-09-25. The overlay and crsd/dock_view_health name
+the bundle in use. Its weak spots, measured on held-out sessions: the bay filling
+the frame at firing distance, and low light.
 
 OWNS THE OAK-D: stop oak_detector / buoy_detector / oakd_publisher first (the
 ground station's exclusive tag does that for you). Camera settings START from
@@ -48,7 +52,14 @@ import sys
 import threading
 import time
 
-import numpy as np
+# One OpenBLAS thread, set before numpy loads. The face-plane RANSAC
+# (dock_obs_core.fit_plane) makes 120 small matrix products a frame; up close
+# (~25k depth points) OpenBLAS splits each over all 6 cores, which are already
+# busy with the LiDAR chain - measured on the boat 2026-10-02: 2.1-2.7 s a frame
+# threaded, 30-70 ms single. setdefault, so a caller can still override it.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
+import numpy as np  # noqa: E402  (after the thread setting above, on purpose)
 
 COL = {"red": (40, 40, 255), "green": (40, 230, 40), "blue": (255, 120, 60),
        "off": (200, 200, 200), "unknown": (0, 160, 255)}          # BGR
@@ -298,6 +309,19 @@ def main(argv=None):
         pub = node.create_publisher(DockObservation, a.topic, 10)
         log.info(f"publishing DockObservation on {node.resolve_topic_name(a.topic)} "
                  f"(window x,y,z from the face plane; intrinsics fx {intr[0]:.0f})")
+    # crsd/dock_view_health: how long each stage takes, once a second, as JSON -
+    # the same String-of-JSON shape as crsd/wall_range_health. The ground
+    # station's Telemetry tab shows it. Published even with --no-publish: a
+    # viewer's latency is still worth seeing.
+    from std_msgs.msg import String
+    health_pub = node.create_publisher(String, "crsd/dock_view_health", 10)
+    # Name the model by a short checksum of its weights, not its folder: bundles
+    # are COPIED into models/ffcv, so the folder name is the same for every model
+    # and would hide which one is loaded. 2026-10-02 rebuilt bay = 331e82f5;
+    # the interim mock-up model = bdc5138c.
+    import hashlib
+    with open(weights, "rb") as fh:
+        model_name = "model " + hashlib.sha256(fh.read()).hexdigest()[:8]
     track_seq = DockSequence(cfg["sequence"])      # the tracked bay's timing, for the message
 
     buf, raw = FrameBuffer(), FrameBuffer()
@@ -311,6 +335,11 @@ def main(argv=None):
     exposure = ""
     logf = open(a.log, "a", buffering=1) if a.log else None
     seqs, t0, n, fps, det_ms, last = {}, None, 0, 0.0, 0.0, time.monotonic()
+    # Per-stage latency, smoothed like det_ms (EMA 0.2). pre: the 3x downscale.
+    # chain: geometry + colour (full-res) + timing + the face plane - everything
+    # after the detector up to the message. total: frame in hand -> published.
+    pre_ms = chain_ms = total_ms = 0.0
+    det_max = 0.0                         # worst detector time in the last second
     try:
         while not stop.is_set():
             try:
@@ -333,16 +362,22 @@ def main(argv=None):
             bgr = msgs["rgb"].getCvFrame()
             t = msgs["rgb"].getTimestamp().total_seconds()   # device clock: timing layer
             t0 = t if t0 is None else t0
+            tf = time.monotonic()                          # frame in hand
             small = cv2.resize(bgr, (DET_W, DET_H), interpolation=cv2.INTER_AREA)
             f = bgr.shape[1] / float(DET_W)
             t1 = time.monotonic()
+            pre_ms = 0.8 * pre_ms + 0.2 * (t1 - tf) * 1000.0
             res = model.predict(small, imgsz=DET_W, conf=conf, verbose=False)[0]
-            det_ms = 0.8 * det_ms + 0.2 * (time.monotonic() - t1) * 1000.0
+            t2 = time.monotonic()
+            det_ms = 0.8 * det_ms + 0.2 * (t2 - t1) * 1000.0
+            det_max = max(det_max, (t2 - t1) * 1000.0)
             dets = {}
             for b, c, p in zip(res.boxes.xyxy.cpu().numpy(), res.boxes.cls.cpu().numpy(),
                                res.boxes.conf.cpu().numpy()):
                 dets.setdefault(classes[int(c)], []).append(([float(v) * f for v in b], float(p)))
-            rgb = np.ascontiguousarray(bgr[:, :, ::-1])
+            # A view, not a copy: colour_core reads only crops (it converts each
+            # one itself), and a full 1920x1200 copy cost 35-50 ms on the boat.
+            rgb = bgr[:, :, ::-1]
             bays, nrej = observe(rgb, dets, cfg, ccfg, template, cc, gc)
             for i, bay in enumerate(bays):
                 sq = seqs.setdefault(i, DockSequence(cfg["sequence"]))
@@ -368,12 +403,25 @@ def main(argv=None):
                     pub.publish(to_msg(obs, node.get_clock().now().to_msg(), "camera_link"))
                 except Exception as e:                  # never let a message stop the camera
                     log.error(f"DockObservation not published: {e}")
+            t3 = time.monotonic()
+            chain_ms = 0.8 * chain_ms + 0.2 * (t3 - t2) * 1000.0
+            total_ms = 0.8 * total_ms + 0.2 * (t3 - tf) * 1000.0
             n += 1
             now = time.monotonic()
             if now - last >= 1.0:
                 fps, last, n = n / (now - last), now, 0
+                try:                                    # never let health stop the camera
+                    health_pub.publish(String(data=json.dumps(dict(
+                        fps=round(fps, 2), pre_ms=round(pre_ms, 1), det_ms=round(det_ms, 1),
+                        det_max_ms=round(det_max, 1), chain_ms=round(chain_ms, 1),
+                        total_ms=round(total_ms, 1), model=model_name,
+                        publishing=pub is not None))))
+                except Exception as e:
+                    log.warn(f"dock_view_health not published: {e}")
+                det_max = 0.0
             counts = {k: len(v) for k, v in dets.items()}
-            status = [f"dock_view  INTERIM model (mock-up bay)  {fps:.1f} fps  det {det_ms:.0f} ms"
+            status = [f"dock_view  {model_name}  {fps:.1f} fps  det {det_ms:.0f} ms"
+                      f"  chain {chain_ms:.0f} ms  total {total_ms:.0f} ms"
                       + ("  -> " + a.topic if pub is not None else "  (not publishing)"),
                       "boxes: " + (", ".join(f"{k} {v}" for k, v in counts.items()) or "none")
                       + (f"   reflections dropped {nrej}" if nrej else ""),
