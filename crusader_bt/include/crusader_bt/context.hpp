@@ -165,6 +165,10 @@ struct Context
   /// looser numbers than the commit that follows it is a tree that stalls.
   dock::VoteParams dock_votes;
   int dock_min_obs = 5;
+  /// How many bays the dock has: dock::layout() numbers bays only once this
+  /// many are confirmed. 3 on the course; 1 to test the Task 3 tree against a
+  /// single practice bay (bt_runner_node dock_bays).
+  int dock_bays = 3;
 
   std::string task3_phase;                    ///< for feedback and the viewers
   int survey_attempt = 0;                     ///< PickVantage calls, all of them
@@ -237,6 +241,9 @@ struct Context
   fire::StrafeCmd strafe;                     ///< ... and what it made of it
   std::string strafe_block;                   ///< non-empty: the keep refuses (why)
   double last_strafe_t = -1.0;
+  /// Live gain overrides, set by bt_runner_node's strafe.* parameter callback.
+  /// NOT cleared per goal: it is the node's parameters, not the run's state.
+  fire::StrafeTune strafe_tune;
   /// Set by StrafeKeep on every tick it commands the sticks; the runner clears
   /// it before each tick and RELEASES the sticks if they were commanded last
   /// tick and not this one.

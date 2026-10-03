@@ -99,7 +99,7 @@ public:
   {
     const bool strict = getInput<bool>("need_others_red").value_or(true);
     std::lock_guard<std::mutex> lk(ctx_->mu);
-    const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs);
+    const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs, ctx_->dock_bays);
     return dock::chooseSafeBay(ctx_->dock, L, ctx_->dock_votes, strict).ok ?
            BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
   }
@@ -167,7 +167,7 @@ public:
     const dock::DockedCheck d = dock::dockedIn(
       ctx_->berth, ctx_->boat, ctx_->heading_deg, ctx_->berth.berth_m, at, lt, ht);
     if (!d.docked) {return BT::NodeStatus::FAILURE;}
-    const double pitch = dock::bayPitch(ctx_->dock, dock::layout(ctx_->dock, ctx_->dock_min_obs));
+    const double pitch = dock::bayPitch(ctx_->dock, dock::layout(ctx_->dock, ctx_->dock_min_obs, ctx_->dock_bays));
     if (!std::isfinite(pitch)) {return BT::NodeStatus::SUCCESS;}   // nothing to test against
     const double reach = dock::hullHalfWidthUsed(ctx_->berth, ctx_->boat, ctx_->heading_deg, hl, hb);
     if (reach > pitch / 2.0 - fm) {
@@ -206,7 +206,7 @@ public:
     if (t == nullptr || !ctx_->pose_fresh) {return BT::NodeStatus::FAILURE;}
     // Only the face and its normal matter here; the distances are placeholders.
     const dock::Berth b = dock::berthFor(
-      *t, dock::layout(ctx_->dock, ctx_->dock_min_obs), 3.0, 1.25);
+      *t, dock::layout(ctx_->dock, ctx_->dock_min_obs, ctx_->dock_bays), 3.0, 1.25);
     return dock::linedUp(b, ctx_->boat, ctx_->heading_deg, a, lt, ht) ?
            BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
   }
@@ -253,7 +253,7 @@ public:
     std::string key, detail;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
-      const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs);
+      const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs, ctx_->dock_bays);
       if (L.ok) {
         for (std::size_t i = 0; i < L.ids.size(); ++i) {
           const dock::BayTrack * t = ctx_->dock.find(L.ids[i]);
@@ -351,7 +351,7 @@ public:
     dock::Choice c;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
-      const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs);
+      const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs, ctx_->dock_bays);
       c = dock::chooseSafeBay(ctx_->dock, L, ctx_->dock_votes, strict);
       if (c.ok) {
         ctx_->chosen_track = c.track_id;
@@ -402,7 +402,7 @@ public:
       std::lock_guard<std::mutex> lk(ctx_->mu);
       const dock::BayTrack * t = ctx_->dock.find(ctx_->chosen_track);
       if (t == nullptr || !ctx_->origin_set) {return BT::NodeStatus::FAILURE;}
-      const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs);
+      const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs, ctx_->dock_bays);
       ctx_->berth = dock::berthFor(*t, L, pre, bm, lead);
       if (!ctx_->berth.ok) {return BT::NodeStatus::FAILURE;}
       const Vec2 p = which == "lead" ? ctx_->berth.lead :

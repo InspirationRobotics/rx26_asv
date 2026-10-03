@@ -51,9 +51,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <deque>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace crusader_bt
@@ -604,6 +606,52 @@ struct StrafeParams
   double slew_us_s = 200.0;      // per axis: gentle, thrust rocks the hull
   double min_range_m = 1.5;      // never push AHEAD inside this
   double square_first_deg = 10.0;  // further off square than this: turn only
+};
+
+// Live overrides of the keep's gains, from bt_runner_node's strafe.* parameters
+// (the ground station's Tuning tab, or ros2 param set), so a tune on the water
+// does not mean stopping the node and the run. NEGATIVE = the tree's own value:
+// the tree file stays the default, and an override reads as a deviation from it
+// in every strafe log line. Not reset between goals; it lives as long as the
+// node, like any parameter. The two windows are the camera's smoothing: the
+// window position is a median over window_median_s, its rate a fit over
+// rate_window_s - at 12 Hz the 0.6 s median is ~0.3 s of lag in the loop.
+struct StrafeTune
+{
+  double kp_fwd = -1.0, kd_fwd = -1.0, ki_fwd = -1.0;
+  double kp_lat = -1.0, kd_lat = -1.0, ki_lat = -1.0;
+  double kp_yaw = -1.0, kd_yaw = -1.0;
+  double i_max_us = -1.0;
+  double window_median_s = -1.0;   // tree default 0.6 s
+  double rate_window_s = -1.0;     // tree default 0.8 s
+
+  /// Overwrite sp's gains where an override is set; "" when none is, else the
+  /// overridden ones as "kd_lat 80 kp_lat 60" for the log.
+  std::string apply(StrafeParams & sp) const
+  {
+    const std::pair<const char *, std::pair<double, double *>> rows[] = {
+      {"kp_fwd", {kp_fwd, &sp.kp_fwd}}, {"kd_fwd", {kd_fwd, &sp.kd_fwd}},
+      {"ki_fwd", {ki_fwd, &sp.ki_fwd}}, {"kp_lat", {kp_lat, &sp.kp_lat}},
+      {"kd_lat", {kd_lat, &sp.kd_lat}}, {"ki_lat", {ki_lat, &sp.ki_lat}},
+      {"kp_yaw", {kp_yaw, &sp.kp_yaw}}, {"kd_yaw", {kd_yaw, &sp.kd_yaw}},
+      {"i_max_us", {i_max_us, &sp.i_max_us}},
+    };
+    std::string out;
+    char buf[40];
+    for (const auto & r : rows) {
+      if (r.second.first < 0.0) {continue;}
+      *r.second.second = r.second.first;
+      std::snprintf(buf, sizeof(buf), "%s%s %g", out.empty() ? "" : " ", r.first, r.second.first);
+      out += buf;
+    }
+    for (const auto & w : {std::make_pair("median_s", window_median_s),
+                           std::make_pair("rate_s", rate_window_s)}) {
+      if (w.second < 0.0) {continue;}
+      std::snprintf(buf, sizeof(buf), "%s%s %g", out.empty() ? "" : " ", w.first, w.second);
+      out += buf;
+    }
+    return out;
+  }
 };
 
 struct StrafeInputs

@@ -394,6 +394,24 @@ int main()
     chk_near("I is capped", c.sticks.lat_us, -80.0, 1e-9);
   }
 
+  {  // live gain overrides (bt_runner_node strafe.*): -1 leaves the tree's value
+    StrafeParams sp;
+    sp.kp_lat = 90.0; sp.kd_lat = 30.0; sp.kp_fwd = 90.0;
+    StrafeTune none;
+    chk("no override: empty log, gains untouched",
+      none.apply(sp).empty() && sp.kp_lat == 90.0 && sp.kd_lat == 30.0);
+    StrafeTune t;
+    t.kp_lat = 60.0; t.kd_lat = 80.0; t.window_median_s = 0.25;
+    const std::string log = t.apply(sp);
+    chk("override: only the set gains change", sp.kp_lat == 60.0 && sp.kd_lat == 80.0 &&
+      sp.kp_fwd == 90.0);
+    chk("override: the log names them", log == "kp_lat 60 kd_lat 80 median_s 0.25");
+    t.kp_lat = -1.0;
+    StrafeParams sp2; sp2.kp_lat = 90.0;
+    t.apply(sp2);
+    chk("back to -1: the tree's value again", sp2.kp_lat == 90.0 && sp2.kd_lat == 80.0);
+  }
+
   std::printf("\n%d checks, %d failed\n", g_checks, g_fails);
   return g_fails == 0 ? 0 : 1;
 }

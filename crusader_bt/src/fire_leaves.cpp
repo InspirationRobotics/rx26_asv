@@ -566,19 +566,29 @@ public:
     fire::StrafeInputs si;
     bool publish = false;
     double heading_now = fire::kNaN;
-    std::string block;
+    std::string block, tuned;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       const double now = ctx_->now_s;
+      // live gain overrides (bt_runner_node strafe.*) on top of the tree's
+      tuned = ctx_->strafe_tune.apply(sp);
+      const double med_s = ctx_->strafe_tune.window_median_s >= 0.0 ?
+        ctx_->strafe_tune.window_median_s : 0.6;
+      const double rate_s = ctx_->strafe_tune.rate_window_s >= 0.0 ?
+        ctx_->strafe_tune.rate_window_s : 0.8;
       heading_now = ctx_->heading_deg;
       si.range_m = ctx_->wall.range(now);
       si.range_rate = ctx_->wall.rate(now);
-      const bool fresh = ctx_->fire_win_y[widx].age(now) <= cam_to;
-      const double wx = fresh ? ctx_->fire_win_x[widx].median(now, 0.6) : fire::kNaN;
-      const double wy = fresh ? ctx_->fire_win_y[widx].median(now, 0.6) : fire::kNaN;
+      const double age = ctx_->fire_win_y[widx].age(now);
+      const bool fresh = age <= cam_to;
+      // the median always spans the newest sample: a window shorter than its
+      // age would find nothing and read as "not seen" while it is fresh
+      const double win = std::max(med_s, age + 1e-6);
+      const double wx = fresh ? ctx_->fire_win_x[widx].median(now, win) : fire::kNaN;
+      const double wy = fresh ? ctx_->fire_win_y[widx].median(now, win) : fire::kNaN;
       if (fresh) {
         si.lat_err_m = wy - noz_y - bias;
-        si.lat_rate = ctx_->fire_win_y[widx].slope(now, 0.8);
+        si.lat_rate = ctx_->fire_win_y[widx].slope(now, rate_s);
       }
       if (ctx_->face_heading.age(now) <= face_to) {
         ctx_->face_target = ctx_->face_heading.median(now, 2.0);
@@ -627,12 +637,13 @@ public:
       ctx_->sticks(cmd.sticks.fwd_us, cmd.sticks.lat_us, cmd.sticks.yaw_us);
     }
     if (ctx_->node) {
+      const std::string live = tuned.empty() ? "" : " [live: " + tuned + "]";
       RCLCPP_INFO_THROTTLE(log(), *ctx_->node->get_clock(), 1000,
         "strafe: range %.2f m, window %+.2f m left, square %+.1f deg | sticks fwd %+.0f "
-        "lat %+.0f yaw %+.0f us (%s)%s",
+        "lat %+.0f yaw %+.0f us (%s)%s%s",
         si.range_m, si.lat_err_m, si.yaw_err_deg, cmd.sticks.fwd_us, cmd.sticks.lat_us,
         cmd.sticks.yaw_us, cmd.why.c_str(),
-        publish ? "" : " [shadow: publish_setpoints is off]");
+        publish ? "" : " [shadow: publish_setpoints is off]", live.c_str());
     }
     return BT::NodeStatus::SUCCESS;
   }
