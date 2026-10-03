@@ -22,13 +22,18 @@ QUIET=0; [ "${1:-}" = "--quiet" ] && QUIET=1
 say() { [ "$QUIET" = 1 ] || echo "$@"; }
 
 [ -s "$PIDS" ] || { say "lake rig: nothing recorded in $PIDS"; exit 0; }
+# stat + pgid of a pid ("" when there is no such process)
+info() { ps -o stat=,pgid= -p "$1" 2>/dev/null; }
+# a process group this rig made and that is still RUNNING: its leader's pid == its pgid (a recycled pid is not stopped blindly)
+# and it is not a zombie. The container's init does not reap, so a leader that has exited stays in the process table as a Z
+# until its parent is gone: it used to read as "alive", cost the full 8 s and was then SIGKILLed, a corpse.
+alive() { local st pg; read -r st pg < <(info "$1"); [ -n "${st:-}" ] && [ "${st#Z}" = "$st" ] && [ "${pg:-}" = "$1" ]; }
 stopped=0
 while read -r name pid; do
   [ -n "${pid:-}" ] || continue
-  if ! kill -0 "$pid" 2>/dev/null; then say "  $name ($pid): already gone"; continue; fi
-  # only a process group this rig made: its leader's pid == its pgid. A recycled pid is not stopped blindly.
-  pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
-  if [ "$pgid" != "$pid" ]; then say "  $name ($pid): pid reused by something else (pgid $pgid), left alone"; continue; fi
+  read -r st pg < <(info "$pid")
+  if [ -z "${st:-}" ] || [ "${st#Z}" != "$st" ]; then say "  $name ($pid): already gone"; continue; fi
+  if [ "${pg:-}" != "$pid" ]; then say "  $name ($pid): pid reused by something else (pgid $pg), left alone"; continue; fi
   kill -INT -- "-$pid" 2>/dev/null
   stopped=$((stopped + 1))
   say "  $name ($pid): SIGINT"
@@ -36,16 +41,16 @@ done < "$PIDS"
 # wait up to 4 s, then TERM, then up to 4 s more, then KILL
 for step in 1 2; do
   for _ in 1 2 3 4 5 6 7 8; do
-    alive=0
+    alive_any=0
     while read -r name pid; do
-      [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null && [ "$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$pid" ] && alive=1
+      [ -n "${pid:-}" ] && alive "$pid" && alive_any=1
     done < "$PIDS"
-    [ "$alive" = 0 ] && break
+    [ "$alive_any" = 0 ] && break
     sleep 0.5
   done
-  [ "$alive" = 0 ] && break
+  [ "$alive_any" = 0 ] && break
   while read -r name pid; do
-    [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null && [ "$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$pid" ] \
+    [ -n "${pid:-}" ] && alive "$pid" \
       && { [ "$step" = 1 ] && kill -TERM -- "-$pid" || kill -KILL -- "-$pid"; say "  $name ($pid): $([ "$step" = 1 ] && echo SIGTERM || echo SIGKILL)"; }
   done < "$PIDS"
 done

@@ -147,8 +147,12 @@ def main():
         check("panel: no origin problem with the real feed", "origin" not in st["errors"], str(st["errors"]))
 
         print("== the field -> the real rxl_link_node -> /crsd/passage_plan")
-        r = panel.act_pin({"state": "off"})
-        check("PIN AT BOAT from the real pose", r["ok"], str(r))
+        check("the pin average fills from the real pose (>= 4 fresh samples in 2 s)",
+              wait(lambda: panel.state({})["pin"]["problem"] is None), str(panel.state({})["pin"]))
+        r = panel.act_pin({"state": "off", "offset_m": 2.0})
+        b = panel.state({})["layout"]["buoys"][-1:] or [{"x": None, "y": None}]
+        check("PIN AT BOAT from the real pose, 2 m ahead of its bow (heading 90 deg = east: x 5 -> 7)",
+              r["ok"] and abs(b[0]["x"] - 7.0) < 0.1 and abs(b[0]["y"] - 2.0) < 0.1, str(r) + " " + str(b))
         panel.act_clear({})
         check("layout accepted", panel.act_layout({"buoys": FIELD})["ok"])
         check("COMMIT", panel.act_commit({})["ok"])

@@ -24,7 +24,7 @@ button.big{padding:9px 16px;font-weight:700}
 #tracks td.sub,#tracks th{font-size:12px}
 </style></head><body>
 <header>
-  <h1>Crusader · LAKE MODE</h1><span class="sub">the REAL boat · you are Ekko (the UAV) · Disruptive tier</span>
+  <h1>Crusader · LAKE MODE</h1><span class="sub">the REAL boat · you are Ekko (the UAV) · tier chosen at START</span>
   <span id="fcupill" class="pill">autopilot ?</span><span id="dmpill" class="pill">dead-man ?</span>
   <span id="feedpill" class="pill">feed ?</span><span id="radiopill" class="pill">UAV ?</span>
   <span style="margin-left:auto"><a id="gcs" target="_blank">ground station</a> · <a id="bt" target="_blank">tree</a>
@@ -32,6 +32,7 @@ button.big{padding:9px 16px;font-weight:700}
 </header>
 <div class="safety">NOT AN E-STOP. The only e-stop is the RC SB switch. This page cannot arm, disarm or change the mode:
   the pilot arms the boat and selects GUIDED with the RC. Stop the boat with the RC (SC to HOLD, or SB).</div>
+<div id="rigline" class="dm" style="display:none"></div>
 <div id="deadman" class="dm"></div>
 <div id="errors"></div>
 <div id="abortban" class="abort" style="display:none">
@@ -73,8 +74,11 @@ button.big{padding:9px 16px;font-weight:700}
       <div class="card"><h3>Field: <span id="count"></span></h3>
         <div class="row sub">Role of the next buoy (keys 1-5):</div>
         <div class="row" id="palette"></div>
-        <div class="row"><button id="pinbtn" onclick="post('/api/pin',{state:pick}).then(poll1)" title="a buoy at the boat's position now (fresh pose only)">PIN AT BOAT</button>
+        <div class="row"><button id="pinbtn" onclick="pinAtBoat()" title="a buoy at the boat's pose, averaged over the last ~2 s (fresh pose only), optionally the bow offset ahead along its heading">PIN AT BOAT</button>
+          <label title="places the pin this many metres AHEAD of the boat along its heading, to nose the bow up to a buoy. 0 = at the boat. Needs a fresh heading (GPS yaw)">bow offset
+            <input id="pinOff" type="number" min="0" max="10" step="0.5" value="0" style="width:64px"> m ahead</label>
           <span class="sub">or click a camera track on the map</span></div>
+        <div id="pininfo" class="sub"></div>
         <div class="row"><input id="llat" placeholder="lat" size="11"><input id="llon" placeholder="lon" size="12">
           <button onclick="addLatLon()">ADD lat/lon</button></div>
         <table><thead><tr><th>id</th><th>x (E)</th><th>y (N)</th><th>lat</th><th>lon</th><th>role</th><th></th></tr></thead>
@@ -90,9 +94,10 @@ button.big{padding:9px 16px;font-weight:700}
     </div>
     <div id="live" style="display:none">
       <div class="card"><h3>Mission</h3>
-        <div class="row"><button id="start" class="go big" onclick="post('/api/start').then(poll1)">START TASK 1</button>
+        <div class="row"><select id="tier" title="the goal's tier. Advanced: the boat plans once from your field and asks NO checkpoints. Disruptive (default): it stops and asks after the ENTRY orbit and every gate, and re-plans on a change. Same field either way."><option value="advanced">Advanced</option><option value="disruptive" selected>Disruptive</option></select>
+          <button id="start" class="go big" onclick="post('/api/start',{tier:val('tier')}).then(poll1)">START TASK 1</button>
           <button id="abort" class="stop big" onclick="post('/api/abort').then(poll1)" title="cancels the tree's goal (SIGINT to lake_goal); does NOT stop the boat">ABORT GOAL</button>
-          <button class="stop" onclick="if(confirm('STOP UAV: nothing more is transmitted. A running goal aborts on the boat’s own plan-freshness guard (~15 s). Continue?'))post('/api/stop_uav').then(poll1)">STOP UAV</button></div>
+          <button class="stop" onclick="if(confirm(stopUavText()))post('/api/stop_uav').then(poll1)">STOP UAV</button></div>
         <div id="startwhy" class="sub w"></div>
         <div id="phase" class="sub"></div><div class="bar"><i id="pct" style="width:0"></i></div>
         <pre id="result" style="margin-top:6px"></pre>
@@ -106,7 +111,7 @@ button.big{padding:9px 16px;font-weight:700}
           <span id="radio" class="sub"></span></div>
         <div class="sub">recolour a buoy here (or click it on the map), then SEND CHANGES, or answer a checkpoint with SEND CHANGES + ACK. Auto-ACK is off by default and, like the resends, is held back when no browser is polling.</div>
       </div>
-      <div class="card"><h3>Checkpoints</h3><table><thead><tr><th>#</th><th>what</th><th>asked</th><th>answer</th><th>asks</th></tr></thead>
+      <div class="card"><h3>Checkpoints</h3><div id="cpnote" class="sub"></div><table><thead><tr><th>#</th><th>what</th><th>asked</th><th>answer</th><th>asks</th></tr></thead>
         <tbody id="cps"></tbody></table></div>
     </div>
     <div class="card" id="approach"><h3>Approach point</h3>
@@ -200,6 +205,26 @@ function emptyClick(w,e){
   if(!tr){toast('no camera track there: click a track square, or switch the map click to "place a buoy"');return}
   addBuoy(tr.x,tr.y,pick)}
 function liveClick(w,e){if(tool()==='approach')post('/api/approach',{x:w[0],y:w[1]}).then(poll1)}
+function pinOffset(){var v=val('pinOff').trim(),n=v===''?0:Number(v);return isFinite(n)&&n>=0&&n<=10?n:NaN}
+function pad3(d){return ('00'+Math.round(d)%360).slice(-3)}
+function pinAtBoat(){
+  var off=pinOffset();if(isNaN(off)){alert('bow offset: a number of metres from 0 to 10');return}
+  post('/api/pin',{state:pick,offset_m:off}).then(function(d){
+    if(d&&d.ok&&d.pin)toast('pinned b'+d.id+' from '+d.pin.n+' pose samples over '+d.pin.span_s.toFixed(1)+' s, spread '+d.pin.spread_m.toFixed(2)+' m'+
+      (off>0?', '+off+' m ahead on heading '+pad3(d.pin.heading_deg)+'° (heading '+d.pin.heading_age.toFixed(1)+' s old)':''));
+    poll1()})}
+// what a pin taken now is made of, and why not (the server decides; this only shows it)
+function renderPin(){
+  var P=S.pin,off=pinOffset(),why=null;
+  if(P.problem)why=P.problem;
+  else if(isNaN(off))why='bow offset: a number from 0 to 10 m';
+  else if(off>0&&P.heading_problem)why='bow offset '+off+' m: '+P.heading_problem;
+  $('pinbtn').disabled=!editable()||!!why;
+  var info=P.n?'pose average: '+P.n+' samples over '+P.span_s.toFixed(1)+' s · spread '+P.spread_m.toFixed(2)+' m · '+
+    (P.heading_deg==null?'no heading (GPS yaw not valid)':'heading '+pad3(P.heading_deg)+'° (age '+P.heading_age.toFixed(1)+' s, spread '+P.heading_spread_deg.toFixed(0)+'°)'):'pose average: none yet';
+  $('pininfo').textContent=info+(P.warn?' · '+P.warn:'')+(why?' · PIN refused: '+why:'');
+  $('pininfo').className='sub'+(why?' e':P.warn?' w':'')
+}
 function addLatLon(){var la=parseFloat(val('llat')),lo=parseFloat(val('llon'));
   if(!isFinite(la)||!isFinite(lo)){alert('lat and lon must be numbers');return}
   post('/api/add_latlon',{lat:la,lon:lo,state:pick}).then(function(d){if(d&&d.ok){$('llat').value='';$('llon').value=''}poll1()})}
@@ -207,17 +232,48 @@ function saveCourse(){var n=val('saveName');post('/api/save',{name:n}).then(func
   if(d&&d.ok){var a=$('dl');a.href=d.download;a.textContent='download '+n+'.yaml';a.style.display='';$('saveInfo').textContent='saved '+d.path}poll1()})}
 // ---- render
 function pill(id,text,cls){var p=$(id);p.textContent=text;p.className='pill'+(cls?' '+cls:'')}
+// ---- the tier. Only the whole-field tree (task1_global.xml) has an Advanced behaviour; the per-gate tree is always Disruptive.
+function tierNow(){var m=S&&S.mission;return m&&m.running&&m.tier?m.tier:val('tier')}
+function perGateRig(){return !!(S&&S.rig&&S.rig.global_tree===false)}
+// does the boat guard on the UAV's field (PassagePlanFresh: ~15 s of silence aborts)? Not in the whole-field Advanced tier.
+function guarded(){return !(tierNow()==='advanced'&&S&&S.rig&&S.rig.global_tree)}
+var NOGUARD='ADVANCED on the whole-field tree has no freshness guard: if this page goes away the boat KEEPS DRIVING its plan. Stop it with ABORT GOAL / the RC.';
+function stopUavText(){return 'STOP UAV: nothing more is transmitted. '+(guarded()?'A running goal aborts on the boat’s own plan-freshness guard (~15 s).':NOGUARD)+' Continue?'}
+var CPNOTE={advanced:'ADVANCED tier: the boat asks NO checkpoints. It plans once from the field you sent and drives approach, ENTRY orbit, transit and EXIT orbit. This table stays empty by design and there is nothing to ACK. (If the boat does ask, the ask appears above the map as usual.)',
+  disruptive:'DISRUPTIVE tier: the boat stops and asks after the ENTRY orbit and after each gate. Answer with ACK, or recolour and SEND CHANGES + ACK. Unanswered it re-asks every 3 s and gives up after 120 s.',
+  pergate:'This rig runs the per-gate tree, which behaves as DISRUPTIVE whatever the tier says: it asks after the ENTRY orbit and each gate.'}
+function renderTier(){
+  var m=S.mission,opt=$('tier').querySelector('option[value=advanced]');
+  opt.disabled=perGateRig();
+  if(perGateRig()&&val('tier')==='advanced')$('tier').value='disruptive';
+  if(m.running&&m.tier&&val('tier')!==m.tier)$('tier').value=m.tier;       // a reloaded page follows the run, not its default
+  $('tier').disabled=m.running;
+  $('cpnote').textContent=perGateRig()?CPNOTE.pergate:CPNOTE[tierNow()];
+}
+function renderRig(){
+  var r=S.rig,el=$('rigline');
+  if(!r){el.style.display='none';return}
+  el.style.display='';
+  if(r.error){el.className='dm warn';el.textContent='Rig: '+r.error;return}
+  var bits=['tree '+r.tree,'nav_mode '+r.nav_mode,r.publish?'PUBLISH on: the boat will drive once armed + GUIDED':'STAND TEST: no setpoints'],n=0;
+  Object.keys(r.applied||{}).forEach(function(k){n+=Object.keys(r.applied[k]).length});
+  if(r.tuning)bits.push('tuning overlay: '+n+' key'+(n===1?'':'s'));
+  if(r.pool)bits.unshift('POOL: camera-only, LiDAR not used for planning');
+  el.className='dm'+(r.pool?' warn':'');
+  el.textContent='Rig: '+bits.join(' · ');
+  el.title=r.nav_why+(r.notes&&r.notes.length?'\n'+r.notes.join('\n'):'')+(r.tuning?'\noverlay file: '+r.tuning:'')+(r.ignored&&Object.keys(r.ignored).length?'\nignored (nav off): '+Object.keys(r.ignored).join(', '):'')
+}
 function renderDeadman(){
   var el=$('deadman'),dm=S&&S.deadman,r=S&&S.radio;
   if(unreachableSince!=null){var s=((Date.now()-unreachableSince)/1000).toFixed(0);
-    el.className='dm bad';el.textContent='PANEL UNREACHABLE for '+s+' s: the field is NOT being resent. The boat aborts about 15 s after the last field it received.';
+    el.className='dm bad';el.textContent='PANEL UNREACHABLE for '+s+' s: the field is NOT being resent. '+(guarded()?'The boat aborts about 15 s after the last field it received.':NOGUARD);
     pill('dmpill','dead-man TRIPPED','bad');return}
   if(!S)return;
   if(!live()){el.className='dm';el.textContent='No field on the air. Build the field, then COMMIT FIELD.';pill('dmpill','no field on air','');return}
   var age=r.last_tx_age;
-  if(age!=null&&age>8){el.className='dm warn';el.textContent='The last field went out '+age.toFixed(0)+' s ago: the boat aborts at 15 s.';pill('dmpill','resend OVERDUE','busy');return}
+  if(age!=null&&age>8){el.className='dm warn';el.textContent='The last field went out '+age.toFixed(0)+' s ago'+(guarded()?': the boat aborts at 15 s.':' (Advanced: the boat does not need it).');pill('dmpill','resend OVERDUE','busy');return}
   el.className='dm ok';el.textContent='DEAD-MAN armed: the field is resent every 5 s only while this page keeps polling (last '+(age==null?'-':age.toFixed(1)+' s ago')+
-    '). Close it or lose the WiFi and the boat aborts ~15 s later.'+(dm.last_trip?' (tripped once at '+new Date(dm.last_trip.at*1000).toLocaleTimeString()+', '+dm.withheld+' resends withheld)':'');
+    (guarded()?'). Close it or lose the WiFi and the boat aborts ~15 s later.':'). '+NOGUARD)+(dm.last_trip?' (tripped once at '+new Date(dm.last_trip.at*1000).toLocaleTimeString()+', '+dm.withheld+' resends withheld)':'');
   pill('dmpill','dead-man OK','up')}
 function renderTracks(){
   var d=layData('tracks'),el=$('trk');
@@ -256,7 +312,7 @@ function render(){
   $('count').textContent=n+'/10 buoys · '+Math.min(red,grn)+' gate'+(Math.min(red,grn)===1?'':'s')+' (red/green pairs)';
   renderValid();
   $('commit').disabled=!editable()||S.layout.errors.length>0;
-  $('pinbtn').disabled=!editable()||!S.boat;
+  renderPin();
   ['tplgo','clear','laygo'].forEach(function(id){$(id).disabled=!editable()});
   fillSelect('tpl',S.templates,'task1_core');fillSelect('lays',S.layouts);
   var a=S.approach;$('apinfo').textContent=a?'approach: '+a.x.toFixed(1)+', '+a.y.toFixed(1)+' m  ('+a.lat.toFixed(7)+', '+a.lon.toFixed(7)+')':'none: the goal skips the drive (the boat is on station)';
@@ -273,7 +329,7 @@ function render(){
   if(m.aborted_at){$('abortAt').textContent=' at '+new Date(m.aborted_at*1000).toLocaleTimeString();
     $('abortState').textContent=m.running?'lake_goal is cancelling the goal...':(m.exit_code!=null?'lake_goal has exited (code '+m.exit_code+'). Goal result: '+(m.result||'none').split('\n')[0]:'')}
   if(live())renderLive();
-  renderRun();layPaint();
+  renderRun();renderTier();renderRig();layPaint();
   draw();
 }
 setInterval(function(){if(unreachableSince!=null)renderDeadman()},1000);

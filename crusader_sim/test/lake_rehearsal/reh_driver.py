@@ -1,13 +1,20 @@
 """The rehearsal's browser stand-in: drives the lake panel over its HTTP API only (no screenshots, no UI).
 
-    python3 reh_driver.py --port 8097 --scenario pass|abort|deadman --pilot "<cmd to arm+GUIDED>" [--hold "<cmd>"]
+    python3 reh_driver.py --port 8097 --scenario pass|recolour|abort|deadman --pilot "<cmd to arm+GUIDED>"
+                          [--hold "<cmd>"] [--tier disruptive|advanced] [--result FILE]
 
-  pass      load the course as the field, COMMIT, pilot arms + GUIDED, START, ACK every checkpoint (EXIT included),
-            wait for the goal to finish. Prints the checkpoints with their labels and the goal's result.
-  abort     the same, but with a recolour sent at checkpoint 1 (the pretend-UAV colour flow), and ABORT in TRANSIT:
-            the goal is cancelled, the boat must hold, the banner state is read back.
-  deadman   the same, but in TRANSIT the driver STOPS POLLING /api/state (the browser goes away) and touches nothing
+  pass      load the course as the field, COMMIT, pilot arms + GUIDED, START (with --tier), ACK every checkpoint (EXIT
+            included), wait for the goal to finish. Prints the checkpoints with their labels and the goal's result.
+            With --tier advanced the boat must ask NO checkpoint, and the driver says so.
+  recolour  the pass, plus the pretend-UAV colour flow at checkpoint 1: the last buoy is recoloured (BLACK -> RED, on the
+            starboard side of the course, so the passage stays valid), SEND CHANGES + ACK, the boat re-plans and the run
+            COMPLETES. (abort's recolour, without the abort.)
+  abort     the recolour, and ABORT in TRANSIT: the goal is cancelled, the boat must hold, the banner state is read back.
+  deadman   the pass, but in TRANSIT the driver STOPS POLLING /api/state (the browser goes away) and touches nothing
             until the boat's own guard has aborted the mission; polling resumes afterwards to read what happened.
+
+--result FILE gets one JSON object: the scenario, tier, START-to-finish seconds, the goal's exit code and result line,
+the checkpoints asked with their labels. reh_run.sh folds it into summary.txt.
 """
 import argparse
 import json
@@ -19,11 +26,13 @@ import urllib.request
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--port", type=int, default=8097)
-ap.add_argument("--scenario", default="pass")
+ap.add_argument("--scenario", default="pass", choices=("pass", "recolour", "abort", "deadman"))
+ap.add_argument("--tier", default="disruptive", choices=("disruptive", "advanced"))
+ap.add_argument("--result", default="")
 ap.add_argument("--course", default="task1_core")
 ap.add_argument("--pilot", required=True)
 ap.add_argument("--hold", default="")
-ap.add_argument("--max-s", type=float, default=420.0)
+ap.add_argument("--max-s", type=float, default=480.0)
 a = ap.parse_args()
 BASE = "http://127.0.0.1:%d" % a.port
 T0 = time.time()
@@ -110,14 +119,17 @@ say("boat's fused passage before START: status %s" % fused["status"])
 
 # ---------------------------------------------------------------- 4. the pilot, then START
 say("start_block before the pilot: %s" % S["state"]["start_block"])
-rc = post("/api/start")
+rc = post("/api/start", {"tier": a.tier})
 say("START before arm/GUIDED (must be refused) -> %s" % rc)
 run_cmd(a.pilot)
 st = wait(lambda s: s["start_block"] is None, 30, "START to enable (armed + GUIDED)")
 say("fcu now %s; start_block %s" % (st["fcu"]["data"], st["start_block"]))
-r = post("/api/start")
-say("START -> %s" % r)
+r = post("/api/start", {"tier": a.tier})
+say("START (tier %s) -> %s" % (a.tier, r))
 t_start = time.time()
+t_done = None
+time.sleep(0.6)
+say("the page reports mission tier %r (rig %s)" % (S["state"]["mission"].get("tier"), (S["state"].get("rig") or {}).get("tree")))
 
 # ---------------------------------------------------------------- 5. the run
 answered = set()
@@ -144,7 +156,7 @@ while time.time() < t_end:
     c = st["checkpoint"]
     if c and c["seq"] not in answered and time.time() - c["asked"] > 1.0:
         say("BOAT ASKS %d: %s   [%s]" % (c["seq"], c["label"], c["what"][:70]))
-        if a.scenario == "abort" and c["seq"] == 1 and not recoloured:
+        if a.scenario in ("abort", "recolour") and c["seq"] == 1 and not recoloured:
             b9 = len(st["run"]["buoys"]) - 1
             say("stage b%d (black) -> RED: %s" % (b9, post("/api/stage", {"id": b9, "state": "flash_red"})))
             time.sleep(0.6)
@@ -162,7 +174,8 @@ while time.time() < t_end:
         say("STOP POLLING (the browser goes away) in phase %s; last poll %.2f s ago" % (m["phase"], time.time() - S["last_poll"]))
         continue
     if not m["running"] and m["exit_code"] is not None:
-        say("goal finished: exit %s" % m["exit_code"])
+        t_done = time.time()
+        say("goal finished: exit %s after %.0f s" % (m["exit_code"], t_done - t_start))
         break
     time.sleep(0.25)
 
@@ -184,6 +197,14 @@ say("--- radio log tail ---")
 for l in full["logs"]["radio"]["lines"][-14:]:
     say("  " + l)
 say("radio: %s  deadman: %s" % (st["radio"], st["deadman"]))
+if a.tier == "advanced":
+    say("ADVANCED: checkpoints the boat asked: %d (must be 0)" % len(st["checkpoints"]))
+if a.result:
+    with open(a.result, "w", encoding="utf-8") as f:
+        json.dump({"scenario": a.scenario, "tier": a.tier, "mission_tier": m.get("tier"), "exit_code": m["exit_code"],
+                   "seconds": None if t_done is None else round(t_done - t_start, 1),
+                   "result": (m["result"] or "").split("\n")[0], "aborted_at": m["aborted_at"],
+                   "checkpoints": [(c["seq"], c["label"], c["reply"]) for c in st["checkpoints"]]}, f, indent=1)
 if a.scenario == "abort":
     time.sleep(6)
     st = get_state()
