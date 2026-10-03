@@ -101,6 +101,15 @@ def parse_datum(text):
     return {"lat": lat, "lon": lon}
 
 
+def fresh_data(view):
+    """A feed layer view's data when the feed calls it fresh, else None (a blank, never the last value)."""
+    return view["data"] if view["status"] == "fresh" and view["data"] else None
+
+
+def round_or_none(v, ndigits):
+    return None if v is None else round(v, ndigits)
+
+
 class PoseAverager:
     """The boat's pose over the last `window_s`, for PIN AT BOAT: one sample per NEW feed packet whose pose layer
     is fresh (blanks over guesses: a stale pose adds nothing, and a stale feed refuses the pin). `note()` is fed
@@ -116,7 +125,8 @@ class PoseAverager:
     def note(self, feed):
         """Offer the feed's current view (FeedReceiver.view()); keeps a sample when it is a new fresh pose."""
         v = feed["pose"]
-        if v["status"] != "fresh" or not v["data"]:
+        d = fresh_data(v)
+        if d is None:
             return
         with self._lock:
             if feed["packets"] == self._packets:
@@ -126,7 +136,6 @@ class PoseAverager:
             t = now - (v["age"] or 0.0)
             if self.samples and t - self.samples[-1][0] < SAMPLE_GAP_S:
                 return
-            d = v["data"]
             self.samples.append((t, d["x"], d["y"], d["yaw"]))
             keep = now - 5.0 * self.window_s
             self.samples = [s for s in self.samples if s[0] >= keep]
@@ -136,9 +145,8 @@ class PoseAverager:
         spread_m (the farthest sample from the mean), yaw (ENU radians, the circular mean; None without a heading),
         heading_deg (compass), heading_n, heading_age (s since the newest sample that had one), heading_spread_deg."""
         self.note(feed)
-        v = feed["pose"]
-        if v["status"] != "fresh" or not v["data"]:
-            return None, "no fresh boat pose from the feed (%s): nothing to pin" % v["status"]
+        if fresh_data(feed["pose"]) is None:
+            return None, "no fresh boat pose from the feed (%s): nothing to pin" % feed["pose"]["status"]
         with self._lock:
             now = self.clock()
             win = [s for s in self.samples if s[0] >= now - self.window_s]
@@ -332,14 +340,9 @@ class LakePanel(Panel):
         return r
 
     # ---------------------------------------------------------- the feed
-    def _fresh(self, feed, layer):
-        """The layer's data when the feed calls it fresh, else None (a blank, never the last value)."""
-        v = feed[layer]
-        return v["data"] if v["status"] == "fresh" else None
-
     def _boat(self, feed):
         """(x, y, yaw or None, age) of the boat, from the feed's pose layer, or None."""
-        p = self._fresh(feed, "pose")
+        p = fresh_data(feed["pose"])
         return None if p is None else (p["x"], p["y"], p["yaw"], feed["pose"]["age"])
 
     def _origin_problem(self, feed):
@@ -451,9 +454,8 @@ class LakePanel(Panel):
                 "the boat moved %.2f m in the window: the pin is the AVERAGE, not where the bow is now" % avg["spread_m"])
         return {"problem": pin_problem(avg), "warn": warn, "n": avg["n"], "window_s": POSE_WINDOW_S,
                 "span_s": round(avg["span_s"], 2), "spread_m": round(avg["spread_m"], 3),
-                "heading_deg": None if avg["yaw"] is None else round(avg["heading_deg"], 1),
-                "heading_age": None if avg["heading_age"] is None else round(avg["heading_age"], 2),
-                "heading_spread_deg": None if avg["yaw"] is None else round(avg["heading_spread_deg"], 1),
+                "heading_deg": round_or_none(avg["heading_deg"], 1), "heading_age": round_or_none(avg["heading_age"], 2),
+                "heading_spread_deg": round_or_none(avg["heading_spread_deg"], 1),
                 "heading_problem": heading_problem(avg), "max_offset_m": MAX_BOW_OFFSET_M}
 
     def act_add_latlon(self, body):

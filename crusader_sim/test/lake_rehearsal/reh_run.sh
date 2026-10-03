@@ -42,14 +42,19 @@ TIER=${REH_TIER:-disruptive}
 PORT=8097
 mkdir -p "$OUT" "$SCR/reh"
 say() { echo "[reh $(date +%T)] $*" | tee -a "$OUT/steps.log"; }
+ENVC='source /opt/ros/humble/setup.bash; source /root/robotx_ws/install/setup.bash'
+CSRC=/root/robotx_ws/src/rx26_asv/crusader_sim                  # the synced copy, as the container sees it
+REHC=/root/robotx_ws/lake_scratch/reh                           # the helper files, copied there below
+cx() { docker exec crsd-sim bash -lc "$ENVC; $*"; }              # a command in crsd-sim with ROS sourced
+# the rig down (by its recorded pids, never by name) and the sim down: the end of every run, and of a failed bring-up
+down() {
+  docker exec -e "LAKE_LOGDIR=/root/robotx_ws/lake_scratch/logs_$TAG" crsd-sim bash $CSRC/scripts/lake_rig_down.sh
+  cx 'for p in $(pgrep -f "crusader_sim.task1_judge"); do kill $p; done' 2>/dev/null
+  bash "$SIM/scripts/gz_sim_down.sh" --keep-container > "$OUT/sim_down.log" 2>&1
+}
 # a bring-up that failed leaves gazebo / SITL / half a rig running (gz_sim_up.sh dies after starting them): never go on
 # into the driver with it. Stop what is up, cleanly, say why, exit 3 (retry once, then report it)
-bail() {
-  say "FAILED: $*  (last lines of the log: $OUT/*.log)"
-  docker exec -e "LAKE_LOGDIR=/root/robotx_ws/lake_scratch/logs_$TAG" crsd-sim bash /root/robotx_ws/src/rx26_asv/crusader_sim/scripts/lake_rig_down.sh >/dev/null 2>&1
-  bash "$SIM/scripts/gz_sim_down.sh" --keep-container > "$OUT/sim_down.log" 2>&1
-  exit 3
-}
+bail() { say "FAILED: $*  (last lines of the log: $OUT/*.log)"; down >/dev/null 2>&1; exit 3; }
 
 # the rig's environment, only what was asked for; the rest is the rig's own defaults
 RIGENV=(-e LAKE_DATUM=1.2806,103.8557 -e "PUBLISH=${REH_PUBLISH:-1}" -e PANEL_PORT=$PORT -e "LAKE_FEED_PORT=${REH_FEED_PORT:-14557}")
@@ -67,15 +72,15 @@ say "sync (once, up front)"
 tr -d '\r' < "$WIN_SRC/crusader_sim/scripts/gz_sync.sh" > /tmp/gz_sync_reh.sh
 bash /tmp/gz_sync_reh.sh 2>&1 | tail -3
 for f in core_standin.sh pilot_standin.py judge_verdict.py bringup_container.sh; do tr -d '\r' < "$SP/$f" > "$SCR/reh/$f"; done
-ENVC='source /opt/ros/humble/setup.bash; source /root/robotx_ws/install/setup.bash'
 RIGEXEC=(docker exec "${RIGENV[@]}" -e "LAKE_LOGDIR=/root/robotx_ws/lake_scratch/logs_$TAG" crsd-sim)
-RIGUP=/root/robotx_ws/src/rx26_asv/crusader_sim/scripts/lake_rig_up.sh
+RIGUP=$CSRC/scripts/lake_rig_up.sh
+pilot() { echo "docker exec crsd-sim bash -lc '$ENVC; python3 $REHC/pilot_standin.py $1'"; }      # the RC pilot's stand-in, as a command line
 
 say "sim up ($COURSE, --no-uav --no-gui, NAV_MODE=$SIMNAV)"
 NAV_MODE=$SIMNAV bash $SIM/scripts/gz_sim_up.sh $COURSE --no-gui --no-uav > "$OUT/sim_up.log" 2>&1 || { tail -6 "$OUT/sim_up.log"; bail "gz_sim_up.sh"; }
 tail -4 "$OUT/sim_up.log"
 say "core stand-in (gz bridge, livox, camera, telemetry_bridge, lidar, gcs)"
-docker exec crsd-sim bash /root/robotx_ws/lake_scratch/reh/core_standin.sh $COURSE | tee "$OUT/core_standin.log"
+docker exec crsd-sim bash $REHC/core_standin.sh $COURSE | tee "$OUT/core_standin.log"
 say "lake_rig_up.sh --check"
 "${RIGEXEC[@]}" bash $RIGUP --check 2>&1 | tee "$OUT/rig_check.log"
 [ "${PIPESTATUS[0]}" = 0 ] || bail "lake_rig_up.sh --check refused (see rig_check.log)"
@@ -85,26 +90,22 @@ say "lake_rig_up.sh"
 
 if [ "$SCN" = bringup ]; then
   say "bringup checks (the rig is up; no START)"
-  { docker exec crsd-sim bash /root/robotx_ws/lake_scratch/reh/bringup_container.sh
+  { docker exec crsd-sim bash $REHC/bringup_container.sh
     python3 "$SP/bringup_check.py" --port $PORT; } 2>&1 | tee "$OUT/bringup_check.txt"
 else
   say "judge (standalone, background)"
   docker exec -d crsd-sim bash -lc "$ENVC; cd /root/robotx_ws; python3 -u -m crusader_sim.task1_judge --course $COURSE > /tmp/judge_$TAG.log 2>&1"
   sleep 3
-  PILOT="docker exec crsd-sim bash -lc '$ENVC; python3 /root/robotx_ws/lake_scratch/reh/pilot_standin.py arm-guided'"
-  HOLD="docker exec crsd-sim bash -lc '$ENVC; python3 /root/robotx_ws/lake_scratch/reh/pilot_standin.py hold'"
   say "driver: $SCN ($TIER)"
-  python3 -u "$SP/reh_driver.py" --port $PORT --scenario $SCN --tier $TIER --course $COURSE --pilot "$PILOT" --hold "$HOLD" \
-    --result "$OUT/result.json" 2>&1 | tee "$OUT/driver.log"
+  python3 -u "$SP/reh_driver.py" --port $PORT --scenario $SCN --tier $TIER --course $COURSE \
+    --pilot "$(pilot arm-guided)" --hold "$(pilot hold)" --result "$OUT/result.json" 2>&1 | tee "$OUT/driver.log"
   say "verdict"
-  docker exec crsd-sim bash -lc "$ENVC; cd /root/robotx_ws; python3 /root/robotx_ws/lake_scratch/reh/judge_verdict.py" | tee "$OUT/verdict.txt"
+  cx "cd /root/robotx_ws; python3 $REHC/judge_verdict.py" | tee "$OUT/verdict.txt"
 fi
 say "logs"
 cp -r $SCR/logs_$TAG "$OUT/lake_logs" 2>/dev/null
 tail -25 $SCR/logs_$TAG/bt.log > "$OUT/bt_tail.txt" 2>/dev/null
 say "rig down, sim down"
-docker exec -e LAKE_LOGDIR=/root/robotx_ws/lake_scratch/logs_$TAG crsd-sim bash /root/robotx_ws/src/rx26_asv/crusader_sim/scripts/lake_rig_down.sh | tee "$OUT/rig_down.log"
-docker exec crsd-sim bash -lc 'for p in $(pgrep -f "crusader_sim.task1_judge"); do kill $p; done' 2>/dev/null
-bash $SIM/scripts/gz_sim_down.sh --keep-container > "$OUT/sim_down.log" 2>&1
+down | tee "$OUT/rig_down.log"
 python3 "$SP/reh_summary.py" "$OUT" --tag "$TAG" --scenario "$SCN" --tier "$TIER" | tee "$OUT/summary.txt"
 say "done -> $OUT"

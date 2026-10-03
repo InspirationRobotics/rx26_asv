@@ -337,8 +337,8 @@ def read_back(retries=4):
                 except yaml.YAMLError as e:
                     why = "unparseable dump: %s" % e
             else:
-                why = (r.stderr or r.stdout or "exit %d" % r.returncode).strip().splitlines()[-1:] or ["failed"]
-                why = why[0]
+                lines = (r.stderr or r.stdout or "").strip().splitlines()
+                why = lines[-1] if lines else "exit %d" % r.returncode
     return None, why
 
 

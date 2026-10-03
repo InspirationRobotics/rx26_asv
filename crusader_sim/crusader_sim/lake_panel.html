@@ -237,8 +237,8 @@ function tierNow(){var m=S&&S.mission;return m&&m.running&&m.tier?m.tier:val('ti
 function perGateRig(){return !!(S&&S.rig&&S.rig.global_tree===false)}
 // does the boat guard on the UAV's field (PassagePlanFresh: ~15 s of silence aborts)? Not in the whole-field Advanced tier.
 function guarded(){return !(tierNow()==='advanced'&&S&&S.rig&&S.rig.global_tree)}
-function stopUavText(){return guarded()?'STOP UAV: nothing more is transmitted. A running goal aborts on the boat’s own plan-freshness guard (~15 s). Continue?'
-  :'STOP UAV: nothing more is transmitted. An ADVANCED goal on the whole-field tree has NO freshness guard: the boat KEEPS DRIVING its plan. Stop it with ABORT GOAL / the RC. Continue?'}
+var NOGUARD='ADVANCED on the whole-field tree has no freshness guard: if this page goes away the boat KEEPS DRIVING its plan. Stop it with ABORT GOAL / the RC.';
+function stopUavText(){return 'STOP UAV: nothing more is transmitted. '+(guarded()?'A running goal aborts on the boat’s own plan-freshness guard (~15 s).':NOGUARD)+' Continue?'}
 var CPNOTE={advanced:'ADVANCED tier: the boat asks NO checkpoints. It plans once from the field you sent and drives approach, ENTRY orbit, transit and EXIT orbit. This table stays empty by design and there is nothing to ACK. (If the boat does ask, the ask appears above the map as usual.)',
   disruptive:'DISRUPTIVE tier: the boat stops and asks after the ENTRY orbit and after each gate. Answer with ACK, or recolour and SEND CHANGES + ACK. Unanswered it re-asks every 3 s and gives up after 120 s.',
   pergate:'This rig runs the per-gate tree, which behaves as DISRUPTIVE whatever the tier says: it asks after the ENTRY orbit and each gate.'}
@@ -266,15 +266,14 @@ function renderRig(){
 function renderDeadman(){
   var el=$('deadman'),dm=S&&S.deadman,r=S&&S.radio;
   if(unreachableSince!=null){var s=((Date.now()-unreachableSince)/1000).toFixed(0);
-    el.className='dm bad';el.textContent='PANEL UNREACHABLE for '+s+' s: the field is NOT being resent. '+(guarded()?'The boat aborts about 15 s after the last field it received.'
-      :'ADVANCED whole-field tree: the boat has no freshness guard and KEEPS DRIVING its plan. Stop it with the RC.');
+    el.className='dm bad';el.textContent='PANEL UNREACHABLE for '+s+' s: the field is NOT being resent. '+(guarded()?'The boat aborts about 15 s after the last field it received.':NOGUARD);
     pill('dmpill','dead-man TRIPPED','bad');return}
   if(!S)return;
   if(!live()){el.className='dm';el.textContent='No field on the air. Build the field, then COMMIT FIELD.';pill('dmpill','no field on air','');return}
   var age=r.last_tx_age;
   if(age!=null&&age>8){el.className='dm warn';el.textContent='The last field went out '+age.toFixed(0)+' s ago'+(guarded()?': the boat aborts at 15 s.':' (Advanced: the boat does not need it).');pill('dmpill','resend OVERDUE','busy');return}
   el.className='dm ok';el.textContent='DEAD-MAN armed: the field is resent every 5 s only while this page keeps polling (last '+(age==null?'-':age.toFixed(1)+' s ago')+
-    (guarded()?'). Close it or lose the WiFi and the boat aborts ~15 s later.':'). ADVANCED whole-field tree: no freshness guard, so closing this page does NOT stop the boat; the RC does.')+(dm.last_trip?' (tripped once at '+new Date(dm.last_trip.at*1000).toLocaleTimeString()+', '+dm.withheld+' resends withheld)':'');
+    (guarded()?'). Close it or lose the WiFi and the boat aborts ~15 s later.':'). '+NOGUARD)+(dm.last_trip?' (tripped once at '+new Date(dm.last_trip.at*1000).toLocaleTimeString()+', '+dm.withheld+' resends withheld)':'');
   pill('dmpill','dead-man OK','up')}
 function renderTracks(){
   var d=layData('tracks'),el=$('trk');

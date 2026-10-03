@@ -89,6 +89,7 @@ PIDS="$LAKE_LOGDIR/pids"
 
 # ---- inputs, checked before anything starts
 case "${PUBLISH:-}" in 1|true|TRUE|True) PUB=true ;; *) PUB=false ;; esac
+CHECK=0; [ "${1:-}" = "--check" ] && CHECK=1          # --check: say whether this container is READY, start nothing
 case "$LAKE_RXL" in replace|keep) ;; *) echo "*** LAKE_RXL must be replace or keep" >&2; exit 2 ;; esac
 if [ -z "${LAKE_DATUM:-}" ]; then
   echo "*** LAKE_DATUM is required: 'lat,lon' of the map origin, e.g. LAKE_DATUM=1.3000000,103.8500000" >&2; exit 2
@@ -106,6 +107,7 @@ PLAN="$(python3 -m crusader_sim.lake_rig_plan decide)" || exit 2
 eval "$PLAN"
 TREE="$PLAN_TREE"; NAV_MODE="$PLAN_NAV_MODE"; POOL="$PLAN_POOL"; TUNING="$PLAN_TUNING"; GLOBAL="$PLAN_GLOBAL"
 case "$TREE" in */*) ;; *) TREE="$BT/$TREE" ;; esac
+TREE_NAME="$(basename "$TREE")"
 NAV2_CFG=$WS/install/crusader_nav/share/crusader_nav/config/nav2_params.yaml
 echo "=== plan ==="
 printf '%s\n' "$PLAN_BANNER" | sed 's/^/  /'
@@ -145,7 +147,7 @@ if [ "$POOL" = 1 ] && pgrep -f 'crusader_world_model.*target_tracker|target_trac
   case "$ul" in
     *alse*) echo "  POOL: the running target_tracker already has use_lidar false" ;;
     *) echo "*** POOL=1: a target_tracker is already running and its use_lidar is not false (${ul:-no answer}): stop it (GCS Nodes tab) and run this again" >&2
-       [ "${1:-}" = "--check" ] || exit 3 ;;
+       [ "$CHECK" = 1 ] || exit 3 ;;
   esac
 fi
 if pgrep -f 'crusader_perception.*oak_detector|oak_detector' >/dev/null; then echo "  oak_detector running"
@@ -158,13 +160,13 @@ from crusader_msgs.msg import FcuStatus, HazardArray, LatLonHead, TrackedTargetA
 PY
 then echo "  python imports ok (yaml, pymavlink, crusader_sim, crusader_msgs)"
 else echo "*** python imports failed:" >&2; sed 's/^/    /' /tmp/lake_imports.err >&2
-  [ "${1:-}" = "--check" ] || exit 2; fi
+  [ "$CHECK" = 1 ] || exit 2; fi
 # the planner-tuning overlay, checked against the boat's own params files for the nav_mode that will REALLY run (the
 # preflight above may have turned nav off); writes $LAKE_LOGDIR/tuning_applied.yaml + rig.json (the page's rig line)
 FIN=(python3 -m crusader_sim.lake_rig_plan finish --nav-mode "$NAV_MODE" --cfg "$CFG" --nav2-cfg "$NAV2_CFG" --out-dir "$LAKE_LOGDIR" --publish "$PUB")
-if [ "${1:-}" = "--check" ]; then "${FIN[@]}" --dry || exit 2; else "${FIN[@]}" || exit 2; fi
-if [ "${1:-}" = "--check" ]; then
-  echo "  would start: tree $(basename "$TREE"), nav_mode $NAV_MODE, publish_setpoints $PUB$([ "$POOL" = 1 ] && echo ', POOL (camera only)')"
+if [ "$CHECK" = 1 ]; then "${FIN[@]}" --dry || exit 2; else "${FIN[@]}" || exit 2; fi
+if [ "$CHECK" = 1 ]; then
+  echo "  would start: tree $TREE_NAME, nav_mode $NAV_MODE, publish_setpoints $PUB$([ "$POOL" = 1 ] && echo ', POOL (camera only)')"
   for pr in 14555 $FEED_PORT; do ss -lun 2>/dev/null | grep -q ":$pr " && echo "  note: udp $pr is in use (a lake rig already up? lake_rig_up.sh restarts it)"; done
   echo "check done: nothing was started."; exit 0
 fi
@@ -218,7 +220,7 @@ APPLIED="$LAKE_LOGDIR/tuning_applied.yaml"
 BT_TUNE=(); NAV_TUNE=()
 if [ -n "$TUNING" ] && [ -s "$APPLIED" ]; then BT_TUNE=(--params-file "$APPLIED"); NAV_TUNE=("nav2_overlay:=$APPLIED"); fi
 TT_ARGS=(); [ "$POOL" = 1 ] && TT_ARGS=(-p use_lidar:=false)
-echo "=== lake rig: datum $LAKE_DATUM  tree $(basename "$TREE")  nav_mode $NAV_MODE  publish_setpoints $PUB$([ "$POOL" = 1 ] && echo '  POOL: camera-only') ==="
+echo "=== lake rig: datum $LAKE_DATUM  tree $TREE_NAME  nav_mode $NAV_MODE  publish_setpoints $PUB$([ "$POOL" = 1 ] && echo '  POOL: camera-only') ==="
 # rxl_link_node: loopback, by command-line override (the running one was stopped above, once)
 if [ "$LAKE_RXL" = replace ]; then
   up rxl_link_node "$LAKE_LOGDIR/rxl.log" \
@@ -286,5 +288,5 @@ else
     echo "  STAND TEST (PUBLISH=false): the tree plans and ticks but sends NO setpoints. For the water: PUBLISH=1 (and NAV_MODE=on for avoidance)"
   fi
 fi
-echo "  tree $(basename "$TREE"), nav_mode $NAV_MODE <- $PLAN_NAV_WHY$([ "$POOL" = 1 ] && echo '. POOL: camera-only, LiDAR not used for planning')"
+echo "  tree $TREE_NAME, nav_mode $NAV_MODE <- $PLAN_NAV_WHY$([ "$POOL" = 1 ] && echo '. POOL: camera-only, LiDAR not used for planning')"
 echo "  stop everything this started: bash $HERE/lake_rig_down.sh"
