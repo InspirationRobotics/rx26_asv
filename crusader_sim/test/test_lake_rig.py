@@ -452,6 +452,16 @@ class RigScriptTest(unittest.TestCase):
         self.assertEqual(text.count("use_lidar:=false"), 3)     # the header, the assignment, the --check message
         self.assertIn("--rig-file", text)
 
+    def test_the_feed_port_can_move_beside_another_panel_and_a_bad_one_is_refused(self):
+        self.assertEqual(self.run_rig(LAKE_FEED_PORT="14557").returncode, 0)
+        r = self.run_rig(LAKE_FEED_PORT="14x57")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("LAKE_FEED_PORT must be a udp port number", r.stderr)
+        text = read_text(SCRIPT)
+        self.assertIn("-p panel_port:=$FEED_PORT", text)           # panel_feed sends there ...
+        self.assertIn('--feed-port "$FEED_PORT"', text)            # ... and the panel listens there
+        self.assertIn('FEED_PORT="${LAKE_FEED_PORT:-14556}"', text)    # the default is the one the sim and the docs use
+
     def test_both_scripts_parse_and_stay_lf(self):
         for path in (SCRIPT, DOWN):
             r = subprocess.run([BASH, "-n", path], capture_output=True, text=True)

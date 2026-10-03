@@ -35,6 +35,8 @@
 #                started with use_lidar:=false, LAKE_TUNING defaults to config/tuning_profiles/tight_3to5m.yaml.
 #                (A pool profile belongs beside it as pool_<name>.yaml once the pool is measured: not guessed.)
 #   PANEL_PORT   default 8095            LAKE_LOGDIR  default ~/.cache/crusader_lake
+#   LAKE_FEED_PORT  default 14556 (udp, loopback): panel_feed -> the panel. Change it ONLY to run beside another
+#                panel that holds 14556 (the sim's Task 1 panel does); keep it in the boat's 1455x range.
 #   LAKE_RXL     replace (default) | keep.  See "rxl_link_node" below.
 #   LAKE_SRC     the checkout inside the container, default /root/robotx_ws/src/rx26_asv
 #
@@ -80,6 +82,8 @@ LAKE_LOGDIR="${LAKE_LOGDIR:-$HOME/.cache/crusader_lake}"
 PANEL_PORT="${PANEL_PORT:-8095}"
 LAKE_RXL="${LAKE_RXL:-replace}"
 RXL_ENDPOINT="udpin:127.0.0.1:14555"
+FEED_PORT="${LAKE_FEED_PORT:-14556}"
+case "$FEED_PORT" in ''|*[!0-9]*) echo "*** LAKE_FEED_PORT must be a udp port number (got '$FEED_PORT')" >&2; exit 2 ;; esac
 mkdir -p "$LAKE_LOGDIR"
 PIDS="$LAKE_LOGDIR/pids"
 
@@ -161,7 +165,7 @@ FIN=(python3 -m crusader_sim.lake_rig_plan finish --nav-mode "$NAV_MODE" --cfg "
 if [ "${1:-}" = "--check" ]; then "${FIN[@]}" --dry || exit 2; else "${FIN[@]}" || exit 2; fi
 if [ "${1:-}" = "--check" ]; then
   echo "  would start: tree $(basename "$TREE"), nav_mode $NAV_MODE, publish_setpoints $PUB$([ "$POOL" = 1 ] && echo ', POOL (camera only)')"
-  for pr in 14555 14556; do ss -lun 2>/dev/null | grep -q ":$pr " && echo "  note: udp $pr is in use (a lake rig already up? lake_rig_up.sh restarts it)"; done
+  for pr in 14555 $FEED_PORT; do ss -lun 2>/dev/null | grep -q ":$pr " && echo "  note: udp $pr is in use (a lake rig already up? lake_rig_up.sh restarts it)"; done
   echo "check done: nothing was started."; exit 0
 fi
 
@@ -179,15 +183,15 @@ if [ "$LAKE_RXL" = replace ]; then
 fi
 if python3 -c "
 import socket, sys
-for port in (14555, 14556):
+for port in (14555, int(sys.argv[1])):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.bind(('127.0.0.1', port))
     except OSError as e:
-        sys.exit('udp %d is taken (%s): something else owns it. 14555 is rxl_link_node, 14556 panel_feed -> the panel' % (port, e))
+        sys.exit('udp %d is taken (%s): something else owns it. 14555 is rxl_link_node, %s is panel_feed -> the panel (LAKE_FEED_PORT moves that one)' % (port, e, sys.argv[1]))
     finally:
         s.close()
-" 2>&1; then :; else
+" "$FEED_PORT" 2>&1; then :; else
   echo "  (an old process of ours may have escaped lake_rig_down: ps -ef | grep -E 'rxl_link|panel_feed')" >&2
   exit 2
 fi
@@ -236,7 +240,7 @@ if running 'groundstation.*ground_station|ground_station'; then echo "  ground_s
 else up ground_station "$LAKE_LOGDIR/gcs.log" ros2 run crusader_groundstation ground_station --ros-args --params-file "$CFG"; fi
 # the boat's layers for the panel. crusader_sim is not colcon-built on the boat: python3 -m from source
 up panel_feed "$LAKE_LOGDIR/panel_feed.log" \
-  python3 -u -m crusader_sim.panel_feed --ros-args -p origin:="$LAKE_DATUM" -p course:=lake
+  python3 -u -m crusader_sim.panel_feed --ros-args -p origin:="$LAKE_DATUM" -p course:=lake -p panel_port:=$FEED_PORT
 sleep 6
 if running 'bt_runner_node'; then
   echo "*** a bt_runner_node is already running that this rig did not start (GCS Nodes tab?). Stop it first: its publish_setpoints / nav_mode are not this rig's." >&2
@@ -247,7 +251,7 @@ up bt_runner "$LAKE_LOGDIR/bt.log" \
   -p tree_file:="$TREE" -p publish_setpoints:=$PUB -p default_timeout_s:=600.0 -p nav_mode:="$NAV_MODE"
 sleep 6
 up task1_panel "$LAKE_LOGDIR/panel.log" python3 -u -m crusader_sim.task1_panel --lake --datum "$LAKE_DATUM" --port "$PANEL_PORT" \
-  --rig-file "$LAKE_LOGDIR/rig.json"
+  --feed-port "$FEED_PORT" --rig-file "$LAKE_LOGDIR/rig.json"
 # the overlay is only a claim until the node says so: read it back from the running bt_runner
 if [ "${#BT_TUNE[@]}" -gt 0 ]; then python3 -m crusader_sim.lake_rig_plan verify "$APPLIED"; fi
 
