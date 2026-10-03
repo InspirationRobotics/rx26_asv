@@ -103,6 +103,22 @@ A build **without `nav2_msgs`** (an image without Nav2) compiles a stub port and
 refuses to start with anything but `off`. To check that on a machine that has Nav2:
 `colcon build --packages-select crusader_bt --build-base /tmp/b_nonav --install-base /tmp/i_nonav --cmake-args -DCMAKE_DISABLE_FIND_PACKAGE_nav2_msgs=TRUE`.
 
+**The other `nav_*` parameters: when a change applies.** The 47 planner knobs
+(`path::kNavKnobs` in `nav_params.hpp`: clearances, periods, orbit and gate sizes, fences)
+are **read when a mission goal is accepted** and used for that mission only, so
+`ros2 param set /bt_runner_node nav_hard_m 1.2` (or the ground station's Tuning tab) takes
+effect at the **next START**, never part-way through a mission. Each goal logs what changed:
+`nav_*: 2 changed since the previous goal: nav_hard_m 0.8 -> 1.2, ...`. Before this, they were
+copied once at startup, so a live set succeeded and changed nothing. The set-callback refuses
+a non-finite value, and per knob a value the planner cannot work with (`> 0` for sizes and
+periods that would break it at 0, `>= 0` for margins; `nav_fence_len_m <= 0` stays the fence
+off switch), with the reason; a bad YAML or `-p` value stops the node at startup. The `nav_*`
+keys wired once (rates, frame, topic and service names, `nav_planner_id`, `nav_mode`) are
+**read-only**: they are built into a timer, a topic or the planner port at startup. No default
+changed. (`crusader_params.yaml` still tags every nav_* key `[RO]`; the planner ones are not.)
+The other bt_runner_node parameters (`tick_hz`, `plan_timeout_s`, `assoc_radius_m`, ...) are
+still copied once at startup.
+
 **Ports.**
 
 | Leaf | Port | Default | Meaning |

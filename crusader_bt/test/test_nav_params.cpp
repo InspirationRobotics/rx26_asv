@@ -37,23 +37,33 @@ int main()
     // Every double and int knob of the struct, in a table: add a field to NavParams and forget the
     // table and this is what fails. (Doubles are 8-aligned and the two ints each take an 8-byte
     // slot between doubles on every 64-bit target this builds for.)
-    static_assert(sizeof(void *) != 8 ||
-      sizeof(NavParams) == std::size(kNavReals) * sizeof(double) + 2 * sizeof(double),
-      "NavParams has a field that is not in kNavReals / kNavWholes (nav_params.hpp)");
-    chk("47 keys: 45 real + 2 whole", kNavKeyCount == 47 && std::size(kNavWholes) == 2);
+    static_assert(sizeof(void *) != 8 || sizeof(NavParams) == std::size(kNavKnobs) * sizeof(double),
+      "NavParams has a field that is not in kNavKnobs (nav_params.hpp)");
+    std::size_t wholes = 0;
+    for (const NavKnob & k : kNavKnobs) {wholes += k.isWhole() ? 1 : 0;}
+    chk("47 knobs: 45 real + 2 whole", std::size(kNavKnobs) == 47 && wholes == 2);
 
     std::set<std::string> names;
-    bool all_nav = true;
-    for (const NavReal & k : kNavReals) {names.insert(k.name); all_nav &= std::string(k.name).rfind("nav_", 0) == 0;}
-    for (const NavWhole & k : kNavWholes) {names.insert(k.name); all_nav &= std::string(k.name).rfind("nav_", 0) == 0;}
-    chk("every name is unique and starts with nav_", names.size() == kNavKeyCount && all_nav);
+    bool all_nav = true, one_kind = true;
+    for (const NavKnob & k : kNavKnobs) {
+      names.insert(k.name);
+      all_nav &= std::string(k.name).rfind("nav_", 0) == 0;
+      one_kind &= (k.real != nullptr) != (k.whole != nullptr);
+    }
+    chk("every name is unique and starts with nav_", names.size() == std::size(kNavKnobs) && all_nav);
+    chk("every knob is exactly one of real / whole", one_kind);
 
-    // Poke every knob to its own value: if two entries pointed at one member, fewer than all differ.
+    // Poke every knob to its own value, then read each back: two entries on one member would
+    // overwrite each other and the first one read back would be wrong.
     NavParams poked;
     double v = 100.0;
-    for (const NavReal & k : kNavReals) {poked.*(k.field) = v; v += 1.0;}
-    for (const NavWhole & k : kNavWholes) {poked.*(k.field) = static_cast<int>(v); v += 1.0;}
-    chk("every table entry reaches its own member", diffNavParams(NavParams{}, poked).size() == kNavKeyCount);
+    for (const NavKnob & k : kNavKnobs) {k.set(poked, v); v += 1.0;}
+    bool own = true;
+    v = 100.0;
+    for (const NavKnob & k : kNavKnobs) {own &= k.get(poked) == v; v += 1.0;}
+    chk("every table entry reaches its own member", own);
+    chk("and a diff against the defaults sees all of them",
+      diffNavParams(NavParams{}, poked).size() == std::size(kNavKnobs));
   }
 
   std::printf("2. the defaults are all acceptable (so a boat on defaults starts)\n");
@@ -62,10 +72,9 @@ int main()
   std::printf("3. non-finite values are refused for every knob\n");
   {
     bool all = true;
-    for (const NavReal & k : kNavReals) {
+    for (const NavKnob & k : kNavKnobs) {
       all &= refused(k.name, nan) && refused(k.name, inf) && refused(k.name, -inf);
     }
-    for (const NavWhole & k : kNavWholes) {all &= refused(k.name, nan) && refused(k.name, inf);}
     chk("NaN, +inf and -inf refused everywhere", all);
     const std::string why = checkNavValue("nav_hard_m", nan);
     chk("the reason names the key and says finite",

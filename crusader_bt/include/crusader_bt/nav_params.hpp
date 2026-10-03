@@ -14,8 +14,8 @@
 //
 // So bt_runner_node now re-reads every key below into ctx_->nav when a mission goal is
 // ACCEPTED (never mid-mission), and refuses a value the planner cannot work with at the
-// moment it is set, in words. Three consumers, one list of names: declare, read, check.
-// A key added to NavParams and not to this table is caught by test_nav_params (sizeof).
+// moment it is set, in words. Four consumers (declare, read, check, diff), one list of
+// names. A key added to NavParams and not to this table is caught by test_nav_params.
 #ifndef CRUSADER_BT__NAV_PARAMS_HPP_
 #define CRUSADER_BT__NAV_PARAMS_HPP_
 
@@ -33,94 +33,103 @@ namespace crusader_bt
 namespace path
 {
 
-/// What a value must satisfy on top of being finite. Chosen per key from how the planner
-/// USES it, not from what sounds sensible: a step of 0 m never advances (gate_step_m makes
+/// What a REAL knob's value must satisfy on top of being finite. Chosen per key from how the
+/// planner USES it, not from what sounds sensible: a step of 0 m never advances (gate_step_m makes
 /// every gate search fail), a 0 s plan timeout times out every request before the planner can
 /// answer, a 0 m radius is not a buoy - those are Positive. A margin or an inflation of 0 is a
 /// legitimate "none" - NonNegative. fence_len_m <= 0 is the documented off switch - Any.
 enum class NavBound {Positive, NonNegative, Any};
 
-struct NavReal
-{
-  const char * name;        ///< the ROS parameter
-  double NavParams::* field;
-  NavBound bound;
-};
-
-struct NavWhole
+/// One planner knob: a double or an int member of NavParams, by its ROS parameter name.
+struct NavKnob
 {
   const char * name;
-  int NavParams::* field;
-  int min;                  ///< smallest accepted value
-};
+  double NavParams::* real;   ///< exactly one of real / whole is set
+  int NavParams::* whole;
+  NavBound bound;             ///< reals only
+  int min;                    ///< wholes only: the smallest accepted value
 
-/// Every double knob of NavParams. Order is the order of the struct, and the order a diff reports.
-inline constexpr NavReal kNavReals[] = {
-  {"nav_hard_m", &NavParams::hard_m, NavBound::Positive},
-  {"nav_soft_m", &NavParams::soft_m, NavBound::Positive},
-  {"nav_buoy_radius_m", &NavParams::buoy_radius_m, NavBound::Positive},
-  {"nav_track_radius_m", &NavParams::track_radius_m, NavBound::Positive},
-  {"nav_exempt_radius_m", &NavParams::exempt_radius_m, NavBound::NonNegative},
-  {"nav_lookahead_m", &NavParams::lookahead_m, NavBound::Positive},
-  {"nav_lookahead_min_m", &NavParams::lookahead_min_m, NavBound::NonNegative},
-  {"nav_max_chord_dev_m", &NavParams::max_chord_dev_m, NavBound::NonNegative},
-  {"nav_wp_radius_m", &NavParams::wp_radius_m, NavBound::Positive},
-  {"nav_replan_period_s", &NavParams::replan_period_s, NavBound::Positive},
-  {"nav_min_request_gap_s", &NavParams::min_request_gap_s, NavBound::NonNegative},
-  {"nav_check_period_s", &NavParams::check_period_s, NavBound::Positive},
-  {"nav_plan_timeout_s", &NavParams::plan_timeout_s, NavBound::Positive},
-  {"nav_first_plan_wait_s", &NavParams::first_plan_wait_s, NavBound::Positive},
-  {"nav_hysteresis_frac", &NavParams::hysteresis_frac, NavBound::NonNegative},
-  {"nav_hysteresis_m", &NavParams::hysteresis_m, NavBound::NonNegative},
-  {"nav_goal_replan_m", &NavParams::goal_replan_m, NavBound::NonNegative},
-  {"nav_clip_radius_m", &NavParams::clip_radius_m, NavBound::Positive},
-  {"nav_clear_after_s", &NavParams::clear_after_s, NavBound::NonNegative},
-  {"nav_unblock_reset_s", &NavParams::unblock_reset_s, NavBound::NonNegative},
-  {"nav_escape_margin_m", &NavParams::escape_margin_m, NavBound::NonNegative},
-  {"nav_goal_margin_m", &NavParams::goal_margin_m, NavBound::NonNegative},
-  {"nav_local_check_tol_m", &NavParams::local_check_tol_m, NavBound::NonNegative},
-  {"nav_orbit_max_push_m", &NavParams::orbit_max_push_m, NavBound::NonNegative},
-  {"nav_orbit_clear_m", &NavParams::orbit_clear_m, NavBound::NonNegative},
-  {"nav_dock_finger_len_m", &NavParams::dock_finger_len_m, NavBound::Positive},
-  {"nav_dock_finger_w_m", &NavParams::dock_finger_w_m, NavBound::Positive},
-  {"nav_dock_slip_w_m", &NavParams::dock_slip_w_m, NavBound::Positive},
-  {"nav_dock_deck_depth_m", &NavParams::dock_deck_depth_m, NavBound::Positive},
-  {"nav_fence_len_m", &NavParams::fence_len_m, NavBound::Any},            // <= 0 switches the fences off
-  {"nav_fence_spacing_m", &NavParams::fence_spacing_m, NavBound::Positive},
-  {"nav_fence_radius_m", &NavParams::fence_radius_m, NavBound::Positive},
-  {"nav_fence_clear_m", &NavParams::fence_clear_m, NavBound::NonNegative},
-  {"nav_gate_clear_m", &NavParams::gate_clear_m, NavBound::NonNegative},
-  {"nav_gate_min_standoff_m", &NavParams::gate_min_standoff_m, NavBound::NonNegative},
-  {"nav_gate_min_approach_m", &NavParams::gate_min_approach_m, NavBound::NonNegative},
-  {"nav_gate_margin_m", &NavParams::gate_margin_m, NavBound::NonNegative},
-  {"nav_gate_step_m", &NavParams::gate_step_m, NavBound::Positive},
-  {"nav_gate_tight_clear_m", &NavParams::gate_tight_clear_m, NavBound::NonNegative},
-  {"nav_gate_tight_margin_m", &NavParams::gate_tight_margin_m, NavBound::NonNegative},
-  {"nav_orbit_radius_m", &NavParams::orbit_radius_m, NavBound::Positive},
-  {"nav_orbit_tolerance_m", &NavParams::orbit_tolerance_m, NavBound::Positive},
-  {"nav_gate_standoff_m", &NavParams::gate_standoff_m, NavBound::Positive},
-  {"nav_gate_approach_m", &NavParams::gate_approach_m, NavBound::Positive},
-  {"nav_goal_max_move_m", &NavParams::goal_max_move_m, NavBound::NonNegative},
-};
-
-/// The two int knobs. invalid_confirm is clamped to >= 1 where it is used, and orbitRing
-/// needs at least one point: below that the knob is not "off", it is a mission that fails.
-inline constexpr NavWhole kNavWholes[] = {
-  {"nav_invalid_confirm", &NavParams::invalid_confirm, 1},
-  {"nav_orbit_points", &NavParams::orbit_points, 1},
-};
-
-inline constexpr std::size_t kNavKeyCount = std::size(kNavReals) + std::size(kNavWholes);
-
-/// What a Positive / NonNegative / Any bound means in a sentence, for a parameter description
-/// and for a refusal.
-inline const char * navBoundText(NavBound b)
-{
-  switch (b) {
-    case NavBound::Positive: return "> 0";
-    case NavBound::NonNegative: return ">= 0";
-    default: return "any finite value";
+  bool isWhole() const {return whole != nullptr;}
+  double get(const NavParams & p) const
+  {
+    return real != nullptr ? p.*real : static_cast<double>(p.*whole);
   }
+  void set(NavParams & p, double v) const
+  {
+    if (real != nullptr) {p.*real = v;} else {p.*whole = static_cast<int>(v);}
+  }
+};
+
+constexpr NavKnob realKnob(const char * name, double NavParams::* m, NavBound b)
+{
+  return {name, m, nullptr, b, 0};
+}
+constexpr NavKnob wholeKnob(const char * name, int NavParams::* m, int min)
+{
+  return {name, nullptr, m, NavBound::Any, min};
+}
+
+/// Every knob of NavParams, in the order of the struct (reals first, then the two ints), which
+/// is the order a diff reports.
+inline constexpr NavKnob kNavKnobs[] = {
+  realKnob("nav_hard_m", &NavParams::hard_m, NavBound::Positive),
+  realKnob("nav_soft_m", &NavParams::soft_m, NavBound::Positive),
+  realKnob("nav_buoy_radius_m", &NavParams::buoy_radius_m, NavBound::Positive),
+  realKnob("nav_track_radius_m", &NavParams::track_radius_m, NavBound::Positive),
+  realKnob("nav_exempt_radius_m", &NavParams::exempt_radius_m, NavBound::NonNegative),
+  realKnob("nav_lookahead_m", &NavParams::lookahead_m, NavBound::Positive),
+  realKnob("nav_lookahead_min_m", &NavParams::lookahead_min_m, NavBound::NonNegative),
+  realKnob("nav_max_chord_dev_m", &NavParams::max_chord_dev_m, NavBound::NonNegative),
+  realKnob("nav_wp_radius_m", &NavParams::wp_radius_m, NavBound::Positive),
+  realKnob("nav_replan_period_s", &NavParams::replan_period_s, NavBound::Positive),
+  realKnob("nav_min_request_gap_s", &NavParams::min_request_gap_s, NavBound::NonNegative),
+  realKnob("nav_check_period_s", &NavParams::check_period_s, NavBound::Positive),
+  realKnob("nav_plan_timeout_s", &NavParams::plan_timeout_s, NavBound::Positive),
+  realKnob("nav_first_plan_wait_s", &NavParams::first_plan_wait_s, NavBound::Positive),
+  realKnob("nav_hysteresis_frac", &NavParams::hysteresis_frac, NavBound::NonNegative),
+  realKnob("nav_hysteresis_m", &NavParams::hysteresis_m, NavBound::NonNegative),
+  realKnob("nav_goal_replan_m", &NavParams::goal_replan_m, NavBound::NonNegative),
+  realKnob("nav_clip_radius_m", &NavParams::clip_radius_m, NavBound::Positive),
+  realKnob("nav_clear_after_s", &NavParams::clear_after_s, NavBound::NonNegative),
+  realKnob("nav_unblock_reset_s", &NavParams::unblock_reset_s, NavBound::NonNegative),
+  realKnob("nav_escape_margin_m", &NavParams::escape_margin_m, NavBound::NonNegative),
+  realKnob("nav_goal_margin_m", &NavParams::goal_margin_m, NavBound::NonNegative),
+  realKnob("nav_local_check_tol_m", &NavParams::local_check_tol_m, NavBound::NonNegative),
+  realKnob("nav_orbit_max_push_m", &NavParams::orbit_max_push_m, NavBound::NonNegative),
+  realKnob("nav_orbit_clear_m", &NavParams::orbit_clear_m, NavBound::NonNegative),
+  realKnob("nav_dock_finger_len_m", &NavParams::dock_finger_len_m, NavBound::Positive),
+  realKnob("nav_dock_finger_w_m", &NavParams::dock_finger_w_m, NavBound::Positive),
+  realKnob("nav_dock_slip_w_m", &NavParams::dock_slip_w_m, NavBound::Positive),
+  realKnob("nav_dock_deck_depth_m", &NavParams::dock_deck_depth_m, NavBound::Positive),
+  realKnob("nav_fence_len_m", &NavParams::fence_len_m, NavBound::Any),   // <= 0 switches fences off
+  realKnob("nav_fence_spacing_m", &NavParams::fence_spacing_m, NavBound::Positive),
+  realKnob("nav_fence_radius_m", &NavParams::fence_radius_m, NavBound::Positive),
+  realKnob("nav_fence_clear_m", &NavParams::fence_clear_m, NavBound::NonNegative),
+  realKnob("nav_gate_clear_m", &NavParams::gate_clear_m, NavBound::NonNegative),
+  realKnob("nav_gate_min_standoff_m", &NavParams::gate_min_standoff_m, NavBound::NonNegative),
+  realKnob("nav_gate_min_approach_m", &NavParams::gate_min_approach_m, NavBound::NonNegative),
+  realKnob("nav_gate_margin_m", &NavParams::gate_margin_m, NavBound::NonNegative),
+  realKnob("nav_gate_step_m", &NavParams::gate_step_m, NavBound::Positive),
+  realKnob("nav_gate_tight_clear_m", &NavParams::gate_tight_clear_m, NavBound::NonNegative),
+  realKnob("nav_gate_tight_margin_m", &NavParams::gate_tight_margin_m, NavBound::NonNegative),
+  realKnob("nav_orbit_radius_m", &NavParams::orbit_radius_m, NavBound::Positive),
+  realKnob("nav_orbit_tolerance_m", &NavParams::orbit_tolerance_m, NavBound::Positive),
+  realKnob("nav_gate_standoff_m", &NavParams::gate_standoff_m, NavBound::Positive),
+  realKnob("nav_gate_approach_m", &NavParams::gate_approach_m, NavBound::Positive),
+  realKnob("nav_goal_max_move_m", &NavParams::goal_max_move_m, NavBound::NonNegative),
+  // invalid_confirm is clamped to >= 1 where it is used, and orbitRing needs at least one point:
+  // below that the knob is not "off", it is a mission that fails.
+  wholeKnob("nav_invalid_confirm", &NavParams::invalid_confirm, 1),
+  wholeKnob("nav_orbit_points", &NavParams::orbit_points, 1),
+};
+
+/// The knob called `name`, or nullptr (a structural nav_* key, or no nav_ key at all).
+inline const NavKnob * findNavKnob(const std::string & name)
+{
+  for (const NavKnob & k : kNavKnobs) {
+    if (name == k.name) {return &k;}
+  }
+  return nullptr;
 }
 
 namespace detail
@@ -135,31 +144,37 @@ inline std::string num(double v)
 
 }  // namespace detail
 
+/// A knob's accepted range in words, for its parameter description.
+inline std::string navRangeText(const NavKnob & k)
+{
+  if (k.isWhole()) {return ">= " + std::to_string(k.min);}
+  switch (k.bound) {
+    case NavBound::Positive: return "> 0";
+    case NavBound::NonNegative: return ">= 0";
+    default: return "any finite number";
+  }
+}
+
 /// "" when `value` is acceptable for the planner knob `name`, or `name` is not a planner knob
 /// (other nav_* keys are structural and not ours to judge); otherwise WHY not, as a sentence
 /// for the node's set-callback to hand back. A NaN or an infinity is refused for every knob.
 inline std::string checkNavValue(const std::string & name, double value)
 {
-  auto refuse = [&](const char * need) {
+  const NavKnob * k = findNavKnob(name);
+  if (k == nullptr) {return "";}
+  auto refuse = [&](const std::string & need) {
       return name + "=" + detail::num(value) + " is refused: " + need;
     };
-  for (const NavReal & k : kNavReals) {
-    if (name != k.name) {continue;}
-    if (!std::isfinite(value)) {return refuse("it must be a finite number");}
-    if (k.bound == NavBound::Positive && !(value > 0.0)) {
-      return refuse("it must be > 0 (a zero or negative size or period breaks the planner)");
-    }
-    if (k.bound == NavBound::NonNegative && !(value >= 0.0)) {return refuse("it must be >= 0");}
-    return "";
+  if (!std::isfinite(value)) {
+    return refuse(k->isWhole() ? "it must be a whole number" : "it must be a finite number");
   }
-  for (const NavWhole & k : kNavWholes) {
-    if (name != k.name) {continue;}
-    if (!std::isfinite(value)) {return refuse("it must be a whole number");}
-    if (value < static_cast<double>(k.min)) {
-      return refuse(("it must be >= " + std::to_string(k.min)).c_str());
-    }
-    return "";
+  if (k->isWhole()) {
+    return value < k->min ? refuse("it must be >= " + std::to_string(k->min)) : "";
   }
+  if (k->bound == NavBound::Positive && !(value > 0.0)) {
+    return refuse("it must be > 0 (a zero or negative size or period breaks the planner)");
+  }
+  if (k->bound == NavBound::NonNegative && !(value >= 0.0)) {return refuse("it must be >= 0");}
   return "";
 }
 
@@ -167,12 +182,8 @@ inline std::string checkNavValue(const std::string & name, double value)
 /// a YAML value the planner cannot use should stop the node, not wait for a mission to find it.
 inline std::string checkNavParams(const NavParams & p)
 {
-  for (const NavReal & k : kNavReals) {
-    const std::string why = checkNavValue(k.name, p.*(k.field));
-    if (!why.empty()) {return why;}
-  }
-  for (const NavWhole & k : kNavWholes) {
-    const std::string why = checkNavValue(k.name, static_cast<double>(p.*(k.field)));
+  for (const NavKnob & k : kNavKnobs) {
+    const std::string why = checkNavValue(k.name, k.get(p));
     if (!why.empty()) {return why;}
   }
   return "";
@@ -189,13 +200,9 @@ struct NavChange
 inline std::vector<NavChange> diffNavParams(const NavParams & before, const NavParams & after)
 {
   std::vector<NavChange> out;
-  for (const NavReal & k : kNavReals) {
-    const double a = before.*(k.field), b = after.*(k.field);
+  for (const NavKnob & k : kNavKnobs) {
+    const double a = k.get(before), b = k.get(after);
     if (!(a == b)) {out.push_back({k.name, a, b});}
-  }
-  for (const NavWhole & k : kNavWholes) {
-    const int a = before.*(k.field), b = after.*(k.field);
-    if (a != b) {out.push_back({k.name, static_cast<double>(a), static_cast<double>(b)});}
   }
   return out;
 }

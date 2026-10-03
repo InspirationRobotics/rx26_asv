@@ -838,7 +838,7 @@ private:
   /// C++ and crusader_params.yaml cannot drift apart unnoticed (check_config cross-checks the
   /// ones the costmap also depends on).
   ///
-  /// TWO KINDS, AND THE DESCRIPTOR SAYS WHICH. The planner knobs (path::kNavReals / kNavWholes)
+  /// TWO KINDS, AND THE DESCRIPTOR SAYS WHICH. The planner knobs (path::kNavKnobs)
   /// are dynamic: reloadNavParams() copies them into ctx_->nav when a goal is accepted, so a
   /// `ros2 param set` or the ground station's Tuning tab applies at the next START. Everything
   /// else further down (rates, frames, topic and service names, the planner id, nav_mode) is
@@ -847,13 +847,14 @@ private:
   void declareNavParams()
   {
     path::NavParams & n = ctx_->nav;
-    for (const path::NavReal & k : path::kNavReals) {
-      n.*(k.field) = declare_parameter<double>(
-        k.name, n.*(k.field), navKnobDescriptor(path::navBoundText(k.bound)));
-    }
-    for (const path::NavWhole & k : path::kNavWholes) {
-      n.*(k.field) = static_cast<int>(declare_parameter<int64_t>(
-        k.name, n.*(k.field), navKnobDescriptor((">= " + std::to_string(k.min)).c_str())));
+    for (const path::NavKnob & k : path::kNavKnobs) {
+      const auto d = navKnobDescriptor(path::navRangeText(k));
+      if (k.isWhole()) {
+        const int64_t v = declare_parameter<int64_t>(k.name, static_cast<int64_t>(k.get(n)), d);
+        k.set(n, static_cast<double>(v));
+      } else {
+        k.set(n, declare_parameter<double>(k.name, k.get(n), d));
+      }
     }
     // A value the planner cannot work with stops the node here, like nav_mode below, rather than
     // waiting for a mission to find it. (The set-callback guards every later change.)
@@ -923,8 +924,8 @@ private:
   static rcl_interfaces::msg::ParameterDescriptor navKnobDescriptor(const std::string & range)
   {
     rcl_interfaces::msg::ParameterDescriptor d;
-    d.description = "planner knob, read when a goal is accepted: a change applies at the next "
-      "START, never mid-mission. Must be " + range;
+    d.description = "planner knob: applies at the next START (read when a goal is accepted, "
+      "never mid-mission). Range: " + range;
     return d;
   }
 
@@ -938,6 +939,19 @@ private:
     return d;
   }
 
+  /// A numeric parameter as a double (a double or an integer); false for any other type.
+  static bool numericValue(const rclcpp::Parameter & p, double * v)
+  {
+    if (p.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) {
+      *v = p.as_double();
+    } else if (p.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER) {
+      *v = static_cast<double>(p.as_int());
+    } else {
+      return false;
+    }
+    return true;
+  }
+
   /// The set-callback: a value the planner cannot work with is refused when it is SET, with the
   /// reason, instead of sitting in the parameter until the next mission misbehaves. It judges
   /// only the planner knobs (path::checkNavValue); every other parameter passes untouched.
@@ -947,14 +961,8 @@ private:
     rcl_interfaces::msg::SetParametersResult r;
     r.successful = true;
     for (const rclcpp::Parameter & p : params) {
-      double v;
-      if (p.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) {
-        v = p.as_double();
-      } else if (p.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER) {
-        v = static_cast<double>(p.as_int());
-      } else {
-        continue;
-      }
+      double v = 0.0;
+      if (!numericValue(p, &v)) {continue;}
       const std::string why = path::checkNavValue(p.get_name(), v);
       if (!why.empty()) {
         r.successful = false;
@@ -977,11 +985,9 @@ private:
       std::lock_guard<std::mutex> lk(ctx_->mu);
       fresh = ctx_->nav;
     }
-    for (const path::NavReal & k : path::kNavReals) {
-      fresh.*(k.field) = get_parameter(k.name).as_double();
-    }
-    for (const path::NavWhole & k : path::kNavWholes) {
-      fresh.*(k.field) = static_cast<int>(get_parameter(k.name).as_int());
+    for (const path::NavKnob & k : path::kNavKnobs) {
+      double v = 0.0;
+      if (numericValue(get_parameter(k.name), &v)) {k.set(fresh, v);}
     }
     // checkNavSet refuses these when they are set, so this fires only for a value that got in
     // another way. Keep the previous, known-good set rather than plan with it.
