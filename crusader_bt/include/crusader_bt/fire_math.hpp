@@ -548,8 +548,10 @@ private:
 // the window in the bow frame now). The rate handed to D is the square-frame
 // rate: the hull's sideways motion, not the yaw's.
 
-// Compass headings by time, so a frame is rotated with the heading the boat had
-// when the frame was taken. Ordered; wrap-aware interpolation.
+// Headings by time (compass degrees; the autopilot EKF's yaw - gyro plus the
+// dual-antenna GPS yaw, the compass itself is off), so a frame is rotated with
+// the heading the boat had when the frame was taken. Ordered; wrap-aware
+// interpolation.
 class HeadingHistory
 {
 public:

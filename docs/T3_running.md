@@ -154,8 +154,8 @@ That is the tune that held best on 2026-10-02. **Tree defaults:**
 the bow's frame, so every degree of yaw wobble at 1.6 m looks like ~3 cm of sideways slide, and
 the brake fights it. The estimator:
 
-- undoes the yaw at each frame's **capture time**, using the compass history, and filters in the
-  square-to-wall frame
+- undoes the yaw at each frame's **capture time**, using the heading history (the autopilot's EKF
+  yaw: gyro plus dual-antenna GPS yaw; the compass is off), and filters in the square-to-wall frame
 - uses `dock_view`'s frame-in-hand stamp, so the 45–100 ms detection delay is corrected
 - adds the **current** yaw back, so `lat_err` is where the nozzle points now
 - gives the brake a smoothed speed with no yaw-made motion in it

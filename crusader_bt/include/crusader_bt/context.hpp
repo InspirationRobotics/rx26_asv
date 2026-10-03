@@ -244,7 +244,7 @@ struct Context
   /// Live gain overrides, set by bt_runner_node's strafe.* parameter callback.
   /// NOT cleared per goal: it is the node's parameters, not the run's state.
   fire::StrafeTune strafe_tune;
-  /// Compass heading by time (ingestHeading), so the lateral estimator can take
+  /// Heading by time (ingestHeading: /crsd/pose, the EKF yaw), so the lateral estimator can take
   /// each camera frame's yaw out with the heading AT that frame's capture time.
   fire::HeadingHistory heading_hist;
   /// The lateral estimator (strafe.est_enable): which window it tracks, and
