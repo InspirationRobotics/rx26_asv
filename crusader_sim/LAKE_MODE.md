@@ -273,6 +273,36 @@ Checked 2026-10-02, never on the real boat (no ssh was used):
 | `lake_rig_up.sh --check` against the live sim container (read-only), `lake_rig_down.sh` and `up()` on dummy process groups | `bash scripts/lake_rig_up.sh --check` | preflight ok; only recorded pids are stopped; a non-leader pid and a stale pid are left alone |
 | **Gazebo rehearsal** of the whole procedure (sim as the boat; `lake_rig_up.sh` unmodified; the pilot's arm + GUIDED played by `pilot_standin.py`, never by the panel) | `test/lake_rehearsal/reh_run.sh <tag> pass|abort|deadman` (WSL; the sim must be FREE, it brings it up and down) | task1_core, PUBLISH=1 NAV_MODE=on, 2026-10-02. **pass**: START refused until armed + GUIDED, then the goal completed (outcome 0, 174 s), all 4 checkpoints answered with their labels incl. `EXIT gate - confirm exit`; the standalone referee says gates 3/3 and both circles correct, no contact, min clearance 1.02 m, but `g2_red` WRONG SIDE: the boat does this on the SIM panel too (`sim_flow_run.sh task1_core`, same buoy), so it is the planner, not lake mode. **abort**: recolour b9 + SEND CHANGES + ACK at checkpoint 1 gave plan v2 (replan); ABORT in transit: outcome 3 CANCELLED, ground speed 0.02 m/s 6 s later, banner set. **deadman**: browser stopped in transit: bt_runner `passage plan is stale (age 15.1s)`, tree FAILURE 15 s after the last field. Found and fixed on the way: a stale `crusader_world_model` install crashed `target_tracker` (no camera tracks), now in `gz_sim_up.sh`'s build list; a zombie `nav_frames_node` read as "already running", now skipped |
 
-Not verified anywhere, because only the boat can: that the `asv` container has Nav2, the newer `crusader_bt` /
-`crusader_world_model`, `pymavlink`; that `oak_detector` produces tracks over the lake; that the RTK heading is valid
-for `planner_server`; the WiFi's behaviour with the dead-man.
+Not verified anywhere, because only the boat can: that the `asv` container has the newer `crusader_bt` (with
+`task1_global.xml`) / `crusader_world_model`, `pymavlink`; that `oak_detector` produces tracks over the lake; that the RTK
+heading is valid (the bow offset and Nav2 both need it); the WiFi's behaviour with the dead-man; the Nav2 packages, only
+for `NAV_MODE=shadow|on`.
+
+### Checked 2026-10-02 evening (branch `wip/lake-sunday`: global tree default, tier select, POOL, LAKE_TUNING, pin average + bow offset)
+
+Never on the real boat (no ssh). Offline: `python3 -m unittest discover -s test` in WSL: **273 tests, OK** (84 in
+`test_lake.py`, 42 in the new `test_lake_rig.py`: the rig's decisions, `lake_rig_up.sh --check` in a fake workspace, the
+overlay checks, `lake_rig_down.sh`); each new rule was mutation-checked (removing it fails a test). The real-ROS check
+`test/ros_lake_integration.py`: **27/27**. The page was driven in a browser against a dry-run panel (DOM only): rig line, POOL
+bar, tier select and checkpoint note, pin readout and a 2.5 m bow offset, START with Advanced.
+
+Gazebo rehearsal with the updated rig, `task1_core`, `PUBLISH=1`, default tree (`task1_global.xml`, **nav_mode off: no
+Nav2 process in the container**), the pilot's arm + GUIDED by `pilot_standin.py`:
+
+| tag | scenario | referee | outcome | START to end |
+|---|---|---|---|---|
+| `lk_a2_global_dis_pass` | Disruptive, all 4 checkpoints ACKed (incl. `EXIT gate - confirm exit`) | PASS, gates 3/3, no contact | 0 | 246 s |
+| `lk_b_global_adv_pass` | **Advanced**: the boat asked 0 checkpoints | PASS, gates 3/3, no contact | 0 | 228 s |
+| `lk_c_global_dis_recolour` | Disruptive, BLACK b9 -> RED, **SEND CHANGES + ACK** at checkpoint 1: plan v1 -> v2 ("the aircraft's field changed: buoy 9 OFF -> RED"), then completes | PASS, gates 3/3, no contact | 0 | 247 s |
+| `lk_d_global_dis_deadman` | the browser stops polling in transit | FAIL (expected: aborted, gates 0/3) | 2, `passage plan is stale (age 15.0s)` | boat aborted ~15 s after the last field |
+| `lk_e_pool_bringup` | `POOL=1` bring-up, no START | n/a | rig up camera-only; `ros2 param get /bt_runner_node nav_orbit_radius_m` = 3.0 (the tight profile; 19/19 keys read back by the rig), `use_lidar` False, no `planner_server` / nav process, `Node not found` for `/planner_server` | n/a |
+| `lk_f2_pool_tight_pass` | `POOL=1` full pass on `task1_tight` with the tight profile | PASS, gates 3/3, no contact | 0 | 162 s |
+
+Re-run: `REH_TIER=advanced bash test/lake_rehearsal/reh_run.sh <tag> pass task1_core` (and `recolour`, `deadman`, `abort`,
+`bringup` with `REH_POOL=1`); `RX26_WIN_SRC` picks the checkout (default: the one the script is in); `summary.txt` in
+`~/.cache/lake_rehearsal/<tag>/` is the one-screen answer.
+
+Found and fixed on the way: `gz_sim_up.sh`'s colcon build crawled into a second workspace under `~/robotx_ws`
+(`gcs_ws`, the ground-station work) and refused with "duplicate package names" after gazebo and SITL were already up
+(now `--base-paths src`; `reh_run.sh` stops on a failed bring-up instead of driving a half-up sim); `lake_rig_down.sh`
+treated an exited-but-unreaped process (the container's init does not reap) as alive and escalated every stop to SIGKILL.
