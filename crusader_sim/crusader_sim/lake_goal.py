@@ -20,7 +20,8 @@ does neither, and cannot:
     it. Cancelling the goal makes bt_runner stop commanding; it does not stop the boat. The
     pilot's stop is the RC (SC to HOLD, or the SB e-stop), and the panel says so.
 
-The goal: tier 2 (Disruptive: the UAV's colours), the approach point you give, 600 s unless
+The goal: --tier disruptive (the default, tier 2: the UAV's colours, checkpoints) or advanced (tier 1:
+plan once, no checkpoints; the panel's START chooses), the approach point you give, 600 s unless
 --timeout-s says otherwise. --approach none (or 0,0) sends 0,0 = "already on station, skip
 the drive". Output lines are task1_goal's ([operator], [tree], [result]); the panel parses
 them.

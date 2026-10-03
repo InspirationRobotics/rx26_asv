@@ -348,6 +348,20 @@ class LakeGoalTest(unittest.TestCase):
         self.assertIn("[result] outcome 0", out)
         self.assertEqual(ros.pubs, [], "lake_goal must create no publisher and no client of any kind")
 
+    def test_the_tier_flag_picks_advanced_or_disruptive_and_nothing_else_changes(self):
+        self.assertEqual((G.TIERS["core"], G.TIERS["advanced"], G.TIERS["disruptive"]), (0, 1, 2))
+        with FakeRos(result_at=4) as ros:
+            rc, out = run_main(["--tier", "advanced", "--approach", "1.31,103.86", "--fcu-wait-s", "1"], ros)
+        self.assertEqual(rc, 0, out)
+        g = ros.goals[0]
+        self.assertEqual((g.tier, g.approach_latitude, g.approach_longitude, g.timeout_s, g.orbit_radius_m),
+                         (1, 1.31, 103.86, 600.0, 0.0))
+        self.assertIn("goal: tier 1", out)
+        with FakeRos(fcu=(("GUIDED", False),)) as ros:           # the tier does not loosen the arm + GUIDED guard
+            rc, out = run_main(["--tier", "advanced", "--fcu-wait-s", "1"], ros)
+        self.assertEqual(rc, 3)
+        self.assertEqual(ros.goals, [])
+
     def test_a_goal_that_fails_exits_1(self):
         with FakeRos(result_at=4, outcome=4) as ros:
             rc, out = run_main(["--fcu-wait-s", "1"], ros)
@@ -787,6 +801,115 @@ class StartAbortTest(PanelCase):
         self.assertNotEqual(self.panel._approach_arg(), "none")
         self.panel.act_approach({"clear": True})
         self.assertEqual(self.panel._approach_arg(), "none")
+
+
+class TierTest(PanelCase):
+    """START chooses Advanced or Disruptive (default Disruptive); the page says what that means for the checkpoints."""
+
+    def argv_of_next_goal(self):
+        self.panel.a.dry_run = False                    # only to see the real command line
+        try:
+            return self.panel._mission_argv()
+        finally:
+            self.panel.a.dry_run = True
+
+    def ready(self):
+        self.commit_field()
+        self.feed.push()
+        self.panel.state({})                            # a browser is polling: the dead-man is released
+
+    def test_start_defaults_to_disruptive_and_lake_goal_is_told_the_tier(self):
+        self.ready()
+        self.assertTrue(self.panel.act_start({})["ok"])
+        self.assertEqual(self.panel.run_tier, "disruptive")
+        argv = self.argv_of_next_goal()
+        self.assertEqual(argv[argv.index("--tier") + 1], "disruptive")
+        self.assertEqual(self.panel.state({})["mission"]["tier"], "disruptive")
+        self.assertIn("disruptive tier", "\n".join(self.panel.logs["mission"].since(0)["lines"]))
+        self.panel.act_abort({})
+
+    def test_advanced_is_passed_through_and_shown(self):
+        self.ready()
+        self.assertTrue(self.panel.act_start({"tier": "advanced"})["ok"])
+        argv = self.argv_of_next_goal()
+        self.assertEqual(argv[argv.index("--tier") + 1], "advanced")
+        self.assertEqual(argv[argv.index("--timeout-s") + 1], "600")
+        self.assertEqual(self.panel.state({})["mission"]["tier"], "advanced")
+        self.panel.act_abort({})
+
+    def test_the_two_tiers_are_goal_clients_names_and_core_is_not_offered(self):
+        self.assertEqual(LP.LAKE_TIERS, ("advanced", "disruptive"))
+        self.assertTrue(set(LP.LAKE_TIERS) <= set(G.TIERS))
+        self.assertEqual(self.panel.state({})["tiers"], ["advanced", "disruptive"])
+
+    def test_a_bad_tier_is_refused_and_nothing_starts(self):
+        self.ready()
+        before = self.boat.n_plans()
+        for bad in ("core", "Advanced", "", "bogus", 2):
+            r = self.panel.act_start({"tier": bad})
+            self.assertFalse(r["ok"], bad)
+            self.assertIn("tier must be advanced or disruptive", r["error"])
+        self.assertFalse(self.panel.state({})["mission"]["running"])
+        self.assertIsNone(self.panel.run_tier)
+        self.assertEqual(self.boat.n_plans(), before, "a refused START must not even transmit")
+
+    def test_the_tier_does_not_loosen_the_arm_and_guided_guard(self):
+        self.commit_field()
+        self.feed.fcu(mode="HOLD", armed=True)
+        self.feed.push()
+        for tier in LP.LAKE_TIERS:
+            r = self.panel.act_start({"tier": tier})
+            self.assertFalse(r["ok"], tier)
+            self.assertIn("not GUIDED", r["error"])
+        self.assertFalse(self.panel.state({})["mission"]["running"])
+
+    def test_advanced_is_refused_on_a_rig_that_runs_the_per_gate_tree(self):
+        self.ready()
+        self.panel.rig = {"tree": "task1_disruptive.xml", "global_tree": False}
+        r = self.panel.act_start({"tier": "advanced"})
+        self.assertFalse(r["ok"])
+        self.assertIn("per-gate tree task1_disruptive.xml", r["error"])
+        self.assertIn("always asks checkpoints", r["error"])
+        self.assertTrue(self.panel.act_start({"tier": "disruptive"})["ok"])
+        self.panel.act_abort({})
+
+    def test_advanced_is_allowed_on_the_global_tree_and_when_the_rig_is_unknown(self):
+        self.ready()
+        self.panel.rig = {"tree": "task1_global.xml", "global_tree": True}
+        self.assertTrue(self.panel.act_start({"tier": "advanced"})["ok"])
+        self.panel.act_abort({})
+
+    def test_the_rig_file_reaches_the_state_and_a_bad_one_is_said_not_ignored(self):
+        self.assertIsNone(self.panel.state({})["rig"])
+        self.assertIsNone(LP.read_rig(""))
+        good = os.path.join(self.panel.dir, "rig.json")
+        with open(good, "w", encoding="utf-8") as f:
+            json.dump({"tree": "task1_global.xml", "global_tree": True, "nav_mode": "off", "pool": True}, f)
+        p = K.make_panel(self.boat, rig_file=good)
+        try:
+            rig = p.state({})["rig"]
+            self.assertEqual((rig["tree"], rig["nav_mode"], rig["pool"]), ("task1_global.xml", "off", True))
+        finally:
+            p.shutdown()
+        self.assertIn("unreadable", LP.read_rig(os.path.join(self.panel.dir, "absent.json"))["error"])
+        bad = os.path.join(self.panel.dir, "bad.json")
+        with open(bad, "w", encoding="utf-8") as f:
+            f.write("[1, 2]")
+        self.assertIn("not a JSON object", LP.read_rig(bad)["error"])
+
+    def test_the_page_has_the_tier_select_defaulting_to_disruptive_and_explains_both(self):
+        html = read(os.path.join(SRC, "lake_panel.html"))
+        self.assertIn('<option value="advanced">Advanced</option><option value="disruptive" selected>Disruptive</option>', html)
+        self.assertIn("post('/api/start',{tier:val('tier')})", html)
+        self.assertIn("ADVANCED tier: the boat asks NO checkpoints", html)
+        self.assertIn("DISRUPTIVE tier: the boat stops and asks", html)
+        self.assertIn("per-gate tree, which behaves as DISRUPTIVE", html)
+        self.assertIn('id="cpnote"', html)
+        # a real ask is never hidden by the tier: the ask card follows S.checkpoint (panel_common.js renderRun), not the tier
+        self.assertNotIn("tier", read(os.path.join(SRC, "panel_common.js")).split("function renderRun")[1].split("// ---- planner tuning")[0])
+        # Advanced has no freshness guard on the whole-field tree: the page must not claim the boat aborts
+        self.assertIn("no freshness guard", html)
+        self.assertIn("KEEPS DRIVING", html)
 
 
 class HttpTest(PanelCase):

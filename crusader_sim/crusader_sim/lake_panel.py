@@ -23,8 +23,8 @@ This file adds only what the water changes:
                  If the WiFi drops the resends stop, and the boat's own plan-freshness guard
                  (plan_timeout_s 15) aborts the mission ~15 s later. The same gate holds back
                  auto-ACK: no operator, no UAV.
-  START          lake_goal (a child process; tier 2, the approach point you clicked, 600 s). Enabled
-                 only while the feed says ARMED + GUIDED, which is the PILOT's doing: this panel
+  START          lake_goal (a child process; the tier you chose, Advanced or Disruptive (default), the
+                 approach point you clicked, 600 s). Enabled only while the feed says ARMED + GUIDED, which is the PILOT's doing: this panel
                  cannot arm, disarm or change the mode, and lake_goal refuses to start unless the
                  autopilot says both anyway.
   ABORT          SIGINT to lake_goal = CANCEL the goal, then a banner: the boat is still armed and
@@ -44,6 +44,7 @@ routes; the sim's launch / attach / stop_sim (which would run gz_sim_up.sh) are 
 LOCKS. As Panel's: tx_lock -> link -> logs, tx_lock -> self.lock; the feed's own lock is a leaf.
 The dead-man timestamp is a plain float (an atomic read), never taken under a lock.
 """
+import json
 import math
 import os
 import signal
@@ -68,6 +69,8 @@ TRAIL_PERIOD_S = 0.25
 ORIGIN_TOL_DEG = 1e-6           # ~0.1 m: a datum that differs by more is another place
 DATUM_WARN_M = 0.5
 GUIDED = "GUIDED"
+LAKE_TIERS = ("advanced", "disruptive")     # goal_client.TIERS minus core: with no UAV there is nothing to play
+DEFAULT_TIER = "disruptive"
 ACTIONS = ("layout", "template", "load", "clear", "save", "pin", "add_latlon", "approach", "commit",
            "stop_uav", "stage", "discard", "send", "ack", "send_ack", "auto_ack", "uav_error", "reroll",
            "start", "abort", "clear_trail")
@@ -86,6 +89,20 @@ def parse_datum(text):
     if (lat, lon) == (0.0, 0.0):
         raise ValueError("0,0 is not a datum")
     return {"lat": lat, "lon": lon}
+
+
+def read_rig(path):
+    """What lake_rig_up.sh chose (rig.json: tree, nav_mode and why, POOL, the overlay's keys), for the page.
+    None when no file was given; {"error": why} when it was and cannot be read: the page says so rather than
+    showing a rig it does not know."""
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            rig = json.load(f)
+    except (OSError, ValueError) as e:
+        return {"error": "rig file %s unreadable: %s" % (path, e)}
+    return rig if isinstance(rig, dict) else {"error": "rig file %s is not a JSON object" % path}
 
 
 def start_problem(fcu, committed, radio_up, running, operator_here):
@@ -119,8 +136,10 @@ class LakePanel(Panel):
         self._tripped = False
         self.approach = None
         self.aborted_at = None
+        self.run_tier = None                    # the tier START chose for the current / last run
         self._trail_t = 0.0
         super().__init__(a)
+        self.rig = read_rig(getattr(a, "rig_file", ""))
         self.uav = dict(UAV_DEFAULT, radius_m=0.0)       # the lake UAV is exact until the operator says otherwise
         self.logs["radio"].add("lake mode: datum %.7f, %.7f; endpoint %s; dead-man %.0f s" % (
             self.origin["lat"], self.origin["lon"], a.rxl_endpoint, DEADMAN_S))
@@ -191,7 +210,7 @@ class LakePanel(Panel):
         if self.a.dry_run:
             return [sys.executable, "-u", "-c", STUB_MISSION, str(self.a.dry_run_mission_s)]
         return [sys.executable, "-u", "-m", "crusader_sim.lake_goal", "--approach", self._approach_arg(),
-                "--timeout-s", "%g" % START_TIMEOUT_S]
+                "--timeout-s", "%g" % START_TIMEOUT_S, "--tier", self.run_tier or DEFAULT_TIER]
 
     def _approach_arg(self):
         with self.lock:
@@ -395,14 +414,27 @@ class LakePanel(Panel):
             return start_problem(feed["fcu"], self.sim == "up", self.link is not None,
                                  self.mission["running"], self._operator_present())
 
-    def act_start(self, _body):
+    def act_start(self, body):
+        """START {"tier": "advanced" | "disruptive"} (default disruptive): the goal's tier. Advanced plans once
+        and asks no checkpoints; Disruptive asks at the entry orbit and every gate (task1_global.xml picks its
+        subtree by it; the field you send is the same)."""
+        tier = (body or {}).get("tier")
+        tier = DEFAULT_TIER if tier is None else tier
+        if tier not in LAKE_TIERS:
+            return {"ok": False, "error": "tier must be advanced or disruptive"}
+        if tier == "advanced" and isinstance(self.rig, dict) and self.rig.get("global_tree") is False:
+            return {"ok": False, "error": "this rig runs the per-gate tree %s, which has no Advanced behaviour (it "
+                    "always asks checkpoints): START Disruptive, or restart the rig with TREE=task1_global.xml"
+                    % self.rig.get("tree")}
         feed = self.feed.view()
         why = self._start_problem(feed)
         if why:
             return {"ok": False, "error": why}
+        with self.lock:
+            self.run_tier = tier
         states = self._begin_run()
         self._transmit(states, "START")          # the field must be there before the goal
-        self.logs["mission"].add("--- START: lake_goal (the pilot armed it and chose GUIDED) ---")
+        self.logs["mission"].add("--- START: lake_goal, %s tier (the pilot armed it and chose GUIDED) ---" % tier)
         try:
             self.proc_mission = Proc("lake_goal", self._mission_argv(), self.logs["mission"],
                                      self._on_mission_line, self._on_mission_exit).start()
@@ -505,7 +537,8 @@ class LakePanel(Panel):
                     "x": boat[0], "y": boat[1], "yaw": boat[2], "age": boat[3]},
                 "start_block": start_problem(feed["fcu"], self.sim == "up", radio_up,
                                              self.mission["running"], True),
-                "mission": dict(self.mission, aborted_at=self.aborted_at), "feed": feed,
+                "mission": dict(self.mission, aborted_at=self.aborted_at, tier=self.run_tier),
+                "tiers": list(LAKE_TIERS), "rig": self.rig, "feed": feed,
                 "trail": self._trail_since(q), "logs": logs,
                 **self._field_state(self.sim == "up"),
             }

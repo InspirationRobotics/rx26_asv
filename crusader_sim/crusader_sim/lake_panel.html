@@ -24,7 +24,7 @@ button.big{padding:9px 16px;font-weight:700}
 #tracks td.sub,#tracks th{font-size:12px}
 </style></head><body>
 <header>
-  <h1>Crusader · LAKE MODE</h1><span class="sub">the REAL boat · you are Ekko (the UAV) · Disruptive tier</span>
+  <h1>Crusader · LAKE MODE</h1><span class="sub">the REAL boat · you are Ekko (the UAV) · tier chosen at START</span>
   <span id="fcupill" class="pill">autopilot ?</span><span id="dmpill" class="pill">dead-man ?</span>
   <span id="feedpill" class="pill">feed ?</span><span id="radiopill" class="pill">UAV ?</span>
   <span style="margin-left:auto"><a id="gcs" target="_blank">ground station</a> · <a id="bt" target="_blank">tree</a>
@@ -32,6 +32,7 @@ button.big{padding:9px 16px;font-weight:700}
 </header>
 <div class="safety">NOT AN E-STOP. The only e-stop is the RC SB switch. This page cannot arm, disarm or change the mode:
   the pilot arms the boat and selects GUIDED with the RC. Stop the boat with the RC (SC to HOLD, or SB).</div>
+<div id="rigline" class="dm" style="display:none"></div>
 <div id="deadman" class="dm"></div>
 <div id="errors"></div>
 <div id="abortban" class="abort" style="display:none">
@@ -90,9 +91,10 @@ button.big{padding:9px 16px;font-weight:700}
     </div>
     <div id="live" style="display:none">
       <div class="card"><h3>Mission</h3>
-        <div class="row"><button id="start" class="go big" onclick="post('/api/start').then(poll1)">START TASK 1</button>
+        <div class="row"><select id="tier" title="the goal's tier. Advanced: the boat plans once from your field and asks NO checkpoints. Disruptive (default): it stops and asks after the ENTRY orbit and every gate, and re-plans on a change. Same field either way."><option value="advanced">Advanced</option><option value="disruptive" selected>Disruptive</option></select>
+          <button id="start" class="go big" onclick="post('/api/start',{tier:val('tier')}).then(poll1)">START TASK 1</button>
           <button id="abort" class="stop big" onclick="post('/api/abort').then(poll1)" title="cancels the tree's goal (SIGINT to lake_goal); does NOT stop the boat">ABORT GOAL</button>
-          <button class="stop" onclick="if(confirm('STOP UAV: nothing more is transmitted. A running goal aborts on the boat’s own plan-freshness guard (~15 s). Continue?'))post('/api/stop_uav').then(poll1)">STOP UAV</button></div>
+          <button class="stop" onclick="if(confirm(stopUavText()))post('/api/stop_uav').then(poll1)">STOP UAV</button></div>
         <div id="startwhy" class="sub w"></div>
         <div id="phase" class="sub"></div><div class="bar"><i id="pct" style="width:0"></i></div>
         <pre id="result" style="margin-top:6px"></pre>
@@ -106,7 +108,7 @@ button.big{padding:9px 16px;font-weight:700}
           <span id="radio" class="sub"></span></div>
         <div class="sub">recolour a buoy here (or click it on the map), then SEND CHANGES, or answer a checkpoint with SEND CHANGES + ACK. Auto-ACK is off by default and, like the resends, is held back when no browser is polling.</div>
       </div>
-      <div class="card"><h3>Checkpoints</h3><table><thead><tr><th>#</th><th>what</th><th>asked</th><th>answer</th><th>asks</th></tr></thead>
+      <div class="card"><h3>Checkpoints</h3><div id="cpnote" class="sub"></div><table><thead><tr><th>#</th><th>what</th><th>asked</th><th>answer</th><th>asks</th></tr></thead>
         <tbody id="cps"></tbody></table></div>
     </div>
     <div class="card" id="approach"><h3>Approach point</h3>
@@ -207,17 +209,49 @@ function saveCourse(){var n=val('saveName');post('/api/save',{name:n}).then(func
   if(d&&d.ok){var a=$('dl');a.href=d.download;a.textContent='download '+n+'.yaml';a.style.display='';$('saveInfo').textContent='saved '+d.path}poll1()})}
 // ---- render
 function pill(id,text,cls){var p=$(id);p.textContent=text;p.className='pill'+(cls?' '+cls:'')}
+// ---- the tier. Only the whole-field tree (task1_global.xml) has an Advanced behaviour; the per-gate tree is always Disruptive.
+function tierNow(){var m=S&&S.mission;return m&&m.running&&m.tier?m.tier:val('tier')}
+function perGateRig(){return !!(S&&S.rig&&S.rig.global_tree===false)}
+// does the boat guard on the UAV's field (PassagePlanFresh: ~15 s of silence aborts)? Not in the whole-field Advanced tier.
+function guarded(){return !(tierNow()==='advanced'&&S&&S.rig&&S.rig.global_tree)}
+function stopUavText(){return guarded()?'STOP UAV: nothing more is transmitted. A running goal aborts on the boat’s own plan-freshness guard (~15 s). Continue?'
+  :'STOP UAV: nothing more is transmitted. An ADVANCED goal on the whole-field tree has NO freshness guard: the boat KEEPS DRIVING its plan. Stop it with ABORT GOAL / the RC. Continue?'}
+var CPNOTE={advanced:'ADVANCED tier: the boat asks NO checkpoints. It plans once from the field you sent and drives approach, ENTRY orbit, transit and EXIT orbit. This table stays empty by design and there is nothing to ACK. (If the boat does ask, the ask appears above the map as usual.)',
+  disruptive:'DISRUPTIVE tier: the boat stops and asks after the ENTRY orbit and after each gate. Answer with ACK, or recolour and SEND CHANGES + ACK. Unanswered it re-asks every 3 s and gives up after 120 s.',
+  pergate:'This rig runs the per-gate tree, which behaves as DISRUPTIVE whatever the tier says: it asks after the ENTRY orbit and each gate.'}
+function renderTier(){
+  var m=S.mission,opt=$('tier').querySelector('option[value=advanced]');
+  opt.disabled=perGateRig();
+  if(perGateRig()&&val('tier')==='advanced')$('tier').value='disruptive';
+  if(m.running&&m.tier&&val('tier')!==m.tier)$('tier').value=m.tier;       // a reloaded page follows the run, not its default
+  $('tier').disabled=m.running;
+  $('cpnote').textContent=perGateRig()?CPNOTE.pergate:CPNOTE[tierNow()];
+}
+function renderRig(){
+  var r=S.rig,el=$('rigline');
+  if(!r){el.style.display='none';return}
+  el.style.display='';
+  if(r.error){el.className='dm warn';el.textContent='Rig: '+r.error;return}
+  var bits=['tree '+r.tree,'nav_mode '+r.nav_mode,r.publish?'PUBLISH on: the boat will drive once armed + GUIDED':'STAND TEST: no setpoints'],n=0;
+  Object.keys(r.applied||{}).forEach(function(k){n+=Object.keys(r.applied[k]).length});
+  if(r.tuning)bits.push('tuning overlay: '+n+' key'+(n===1?'':'s'));
+  if(r.pool)bits.unshift('POOL: camera-only, LiDAR not used for planning');
+  el.className='dm'+(r.pool?' warn':'');
+  el.textContent='Rig: '+bits.join(' · ');
+  el.title=r.nav_why+(r.notes&&r.notes.length?'\n'+r.notes.join('\n'):'')+(r.tuning?'\noverlay file: '+r.tuning:'')+(r.ignored&&Object.keys(r.ignored).length?'\nignored (nav off): '+Object.keys(r.ignored).join(', '):'')
+}
 function renderDeadman(){
   var el=$('deadman'),dm=S&&S.deadman,r=S&&S.radio;
   if(unreachableSince!=null){var s=((Date.now()-unreachableSince)/1000).toFixed(0);
-    el.className='dm bad';el.textContent='PANEL UNREACHABLE for '+s+' s: the field is NOT being resent. The boat aborts about 15 s after the last field it received.';
+    el.className='dm bad';el.textContent='PANEL UNREACHABLE for '+s+' s: the field is NOT being resent. '+(guarded()?'The boat aborts about 15 s after the last field it received.'
+      :'ADVANCED whole-field tree: the boat has no freshness guard and KEEPS DRIVING its plan. Stop it with the RC.');
     pill('dmpill','dead-man TRIPPED','bad');return}
   if(!S)return;
   if(!live()){el.className='dm';el.textContent='No field on the air. Build the field, then COMMIT FIELD.';pill('dmpill','no field on air','');return}
   var age=r.last_tx_age;
-  if(age!=null&&age>8){el.className='dm warn';el.textContent='The last field went out '+age.toFixed(0)+' s ago: the boat aborts at 15 s.';pill('dmpill','resend OVERDUE','busy');return}
+  if(age!=null&&age>8){el.className='dm warn';el.textContent='The last field went out '+age.toFixed(0)+' s ago'+(guarded()?': the boat aborts at 15 s.':' (Advanced: the boat does not need it).');pill('dmpill','resend OVERDUE','busy');return}
   el.className='dm ok';el.textContent='DEAD-MAN armed: the field is resent every 5 s only while this page keeps polling (last '+(age==null?'-':age.toFixed(1)+' s ago')+
-    '). Close it or lose the WiFi and the boat aborts ~15 s later.'+(dm.last_trip?' (tripped once at '+new Date(dm.last_trip.at*1000).toLocaleTimeString()+', '+dm.withheld+' resends withheld)':'');
+    (guarded()?'). Close it or lose the WiFi and the boat aborts ~15 s later.':'). ADVANCED whole-field tree: no freshness guard, so closing this page does NOT stop the boat; the RC does.')+(dm.last_trip?' (tripped once at '+new Date(dm.last_trip.at*1000).toLocaleTimeString()+', '+dm.withheld+' resends withheld)':'');
   pill('dmpill','dead-man OK','up')}
 function renderTracks(){
   var d=layData('tracks'),el=$('trk');
@@ -273,7 +307,7 @@ function render(){
   if(m.aborted_at){$('abortAt').textContent=' at '+new Date(m.aborted_at*1000).toLocaleTimeString();
     $('abortState').textContent=m.running?'lake_goal is cancelling the goal...':(m.exit_code!=null?'lake_goal has exited (code '+m.exit_code+'). Goal result: '+(m.result||'none').split('\n')[0]:'')}
   if(live())renderLive();
-  renderRun();layPaint();
+  renderRun();renderTier();renderRig();layPaint();
   draw();
 }
 setInterval(function(){if(unreachableSince!=null)renderDeadman()},1000);
