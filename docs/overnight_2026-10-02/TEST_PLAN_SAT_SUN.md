@@ -1,5 +1,14 @@
 # Crusader Task 1: Saturday prep and Sunday lake test (3–4 Oct 2026)
 
+> **Superseded on Fri 2 Oct, night.** The current plan is the published page *Crusader Test Weekend* (claude.ai
+> artifacts), with a shared checklist, run log and readings. What changed since this file was written: the lake rig
+> now defaults to the whole-field tree `task1_global.xml` with `nav_mode off`, so **the asv container does NOT need
+> Nav2** (step 6 below is no longer required for Sunday); START has an Advanced/Disruptive select; `POOL=1` runs
+> camera-only for the Saturday pool; the operator GUI (`:8090`) has a Task 1 tab and planner knobs in Tuning that apply
+> at the next START; vision engines are built with `tools/scripts/export_engines.py`. Keep `WP_RADIUS <= 0.5` on the
+> boat (stall analysis in the page). This file is kept as the record of the overnight state.
+
+
 Written overnight on 2 Oct, from the state of local branch `sim/gazebo`, which has **not been pushed**.
 Each step names where it runs: **[laptop]** (Windows, PowerShell 5.1), **[WSL]**, **[Jetson]** (host, over SSH),
 **[asv]** (inside the Jetson's container), or **[yard]** / **[lake]** (physical work with the boat).
