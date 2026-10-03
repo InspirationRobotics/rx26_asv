@@ -104,7 +104,7 @@ DLAT="${LAKE_DATUM%%,*}"; DLON="${LAKE_DATUM##*,}"
 # A bad input (NAV_MODE, a missing tuning file) is refused here, before anything starts; it says why on stderr.
 PLAN="$(python3 -m crusader_sim.lake_rig_plan decide)" || exit 2
 eval "$PLAN"
-TREE="$PLAN_TREE"; NAV_MODE="$PLAN_NAV_MODE"; POOL="$PLAN_POOL"; TUNING="$PLAN_TUNING"
+TREE="$PLAN_TREE"; NAV_MODE="$PLAN_NAV_MODE"; POOL="$PLAN_POOL"; TUNING="$PLAN_TUNING"; GLOBAL="$PLAN_GLOBAL"
 case "$TREE" in */*) ;; *) TREE="$BT/$TREE" ;; esac
 NAV2_CFG=$WS/install/crusader_nav/share/crusader_nav/config/nav2_params.yaml
 echo "=== plan ==="
@@ -232,7 +232,7 @@ if [ "$NAV_MODE" != off ]; then
   if running 'nav_frames_node'; then echo "  nav                  -- already running (its datum was NOT set by this rig: check /crsd/datum)"
   else up nav "$LAKE_LOGDIR/nav.log" ros2 launch crusader_nav nav.launch.py datum_source:=param datum_lat:=$DLAT datum_lon:=$DLON "${NAV_TUNE[@]}"; fi
 else
-  echo "  nav                  -- not started (NAV_MODE=off: the legacy straight legs)"
+  echo "  nav                  -- not started (nav_mode off$([ "$GLOBAL" = 1 ] || echo ': the legacy straight legs'))"
 fi
 if running 'tools/bt_view.py'; then echo "  bt_view              -- already running, left alone"
 else up bt_view "$LAKE_LOGDIR/btview.log" python3 -u "$SRC/tools/bt_view.py"; fi
@@ -280,7 +280,7 @@ echo "  panel:        http://<jetson>:$PANEL_PORT      ground station: http://<j
 if [ "$PUB" = true ]; then
   echo "  PUBLISH=true: the tree WILL send setpoints once the pilot has armed and chosen GUIDED. The RC SB switch is the only e-stop."
 else
-  if [ "$(basename "$TREE")" = task1_global.xml ]; then
+  if [ "$GLOBAL" = 1 ]; then
     echo "  STAND TEST (PUBLISH=false): the tree plans and ticks but sends NO setpoints. For the water: PUBLISH=1 (the global tree drives the same in every nav_mode)"
   else
     echo "  STAND TEST (PUBLISH=false): the tree plans and ticks but sends NO setpoints. For the water: PUBLISH=1 (and NAV_MODE=on for avoidance)"

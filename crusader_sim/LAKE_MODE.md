@@ -4,6 +4,11 @@ Sunday 2026-10-04: 10 buoys on a lake, no UAV in the air. The boat runs its real
 you tell it where the buoys are and what colour each one is, and you answer its checkpoints, from a browser. This is
 the sim's Task 1 panel (`task1_panel`) with the simulator taken out: same radio handshake, same buttons, real boat.
 
+By default the boat runs the **whole-field planner** (`task1_global.xml`, Advanced and Disruptive tier) with `nav_mode off`:
+it drives its own plan with GUIDED setpoints and never calls Nav2, so the `asv` container needs no Nav2 for it. START picks
+the tier ([Advanced vs Disruptive](#advanced-vs-disruptive)). Saturday's pool test is `POOL=1`
+([Pool test](#pool-test-saturday)).
+
 ## Safety, before anything else
 
 - **The RC SB switch is the only e-stop.** Neither this page nor any script here is one. The page says so on every screen.
@@ -17,6 +22,9 @@ the sim's Task 1 panel (`task1_panel`) with the simulator taken out: same radio 
   lose the WiFi, sleep the laptop: the resends stop, and the boat's own plan-freshness guard (`plan_timeout_s` 15)
   aborts the mission about 15 s later. Auto-ACK is held back the same way. The page shows the dead-man state on every
   screen. **Keep the page open and visible:** a browser throttles a tab in a background window.
+  **Exception: the Advanced tier on the whole-field tree has no freshness guard** (it plans once and "the UAV is not
+  required to remain on station"): close the page there and the boat KEEPS DRIVING its plan. The page says so instead of
+  promising an abort; the RC is the stop.
 - The panel is unauthenticated HTTP on the boat's WiFi. START still needs the pilot's arm + GUIDED, but anyone on that
   WiFi can ABORT. Use the lake's WiFi, not a shared one.
 - PUBLISH defaults to **false** (stand test): the tree plans and ticks but sends no setpoints.
@@ -39,7 +47,7 @@ The laptop only runs a browser at `http://<jetson>:8095`. It pulls everything ov
 | tcp 8090 | ground station | core runs it; the rig starts one only if none is up |
 | tcp 8085 | `bt_view` (the tree) | |
 | udp 14555 loopback | `rxl_link_node` (the panel talks to it as the UAV) | `-p rxl_endpoint:=udpin:127.0.0.1:14555` on the command line; the YAML's `/dev/crsd-rfd` is never edited |
-| udp 14556 loopback | `panel_feed` -> the panel | |
+| udp 14556 loopback | `panel_feed` -> the panel | `LAKE_FEED_PORT` moves it, only to run beside another panel (the sim's Task 1 panel holds 14556) |
 | 14550, 14551 | untouched | 14551 is `telemetry_bridge`'s, 14550 stays free for tooling |
 
 ## Before the day (at home, once)
@@ -55,11 +63,14 @@ The laptop only runs a browser at `http://<jetson>:8095`. It pulls everything ov
 2. **What the container must have** (the rig checks and says what is missing; run it with `--check` first):
    - core up (`systemctl status crsd-ros` on the host): `telemetry_bridge` is the one hard requirement
    - built in the workspace: `crusader_bt`, `crusader_world_model` (`target_tracker`), `crusader_link`,
-     `crusader_groundstation`, and for avoidance `crusader_nav`, `crusader_nav_layers` and the **Nav2 packages**
-     (`nav2_planner`, the STVL layer). **Without them the rig runs `NAV_MODE=off` (legacy straight legs) and says so.**
-     The `crsd-sim:nav2` image has Nav2; the `asv` container may not. Settle that before the day.
-   - `crusader_bt`/`crusader_world_model` new enough for the tree you run (`task1_disruptive.xml`, the colour-vote
-     tracker, `nav_mode`, `n_gates` in `/crsd/safe_passage_report`). The rebuild is on the **host**: `tools/scripts/rebuild.sh`
+     `crusader_groundstation`. **Nav2 is NOT needed for the default (the global tree, `nav_mode off`)**: `crusader_nav`,
+     `crusader_nav_layers` and the Nav2 packages (`nav2_planner`, the STVL layer) are needed only for `NAV_MODE=shadow|on`
+     (the per-gate tree, or to watch a planner drawn). Without them such a run falls back to `off` and says so; with
+     `nav_mode off` the rig says they are not needed and goes on. The `crsd-sim:nav2` image has Nav2; the `asv`
+     container may not.
+   - `crusader_bt`/`crusader_world_model` new enough for the tree you run (`task1_global.xml` is in
+     `install/crusader_bt/share/crusader_bt/behavior_trees/`; the colour-vote tracker; `nav_mode`; `n_gates` in
+     `/crsd/safe_passage_report`). The rebuild is on the **host**: `tools/scripts/rebuild.sh`
    - python in `asv`: `yaml`, `pymavlink` (both are what the boat's own nodes use)
 3. **`asv`: check readiness without starting anything.** Jetson host: `docker exec -it asv bash`, then in asv:
 
@@ -75,21 +86,30 @@ Use the same value every time you restart the rig.
 
     LAKE_DATUM=<lat>,<lon> bash /root/robotx_ws/src/rx26_asv/crusader_sim/scripts/lake_rig_up.sh
 
-First time: the **stand test** (defaults `NAV_MODE=shadow`, `PUBLISH=false`): the tree plans and the planner is drawn, but
-no setpoint is sent. For the water, restart it: `PUBLISH=1 NAV_MODE=on LAKE_DATUM=... bash .../lake_rig_up.sh`
-(re-running restarts the rig cleanly; it stops only what it started, by recorded pid).
+First time: the **stand test** (`PUBLISH=false`): the tree plans and ticks, but no setpoint is sent. For the water, restart it
+with `PUBLISH=1` (re-running restarts the rig cleanly; it stops only what it started, by recorded pid):
+
+    PUBLISH=1 LAKE_DATUM=<lat>,<lon> bash /root/robotx_ws/src/rx26_asv/crusader_sim/scripts/lake_rig_up.sh
+
+The banner (and `--check`) says plainly **which tree and nav_mode it chose, and why**: with the default global tree and no
+`NAV_MODE` given it says `nav_mode off <- task1_global.xml drives GUIDED setpoints itself and never calls Nav2`. The
+per-gate tree keeps its old behaviour: `TREE=task1_disruptive.xml` defaults to `NAV_MODE=shadow`, and `NAV_MODE=on` makes it
+drive the planner's paths.
 
 | Env | Default | |
 |---|---|---|
 | `LAKE_DATUM` | **required** | `lat,lon` |
-| `NAV_MODE` | `shadow` | `off` legacy legs / `shadow` plan + draw, drive legacy / `on` drive the plans |
+| `TREE` | `task1_global.xml` | the whole-field planner (Advanced + Disruptive). `task1_disruptive.xml` = the per-gate tree (always Disruptive behaviour) |
+| `NAV_MODE` | not given: `off` with the global tree, `shadow` with a per-gate tree | `off` no Nav2 / `shadow` plan + draw, drive legacy / `on` drive the plans. With the global tree shadow/on only start the nav stack and draw its planner: it does not drive the boat (the banner says so) |
 | `PUBLISH` | false | `1` lets the tree send setpoints (the pilot still has to arm + GUIDED) |
-| `TREE` | `task1_disruptive.xml` | |
+| `LAKE_TUNING` | none | a planner-tuning file, see [Planner tuning](#planner-tuning-overlay-lake_tuning) |
+| `POOL` | off | `1` = the pool test, see [Pool test](#pool-test-saturday) |
 | `PANEL_PORT`, `LAKE_LOGDIR`, `LAKE_SRC` | 8095, `~/.cache/crusader_lake`, `/root/robotx_ws/src/rx26_asv` | logs: `<LAKE_LOGDIR>/<name>.log` |
+| `LAKE_FEED_PORT` | 14556 | the udp port `panel_feed` sends to; change it only to run beside the sim's own panel |
 | `LAKE_RXL` | `replace` | see below |
 
-It starts only what `core.launch.py` does not run: `rxl_link_node` (loopback), `target_tracker`, `nav`, `bt_view`,
-`ground_station` (only if none is up), `panel_feed`, `bt_runner`, `task1_panel --lake`. **`rxl_link_node`**: core runs one
+It starts only what `core.launch.py` does not run: `rxl_link_node` (loopback), `target_tracker`, `nav` (not with
+`nav_mode off`), `bt_view`, `ground_station` (only if none is up), `panel_feed`, `bt_runner`, `task1_panel --lake`. **`rxl_link_node`**: core runs one
 with respawn on the RFD900's serial port. `LAKE_RXL=replace` stops it once and starts the loopback one; core respawns its serial
 one 5 s later (harmless noise if the RFD900 is not on USB; if it is, it runs beside ours and hears nothing: unplug
 the RFD900 for a cleaner day). Stop everything it started: `bash .../lake_rig_down.sh` (by pid, never by name).
@@ -104,9 +124,15 @@ autopilot (`GUIDED . ARMED`, or why not), the dead-man, the feed and whether the
 EXIT, BLACK), then any of:
 - **click a camera track** on the map (the squares: outline = the boat's own colour vote, grey `?` = unknown), or the
   `-> buoy` button in the *Camera tracks* table. Clicking a buoy's track again recolours it;
-- **PIN AT BOAT**: a buoy where the boat is now (fresh pose only). It is the boat's GPS position, not the buoy's: bring the
-  boat alongside and expect ~1 m. A camera track is the better source; the boat fuses your position with its own track
-  within 5 m (`assoc_radius_m`), and the UAV error requirement is < 1 m;
+- **PIN AT BOAT**: a buoy where the boat is. It is the boat's GPS position, not the buoy's: bring the boat alongside and
+  expect ~1 m. A camera track is the better source; the boat fuses your position with its own track within 5 m
+  (`assoc_radius_m`), and the UAV error requirement is < 1 m. The pin is the **average of the boat's fresh pose over the
+  last ~2 s** (the page shows how many samples, the spread and the heading's age under the button). It refuses, and says
+  why, rather than guess: no fresh pose; fewer than 4 samples in the window; a boat that moved more than 1.5 m within it
+  ("hold it still alongside the buoy"; a wander over 0.5 m is allowed with a warning). **Bow offset** (metres, default 0,
+  up to 10): puts the pin that far **ahead of the boat along its heading**, so you can nose the bow up to a buoy and
+  pin the buoy rather than the boat. It needs a fresh heading (the GPS yaw of the RTK pair; the compass is disabled):
+  a blank heading, or one whose newest sample is older than 1 s, **refuses the offset** (the pin at offset 0 still works);
 - **ADD lat/lon**: typed coordinates;
 - **Load template / Load saved**: a course YAML as the starting field, placed from the datum whatever its own origin.
 The "map click" choice switches between *camera track -> buoy*, *place a buoy at the click* and *set approach point*.
@@ -121,10 +147,12 @@ agree with what you sent. UAV position error defaults to **0** here (R in the ca
 
 **8. The pilot arms and selects GUIDED with the RC.** The header pill reads `GUIDED . ARMED`; START enables.
 
-**9. START TASK 1.** Rewinds the radio, sends the field, then runs `lake_goal`: tier 2 (Disruptive, your colours),
-your approach point, 600 s. `lake_goal` refuses unless the autopilot reports armed + GUIDED.
+**9. START TASK 1.** Pick the tier next to the button (**Disruptive** by default, or **Advanced**). START rewinds the radio,
+sends the field, then runs `lake_goal --tier ...`: your colours, your approach point, 600 s. `lake_goal` refuses unless the
+autopilot reports armed + GUIDED, in either tier. The select is locked while a goal runs.
 
-**10. Answer the checkpoints.** The boat asks after the ENTRY orbit and after each gate, and waits:
+**10. Answer the checkpoints (Disruptive only; in Advanced the boat asks none and the page says so).** The boat asks after
+the ENTRY orbit and after each gate, and waits:
 
 | Ask | Label |
 |---|---|
@@ -144,6 +172,63 @@ radio: nothing is transmitted; a running goal aborts on the boat's own guard in 
 **12. Keep the layout.** *SAVE AS COURSE* writes `<LAKE_LOGDIR>/layouts/<name>.yaml` (origin = the datum, metres east/north
 of it, `boat_start` = where the boat was, `approach` = your point, tier disruptive) and offers it as a download.
 
+## Advanced vs Disruptive
+
+START chooses the goal's tier; the field you build and COMMIT is the same.
+
+| | Advanced | Disruptive (default) |
+|---|---|---|
+| the boat | waits for your field, plans the whole passage **once**, drives approach, ENTRY orbit, transit, EXIT orbit | the same plan, but it **stops and asks** after the ENTRY orbit and after each gate |
+| checkpoints | **none**: the Checkpoints card says so, nothing waits for you, the table stays empty by design | seq 1 = ENTRY orbit, seq k+1 = gate k, the last = the EXIT confirmation; ACK, or SEND CHANGES + ACK |
+| a changed field | the plan is re-made only if what is left of it stops being good (a hazard on it, the boat pushed off) | any change you SEND re-plans the rest from where the boat is |
+| the UAV may leave | **yes**: no freshness guard on your field. Closing the page does **not** stop the boat | **no**: `PassagePlanFresh` aborts ~15 s after your last field (the dead-man above) |
+
+Only the whole-field tree has an Advanced behaviour. A rig running `TREE=task1_disruptive.xml` is always the Disruptive
+behaviour: the page then disables Advanced (and the panel refuses it) rather than let you expect no checkpoints.
+A real ask is never hidden by the tier: the ask card follows what the boat asked.
+
+## Planner tuning overlay (`LAKE_TUNING`)
+
+`LAKE_TUNING=<yaml>` layers a planner-tuning file on the boat's own params for this rig run. The format is the sim's
+tuning profile (`config/tuning_profiles/*.yaml`, e.g. `tight_3to5m.yaml`): nested ROS params, **only the keys that change**.
+`bt_runner` gets it as a **2nd `--params-file`** (after the boat's own, so it wins); Nav2 gets it as `nav2_overlay:=` and
+**only when the nav stack is started** (a profile's `planner_server` / `global_costmap` keys are listed as IGNORED with
+`nav_mode off`, never silently dropped). `crusader_params.yaml` and `nav2_params.yaml` are never edited.
+
+The rig checks the file against the boat's own params files **before it starts anything** and stops with every problem at
+once: no such file, not YAML, a node it cannot reach, a key the boat's file does not have (ROS would ignore a typo
+silently), a value of another type (the node would refuse to start). The banner lists every key applied, `<LAKE_LOGDIR>/
+tuning_applied.yaml` is the exact file the nodes got, and once `bt_runner` is up the rig reads the keys back from the running
+node (`overlay read back from /bt_runner_node: N/N key(s) match`, or which ones did not take). By hand:
+`ros2 param get /bt_runner_node nav_orbit_radius_m`.
+
+Most keys are read once at start: change them by restarting the rig. With the global tree the keys that matter are the
+orbit ones (`nav_orbit_radius_m`: the largest orbit, shrunk to fit the water round each blue buoy); the gate/fence keys are the
+per-gate tree's.
+
+## Pool test (Saturday)
+
+A small outdoor pool, **camera only**: the LiDAR must feed nothing that plans.
+
+    POOL=1 PUBLISH=1 LAKE_DATUM=<lat>,<lon> bash /root/robotx_ws/src/rx26_asv/crusader_sim/scripts/lake_rig_up.sh
+
+`POOL=1` does four things, and the banner says `POOL: camera-only, LiDAR not used for planning`:
+- **`NAV_MODE` is forced off** (a `NAV_MODE=` you give is ignored and the banner says so): no Nav2, no STVL, no planner,
+  nothing from the LiDAR reaches a costmap.
+- **`target_tracker` starts with `use_lidar:=false` stated on its command line.** It is already `false` in
+  `crusader_params.yaml` and in the tracker's code (`test_lake_rig.py` pins both); the explicit flag makes the promise survive
+  a changed default. A `target_tracker` already running with `use_lidar` true (someone started it from the GCS Nodes tab) is
+  **refused** before anything starts: stop it first.
+- **`LAKE_TUNING` defaults to `tuning_profiles/tight_3to5m.yaml`** (orbit 3 m, 3 m gate points ...) unless you give one. It was
+  tuned for a 3-5 m field in the sim, not for any particular pool: read the keys the banner lists.
+- The tree is the global tree unless you say otherwise.
+
+**The pool is not measured yet, so there is no pool profile.** When the satellite image (or a tape) gives the dimensions, a
+profile belongs in `crusader_sim/config/tuning_profiles/pool_<name>.yaml` in `tight_3to5m.yaml`'s format, and the run is
+`POOL=1 LAKE_TUNING=<that file> ...`. Numbers in it must come from the pool, not from a guess. The `lidar_cluster_node` and
+the LiDAR driver still run (they are core's): only their use in tracks and plans is off. With `nav_mode off` the page's hazards
+and costmap layers are blank (no nav datum): the camera tracks, the fused passage, the field and the boat still draw.
+
 ## Replaying the lake layout in Gazebo ("sim-real")
 
 1. laptop: put the downloaded file in `Boat\rx26_asv\crusader_sim\courses\<name>.yaml`.
@@ -155,6 +240,13 @@ The frame is the same: the course's metres east/north of its origin are the sim'
 
 | Symptom | Likely cause |
 |---|---|
+| the rig stops before starting anything with `LAKE_TUNING ...` | the tuning file is missing, a key is not in the boat's own params file (a typo ROS would ignore silently), or a value has the wrong type (3 for a double). The message lists every problem |
+| the rig stops with `NAV_MODE must be off, shadow or on` | `NAV_MODE=` anything else |
+| `PIN refused: only N fresh pose sample(s)` | the feed has just started or is dropping out; wait 2 s. `no fresh boat pose`: `panel_feed` / `telemetry_bridge` (the pose layer is blank, never the last value) |
+| `PIN refused: ... hold it still` | the boat moved more than 1.5 m in the last 2 s: stop alongside the buoy |
+| bow offset refused: `no heading` / `heading is stale` | no GPS yaw (RTK moving baseline not fixed): pin with offset 0 |
+| hazards / costmap layers are blank with `nav_mode off` | by design: no nav stack, so no nav datum and no costmap; the camera tracks, the boat, the fused passage and the field still draw |
+| Advanced refused: `this rig runs the per-gate tree` | `TREE=task1_disruptive.xml` has no Advanced behaviour: START Disruptive, or restart with the default tree |
 | `PANEL UNREACHABLE` | the page cannot poll: WiFi, or the panel died (`<LAKE_LOGDIR>/panel.log`). The boat aborts ~15 s after its last field |
 | no camera tracks | `oak_detector` not running (GCS Nodes tab), or `target_tracker` down (`tt.log`) |
 | `feed OFFLINE` | `panel_feed` down (`panel_feed.log`), or something else holds udp 14556 |

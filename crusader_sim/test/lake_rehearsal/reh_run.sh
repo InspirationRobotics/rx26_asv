@@ -42,6 +42,14 @@ TIER=${REH_TIER:-disruptive}
 PORT=8097
 mkdir -p "$OUT" "$SCR/reh"
 say() { echo "[reh $(date +%T)] $*" | tee -a "$OUT/steps.log"; }
+# a bring-up that failed leaves gazebo / SITL / half a rig running (gz_sim_up.sh dies after starting them): never go on
+# into the driver with it. Stop what is up, cleanly, say why, exit 3 (retry once, then report it)
+bail() {
+  say "FAILED: $*  (last lines of the log: $OUT/*.log)"
+  docker exec -e "LAKE_LOGDIR=/root/robotx_ws/lake_scratch/logs_$TAG" crsd-sim bash /root/robotx_ws/src/rx26_asv/crusader_sim/scripts/lake_rig_down.sh >/dev/null 2>&1
+  bash "$SIM/scripts/gz_sim_down.sh" --keep-container > "$OUT/sim_down.log" 2>&1
+  exit 3
+}
 
 # the rig's environment, only what was asked for; the rest is the rig's own defaults
 RIGENV=(-e LAKE_DATUM=1.2806,103.8557 -e "PUBLISH=${REH_PUBLISH:-1}" -e PANEL_PORT=$PORT -e "LAKE_FEED_PORT=${REH_FEED_PORT:-14557}")
@@ -64,14 +72,16 @@ RIGEXEC=(docker exec "${RIGENV[@]}" -e "LAKE_LOGDIR=/root/robotx_ws/lake_scratch
 RIGUP=/root/robotx_ws/src/rx26_asv/crusader_sim/scripts/lake_rig_up.sh
 
 say "sim up ($COURSE, --no-uav --no-gui, NAV_MODE=$SIMNAV)"
-NAV_MODE=$SIMNAV bash $SIM/scripts/gz_sim_up.sh $COURSE --no-gui --no-uav > "$OUT/sim_up.log" 2>&1
+NAV_MODE=$SIMNAV bash $SIM/scripts/gz_sim_up.sh $COURSE --no-gui --no-uav > "$OUT/sim_up.log" 2>&1 || { tail -6 "$OUT/sim_up.log"; bail "gz_sim_up.sh"; }
 tail -4 "$OUT/sim_up.log"
 say "core stand-in (gz bridge, livox, camera, telemetry_bridge, lidar, gcs)"
 docker exec crsd-sim bash /root/robotx_ws/lake_scratch/reh/core_standin.sh $COURSE | tee "$OUT/core_standin.log"
 say "lake_rig_up.sh --check"
 "${RIGEXEC[@]}" bash $RIGUP --check 2>&1 | tee "$OUT/rig_check.log"
+[ "${PIPESTATUS[0]}" = 0 ] || bail "lake_rig_up.sh --check refused (see rig_check.log)"
 say "lake_rig_up.sh"
 "${RIGEXEC[@]}" bash $RIGUP 2>&1 | tee "$OUT/rig_up.log"
+[ "${PIPESTATUS[0]}" = 0 ] || bail "lake_rig_up.sh refused or failed (see rig_up.log)"
 
 if [ "$SCN" = bringup ]; then
   say "bringup checks (the rig is up; no START)"

@@ -347,6 +347,7 @@ def read_back(retries=4):
 def sh_assignments(decision, banner):
     pairs = (("PLAN_TREE", decision["tree"]), ("PLAN_NAV_MODE", decision["nav_mode"]),
              ("PLAN_NAV_WHY", decision["nav_why"]), ("PLAN_POOL", "1" if decision["pool"] else "0"),
+             ("PLAN_GLOBAL", "1" if decision["global_tree"] else "0"),
              ("PLAN_TUNING", decision["tuning"]), ("PLAN_BANNER", banner))
     return "\n".join("%s=%s" % (k, shlex.quote(str(v))) for k, v in pairs) + "\n"
 
