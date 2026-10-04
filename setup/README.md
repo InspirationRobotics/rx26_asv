@@ -57,8 +57,25 @@ has hand-made steps that file no longer has), so a new package set goes in as **
 top of the image the boat runs**, and the container is then recreated from that image with the
 SAME flags. `asv_add_bt.Dockerfile` (BehaviorTree.CPP) and `asv_add_nav2.Dockerfile` (Nav2
 planner and costmap, STVL, and BehaviorTree.CPP again, idempotently) are those layers. The
-Nav2 one is for `docs/nav2_avoidance_spec.md`; it is **written and parsed, but never built
-against the boat's real image**. The sanity build was against the x86 sim image only.
+Nav2 one is for `docs/nav2_avoidance_spec.md`.
+
+**Done on the boat 2026-10-03 (Chase approved).** The boat's `asv` container now runs
+`asv:nav2-20261003`, built from `asv_add_nav2.Dockerfile` on `asv:bt-20260928`. The layer adds 20 ROS
+packages (Nav2, STVL and `map_msgs`, which the lake panel's `panel_feed` imports) and changes one:
+`tf2-ros-py` 0.25.20 → 0.25.23. The old container is kept, stopped, as `asv_pre_nav2`. Three
+things learned doing it:
+
+- **No sudo needed.** Rename the running container, `docker create` the new one with the step 4
+  flags, then reboot through `crsd-power` (`{"verb": "reboot"}` on `/run/crsd-power.sock`).
+  systemd starts the new one by name. The old one has restart policy `no`, so it stays down.
+- **Clear the CMake caches when switching images, in either direction.** `rebuild.sh` alone kept
+  the no-Nav2 configure: 17 s build, `bt_runner` linking no Nav2, no plugin library. Run
+  `rm -rf ~/robotx_ws/build/crusader_bt ~/robotx_ws/build/crusader_nav_layers
+  ~/robotx_ws/install/crusader_nav_layers` (inside `asv`; they are root-owned), then `rebuild.sh`.
+  That took 2.5 min and gave `libcrusader_nav_layers.so`, with `bt_runner` linking `nav2_msgs`.
+- **Verified after the swap:** core stack up; LiDAR 10.0 Hz; `oak_detector` engines ready at 15 Hz;
+  lake rig `POOL=1` feed up; lake rig `TREE=task1_disruptive.xml NAV_MODE=shadow` with
+  `planner_server` active. The default (whole-field tree, nav_mode off) is unchanged.
 
 **This needs explicit team approval.** Run it on the **Jetson host** over
 `ssh crusader@192.168.100.109`, in bash, with the boat on the stand and **disarmed**. `sudo`
@@ -128,6 +145,14 @@ rm -rf ~/robotx_ws/build/crusader_bt ~/robotx_ws/build/crusader_nav_layers ~/rob
 ```bash
 sudo systemctl start crsd-container && bash ~/robotx_ws/src/rx26_asv/tools/scripts/rebuild.sh && sudo systemctl start crsd-ros
 ```
+
+**Rollback without sudo** (how the 2026-10-03 swap would be undone):
+1. `docker rename asv asv_nav2_failed && docker rename asv_pre_nav2 asv`
+2. Reboot through `crsd-power`. The core stack never loads `crusader_bt` or the costmap plugin, so it
+   comes up fine on the old image.
+3. Inside `asv`, clear the same three CMake directories as above, then run `rebuild.sh`.
+
+The lake rig needs that rebuild: its `bt_runner` links `nav2_msgs` until it is rebuilt in the old image.
 
 Delete `asv_pre_nav2` only after a successful water day. `crsd-container.service` starts the
 container by name (`docker start -a asv`), so no unit file changes. If `apt-get update` fails in
