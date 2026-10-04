@@ -210,8 +210,11 @@ up() {   # up <name> <logfile> <command...>: its own process group; its pid (= p
 }
 # a live process matching a pattern. pgrep -f falls back to the process NAME for a zombie (empty cmdline), and the
 # container's init does not reap: a dead nav_frames_node read as "already running" on 2026-10-02. Zombies are skipped.
+# The CONTENT of cmdline, not `[ -s ]`: /proc files always stat as size 0, so `-s` was never true
+# and every check below read "not running" (2026-10-03: a second ground_station on the boat, which
+# failed on :8090). An empty cmdline is a zombie or a kernel thread, which is not "running".
 running() { local p; for p in $(pgrep -f -- "$1"); do
-              if [ -s /proc/$p/cmdline ]; then echo "    (pid $p: $(tr '\0' ' ' < /proc/$p/cmdline | cut -c1-90))" >&2; return 0; fi
+              if [ -n "$(tr -d '\0' < /proc/$p/cmdline 2>/dev/null)" ]; then echo "    (pid $p: $(tr '\0' ' ' < /proc/$p/cmdline | cut -c1-90))" >&2; return 0; fi
             done; return 1; }
 
 # the overlay finish() kept for this run (none: the boat's own params). bt_runner reads it as a 2nd --params-file,
