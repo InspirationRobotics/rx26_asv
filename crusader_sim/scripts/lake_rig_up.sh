@@ -141,9 +141,21 @@ if [ -n "$need" ]; then
   fi
   [ -z "${need// /}" ] || { echo "*** missing packages:$need  (rebuild on the HOST: tools/scripts/rebuild.sh)" >&2; exit 2; }
 fi
+# A rig of OURS that is already up is stopped HERE, before the check below, not just before starting
+# (as it used to be). The check is for a tracker SOMEBODY ELSE started, but our own one from the last
+# start always reached it first, and its parameter query races DDS discovery with --no-daemon ("Node
+# not found"): a plain restart of a POOL rig -- capture with setpoints off, then PUBLISH=1 -- failed
+# with exit 3 (found on the boat 2026-10-03). --check stops nothing.
+[ "$CHECK" = 1 ] || bash "$HERE/lake_rig_down.sh" --quiet
 if [ "$POOL" = 1 ] && pgrep -f 'crusader_world_model.*target_tracker|target_tracker' >/dev/null; then
-  # POOL promises camera only: a tracker somebody else started with use_lidar true would put LiDAR tracks into the plan
-  ul="$(timeout 10 ros2 param get /target_tracker use_lidar --no-daemon 2>/dev/null | tr -d '\n')"
+  # POOL promises camera only: a tracker somebody else started with use_lidar true would put LiDAR tracks into the plan.
+  # Asked up to 3 times: a fresh --no-daemon query can miss a node that discovery has not reached yet.
+  ul=""
+  for _ in 1 2 3; do
+    ul="$(timeout 10 ros2 param get /target_tracker use_lidar --no-daemon 2>/dev/null | tr -d '\n')"
+    case "$ul" in *rue*|*alse*) break ;; esac
+    sleep 1
+  done
   case "$ul" in
     *alse*) echo "  POOL: the running target_tracker already has use_lidar false" ;;
     *) echo "*** POOL=1: a target_tracker is already running and its use_lidar is not false (${ul:-no answer}): stop it (GCS Nodes tab) and run this again" >&2
@@ -172,7 +184,7 @@ if [ "$CHECK" = 1 ]; then
 fi
 
 # ---- ours only: stop the previous lake rig (by recorded pid), never anything else
-bash "$HERE/lake_rig_down.sh" --quiet
+# (done above, before the POOL check: lake_rig_down.sh already ran by the time we get here)
 # core.launch.py's rxl_link_node (serial, respawning) is stopped ONCE, here, so the loopback one can have udp 14555
 if [ "$LAKE_RXL" = replace ]; then
   for pid in $(pgrep -f 'rxl_link_node'); do
