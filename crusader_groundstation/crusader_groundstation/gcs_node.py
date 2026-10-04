@@ -69,7 +69,7 @@ from crusader_common.param_utils import (declare, declare_from_config,
 from crusader_common.stream_cache import StreamCache
 
 from crusader_groundstation import node_registry as reg
-from crusader_groundstation import bag_recorder, camera_profiles, param_client
+from crusader_groundstation import bag_recorder, camera_profiles, lake_rig, param_client
 from crusader_groundstation import planner_profiles
 from crusader_groundstation import power_client, proc_scan, radio_core
 from crusader_groundstation import system_info
@@ -213,6 +213,14 @@ class GroundStation(Node):
         self.procs = ProcessManager(
             tools_dir=p["tools_dir"],
             logger=lambda m: self.get_logger().info(m))
+
+        # The Task 1 tab's START RIG / STOP RIG: crusader_sim's lake_rig_up.sh, run here
+        # (this node is inside asv too) with the datum taken from the boat. See lake_rig.
+        # The rig scripts sit beside tools/ in the same checkout, so no parameter of its own.
+        repo = os.path.dirname(os.path.normpath(p["tools_dir"]))
+        self.rig = lake_rig.LakeRig(os.path.join(repo, "crusader_sim", "scripts"),
+                                    os.path.expanduser("~/.cache/crusader_lake"),
+                                    logger=lambda m: self.get_logger().info(m))
 
         # Parameter services against every OTHER node. Clients are created on
         # first use, so a session that never opens the Tuning tab adds no graph
@@ -589,6 +597,7 @@ class GroundStation(Node):
             },
             "system": sysinfo,
             "power": self._power_state(),
+            "lake": self._lake_state(pose),
             "logs": {"counts": self.logs.counts(),
                      "nodes": self.logs.nodes()},
             "layers": {"clusters": "clusters" in layers,
@@ -783,6 +792,10 @@ class GroundStation(Node):
             return self._start_profile(payload)
         if path == "/power":
             return self._power(payload)
+        if path == "/lake/start":
+            return self._lake_start(payload)
+        if path == "/lake/stop":
+            return self._lake_stop(payload)
         if path == "/trail/clear":
             self._trail.clear()
             return {"ok": True, "message": "trail cleared"}
@@ -1248,6 +1261,53 @@ class GroundStation(Node):
         except (power_client.PowerUnavailable, ValueError) as e:
             return {"ok": False, "message": str(e)}
         return {"ok": True, "message": reply}
+
+    # ---------- the lake rig (Task 1 tab) ----------
+
+    def _rig_blocked(self):
+        """Why the rig must not be started or stopped right now, or None. Restarting it
+        kills its bt_runner, so never under a mission: armed in GUIDED or AUTO is the
+        pilot's to end first. An unknown FCU status is not a block; the rig's own
+        preflight says so, and START in the panel needs armed + GUIDED anyway."""
+        status = self._status.get(time.monotonic())
+        if status is not None and status[1] and str(status[0]).upper() in ("GUIDED", "AUTO"):
+            return (f"the autopilot is ARMED in {status[0]}: restarting the rig would cut a "
+                    "running mission. The pilot takes it out of GUIDED first.")
+        return None
+
+    def _lake_start(self, payload):
+        """START RIG: lake_rig_up.sh with the datum from the boat (lake_rig.choose_datum)."""
+        why = self._rig_blocked()
+        if why:
+            return {"ok": False, "message": why}
+        pose = self._pose.get(time.monotonic())
+        if pose is None:
+            return {"ok": False,
+                    "message": "no fresh boat pose (GPS yaw resolved?): the datum comes "
+                               "from the boat, so the rig cannot start without one"}
+        lat, lon, chosen = lake_rig.choose_datum(
+            pose[:2], self.rig.field(), new_here=bool(payload.get("new_datum")))
+        ok, message = self.rig.start((lat, lon), chosen, bool(payload.get("pool")),
+                                     bool(payload.get("publish")))
+        return {"ok": ok, "message": message}
+
+    def _lake_stop(self, _payload):
+        """STOP RIG: lake_rig_down.sh, which stops only what the rig started."""
+        why = self._rig_blocked()
+        if why:
+            return {"ok": False, "message": why}
+        ok, message = self.rig.stop()
+        return {"ok": ok, "message": message}
+
+    def _lake_state(self, pose):
+        """The rig as the Task 1 tab shows it, plus the datum a START RIG would use now
+        (None without a fresh pose: the button would be refused, and the tab says why)."""
+        state = self.rig.view()
+        state["next"] = None
+        if pose is not None:
+            lat, lon, chosen = lake_rig.choose_datum(pose[:2], self.rig.field())
+            state["next"] = {"lat": lat, "lon": lon, "why": chosen}
+        return state
 
     # ---------- teardown ----------
 

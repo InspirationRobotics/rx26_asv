@@ -89,6 +89,11 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
    background:var(--panel);border-bottom:1px solid var(--line)}
  #t1warn{padding:5px 10px;font-size:12px;color:var(--warn);
    border-bottom:1px solid var(--line)}
+ #t1rig{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:6px 10px;
+   background:var(--panel);border-bottom:1px solid var(--line)}
+ #t1rig label{display:flex;gap:4px;align-items:center}
+ #t1out{padding:0 10px;border-bottom:1px solid var(--line)}
+ #t1log{max-height:180px;overflow:auto;font-size:11px;margin:4px 0;white-space:pre-wrap}
  #t1body{flex:1;min-height:0;position:relative;overflow:auto}
  #t1body iframe{display:block;width:100%;height:100%;border:0;background:var(--bg)}
  /* The controls sit BESIDE the picture, not on another tab. The whole reason
@@ -1609,6 +1614,17 @@ function t1Build(){
     + '<button id="t1reset" title="back to this host, port ' + T1_PORT + '">default</button>'
     + '<a id="t1open" class="meta" target="_blank" rel="noopener">open on its own</a>'
     + '<span class="meta" id="t1st" style="margin-left:auto"></span></div>'
+    + '<div id="t1rig"><b>rig</b><span id="t1rst" class="meta">…</span>'
+    + '<label class="meta" title="POOL=1: camera only, no LiDAR or Nav2 in the plan, tight-field profile">'
+    + '<input type="checkbox" id="t1pool">pool (camera only)</label>'
+    + '<label class="meta" title="PUBLISH=1: the tree sends setpoints once the pilot arms, selects GUIDED and START is pressed">'
+    + '<input type="checkbox" id="t1pub">setpoints ON</label>'
+    + '<label class="meta" title="use the boat\'s position even if a field in progress is within 1 km (a new site)">'
+    + '<input type="checkbox" id="t1new">new datum here</label>'
+    + '<button class="go" id="t1up">START RIG</button><button id="t1down">STOP RIG</button>'
+    + '<span class="meta" id="t1next" style="margin-left:auto"></span></div>'
+    + '<details id="t1out"><summary class="meta">rig output (lake_rig_up.sh / lake_rig_down.sh)</summary>'
+    + '<pre id="t1log"></pre></details>'
     + '<div id="t1warn"><b>Leaving this tab stops the UAV heartbeat: the boat aborts a '
     + 'running mission about 15 s later.</b> The panel resends the field only while a '
     + 'browser is polling it. Keep this tab open and in front during a run. The RC SB '
@@ -1621,6 +1637,60 @@ function t1Build(){
     el('t1url').value = t1Default(); t1Store(''); t1Load(); };
   el('t1url').onkeydown = function(ev){
     if(ev.key === 'Enter'){ ev.preventDefault(); t1Load(); } };
+  el('t1up').onclick = function(){
+    var pub = el('t1pub').checked;
+    if(pub && !confirm('Start the rig with SETPOINTS ON?\n\nOnce the pilot arms, selects GUIDED '
+                       + 'and START is pressed in the panel, the boat drives itself. The RC SB '
+                       + 'switch is the only e-stop.')) return;
+    if(S && S.lake && S.lake.up
+       && !confirm('Restart the rig? The panel below goes away for up to a minute.')) return;
+    post('/lake/start', {pool: el('t1pool').checked, publish: pub,
+                         new_datum: el('t1new').checked});
+  };
+  el('t1down').onclick = function(){
+    if(!confirm('Stop the lake rig? The Task 1 panel goes away.')) return;
+    post('/lake/stop', {});
+  };
+}
+
+/* ---- the rig strip ----
+   START RIG runs crusader_sim's lake_rig_up.sh ON THE BOAT (the ground station is in the
+   same container) with the datum taken from the boat: the field in progress when the boat
+   is within 1 km of it, so a restart between capturing the field and the runs brings the
+   pinned buoys back; otherwise the boat's position now (lake_rig.py's header says why).
+   It starts the rig, not a mission: START in the panel below still needs the pilot to arm
+   and select GUIDED, and the node refuses START/STOP RIG while armed in GUIDED or AUTO.
+   When a start or stop finishes, the tab looks for the panel again, so the frame follows. */
+var t1RigWas = null;
+function t1LL(lat, lon){ return lat.toFixed(7) + ', ' + lon.toFixed(7); }
+
+function renderT1Rig(){
+  var L = S.lake, st = el('t1rst');
+  if(!L || !st) return;
+  var last = L.last, txt;
+  if(L.busy) txt = L.busy + '… (up to a minute)';
+  else if(L.up && last && last.op === 'start' && last.ok)
+    txt = 'UP — datum ' + t1LL(last.datum[0], last.datum[1])
+        + (last.pool ? ' · POOL' : '') + (last.publish ? ' · SETPOINTS ON' : ' · setpoints off');
+  else if(L.up) txt = 'UP (started outside this page: its banner is in the rig output if it was started here)';
+  else txt = 'down';
+  if(!L.busy && last && !last.ok) txt += ' — last ' + last.op + ' FAILED (exit ' + last.rc + '): open the rig output';
+  st.textContent = txt;
+  st.style.color = L.busy ? 'var(--warn)' : L.up ? 'var(--ok)' : (last && !last.ok) ? 'var(--bad)' : 'var(--dim)';
+
+  var nx = L.next;
+  if(el('t1new').checked)
+    nx = S.boat.ok ? {lat: S.boat.lat, lon: S.boat.lon, why: "the boat's position (new datum asked for)"} : null;
+  el('t1next').textContent = L.busy ? '' : nx ? 'START RIG uses ' + t1LL(nx.lat, nx.lon) + ': ' + nx.why
+                                             : 'START RIG needs a fresh boat pose (GPS yaw resolved?)';
+  el('t1up').textContent = L.up ? 'RESTART RIG' : 'START RIG';
+  el('t1up').disabled = !!L.busy || !nx;
+  el('t1down').disabled = !!L.busy || !(L.procs && L.procs.length);
+  var log = last ? last.tail.join('\n') : '';
+  if(el('t1log').textContent !== log) el('t1log').textContent = log;
+
+  if(t1RigWas && !L.busy && tab === 'task1') t1Load();
+  t1RigWas = L.busy;
 }
 
 function t1Status(msg){ var e = el('t1st'); if(e) e.textContent = msg; }
@@ -1639,7 +1709,9 @@ function t1Unreachable(u){
   el('t1body').innerHTML = viewerPanel(
     'The Task 1 panel did not answer',
     'Nothing is listening at <b>' + esc(u) + '</b>. The panel is not part of core: it '
-      + 'runs inside the <b>asv</b> container and is started by hand. On the Jetson host '
+      + 'is the lake rig\'s. Start it with <b>START RIG</b> above: it runs the rig on the '
+      + 'boat with the datum taken from the boat (tick <b>pool</b> for the camera-only pool '
+      + 'test, <b>setpoints ON</b> for runs). By hand instead: on the Jetson host '
       + 'run <code>docker exec -it asv bash</code>, then in asv:'
       + '<pre style="text-align:left">' + T1_START + '</pre>'
       + 'Use the same <b>LAKE_DATUM</b> every time you restart it. A panel on another '
@@ -2409,6 +2481,7 @@ function render(){
   if(tab==='radio') renderRadio();
   if(tab==='sys' && !document.activeElement.matches('#confirm')) renderSys();
   if(tab==='map') draw();
+  if(tab==='task1') renderT1Rig();
 
   var msg = '';
   if(!S.boat.ok) msg = 'POSE STALE — vessel position is NOT current';
