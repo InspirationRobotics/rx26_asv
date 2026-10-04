@@ -229,6 +229,23 @@ public:
       RCLCPP_WARN(get_logger(), "dock_bays = %d: TEST setting - the course has 3",
         ctx_->dock_bays);
     }
+    // Task 3 run as two trees (task3_part1_approach.xml, then
+    // task3_part2_dock_fire.xml): the bay part 1 committed to, for the part 2
+    // run. A new goal forgets part 1's dock book, and from where part 2 starts
+    // (3 m out) the outer faces are cut off by the image edge, so the bays
+    // cannot be numbered again. 0 = not given: part 2 numbers them from what it
+    // sees (enough with one bay). Read at every goal start.
+    {
+      rcl_interfaces::msg::ParameterDescriptor d;
+      d.description = "Task 3 part 2: the bay part 1 committed to (its log: "
+        "\"committed to bay N\"), 1..3; 0 = not given";
+      rcl_interfaces::msg::IntegerRange range;
+      range.from_value = 0;
+      range.to_value = 3;
+      range.step = 1;
+      d.integer_range.push_back(range);
+      declare_parameter<int64_t>("task3_bay", 0, d);
+    }
 
     // Latched: a subscriber that starts mid-mission must learn the current
     // value rather than sit on a default. avoidance_enable especially —
@@ -1021,6 +1038,14 @@ private:
       ctx_->tier = goal->tier;
       resetTask3(*ctx_);
       resetFire(*ctx_);
+      // Part 2's bay, when the operator gave it (task3_bay): the NUMBER only,
+      // for the docking report - there is no track behind it.
+      const int64_t given_bay = get_parameter("task3_bay").as_int();
+      if (given_bay > 0) {
+        ctx_->chosen_bay = static_cast<int>(given_bay);
+        RCLCPP_INFO(get_logger(), "task3_bay: the docking report will name bay %d",
+          ctx_->chosen_bay);
+      }
       goal_mode_ = ctx_->mode;
       // "Home" is where THIS attempt started, captured once. Not the autopilot's
       // HOME, which is wherever it was armed and is usually somewhere else after

@@ -212,6 +212,22 @@ public:
   }
 };
 
+/// A bay number is in hand for the docking report: committed in this run
+/// (CommitSafeBay), or given for a Task 3 part 2 run (bt_runner_node task3_bay).
+class BayChosen : public CrusaderCondition
+{
+public:
+  BayChosen(const std::string & n, const BT::NodeConfig & c)
+  : CrusaderCondition(n, c) {}
+  static BT::PortsList providedPorts() {return {};}
+
+  BT::NodeStatus tick() override
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    return ctx_->chosen_bay > 0 ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
+  }
+};
+
 /// The goal's tier is at least `tier` (0 Core, 1 Advanced, 2 Disruptive), so
 /// one tree serves all three and Core simply stops after the fire is out.
 class TierAtLeast : public CrusaderCondition
@@ -456,7 +472,9 @@ public:
   {
     return {
       BT::InputPort<double>("timeout_s", 60.0, "give up waiting for the light"),
-      BT::InputPort<double>("resend_s", 10.0, "re-send the docking report this often")};
+      BT::InputPort<double>("resend_s", 10.0, "re-send the docking report this often"),
+      BT::OutputPort<int>("window",
+        "the lit window's DockWindow.index (0 = upper-left), for StrafeKeep / FireBurst")};
   }
 
   BT::NodeStatus onStart() override
@@ -473,18 +491,25 @@ public:
   BT::NodeStatus onRunning() override
   {
     int bay = 0;
+    int lit = -1;
     bool resend = false;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       const bool red = ctx_->dock_pattern == "steady" && ctx_->dock_colours.size() == 1 &&
         ctx_->dock_colours[0] == dock::Colour::Red;
       if (red && ctx_->dock_target_window >= 0) {
-        RCLCPP_INFO(log(), "FIRE: window %d is steady RED", ctx_->dock_target_window);
-        return BT::NodeStatus::SUCCESS;
+        lit = ctx_->dock_target_window;
       }
       bay = ctx_->chosen_bay;
       resend = !ctx_->readiness_confirmed &&
         since(last_) >= getInput<double>("resend_s").value_or(10.0);
+    }
+    if (lit >= 0) {
+      // Optional: a tree that does not wire `window` gets an error value here,
+      // not an exception, and that is fine.
+      (void)setOutput("window", lit);
+      RCLCPP_INFO(log(), "FIRE: window %d is steady RED", lit);
+      return BT::NodeStatus::SUCCESS;
     }
     if (resend) {
       last_ = Clock::now();
@@ -749,6 +774,7 @@ void registerTask3Nodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<ChosenBaySafe>("ChosenBaySafe");
   factory.registerNodeType<DockedInBay>("DockedInBay");
   factory.registerNodeType<LinedUp>("LinedUp");
+  factory.registerNodeType<BayChosen>("BayChosen");
   factory.registerNodeType<TierAtLeast>("TierAtLeast");
   factory.registerNodeType<UpdateDockBook>("UpdateDockBook");
   factory.registerNodeType<PickVantage>("PickVantage");

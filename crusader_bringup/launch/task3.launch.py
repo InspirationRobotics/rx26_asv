@@ -62,6 +62,9 @@ TREES = {
     "fire_manual": "task3_fire_manual.xml",   # MANUAL, strafes onto the window (the shot)
     "fire_test": "task3_fire_test.xml",       # GUIDED, aims by turning
     "disruptive": "task3_disruptive.xml",     # the full Task 3 mission tree
+    # the mission in two halves, SC GUIDED -> MANUAL between them (part 1's header)
+    "part1": "task3_part1_approach.xml",      # GUIDED: find the GREEN bay, line up 3 m out
+    "part2": "task3_part2_dock_fire.xml",     # MANUAL: dock, report, fire, request
     # TEST variants (headers say how they differ):
     "fire_1p6": "task3_fire_manual_1p6.xml",  # pool tuning: 1.6 m, no attempt limit
     "approach_test": "task3_approach_test.xml",  # GUIDED approach to line-up only; dock_bays:=1

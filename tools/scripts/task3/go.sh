@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# go.sh [TIMEOUT_S] [--here] [-d] - the operator's deliberate step: check,
+# go.sh [TIMEOUT_S] [--here] [tier=N] [-d] - the operator's deliberate step: check,
 # reset the autonomy-drop latch, start the run (the SafePassage goal). Runs
 # INSIDE the asv container, after tree.sh (or task3.launch.py) is up:
 #
@@ -7,6 +7,7 @@
 #   docker exec -it asv .../go.sh 86400              # no practical time limit
 #   docker exec -it asv .../go.sh 600 --here         # approach point = the boat
 #   docker exec asv .../go.sh 600 --here -d          # detached: feedback to $GOLOG
+#   docker exec -it asv .../go.sh 600 tier=2         # Disruptive: the request too
 #
 # TIMEOUT_S: the goal's timeout (default 600). Inside the tree, the fire trees'
 #   AwaitStrafeSolution has its own per-attempt timeout (60 s x 5 in
@@ -16,6 +17,8 @@
 #   point the survey has nowhere to look from and fails at once. Start with the
 #   boat facing the dock - with nothing seen, the first look is from here and
 #   the next ones are a 4 m ring search around it.
+# tier=N: the goal's tier, 0 Core (default), 1 Advanced, 2 Disruptive. The Task 3
+#   trees read the resource request (TierAtLeast) only at 1 or 2. --tier=N works too.
 # -d: detach (the goal keeps running after this returns); otherwise this stays
 #   attached and prints feedback. Ctrl+C here does NOT stop the tree.
 #
@@ -34,11 +37,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/env.sh"
 set -u
 
-TIMEOUT_S=600; HERE=0; DETACH=0
+TIMEOUT_S=600; HERE=0; DETACH=0; TIER=0
 for a in "$@"; do
   case "$a" in
     --here) HERE=1 ;;
     -d) DETACH=1 ;;
+    tier=[012]|--tier=[012]) TIER="${a##*=}" ;;
+    tier=*|--tier=*) echo "go.sh: tier must be 0, 1 or 2 (got '${a##*=}')" >&2; exit 1 ;;
     ''|*[!0-9.]*) echo "go.sh: unknown argument '$a'" >&2; exit 1 ;;
     *) TIMEOUT_S="$a" ;;
   esac
@@ -65,7 +70,7 @@ say "mode:  $MODE"
 # 2. the flight mode this tree runs in
 FCU_MODE=$(timeout 5 ros2 topic echo --once /crsd/fcu_status 2>/dev/null | awk '/^mode:/{print $2}')
 case "$TREE" in
-  task3_fire_manual*)
+  task3_fire_manual*|task3_part2_*)
     [ "$FCU_MODE" = "MANUAL" ] || fail "flight mode is '${FCU_MODE:-unknown}'; this tree strafes on the sticks and needs MANUAL (SC)"
     ;;
   *)
@@ -92,7 +97,7 @@ else
 fi
 
 # 4. the goal
-GOAL="tier: 0, timeout_s: ${TIMEOUT_S}"
+GOAL="tier: ${TIER}, timeout_s: ${TIMEOUT_S}"
 if [ "$HERE" = 1 ]; then
   P=$(timeout 4 ros2 topic echo --once /crsd/pose 2>/dev/null)
   LAT=$(echo "$P" | awk '/^latitude:/{print $2}'); LON=$(echo "$P" | awk '/^longitude:/{print $2}')
@@ -100,7 +105,7 @@ if [ "$HERE" = 1 ]; then
   GOAL="$GOAL, approach_latitude: $LAT, approach_longitude: $LON"
   say "approach point: here ($LAT, $LON)"
 fi
-say "sending the SafePassage goal (timeout ${TIMEOUT_S}s)."
+say "sending the SafePassage goal (tier ${TIER}, timeout ${TIMEOUT_S}s)."
 say "to take the boat back: SC to MANUAL (GUIDED trees) or out of MANUAL (fire trees)"
 say "ends the run; SD up (drop latch); SB (e-stop). Ctrl+C here does NOT stop the tree."
 if [ "$DETACH" = 1 ]; then

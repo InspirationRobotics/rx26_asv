@@ -157,6 +157,7 @@ public:
     double stream_timeout_s = 1.0;
     bool publish_setpoints = false;
     bool fire_pump = false;        ///< bt_runner_node's fire_pump: FireBurst may squirt
+    int task3_bay = 0;             ///< bt_runner_node's task3_bay: part 2's bay, 0 = not given
     bool verbose_tree = false;
   };
 
@@ -539,6 +540,10 @@ private:
       ctx_->have_waypoint = false;
       resetTask3(*ctx_);
       resetFire(*ctx_);
+      if (p_.task3_bay > 0) {        // as bt_runner_node: the number only
+        ctx_->chosen_bay = p_.task3_bay;
+        RCLCPP_INFO(node_.get_logger(), "task3_bay: the docking report will name bay %d", ctx_->chosen_bay);
+      }
       goal_mode_ = ctx_->mode;
       ctx_->home = ctx_->boat;
       ctx_->have_home = ctx_->pose_fresh;
@@ -708,6 +713,12 @@ int main(int argc, char ** argv)
       p.publish_setpoints = true;
     } else if (a == "--fire-pump") {
       p.fire_pump = true;
+    } else if (a == "--task3-bay") {
+      p.task3_bay = std::stoi(next("--task3-bay"));
+      if (p.task3_bay < 0 || p.task3_bay > 3) {
+        std::fprintf(stderr, "--task3-bay must be 0..3\n");
+        return 2;
+      }
     } else if (a == "--verbose-tree") {
       p.verbose_tree = true;
     } else {

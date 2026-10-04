@@ -421,6 +421,8 @@ public:
       BT::InputPort<double>("burst_s", 0.5, "pump on for this long (the bridge caps it)"),
       BT::InputPort<double>("flight_s", 0.8, "the water's flight after the pump stops"),
       BT::InputPort<double>("ack_timeout_s", 1.5, "no answer from the bridge by then: fail"),
+      BT::InputPort<int>("window_index", -1,
+        "the window this burst is aimed at, kept for ReportFirefighting (-1: not kept)"),
     };
   }
 
@@ -429,6 +431,7 @@ public:
     burst_ = getInput<double>("burst_s").value_or(0.5);
     flight_ = getInput<double>("flight_s").value_or(0.8);
     ack_timeout_ = getInput<double>("ack_timeout_s").value_or(1.5);
+    widx_ = getInput<int>("window_index").value_or(-1);
     sent_ = accepted_ = false;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
@@ -478,6 +481,7 @@ public:
     }
     if ((dry_ || accepted_) && now - t0_ >= burst_ + flight_) {
       ctx_->bursts.record(t0_, burst_, flight_);
+      if (widx_ >= 0) {ctx_->fired_window = widx_;}   // ReportFirefighting's window
       sent_ = false;
       return BT::NodeStatus::SUCCESS;
     }
@@ -492,6 +496,7 @@ public:
 
 private:
   double burst_ = 0.5, flight_ = 0.8, ack_timeout_ = 1.5, t0_ = 0.0;
+  int widx_ = -1;
   std::uint32_t seq_ = 0;
   bool dry_ = true, sent_ = false, accepted_ = false;
 };
@@ -511,8 +516,10 @@ public:
     return {
       BT::InputPort<double>("fire_range_m", 3.22, "LiDAR wall range to fire from (squirt_cal)"),
       BT::InputPort<int>("window_index", 0, "DockWindow.index to hit (0 = upper-left)"),
+      // The hold puts the window `bias` LEFT of the nozzle's line (lat_err =
+      // wy - nozzle_y - bias -> 0), so the line, and the shot, moves RIGHT.
       BT::InputPort<double>("lateral_bias_m", 0.0,
-        "calibrated: + puts the stream this much further LEFT at the window"),
+        "+ moves the shot this much further RIGHT at the window (the window is held this far LEFT of the line)"),
       BT::InputPort<double>("nozzle_y_m", 0.0, "nozzle LEFT of the centreline"),
       BT::InputPort<double>("cam_timeout_s", 0.5, "window older than this: no sideways thrust"),
       BT::InputPort<double>("face_timeout_s", 3.0, "square-up older than this: hold the last"),
