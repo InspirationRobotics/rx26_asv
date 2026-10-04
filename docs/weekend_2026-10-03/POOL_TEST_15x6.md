@@ -98,11 +98,10 @@ and accept that the buoys sit at the walls.
 Exercises everything on the real boat except the autopilot following the plan: perception, capture, commit,
 the drawn plan, checkpoints UI, ABORT, the dead-man, the tuning path.
 
-- [ ] **[asv]** Rig up in pool mode, setpoints **off** (no `PUBLISH=1`):
-
-  ```bash
-  POOL=1 LAKE_DATUM=<lat>,<lon> bash /root/robotx_ws/src/rx26_asv/crusader_sim/scripts/lake_rig_up.sh
-  ```
+- [ ] **[gcs]** Task 1 tab, **rig** strip: tick **pool (camera only)**, leave **setpoints ON** off, press
+  **START RIG** (about 40 s). The datum is the boat's position, so start it with the boat where you
+  want the map origin. No SSH needed. By hand, the old way still works:
+  `POOL=1 LAKE_DATUM=<lat>,<lon> bash /root/robotx_ws/src/rx26_asv/crusader_sim/scripts/lake_rig_up.sh` in `asv`.
 
   **Pass:** banner `POOL: camera-only, LiDAR not used for planning`; no `planner_server`. If the preflight says
   "no /crsd/fcu_status within 8 s", run it again before believing it (it did that once right after a boot today
@@ -234,3 +233,30 @@ per-buoy side rule; the whole-field tree exists to fix that. Keep Sunday on `tas
   The 8 s `--no-daemon` probe is too short on a busy Jetson. **If the panel shows FCU "fresh", ignore the line.**
 - **Harmless:** the rig also starts a second `ground_station`. It fails with "Address already in use" because
   core's own instance already serves :8090 with the new build. The GUI is unaffected.
+
+## START RIG from the GUI (added Sat night)
+
+The Task 1 tab has a **rig** strip: **pool (camera only)**, **setpoints ON** and **new datum here** switches,
+**START RIG / RESTART RIG / STOP RIG**, the datum the next start will use and why, and the rig script's own
+output under *rig output*. The ground station runs the same `lake_rig_up.sh` / `lake_rig_down.sh` itself.
+
+- **Datum:** the boat's position, **except** when a field in progress is within 1 km. Then that field's
+  datum is kept, because the panel restores the field only for the same datum. So capture with
+  setpoints off, then RESTART RIG with setpoints ON, and the buoys you pinned come back. Tick
+  **new datum here** for a new site that happens to be close. With no fresh boat pose (GPS yaw), START RIG
+  is refused.
+- **Safety:** START RIG starts the rig, not a mission. START in the panel still needs the pilot to arm and
+  select GUIDED. START/STOP RIG are refused while the autopilot is armed in GUIDED or AUTO, and setpoints ON
+  asks you to confirm.
+- **Tested on the boat:** START (pool) up in ~38 s with the datum from the boat. A second press while busy
+  is refused. A pinned buoy turns the preview to "the field in progress, N m from the boat". RESTART with
+  setpoints ON is up in ~35 s, keeps the datum, restores the pinned buoys, and its banner says PUBLISH=true.
+  STOP brings everything down in about 1 s.
+- **Two pre-existing rig-script bugs fixed on the way:**
+  - `running()` never detected anything, which made the rig start a second ground_station.
+  - A POOL rig could not be restarted (exit 3: "use_lidar is not false (no answer)"). The rig's own previous
+    tracker reached the POOL check first, and its parameter query raced discovery. The second command of
+    TEST_PLAN.md P3 would have hit this by hand too.
+- The rig's logs and layouts (`~/.cache/crusader_lake/`) live **inside** the `asv` container, not on the
+  host. Copy them out with `docker cp asv:/root/.cache/crusader_lake <dest>` after each run, as the plan
+  asks.
