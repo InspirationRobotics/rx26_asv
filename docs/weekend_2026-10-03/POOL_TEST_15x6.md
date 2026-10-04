@@ -260,3 +260,34 @@ output under *rig output*. The ground station runs the same `lake_rig_up.sh` / `
 - The rig's logs and layouts (`~/.cache/crusader_lake/`) live **inside** the `asv` container, not on the
   host. Copy them out with `docker cp asv:/root/.cache/crusader_lake <dest>` after each run, as the plan
   asks.
+
+## Pool results, Sat night (boat in the backyard pool, after dark)
+
+Logs: `Boat/logs/pool-20261003/` on the laptop (rig logs from `asv:/root/.cache/crusader_lake`, plus the
+5 Hz telemetry CSV `pooltest-20261003.csv`). Laptop on TeamInspirationField_2.0 (192.168.8.107), reaching
+the boat through the Rocket/Bullet at 192.168.8.109.
+
+| Test | Result |
+|---|---|
+| QGC on the radio subnet | Fixed: `/etc/default/crusader` `GCS_IPS="192.168.100.107 192.168.8.107"`, crsd-mavproxy restarted (backup `.bak-20261003`) |
+| GPS heading outdoors | **Valid** (GPS_RAW_INT.yaw = autopilot heading); EKF healthy (flags 0x33F) |
+| GPS position | 3D fix only, **no RTK**, ±1.3–1.5 m |
+| MANUAL: forward / strafe R-L / rotate CW-CCW | Correct directions (ch3+ forward, ch4± strafe, ch1± rotate). Reverse was not captured in the log |
+| GUIDED click-to-go | 5.8 m at 0.50 m/s (= WP_SPEED), no spin |
+| Camera | **Not tested.** Too dark: the camera runs a daytime exposure (-3 EV, 8 ms cap) |
+| **Task 1, operator-pinned field, setpoints ON** | START RIG (pool, setpoints ON), ENTRY + EXIT pinned with PIN AT BOAT, `nav_orbit_radius_m` 3 → 1.7 from the Tuning tab (bt_runner logged the change). Advanced run: **ENTRY orbit and transit completed, 5.3 of 13.8 m of the EXIT orbit, 0.2–0.7 m off the planned path, up to 0.48 m/s**. Then the pilot took MANUAL: `RESULT 4 ... the pilot took control; not fighting for it` |
+| SB e-stop | **Not seen in the log** (ch7 never went low). Unconfirmed |
+| ABORT / dead-man on the boat | Not done (steps 9–10) |
+
+## Before the first autonomous run at the lake
+
+1. **SB e-stop:** armed in MANUAL, SB on, a little throttle, nothing spins, SB off. Then the same in GUIDED.
+   Note which channel moves in QGC, because tonight ch7 never did.
+2. **Raise the speed for the lake:** `WP_SPEED` is 0.5 m/s (fine for the pool). `CRUISE_SPEED` /
+   `CRUISE_THROTTLE` are 2.0 / 15.
+3. **Untick pool** in the Task 1 tab. Check `nav_orbit_radius_m` in the Tuning tab: tonight's 1.7 was a live
+   change, and a rig restart reloads the defaults, but check before START.
+4. RTK base if you have one (±1.3 m tonight); PIN AT BOAT relative error cancels mostly, absolute does not.
+5. ABORT and the dead-man on the real boat (R0/R1), then the camera in daylight (U2).
+6. LED strip in; meter the pack (the autopilot reports no voltage).
+7. After each run: `docker cp asv:/root/.cache/crusader_lake <dest>` (the rig's logs live inside the container).
