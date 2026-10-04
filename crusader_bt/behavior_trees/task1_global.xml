@@ -63,10 +63,10 @@
         <RetryUntilSuccessful num_attempts="4">
           <Sequence>
             <PlanGlobalPassage/>
-            <DrivePlanPhase phase="approach"/>
-            <DrivePlanPhase phase="entry_orbit"/>
-            <DrivePlanPhase phase="transit"/>
-            <DrivePlanPhase phase="exit_orbit"/>
+            <DrivePlanPhase lookahead_m="2.5" phase="approach"/>
+            <DrivePlanPhase lookahead_m="2.5" phase="entry_orbit"/>
+            <DrivePlanPhase lookahead_m="2.5" phase="transit"/>
+            <DrivePlanPhase lookahead_m="2.5" phase="exit_orbit"/>
           </Sequence>
         </RetryUntilSuccessful>
       </Sequence>
@@ -89,9 +89,9 @@
         <RetryUntilSuccessful num_attempts="4">
           <Sequence>
             <PlanGlobalPassage/>
-            <DrivePlanPhase phase="approach"/>
+            <DrivePlanPhase lookahead_m="2.5" phase="approach"/>
             <!-- stop on the orbit's last point: the next thing is a question -->
-            <DrivePlanPhase phase="entry_orbit" stop_at_end="true"/>
+            <DrivePlanPhase lookahead_m="2.5" phase="entry_orbit" stop_at_end="true"/>
           </Sequence>
         </RetryUntilSuccessful>
 
@@ -117,7 +117,7 @@
               <RetryUntilSuccessful num_attempts="4">
                 <Sequence>
                   <PlanGlobalPassage/>
-                  <DrivePlanPhase phase="transit" stop_at_checkpoints="true"/>
+                  <DrivePlanPhase lookahead_m="2.5" phase="transit" stop_at_checkpoints="true"/>
                 </Sequence>
               </RetryUntilSuccessful>
               <IfThenElse>
@@ -138,7 +138,7 @@
         <RetryUntilSuccessful num_attempts="4">
           <Sequence>
             <PlanGlobalPassage/>
-            <DrivePlanPhase phase="exit_orbit"/>
+            <DrivePlanPhase lookahead_m="2.5" phase="exit_orbit"/>
           </Sequence>
         </RetryUntilSuccessful>
       </Sequence>
