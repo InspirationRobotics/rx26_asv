@@ -718,7 +718,13 @@ def main(args=None):
         raise SystemExit(1 if _selftest() else 0)
     import rclpy
     from crusader_msgs.msg import FcuStatus, HazardArray, LatLonHead, TrackedTargetArray
-    from map_msgs.msg import OccupancyGridUpdate
+    try:
+        from map_msgs.msg import OccupancyGridUpdate
+    except ImportError:
+        # The boat's asv image has no Nav2, and map_msgs comes with Nav2. Only the costmap-updates
+        # layer needs it; without this the whole feed died at import and the lake panel had no pose,
+        # no FCU status, so no PIN AT BOAT and no START (found on the boat 2026-10-03).
+        OccupancyGridUpdate = None
     from nav_msgs.msg import OccupancyGrid
     from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
     from sensor_msgs.msg import PointCloud2
@@ -758,7 +764,10 @@ def main(args=None):
     latched = QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
                          durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
     node.create_subscription(OccupancyGrid, COSTMAP_TOPIC, feeder.on_costmap, latched)
-    node.create_subscription(OccupancyGridUpdate, COSTMAP_UPDATES_TOPIC, feeder.on_costmap_update, 10)
+    if OccupancyGridUpdate is not None:
+        node.create_subscription(OccupancyGridUpdate, COSTMAP_UPDATES_TOPIC, feeder.on_costmap_update, 10)
+    else:
+        log.info("map_msgs is not installed (no Nav2 in this image): no costmap-updates layer")
     node.create_subscription(LatLonHead, DATUM_TOPIC, lambda m: feeder.on_datum(m.latitude, m.longitude),
                              latched)
     voxels = []                                   # [(newest voxel cloud, arrival time)] or []
