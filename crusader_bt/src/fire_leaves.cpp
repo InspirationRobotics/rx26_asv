@@ -218,7 +218,7 @@ public:
   static BT::PortsList providedPorts()
   {
     return {
-      BT::InputPort<double>("fire_range_m", 3.22, "calibrated wall range for this window (squirt_cal)"),
+      BT::InputPort<double>("fire_range_m", 1.4, "calibrated wall range for this window (30 deg nozzle)"),
       BT::InputPort<double>("window_lat_m", 0.22, "window from the face centre, + LEFT (UL 0.22)"),
       BT::InputPort<double>("yaw_bias_deg", 0.0, "calibrated: + aims further left"),
       BT::InputPort<std::string>("lateral", "centreline", "fingers | camera | centreline"),
@@ -242,7 +242,7 @@ public:
   BT::NodeStatus tick() override
   {
     fire::AimParams ap;
-    ap.fire_range_m = getInput<double>("fire_range_m").value_or(3.22);
+    ap.fire_range_m = getInput<double>("fire_range_m").value_or(1.4);
     ap.window_lat_m = getInput<double>("window_lat_m").value_or(0.22);
     ap.yaw_bias_deg = getInput<double>("yaw_bias_deg").value_or(0.0);
     const fire::Lateral mode =
@@ -501,6 +501,139 @@ private:
   bool dry_ = true, sent_ = false, accepted_ = false;
 };
 
+/// Look left, then right, on the STICKS (MANUAL; the yaw stick only), so the
+/// camera sweeps the whole dock: Task 3 part 2 numbering the bays from its
+/// line-up point. Turns to the starting heading - swing_deg, holds hold_s,
+/// turns to + swing_deg, holds, turns back. SUCCESS when back; FAILURE with
+/// no heading or a turn that takes longer than turn_timeout_s.
+///
+/// The trig (OAK-D LR, 82 deg across): the three faces span 5 m (centres 2 m
+/// apart, 1 m wide). Square on to the MIDDLE bay they all fit from 2.9 m
+/// (camera to face); square on to an OUTER bay never in practice (5.2 m), but
+/// with the bow turned ~25 deg toward the others they fit from 2.6 m. So a
+/// 25 deg swing each way, from 3 m or more out, shows every face whole once.
+///
+/// Shadow (publish_setpoints off): no sticks, so it cannot turn; it waits the
+/// holds out and succeeds, logging what it would have done.
+class LookAround : public CrusaderAction
+{
+public:
+  LookAround(const std::string & n, const BT::NodeConfig & c) : CrusaderAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<double>("swing_deg", 25.0, "each way from the starting heading"),
+      BT::InputPort<double>("hold_s", 3.0, "look this long at each side"),
+      BT::InputPort<double>("tol_deg", 4.0, "close enough to the look heading"),
+      BT::InputPort<double>("kp_yaw", 4.0, "us per deg"),
+      BT::InputPort<double>("kd_yaw", 1.0, "us per deg/s"),
+      BT::InputPort<double>("min_us", 30.0, "smallest yaw stick that turns the hull"),
+      BT::InputPort<double>("max_us", 100.0, "yaw stick cap"),
+      BT::InputPort<double>("turn_timeout_s", 20.0, "one turn longer than this: FAILURE"),
+    };
+  }
+
+  BT::NodeStatus onStart() override
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    if (!ctx_->pose_fresh || !std::isfinite(ctx_->heading_deg)) {
+      RCLCPP_WARN(log(), "LookAround: no heading to turn by");
+      return BT::NodeStatus::FAILURE;
+    }
+    h0_ = ctx_->heading_deg;
+    step_ = 0;
+    t_step_ = ctx_->now_s;
+    held_since_ = -1.0;
+    shadow_ = !ctx_->publish_setpoints;
+    ctx_->task3_phase = "LOOK";
+    return BT::NodeStatus::RUNNING;
+  }
+
+  BT::NodeStatus onRunning() override
+  {
+    const double swing = getInput<double>("swing_deg").value_or(25.0);
+    const double hold = getInput<double>("hold_s").value_or(3.0);
+    const double tol = getInput<double>("tol_deg").value_or(4.0);
+    const double turn_to = getInput<double>("turn_timeout_s").value_or(20.0);
+    const double offsets[3] = {-swing, swing, 0.0};
+    double yaw_us = 0.0, err = fire::kNaN, now = 0.0;
+    bool publish = false, done = false, fail = false;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      now = ctx_->now_s;
+      const double target = fire::wrap360(h0_ + offsets[step_]);
+      // the last step (back to square) needs no hold: StrafeKeep takes over
+      const double need = step_ < 2 ? hold : 0.0;
+      if (!std::isfinite(ctx_->heading_deg)) {
+        fail = true;
+      } else if (shadow_) {
+        // cannot turn without the sticks: pretend each step arrives at once
+        if (now - t_step_ >= need) {next(now);}
+        done = step_ > 2;
+      } else {
+        err = fire::wrap180(target - ctx_->heading_deg);          // + = turn right
+        const double rate = ctx_->yaw_rate_dps;
+        const bool there = std::fabs(err) <= tol &&
+          (!std::isfinite(rate) || std::fabs(rate) < 5.0);
+        if (there) {
+          if (held_since_ < 0.0) {held_since_ = now;}
+          if (now - held_since_ >= need) {next(now);}
+        } else {
+          held_since_ = -1.0;
+          if (now - t_step_ > turn_to) {fail = true;}
+        }
+        done = step_ > 2;
+        if (!done && !fail) {
+          yaw_us = fire::axisLaw(err, std::isfinite(rate) ? -rate : fire::kNaN,
+            getInput<double>("kp_yaw").value_or(4.0), getInput<double>("kd_yaw").value_or(1.0),
+            there ? 180.0 : 0.0,                  // at the look heading: hands off
+            getInput<double>("min_us").value_or(30.0), getInput<double>("max_us").value_or(100.0));
+        }
+        publish = ctx_->publish_setpoints;
+        if (publish) {ctx_->sticks_commanded = true;}
+      }
+    }
+    if (publish && ctx_->sticks) {ctx_->sticks(0.0, 0.0, done || fail ? 0.0 : yaw_us);}
+    if (fail) {
+      RCLCPP_WARN(log(), "LookAround: %s", std::isfinite(err) ?
+        "a turn took too long" : "lost the heading");
+      return BT::NodeStatus::FAILURE;
+    }
+    if (done) {
+      RCLCPP_INFO(log(), "looked %.0f deg each way%s", swing, shadow_ ? " [shadow]" : "");
+      return BT::NodeStatus::SUCCESS;
+    }
+    if (ctx_->node) {
+      RCLCPP_INFO_THROTTLE(log(), *ctx_->node->get_clock(), 1000,
+        "look %d/3: %+.1f deg to go | yaw stick %+.0f us%s", step_ + 1, err, yaw_us,
+        shadow_ ? " [shadow: publish_setpoints is off]" : "");
+    }
+    return BT::NodeStatus::RUNNING;
+  }
+
+  void onHalted() override
+  {
+    bool publish = false;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      publish = ctx_->publish_setpoints;
+    }
+    if (publish && ctx_->sticks) {ctx_->sticks(0.0, 0.0, 0.0);}
+  }
+
+private:
+  void next(double now)
+  {
+    ++step_;
+    t_step_ = now;
+    held_since_ = -1.0;
+  }
+
+  double h0_ = 0.0, t_step_ = 0.0, held_since_ = -1.0;
+  int step_ = 0;
+  bool shadow_ = false;
+};
+
 /// Hold the firing spot on the STICKS (MANUAL, RC override): the LiDAR range
 /// to the firing range (surge), the window onto the nozzle's line (sway,
 /// from the camera's window x,y,z) and the bow square to the face (yaw, from
@@ -514,7 +647,7 @@ public:
   static BT::PortsList providedPorts()
   {
     return {
-      BT::InputPort<double>("fire_range_m", 3.22, "LiDAR wall range to fire from (squirt_cal)"),
+      BT::InputPort<double>("fire_range_m", 1.4, "LiDAR wall range to fire from (30 deg nozzle)"),
       BT::InputPort<int>("window_index", 0, "DockWindow.index to hit (0 = upper-left)"),
       // The hold puts the window `bias` LEFT of the nozzle's line (lat_err =
       // wy - nozzle_y - bias -> 0), so the line, and the shot, moves RIGHT.
@@ -721,7 +854,7 @@ public:
       BT::InputPort<double>("range_tol_m", 0.06, "+- about fire_range_m"),
       BT::InputPort<double>("lat_tol_m", 0.05, "+- the window off the nozzle's line"),
       BT::InputPort<double>("yaw_tol_deg", 5.0, "+- off square (loose: see StrafeKeep)"),
-      BT::InputPort<double>("fire_range_m", 3.22, "= StrafeKeep's"),
+      BT::InputPort<double>("fire_range_m", 1.4, "= StrafeKeep's"),
       BT::InputPort<double>("hold_s", 1.0, "everything true for this long"),
       BT::InputPort<double>("gap_s", 2.0, "from the last burst's end"),
       BT::InputPort<double>("timeout_s", 60.0, "give up after this"),
@@ -742,7 +875,7 @@ public:
     const double rtol = getInput<double>("range_tol_m").value_or(0.06);
     const double ltol = getInput<double>("lat_tol_m").value_or(0.05);
     const double ytol = getInput<double>("yaw_tol_deg").value_or(5.0);
-    const double target = getInput<double>("fire_range_m").value_or(3.22);
+    const double target = getInput<double>("fire_range_m").value_or(1.4);
     const double gap = getInput<double>("gap_s").value_or(2.0);
     const double timeout = getInput<double>("timeout_s").value_or(60.0);
     std::string why;
@@ -838,6 +971,7 @@ void registerFireNodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<AwaitFiringSolution>("AwaitFiringSolution");
   factory.registerNodeType<FireBurst>("FireBurst");
   factory.registerNodeType<StopBoat>("StopBoat");
+  factory.registerNodeType<LookAround>("LookAround");
   factory.registerNodeType<StrafeKeep>("StrafeKeep");
   factory.registerNodeType<AwaitStrafeSolution>("AwaitStrafeSolution");
 }

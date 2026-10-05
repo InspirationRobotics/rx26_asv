@@ -6,7 +6,7 @@
 //
 //     g++ -std=c++17 -O2 -I include -o t test/test_fire_math.cpp && ./t
 //
-// WHY A NOZZLE NEEDS ITS OWN MATHS. The Task 3 nozzle is fixed (~45 deg, no pan,
+// WHY A NOZZLE NEEDS ITS OWN MATHS. The Task 3 nozzle is fixed (30 deg, no pan,
 // no tilt), so the boat IS the aim. Its distance from the dock sets how high the
 // water lands and its heading sets how far left or right. tools/squirt_cal found
 // the range that hits a window by firing at it; this file turns that number into
@@ -208,7 +208,7 @@ inline Lateral lateralFromName(const std::string & s)
 
 struct AimParams
 {
-  double fire_range_m = 3.22;   // the calibrated wall range for this window (squirt_cal)
+  double fire_range_m = 1.4;    // the calibrated wall range for this window (30 deg nozzle)
   double window_lat_m = 0.22;   // the window from the face centre, + LEFT (UL = +0.22)
   double yaw_bias_deg = 0.0;    // calibrated: + aims further LEFT (the stream's own skew)
   double cam_x_m = 0.37;        // camera ahead of the body origin (for the CV bearing)
@@ -750,7 +750,7 @@ struct Sticks
 
 struct StrafeParams
 {
-  double fire_range_m = 3.22;    // LiDAR range to fire from (squirt_cal)
+  double fire_range_m = 1.4;     // LiDAR range to fire from (30 deg nozzle, upper-left)
   double deadband_range_m = 0.05;
   double deadband_lat_m = 0.04;
   // Square matters little once the aim is by strafing: the window's y in the

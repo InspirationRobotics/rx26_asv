@@ -71,9 +71,10 @@ DEFAULTS = dict(
     # starting point only (nozzle_model); MEASURE these in Phase 0
     nozzle_x_m=0.45,             # nozzle ahead of the LiDAR's body origin
     nozzle_height_m=0.40,        # above the water
-    nozzle_elev_deg=45.0,
-    nozzle_range_m=3.0,          # level range at nozzle_elev_deg
-    deck_height_m=0.30,          # face panel bottom above the water
+    nozzle_elev_deg=30.0,        # the 30 deg nozzle (2026-09-28); was 45
+    nozzle_range_m=3.5,          # level range at 30 deg: ~6.3 m/s, inferred from the
+                                 # upper-left at 1.0-1.6 m and the lower-right at 0.7-0.8 m
+    deck_height_m=0.05,          # face panel bottom above the water (practice dock)
     face_setback_m=0.0,          # face behind the edge the LiDAR ranges
     branch="near",               # near = on the way up; far = coming down
     # targets, as parallel lists (rcl params cannot be a list of dicts)

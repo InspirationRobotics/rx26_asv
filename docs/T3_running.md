@@ -228,12 +228,11 @@ plan to GPS-log the dock during practice.
 
 | part | tree | mode | does |
 |---|---|---|---|
-| 1 | `task3_part1_approach.xml` | GUIDED | finds the GREEN bay, commits, lines up **3 m** out on its centreline, outside the fingers. Logs `committed to bay N`. |
-| 2 | `task3_part2_dock_fire.xml` | MANUAL | drives in on the camera and LiDAR, docks at the **1.4 m watch range**, reports docking, waits for the fire, goes in to shoot, reports, backs out, reads and reports the request |
+| 1 | `task3_part1_approach.xml` | GUIDED | finds the GREEN bay, commits, lines up **3.5 m** out on its centreline, outside the fingers. Logs `committed to bay N`. |
+| 2 | `task3_part2_dock_fire.xml` | MANUAL | looks 25° left and right to number the bays, drives in on the camera and LiDAR, docks at **1.4 m**, reports docking, waits for the fire, shoots it (upper-left from 1.4 m, lower-right from 0.8 m), reports, reads and reports the request |
 
-The mission's legs and numbers are `task3_disruptive.xml`'s; the firing spots are
-`task3_fire_manual.xml`'s. Each header explains its choices. Between the parts, **you** move SC from
-GUIDED to MANUAL, and you carry the bay number across.
+The mission's legs are `task3_disruptive.xml`'s. Each header explains its choices. Between the
+parts, **you** move SC from GUIDED to MANUAL.
 
 **Run:**
 
@@ -241,49 +240,53 @@ GUIDED to MANUAL, and you carry the bay number across.
 ssh crusader@crusader-asv "docker exec asv /root/robotx_ws/src/rx26_asv/tools/scripts/task3/tree.sh true false task3_part1_approach.xml"
 # SC to GUIDED (WP_RADIUS 0.3, the dock in view), then:
 ssh -t crusader@crusader-asv "docker exec -it asv /root/robotx_ws/src/rx26_asv/tools/scripts/task3/go.sh 600 --here"
-# it stops lined up 3 m out; note N in "committed to bay N"
-ssh crusader@crusader-asv "docker exec asv /root/robotx_ws/src/rx26_asv/tools/scripts/task3/tree.sh true false task3_part2_dock_fire.xml -p task3_bay:=N -p strafe.window_median_s:=0.1 -p strafe.rate_window_s:=0.5"
+# it stops lined up 3.5 m out
+ssh crusader@crusader-asv "docker exec asv /root/robotx_ws/src/rx26_asv/tools/scripts/task3/tree.sh true false task3_part2_dock_fire.xml -p strafe.window_median_s:=0.1 -p strafe.rate_window_s:=0.5"
 # SC to MANUAL, then:
 ssh -t crusader@crusader-asv "docker exec -it asv /root/robotx_ws/src/rx26_asv/tools/scripts/task3/go.sh 600 tier=2"
 ```
 
-At the pool (one bay) add `-p dock_bays:=1` to both; `task3_bay` can then be left out, because part
-2 can number one bay itself. With three bays it can't: from 3 m the outer faces are cut off at the
-image edge. `true false` keeps the pump dry; `true true` only after a clean dry run.
+At the pool (one bay) add `-p dock_bays:=1` to both. `-p task3_bay:=N` (part 1's bay) makes part 2
+skip the look. `true false` keeps the pump dry; `true true` only after a clean dry run.
 
-**Why part 2 docks at 1.4 m and goes in only to shoot.** From the firing spots (1.0 / 0.8 m) the
-camera cannot see the upper-left window. In the 2026-10-02 close-range frames with the camera 1.0 m
-or less from the face, it showed in at most 65% of frames and was never whole, and the indicator
-drops out of view too. So the boat watches from 1.4 m (stern still inside the 2.0 m fingers), goes
-in to shoot, and comes back out to read the code. The hold always tracks the **lower-right**
-window. The upper-left is shot 0.45 m to its left (`aim_bias` -0.45; **measure that spacing on the
-dock**).
+**Why 3.5 m and a look (OAK-D LR, 82° across).** The three faces span 5 m (centres 2 m apart, 1 m
+wide). Square on to the **middle** bay they all fit once the camera is 2.9 m from them: 3.25 m of
+LiDAR range, 3.5 m with margin. Square on to an **outer** bay they never fit at a practical range
+(5.5 m), but turned ~25° toward the others they fit from 3 m. Part 1 stops at 3.5 m; part 2's
+`LookAround` turns 25° each way with the yaw stick only, until the dock book can number all three.
 
-**Known gap: the upper-left shot.**
-- **Today's calibration (1.0 m):** on the upper-left's line at 1.0 m, the lower-right is at the edge
-  of the camera's view. In the sim the hold lost it, and no shot was taken.
-- **Calibrated for 1.4 m instead:** the sim passed, with the shot 2 cm from target. Calibrate the
-  upper-left shot from the watch range (a lower nozzle angle), then change `fire_range := 1.0` in
-  the `upper_left` branch to that range.
+**Why part 2 docks at 1.4 m.** From the lower-right's firing spot (0.8 m) the camera can't see the
+upper-left window or the indicator, and the timing stage (which window is lit, the colour code)
+needs them. At 1.4 m the stern is still 0.1 m inside the 2.0 m fingers, and the upper-left is shot
+from there (it takes water from 1.0 to 1.6 m). The hold always tracks the **lower-right** window;
+the upper-left is shot 0.45 m to its left (`aim_bias` -0.45; **measure that spacing on the dock**).
 
-**Sim checks (2026-10-03).** The sim needs `cam_pitch_deg -10` (it only reports windows wholly in
-view) and a stand-in nozzle, so these test the tree's logic, not the aim.
+**Tilt the camera up ~5°.** With it level, the upper-left from 1.4 m sits on the hull-band edge:
+the sim sees less than half of it, so it never sees it lit; the 2026-10-02 frames had it in ~65% of
+frames at that distance, always cut. Tilted up 5° (then set `cam_pitch_deg: -5.0` in both places in
+`crusader_params.yaml`, and re-check `dock_view`'s hull band), every case below passes.
 
-| case | result |
-|---|---|
-| part 1, GREEN bay 1, 2 or 3 | committed to the right bay in ~18 s, no contacts |
-| part 2, lower-right lit | docking, fire out, request and UAV all right; no contacts |
-| part 2, upper-left lit, shot calibrated at 1.4 m | all right; no contacts |
-| part 2, upper-left lit, shot at 1.0 m | docked, then lost the lower-right window at 1.0 m: no shot |
+**Sim checks (2026-10-04).** The sim now models the 30° nozzle and the practice dock's height (window
+centres ~0.80 / ~0.56 m up; one ~6.3 m/s stream goes in the upper-left from 1.0-1.6 m and the
+lower-right from 0.7-0.8 m), and reports windows at least half in view, the way the close-range
+model does.
+
+| case | camera level | tilted up 5° |
+|---|---|---|
+| part 1, GREEN bay 1, 2 or 3 | committed to the right bay, ~17 s, no contacts | |
+| part 2, bay 1/2/3, lower-right lit | all reports right, no contacts | all reports right, no contacts |
+| part 2, bay 1/2/3, upper-left lit | docked, never saw the fire | all reports right, no contacts |
+
+Part 2 ran with no bay number given: the look numbered the bays every time.
 
 ```bash
-python tools/task3_sim/sim.py --headless --timeout 400 --fire-pump --task3-bay 2 --tree crusader_bt/behavior_trees/task3_part2_dock_fire.xml --scenario "{\"start_n\": 17.0, \"start_mode\": \"MANUAL\", \"target_window\": 1, \"cam_pitch_deg\": -10.0, \"deck_z\": 0.0, \"nozzle_elev_deg\": 65.0, \"nozzle_hit_range_m\": 0.8, \"extinguish_s\": 0.3}"
+python tools/task3_sim/sim.py --headless --timeout 420 --fire-pump --tree crusader_bt/behavior_trees/task3_part2_dock_fire.xml --scenario "{\"green_bay\": 1, \"start_e\": -2.0, \"start_n\": 16.5, \"start_mode\": \"MANUAL\", \"target_window\": 0, \"cam_pitch_deg\": -5.0, \"extinguish_s\": 0.3}"
 ```
 
-**For the competition** the two parts must become one run. A person switching SC or typing the bay
-mid-run is an intervention. That means one tree, with the mode change made by the tree on
-`/crsd/set_mode` (the bridge already accepts it; SC still outranks it). It needs a SetMode leaf and
-the team's sign-off. Not built yet.
+**For the competition** the two parts must become one run. A person switching SC mid-run is an
+intervention. That means one tree, with the mode change made by the tree on `/crsd/set_mode` (the
+bridge already accepts it; SC still outranks it). It needs a SetMode leaf and the team's sign-off.
+Not built yet.
 
 ## When things go wrong (all seen on 2026-10-02)
 

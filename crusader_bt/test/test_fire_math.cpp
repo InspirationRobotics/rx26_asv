@@ -317,6 +317,7 @@ int main()
   std::printf("the strafe keep\n");
   {
     StrafeParams p;
+    p.fire_range_m = 3.22;   // the ranges below were written for this; the default is now 1.4
     chk("in the band: nothing", axisLaw(0.04, 0.0, 90, 60, 0.05, 30, 120) == 0.0);
     chk_near("just out: the deadband offset plus P", axisLaw(0.06, 0.0, 90, 60, 0.05, 30, 120),
       30.0 + 90 * 0.06, 1e-9);

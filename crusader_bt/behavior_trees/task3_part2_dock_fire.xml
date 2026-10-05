@@ -2,22 +2,22 @@
 <!--
   task3_part2_dock_fire.xml - Task 3, PART 2 of 2, in MANUAL on the sticks:
   from where task3_part1_approach.xml stops (on the GREEN bay's centreline,
-  3 m out, bow in) to the end of the boat's part of the task.
+  3.5 m out, bow in) to the end of the boat's part of the task.
 
     1. WHICH BAY   the docking report needs the bay's NUMBER, and this run
                    does not have part 1's dock book (a new goal starts empty).
-                   Give it: bt_runner_node task3_bay = the N of part 1's
-                   "committed to bay N". Not given (0), it numbers the bays
-                   from what the camera sees here - enough with one bay (the
-                   pool), NOT with three: from 3 m the outer faces are cut off
-                   at the image edge and never become tracks (the sim shows it)
+                   So, before driving in, the boat looks 25 deg left and 25 deg
+                   right (LookAround, yaw stick only) until every face has been
+                   seen whole and the bays can be numbered, then commits to the
+                   GREEN one. bt_runner_node task3_bay (part 1's "committed to
+                   bay N") skips the look.
     2. DOCK        StrafeKeep drives in on the camera and the LiDAR: square to
                    the face, the lower-right window on the nozzle's line, the
                    LiDAR range down to the WATCH range. Held there square and
                    still for 2 s = docked: DockingReport(bay)
     3. THE FIRE    AwaitFireTarget waits, at the watch range, for one window to
                    go steady RED (re-sending the docking report until
-                   RoboCommand confirms it) and names it. The hold moves IN to
+                   RoboCommand confirms it) and names it. The hold moves to
                    that window's firing range and aim; line up, fire, until it
                    reads GREEN (5 shots at most); FirefightingReport(window)
     4. THE REQUEST back out to the watch range; Advanced and Disruptive only
@@ -25,37 +25,39 @@
                    window, then ResourceDeliveryRequest to RoboCommand and to
                    the UAV
 
-  The hold runs in the guard band, so it keeps the boat on the window through
-  every step, the waits included: in MANUAL nothing else would.
+  In steps 2-4 the hold runs in the guard band, so it keeps the boat on the
+  window through every step, the waits included: in MANUAL nothing else would.
+  In step 1 it does not run (the look has the yaw stick).
 
-  WHY A WATCH RANGE AND A FIRING RANGE. From the firing spot the camera cannot
-  see the upper-left window: in the 2026-10-02 close-range frames, with the
-  camera 1.0 m or less from the face, it shows in at most 65% of frames and is
-  cut off by the hull edge in every one (whole in 0%); nearer still the dock's
-  indicator drops out of view too, and the timing stage (which window is lit,
-  the colour code) follows the bay by its indicator. So the boat watches from
-  1.4 m - the camera ~1.0 m from the face, both windows in view, the stern still
-  0.1 m inside the 2.0 m fingers (the LiDAR range is from the body origin,
-  WallRange.msg; the hull is 1.0 m) - goes in only to shoot, and comes back out
-  to read the code.
+  WHY A WATCH RANGE. From the lower-right's firing spot (0.8 m) the camera
+  cannot see the upper-left window, nor the dock's indicator, and the timing
+  stage (which window is lit, the colour code) follows the bay by its
+  indicator: in the 2026-10-02 close-range frames, camera 1.0 m or less from
+  the face, the upper-left showed in at most 65% of frames and never whole. So
+  the boat watches from 1.4 m (camera ~1.0 m from the face, stern 0.1 m inside
+  the 2.0 m fingers: the LiDAR range is from the body origin, WallRange.msg,
+  and the hull is 1.0 m), and comes back to it to read the code.
 
   THE HOLD ALWAYS TRACKS THE LOWER-RIGHT WINDOW (index 1), the one in view all
   the way in. The upper-left is shot by holding the lower-right 0.45 m RIGHT of
   the nozzle's line (aim_bias -0.45: StrafeKeep's lateral_bias_m, + = the shot
-  further RIGHT): 0.45 m, the build guide's centres (0.22 m left and 0.23 m right of the face centre; the
-  sim's WINDOW_SLOTS). The labelled practice-dock faces put it at 0.37-0.45 m,
-  depending on how wide the face really is under its labelled box. MEASURE IT
-  on the dock: tape, centre to centre, horizontally.
+  further RIGHT): the build guide's centres, 0.22 m left and 0.23 m right of
+  the face centre (the sim's WINDOW_SLOTS). The labelled practice-dock faces put
+  it at 0.37-0.45 m. MEASURE IT on the dock: tape, centre to centre,
+  horizontally.
 
-  THE NUMBERS
+  THE NUMBERS (the bays are all the practice dock's height)
     watch range    1.4 m (above). Inside the fingers by 0.1 m only: check on a
                    real slip, and keep it at most finger length - 0.5 - margin.
-    firing range   upper-left (index 0) 1.0 m, lower-right (index 1) 0.8 m:
-                   squirt_cal 2026-09-28, nozzle at 30 deg. The 0.8 is that
-                   day's estimate, never shot: calibrate it before trusting it.
+    firing range   upper-left (index 0) 1.4 m: the 30 deg nozzle reaches it
+                   from 1.0 to 1.6 m (shot outside at 1.6 m, 2026-10); 1.4
+                   is the watch range, so this shot needs no move in or out.
+                   Lower-right (index 1) 0.8 m (0.7-0.8 m).
     aim_bias       upper-left -0.45 m, lower-right 0 (StrafeKeep
                    lateral_bias_m: + = the shot further RIGHT). The measured
                    spacing replaces the 0.45.
+    look           25 deg each way, 3 s at each side (LookAround's header has
+                   the trig for the OAK-D LR's 82 deg).
     gains          the 2026-10-02 pool tune (at 1.6 m). Two of that tune are
                    bt_runner_node parameters, not ports: pass
                    strafe.window_median_s 0.1 and strafe.rate_window_s 0.5 to
@@ -64,19 +66,24 @@
                    fire trees since 2026-09-28. On the real dock with fingers,
                    turn it on and set face_setback_m once measured.
 
+  THE CAMERA WANTS ~5 DEG OF TILT UP. Level, the upper-left from 1.4 m sits on
+  the hull-band edge: the sim sees under half of it and so never sees it lit
+  (the 2026-10-02 frames had it in ~65% of frames at that distance, always
+  cut). Tilted up 5 deg every sim case passes (docs/T3_running.md); then set
+  cam_pitch_deg -5 in crusader_params.yaml and re-check dock_view's hull band.
+
   NOT TESTED ON THE BOAT. The sim runs it (tools/task3_sim; the run lines are
   in docs/T3_running.md); the water has not. It relies on:
-    * with three bays, task3_bay must be given (step 1). For the competition a
-      person typing the bay in is not autonomy: the two parts have to become
-      one run (task3_part1_approach.xml's header).
     * the hold docks on the bay NEAREST THE BOW: part 1 must have left the boat
       in front of the GREEN one.
+    * for the competition the two parts have to become one run: a person
+      moving SC mid-run is an intervention (task3_part1_approach.xml's header).
   At the pool with no lights, step 3 times out after 90 s and the tree fails
   (the sticks go back to the pilot). Shots alone: task3_fire_manual_1p6.xml.
 
   RUN IT (MANUAL on SC, the boat where part 1 left it)
-    tree.sh true false task3_part2_dock_fire.xml -p task3_bay:=N -p strafe.window_median_s:=0.1 -p strafe.rate_window_s:=0.5
-    (N from part 1's log; the pool's one bay: dock_bays:=1, and task3_bay:=1 or leave it out)
+    tree.sh true false task3_part2_dock_fire.xml -p strafe.window_median_s:=0.1 -p strafe.rate_window_s:=0.5
+    (the pool's one bay: add dock_bays:=1; part 1's bay, to skip the look: task3_bay:=N)
     go.sh 600 tier=2       (tier=0 Core stops after the fire report)
   true false = the sticks but a DRY pump; true true only once the dry run is
   clean. Taking it back, as for every fire tree: SC out of MANUAL ends it and the
@@ -91,6 +98,30 @@
 
       <!-- Dock at the watch range on the lower-right window's line. -->
       <Script code="watch_range := 1.4; fire_range := watch_range; aim_bias := 0.0"/>
+
+      <!-- 1. WHICH BAY, before anything drives in: given (task3_bay), or
+           numbered from here. The look ends as soon as the strict picture
+           (GREEN + RED + RED) is in; after a whole look the lenient one (a
+           lone strong GREEN) will do. -->
+      <ReactiveSequence name="guard_numbering">
+        <ModeIs mode="MANUAL"/>
+        <NotDropped/>
+        <AttitudeAlive max_age_s="0.5"/>
+        <DockCameraAlive max_age_s="3.0"/>
+        <UpdateDockBook/>
+        <Fallback name="which_bay">
+          <BayChosen/>
+          <Sequence name="number_them_from_here">
+            <SetTask token="TASK_COORDINATED_LOGISTICS"/>
+            <ReactiveFallback name="look_until_known">
+              <SafeBayKnown need_others_red="true"/>
+              <LookAround swing_deg="25.0" hold_s="3.0"/>
+            </ReactiveFallback>
+            <SafeBayKnown need_others_red="false"/>
+            <CommitSafeBay/>
+          </Sequence>
+        </Fallback>
+      </ReactiveSequence>
 
       <ReactiveSequence name="guard_band">
 
@@ -115,45 +146,18 @@
 
           <SetTask token="TASK_COORDINATED_LOGISTICS"/>
 
-          <!-- 1. WHICH BAY: given (task3_bay), or numbered from here: wait
-               (up to 30 s) until one bay reads GREEN in the book, then commit.
-               Inverter / KeepRunningUntilFailure / Inverter is "run until this
-               condition holds". -->
-          <Fallback name="which_bay">
-            <BayChosen/>
-            <Sequence name="number_them_from_here">
-              <Timeout msec="30000">
-                <Inverter>
-                  <KeepRunningUntilFailure>
-                    <Inverter>
-                      <SafeBayKnown need_others_red="false"/>
-                    </Inverter>
-                  </KeepRunningUntilFailure>
-                </Inverter>
-              </Timeout>
-              <CommitSafeBay/>
-            </Sequence>
-          </Fallback>
-
           <!-- 2. DOCK: at the watch range, square, on the line, still for 2 s. -->
           <AwaitStrafeSolution fire_range_m="{fire_range}" range_tol_m="0.06" lat_tol_m="0.05"
                                yaw_tol_deg="5.0" hold_s="2.0" gap_s="0.0" timeout_s="120.0"/>
           <ReportDocking/>
 
-          <!-- 3. THE FIRE: which window (watched from here), then in to its
-               firing range and aim. -->
+          <!-- 3. THE FIRE: which window (watched from here), then its firing
+               range and aim. -->
           <AwaitFireTarget timeout_s="90.0" resend_s="10.0" window="{fire_window}"/>
           <Fallback name="aim_for_the_window">
             <Sequence name="upper_left">
               <ScriptCondition code="fire_window == 0"/>
-              <!-- Slide onto the upper-left's line HERE, at the watch range,
-                   where the lower-right is still whole in view and the hull
-                   has room; only then go in. A 0.45 m slide at 1.0 m put the
-                   hull on the dock in the sim. -->
-              <Script code="aim_bias := -0.45"/>
-              <AwaitStrafeSolution fire_range_m="{fire_range}" range_tol_m="0.06" lat_tol_m="0.05"
-                                   yaw_tol_deg="5.0" hold_s="1.0" gap_s="0.0" timeout_s="60.0"/>
-              <Script code="fire_range := 1.0"/>
+              <Script code="fire_range := 1.4; aim_bias := -0.45"/>
             </Sequence>
             <Script name="lower_right" code="fire_range := 0.8; aim_bias := 0.0"/>
           </Fallback>
@@ -179,8 +183,8 @@
                still reports: the window is right even if the fire is not out. -->
           <ReportFirefighting window_id_base="1"/>
 
-          <!-- 4. Back out to where the code can be read; the request,
-               Advanced and Disruptive only. -->
+          <!-- 4. Back to where the code can be read; the request, Advanced
+               and Disruptive only. -->
           <Script name="back_out" code="fire_range := watch_range; aim_bias := 0.0"/>
           <Fallback name="request">
             <Inverter>

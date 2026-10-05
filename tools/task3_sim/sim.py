@@ -65,13 +65,15 @@ TREE = os.path.join(REPO, "crusader_bt", "behavior_trees", "task3_disruptive.xml
 FIRE_TREE = os.path.join(REPO, "crusader_bt", "behavior_trees", "task3_fire_manual.xml")
 FIRE_TREE_GUIDED = os.path.join(REPO, "crusader_bt", "behavior_trees", "task3_fire_test.xml")
 # --fire's course: the UL window burning, the boat 3.8 m off the green bay's
-# slip, square on, in MANUAL, the camera level (the boat's mount). The default
-# dock is 20 m north with its bays facing south.
+# slip, square on, in MANUAL, the camera tilted up 5 deg (the recommended
+# mount; level, the UL is at the hull band's edge from 1.4 m), the 30 deg
+# nozzle (world.Scenario: through the UL's centre from 1.4 m). The default dock
+# is 20 m north with its bays facing south.
 FIRE_COURSE = {"fire_lit": True, "target_window": 0, "green_bay": 2, "tier": 0,
                "start_e": 0.0, "start_n": 16.2, "start_heading": 0.0,
-               "extinguish_s": 0.3, "start_mode": "MANUAL", "cam_pitch_deg": 0.0}
+               "extinguish_s": 0.3, "start_mode": "MANUAL", "cam_pitch_deg": -5.0}
 # --fire-guided's: the same, in GUIDED, with the autopilot's avoidance acting.
-FIRE_COURSE_GUIDED = dict(FIRE_COURSE, start_mode="GUIDED", cam_pitch_deg=-25.0,
+FIRE_COURSE_GUIDED = dict(FIRE_COURSE, start_mode="GUIDED",
                           autopilot_avoidance=True)
 # The sticks onto RC channels, as bt_runner_node's defaults (stick_channels,
 # stick_neutral_us): (channel, neutral) for ahead, lateral, yaw.

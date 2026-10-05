@@ -21,9 +21,11 @@
                        on the compass between frames
   The LiDAR's wall angle is not used: the wall may not be flat, the face is.
 
-  THE NUMBERS: fire_range_m 1.0 is squirt_cal on 2026-09-28 with the nozzle at
-  30 deg (upper-left window; the lower-right wanted ~0.8 m, and the old 45 deg
-  nozzle 3.22 m). min_range_m 0.6 so the floor sits below the firing range.
+  THE NUMBERS: fire_range_m 1.4. The 30 deg nozzle puts water in the upper-left
+  window from 1.0 m (squirt_cal 2026-09-28) to 1.6 m (shot outside, 2026-10);
+  1.4 is the middle, and the stern is still inside 2.0 m fingers there. The
+  lower-right wants 0.7-0.8 m; the old 45 deg nozzle wanted 3.22 m.
+  min_range_m 0.6 so the floor sits below the firing range.
   Gains and the 120 us cap are dp_hold's tune on this hull. Re-calibrate on the
   real dock.
 
@@ -55,7 +57,7 @@
       <WallRangeAlive max_age_s="1.0"/>
       <AttitudeAlive max_age_s="0.5"/>
 
-      <StrafeKeep fire_range_m="1.0" window_index="0" lateral_bias_m="0.0" nozzle_y_m="0.0"
+      <StrafeKeep fire_range_m="1.4" window_index="0" lateral_bias_m="0.0" nozzle_y_m="0.0"
                   cam_timeout_s="0.5" face_timeout_s="3.0"
                   range_check_m="0" face_setback_m="0.0"
                   deadband_range_m="0.05" deadband_lat_m="0.04" deadband_yaw_deg="3.0"
@@ -68,7 +70,7 @@
         <ForceSuccess>
           <RetryUntilSuccessful num_attempts="5">
             <Sequence name="one_shot">
-              <AwaitStrafeSolution fire_range_m="1.0" range_tol_m="0.06" lat_tol_m="0.05"
+              <AwaitStrafeSolution fire_range_m="1.4" range_tol_m="0.06" lat_tol_m="0.05"
                                    yaw_tol_deg="5.0" hold_s="1.0" gap_s="2.0" timeout_s="60.0"/>
               <FireBurst burst_s="0.5" flight_s="0.8" ack_timeout_s="1.5"/>
               <!-- FAILURE until the window reads GREEN long enough, which
