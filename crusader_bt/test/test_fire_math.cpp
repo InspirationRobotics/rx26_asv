@@ -14,6 +14,7 @@
 //     gets nothing, and the boat never arrives.
 #include <cmath>
 #include <cstdio>
+#include <random>
 #include <string>
 
 #include "crusader_bt/fire_math.hpp"
@@ -316,6 +317,7 @@ int main()
   std::printf("the strafe keep\n");
   {
     StrafeParams p;
+    p.fire_range_m = 3.22;   // the ranges below were written for this; the default is now 1.4
     chk("in the band: nothing", axisLaw(0.04, 0.0, 90, 60, 0.05, 30, 120) == 0.0);
     chk_near("just out: the deadband offset plus P", axisLaw(0.06, 0.0, 90, 60, 0.05, 30, 120),
       30.0 + 90 * 0.06, 1e-9);
@@ -392,6 +394,100 @@ int main()
     chk("... and holding is not correcting", !c.correcting && c.lat_ok);
     for (int i = 0; i < 2000; ++i) {c = strafeKeep(p, in, cur, 0.1);}
     chk_near("I is capped", c.sticks.lat_us, -80.0, 1e-9);
+  }
+
+  {  // live gain overrides (bt_runner_node strafe.*): -1 leaves the tree's value
+    StrafeParams sp;
+    sp.kp_lat = 90.0; sp.kd_lat = 30.0; sp.kp_fwd = 90.0;
+    StrafeTune none;
+    chk("no override: empty log, gains untouched",
+      none.apply(sp).empty() && sp.kp_lat == 90.0 && sp.kd_lat == 30.0);
+    StrafeTune t;
+    t.kp_lat = 60.0; t.kd_lat = 80.0; t.window_median_s = 0.25;
+    const std::string log = t.apply(sp);
+    chk("override: only the set gains change", sp.kp_lat == 60.0 && sp.kd_lat == 80.0 &&
+      sp.kp_fwd == 90.0);
+    chk("override: the log names them", log == "kp_lat 60 kd_lat 80 median_s 0.25");
+    t.kp_lat = -1.0;
+    StrafeParams sp2; sp2.kp_lat = 90.0;
+    t.apply(sp2);
+    chk("back to -1: the tree's value again", sp2.kp_lat == 90.0 && sp2.kd_lat == 80.0);
+  }
+
+  {  // the lateral estimator
+    // headings across north interpolate the short way
+    HeadingHistory hh;
+    hh.add(0.0, 359.0); hh.add(1.0, 1.0);
+    chk_near("heading interpolates across north", hh.at(0.5), 0.0, 1e-9);
+    chk("heading: nothing near -> NaN", std::isnan(hh.at(5.0)));
+
+    // square <-> body round trip, and the sign: bow turned LEFT 5 deg
+    // (yaw_err +5) puts a window straight ahead to the RIGHT in the bow frame
+    chk_near("square/body round trip", squareOffset(1.6, bodyOffset(1.6, 0.12, 5.0), 5.0), 0.12, 1e-12);
+    chk("bow left of square: window reads right", bodyOffset(1.6, 0.0, 5.0) < -0.13);
+
+    LateralEstParams k;
+    std::mt19937 rng(7);
+    std::normal_distribution<double> noise(0.0, 0.02);
+
+    // 1. a pure yaw wobble (+-5 deg, 0.5 Hz) with the hull NOT moving sideways:
+    //    the body-frame window swings +-14 cm. Fed the bow-frame value, the
+    //    rate swings with it (what D braked on); fed the square-frame value,
+    //    only camera noise is left.
+    LateralEstimator e, raw;
+    double ss_e = 0.0, ss_raw = 0.0;
+    int n = 0;
+    for (int i = 0; i < 12 * 10; ++i) {        // 10 s at 12 fps
+      const double t = i / 12.0;
+      const double yaw = 5.0 * std::sin(2.0 * kPi * 0.5 * t);
+      const double yb = bodyOffset(1.6, 0.10, yaw) + noise(rng);
+      e.update(t, squareOffset(1.6, yb, yaw), k);
+      raw.update(t, yb, k);
+      if (t > 2.0) {
+        ss_e += std::pow(e.at(t).second, 2); ss_raw += std::pow(raw.at(t).second, 2); ++n;
+      }
+    }
+    const double rms_e = std::sqrt(ss_e / n), rms_raw = std::sqrt(ss_raw / n);
+    std::printf("    yaw wobble: rate RMS %.3f m/s compensated, %.3f bow-frame\n", rms_e, rms_raw);
+    chk("yaw wobble alone: compensated rate is camera noise only (< 4 cm/s)", rms_e < 0.04);
+    chk("yaw wobble alone: 5x less fake rate than the bow-frame value", rms_e * 5.0 < rms_raw);
+    chk_near("yaw wobble alone: position held", e.at(10.0).first, 0.10, 0.03);
+
+    // 2. a steady 10 cm/s drift is tracked: rate (averaged over the last
+    //    second, the noise is the camera's) and position, with no lag
+    LateralEstimator d;
+    double vsum = 0.0;
+    int vn = 0;
+    for (int i = 0; i < 12 * 4; ++i) {
+      const double t = i / 12.0;
+      d.update(t, 0.10 * t + noise(rng), k);
+      if (t > 3.0) {vsum += d.at(t).second; ++vn;}
+    }
+    const double t_end = 47.0 / 12.0;
+    chk_near("drift: rate", vsum / vn, 0.10, 0.025);
+    chk_near("drift: position projected 0.1 s ahead", d.at(t_end + 0.1).first, 0.10 * (t_end + 0.1), 0.03);
+
+    // 3. outliers: a one-frame jump of a window's spacing (a UL/LR swap) is
+    //    rejected; three in a row restart the filter on the new value
+    LateralEstimator o;
+    for (int i = 0; i < 24; ++i) {o.update(i / 12.0, 0.0, k);}
+    chk("one-frame 0.45 m jump rejected", !o.update(2.0, 0.45, k) && std::fabs(o.at(2.0).first) < 0.01);
+    chk("back on the window: accepted", o.update(2.1, 0.0, k));
+    o.update(2.2, 0.45, k); o.update(2.3, 0.45, k);
+    chk("third in a row: restart on it", o.update(2.4, 0.45, k) && std::fabs(o.at(2.4).first - 0.45) < 1e-9);
+
+    // 4. dropout: the last update's time is what track_s is measured from
+    chk_near("last measurement time", o.lastMeasT(), 2.4, 1e-12);
+    chk("older frame after a newer one: ignored", !o.update(2.0, 0.0, k));
+
+    // the new live settings reach the params and the log
+    StrafeParams sp;
+    StrafeTune t3;
+    t3.coast_s = 0.0; t3.lat_min_us = 50.0; t3.est_enable = 1.0;
+    const std::string lg = t3.apply(sp);
+    chk("coast_s / lat_min_us applied", sp.coast_lat_s == 0.0 && sp.lat_min_us == 50.0);
+    chk("estimator on, and logged", t3.estOn() && lg.find("est 1") != std::string::npos);
+    chk("coast 0: no coasting", axisLaw(0.2, -0.29, 90, 60, 0.05, 30, 120, 0.0) != 0.0);
   }
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fails);

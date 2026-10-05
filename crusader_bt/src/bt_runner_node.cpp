@@ -228,6 +228,35 @@ public:
     dock_topic_ = declare_parameter<std::string>("dock_topic", "dock/observations");
     declareNavParams();
     nav_set_cb_ = add_on_set_parameters_callback(&BtRunner::checkNavSet);
+    declareStrafeTune();
+    // 3 on the course. 1 (or 2) ONLY to test the Task 3 tree against a practice
+    // dock with fewer bays: the bay numbering, the strict GREEN+RED+RED rule and
+    // the measured slip pitch all assume three.
+    ctx_->dock_bays = static_cast<int>(declare_parameter<int64_t>("dock_bays", 3));
+    if (ctx_->dock_bays < 1 || ctx_->dock_bays > 3) {
+      throw std::runtime_error("dock_bays must be 1..3");
+    }
+    if (ctx_->dock_bays != 3) {
+      RCLCPP_WARN(get_logger(), "dock_bays = %d: TEST setting - the course has 3",
+        ctx_->dock_bays);
+    }
+    // Task 3 run as two trees (task3_part1_approach.xml, then
+    // task3_part2_dock_fire.xml): the bay part 1 committed to, for the part 2
+    // run. A new goal forgets part 1's dock book, and from where part 2 starts
+    // (3 m out) the outer faces are cut off by the image edge, so the bays
+    // cannot be numbered again. 0 = not given: part 2 numbers them from what it
+    // sees (enough with one bay). Read at every goal start.
+    {
+      rcl_interfaces::msg::ParameterDescriptor d;
+      d.description = "Task 3 part 2: the bay part 1 committed to (its log: "
+        "\"committed to bay N\"), 1..3; 0 = not given";
+      rcl_interfaces::msg::IntegerRange range;
+      range.from_value = 0;
+      range.to_value = 3;
+      range.step = 1;
+      d.integer_range.push_back(range);
+      declare_parameter<int64_t>("task3_bay", 0, d);
+    }
 
     // Latched: a subscriber that starts mid-mission must learn the current
     // value rather than sit on a default. avoidance_enable especially —
@@ -379,6 +408,96 @@ public:
   ~BtRunner() override {shutdown();}
 
 private:
+  // ------------------------------------------------------- live strafe gains
+
+  /// strafe.* : the MANUAL fire tree's gains, settable while the node runs (the
+  /// ground station's Tuning tab lists them from these descriptors; or
+  /// `ros2 param set /bt_runner_node strafe.kd_lat 80`). -1 = the tree's own
+  /// value. A set lands at the next tick and lasts until the node exits; the
+  /// tree file stays the source of truth, so copy a good tune into it.
+  void declareStrafeTune()
+  {
+    struct Row {const char * name; double fire::StrafeTune::* field; double max; const char * what;};
+    static const Row rows[] = {
+      {"kp_fwd", &fire::StrafeTune::kp_fwd, 400.0, "range P, us per m (tree: 90)"},
+      {"kd_fwd", &fire::StrafeTune::kd_fwd, 400.0, "range D, us per m/s (tree: 60)"},
+      {"ki_fwd", &fire::StrafeTune::ki_fwd, 200.0, "range I, us per m.s (tree: 20)"},
+      {"kp_lat", &fire::StrafeTune::kp_lat, 400.0, "sideways P, us per m (tree: 90)"},
+      {"kd_lat", &fire::StrafeTune::kd_lat, 400.0, "sideways D, us per m/s (tree: 30)"},
+      {"ki_lat", &fire::StrafeTune::ki_lat, 200.0, "sideways I, us per m.s (tree: 30)"},
+      {"kp_yaw", &fire::StrafeTune::kp_yaw, 40.0, "square-up P, us per deg (tree: 4)"},
+      {"kd_yaw", &fire::StrafeTune::kd_yaw, 40.0, "square-up D, us per deg/s (tree: 3)"},
+      {"i_max_us", &fire::StrafeTune::i_max_us, 120.0, "integral cap, us (tree: 80)"},
+      {"window_median_s", &fire::StrafeTune::window_median_s, 2.0,
+        "camera window position: median over this many s (tree: 0.6)"},
+      {"rate_window_s", &fire::StrafeTune::rate_window_s, 2.0,
+        "camera window rate: fit over this many s, needs 4 samples (tree: 0.8)"},
+      {"coast_s", &fire::StrafeTune::coast_s, 5.0,
+        "sideways coasting window, s - stop pushing when arrival is this close (tree: 1.5; 0 = never)"},
+      {"lat_min_us", &fire::StrafeTune::lat_min_us, 120.0,
+        "sideways deadband offset added to every correction, us (tree: = min_us, 30)"},
+      {"est_enable", &fire::StrafeTune::est_enable, 1.0,
+        "1 = the lateral ESTIMATOR on (camera + compass Kalman filter, yaw taken out); -1/0 = off"},
+      {"est_q", &fire::StrafeTune::est_q, 10.0,
+        "estimator process noise, m^2/s^3 - higher follows faster, noisier (default 0.01)"},
+      {"est_r", &fire::StrafeTune::est_r, 1.0,
+        "estimator camera noise per frame, m (default 0.03)"},
+      {"track_s", &fire::StrafeTune::track_s, 5.0,
+        "estimator rides through camera dropouts this long, s (default 1.0)"},
+    };
+    for (const auto & r : rows) {
+      rcl_interfaces::msg::ParameterDescriptor d;
+      d.description = std::string("LIVE (MANUAL fire tree): ") + r.what +
+        ". -1 = the tree's value; not saved - copy a good tune into the tree file.";
+      rcl_interfaces::msg::FloatingPointRange range;
+      range.from_value = -1.0;
+      range.to_value = r.max;
+      d.floating_point_range.push_back(range);
+      const double v = declare_parameter<double>(std::string("strafe.") + r.name, -1.0, d);
+      ctx_->strafe_tune.*(r.field) = v < 0.0 ? -1.0 : v;
+    }
+    tune_cb_ = add_on_set_parameters_callback(
+      [this](const std::vector<rclcpp::Parameter> & ps) {
+        rcl_interfaces::msg::SetParametersResult res;
+        res.successful = true;
+        fire::StrafeTune next;
+        {
+          std::lock_guard<std::mutex> lk(ctx_->mu);
+          next = ctx_->strafe_tune;
+        }
+        for (const auto & p : ps) {
+          if (p.get_name().rfind("strafe.", 0) != 0) {continue;}
+          const std::string key = p.get_name().substr(7);
+          const Row * row = nullptr;
+          for (const auto & r : rows) {if (key == r.name) {row = &r;}}
+          if (row == nullptr) {continue;}
+          if (p.get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE) {
+            res.successful = false;
+            res.reason = p.get_name() + " must be a number (write 80.0, not 80)";
+            return res;
+          }
+          const double v = p.as_double();
+          // the windows need at least a sample; zero would mean "no smoothing
+          // at all" only by accident of the median's edge, so refuse it
+          const bool window = row->field == &fire::StrafeTune::window_median_s ||
+            row->field == &fire::StrafeTune::rate_window_s;
+          if (window && v >= 0.0 && v < 0.05) {
+            res.successful = false;
+            res.reason = p.get_name() + ": use -1 (the tree's) or at least 0.05 s";
+            return res;
+          }
+          next.*(row->field) = v < 0.0 ? -1.0 : v;
+          RCLCPP_INFO(get_logger(), "%s = %g (%s)", p.get_name().c_str(), v,
+            v < 0.0 ? "back to the tree's value" : "live override");
+        }
+        std::lock_guard<std::mutex> lk(ctx_->mu);
+        ctx_->strafe_tune = next;
+        return res;
+      });
+  }
+
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr tune_cb_;
+
   // ------------------------------------------------------------ subscriptions
 
   void onStatus(const crusader_msgs::msg::FcuStatus::SharedPtr m)
@@ -456,6 +575,7 @@ private:
       case PoseEvent::Tracked:
         break;
     }
+    ingestHeading(*ctx_, nowS());
     pose_t_ = now();
   }
 
@@ -801,7 +921,14 @@ private:
     // Freshness at THIS instant: ingest places bays only on a fresh pose.
     ctx_->pose_fresh = ctx_->origin_set && (t - pose_t_).seconds() < stream_timeout_s_;
     ingestDockObservation(*ctx_, f);
-    ingestFireWindows(*ctx_, nowS(), f);
+    // The fire windows on now_s's clock, at the frame's CAPTURE instant: its age
+    // (receipt minus the header stamp, which dock_view sets when the frame is in
+    // hand) taken off. The lateral estimator rotates each frame with the heading
+    // of that instant. An age outside 0-1 s is a clock problem, not a frame that
+    // old: then receipt time, as before.
+    double age = (t - rclcpp::Time(m->header.stamp, t.get_clock_type())).seconds();
+    if (!(age >= 0.0 && age <= 1.0)) {age = 0.0;}
+    ingestFireWindows(*ctx_, nowS() - age, f);
     dock_t_ = t;
     have_dock_ = true;
   }
@@ -1258,6 +1385,14 @@ private:
       ctx_->tier = goal->tier;
       resetTask3(*ctx_);
       resetFire(*ctx_);
+      // Part 2's bay, when the operator gave it (task3_bay): the NUMBER only,
+      // for the docking report - there is no track behind it.
+      const int64_t given_bay = get_parameter("task3_bay").as_int();
+      if (given_bay > 0) {
+        ctx_->chosen_bay = static_cast<int>(given_bay);
+        RCLCPP_INFO(get_logger(), "task3_bay: the docking report will name bay %d",
+          ctx_->chosen_bay);
+      }
       goal_mode_ = ctx_->mode;
       // "Home" is where THIS attempt started, captured once. Not the autopilot's
       // HOME, which is wherever it was armed and is usually somewhere else after

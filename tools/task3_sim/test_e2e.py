@@ -74,10 +74,12 @@ SCENARIOS = {
                      "code": ["red", "red"]}, "pass_contact", 240),
     # RoboCommand never hears the first docking report: the tree must re-send.
     "lost_report": ({"green_bay": 1, "tier": 2, "lose_docking_reports": 1}, "resent", 240),
-    # THE CAMERA AS MOUNTED TODAY: level. It docks, reports, and never sees the
-    # fire - neither window is in view from the berth. Pinned, so a better
-    # mount shows up as this scenario changing.
-    "level_camera": ({"green_bay": 2, "tier": 2, "cam_pitch_deg": 0.0}, "no_fire", 200),
+    # THE CAMERA AS MOUNTED TODAY: level. On the practice dock's height it sees
+    # the lower window from the berth but not half of the UPPER one: with the
+    # upper-left on fire it docks, reports, and never sees it. Pinned, so a
+    # better mount shows up as this scenario changing.
+    "level_camera": ({"green_bay": 2, "tier": 2, "cam_pitch_deg": 0.0, "target_window": 0},
+                     "no_fire", 200),
     # THE PRECONDITION: this boat's real WP_RADIUS parks it 2 m short.
     "wp_radius_2": ({"green_bay": 2, "tier": 2, "wp_radius": 2.0}, "no_dock", 130),
     # A dead dock detector: the guard band must stop the run, not drive blind.
@@ -101,7 +103,7 @@ SCENARIOS = {
     "fire_current":     ({"current_mps": 0.05, "current_to_deg": 90.0}, "fire_out", 90, FIRE),
     # 12 cm/s: P stalls 0.65 m off; the integrator (on when stalled) breaks it free.
     "fire_current_strong": ({"current_mps": 0.12, "current_to_deg": 90.0}, "fire_out", 120, FIRE),
-    # Starts 2.0 m out, between the fingers: backs out to the firing range.
+    # Starts 2.0 m out, between the fingers: comes in to the firing range (1.4 m).
     "fire_close_start": ({"start_n": 18.0}, "fire_out", 90, FIRE),
     # 5 m out the LiDAR cannot see the dock (wall_range_node.r_max 4 m): the
     # guard band stops the run at once. Hand over inside 4 m.
@@ -119,9 +121,10 @@ SCENARIOS = {
     "fire_sc_hold":     ({"pilot_mode_at_s": 2.5, "pilot_mode": "HOLD"}, "stops", 40, FIRE),
     # The bridge has no pump output (G7 not done): FireBurst fails, loudly.
     "fire_pump_off":    ({"pump_path": False}, "fail_loud", 120, FIRE),
-    # The calibration is wrong (the truth is 3.6 m, the tree believes 3.22):
-    # it fires, misses high, and says so shot by shot.
-    "fire_cal_error":   ({"nozzle_hit_range_m": 3.6}, "misses", 150, FIRE),
+    # The calibration is wrong: the stream leaves 10 deg LEFT of the bow, ~17 cm
+    # off at the window (a 30 deg stream forgives range, not aim). It fires,
+    # misses, and says so shot by shot.
+    "fire_cal_error":   ({"nozzle_yaw_bias_deg": 10.0}, "misses", 150, FIRE),
     # fire_pump off: the shadow posture. Lines up, fires DRY, no water.
     "fire_dry":         ({}, "dry", 120, {"fire": True}),
     # ---- the GUIDED heading+speed version (task3_fire_test.xml), kept for when

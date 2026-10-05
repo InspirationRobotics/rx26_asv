@@ -37,11 +37,12 @@ WHAT IS MODELLED, and how honestly:
 
 THE FIXED-NOZZLE SHOT (behavior_trees/task3_fire_test.xml) adds:
 
-  the nozzle     fixed on the bow, a drag-free parabola (squirt_cal's
-                 nozzle_model) whose exit speed is FITTED so that a level,
-                 square-on boat at `nozzle_hit_range_m` puts the stream on the
-                 target window's top edge - the pool's answer, 3.22 m. The
-                 water goes where the boat's TRUE pose, pitch and roll send it.
+  the nozzle     fixed on the bow at 30 deg, a drag-free parabola
+                 (squirt_cal's nozzle_model) whose exit speed is FITTED so that
+                 a level, square-on boat at `nozzle_hit_range_m` puts the
+                 stream through the target window's CENTRE (1.4 m: the
+                 upper-left goes in from 1.0 to 1.6 m on the boat). The water
+                 goes where the boat's TRUE pose, pitch and roll send it.
   the sea        squirt_cal's fake_boat rocking (a few sines under a slow
                  envelope), plus a pitch kick whenever the boat accelerates.
   the LiDAR      /crsd/wall_range from the true pose: range to the dock edge,
@@ -195,7 +196,12 @@ class Scenario:
     finger_width: float = 0.5
     finger_len: float = 2.0
     deck_depth: float = 1.0
-    deck_z: float = 0.3                        # ASSUMED: dock-cube freeboard
+    # Every bay is the practice dock's height (2026-10-04). That puts the
+    # window centres ~0.80 m (upper-left) and ~0.56 m (lower-right) above the
+    # water: the 2026-09-25 frames say so (level camera, 0.41 m up), and so do
+    # the 30 deg shots - one exit speed (~6.3 m/s from 0.40 m) goes in the
+    # upper-left from 1.0-1.6 m and the lower-right from 0.7-0.8 m. MEASURE.
+    deck_z: float = 0.05
     green_bay: int = 2                         # 1..3, left to right facing them
     # the goal's approach point, metres out in front of the dock centre. The
     # operator's rough "the dock is over there", on the water side and clear
@@ -211,11 +217,14 @@ class Scenario:
     extinguish_s: float = 2.0                  # spray-on-target to put it out
     # sensing
     camera_ok: bool = True
-    # + = aimed DOWN (cam_pitch_deg). THE BOAT'S CAMERA IS LEVEL TODAY (0), and
-    # level it sees NEITHER window whole from a berth inside the slip; -25 is
-    # what that takes with the hull band. The default shows the tree working
-    # with the mount it needs; test_e2e level_camera pins today's failing.
-    cam_pitch_deg: float = -25.0
+    # + = aimed DOWN (cam_pitch_deg). THE BOAT'S CAMERA IS LEVEL TODAY (0). On
+    # the practice dock's height, level it sees the LOWER window from the
+    # berth but not half of the upper one, and from 1.4 m it sees the upper
+    # one only at the hull band's edge. -5 (tilted up 5 deg) is the mount
+    # recommended for that (docs/T3_running.md, 2026-10-04); test_e2e
+    # level_camera pins today's failing case. (-25 was for the old 0.3 m deck,
+    # and with this one it sees the face too low and berths short.)
+    cam_pitch_deg: float = -5.0
     hull_band_rows: int = 188                  # CV config occluded_top_rows
     miscolour: float = 0.0                     # P(a lit colour read as another)
     unknown_rate: float = 0.03                 # P(the colour rule abstains)
@@ -231,12 +240,13 @@ class Scenario:
     fire_lit: bool = False                     # the target window is ON FIRE from the start
     nozzle_x: float = 0.45                     # ahead of the body origin (squirt_cal nozzle_x_m)
     nozzle_z: float = 0.40                     # above the water
-    nozzle_elev_deg: float = 45.0
+    nozzle_elev_deg: float = 30.0              # the 45 deg nozzle is gone (2026-09-28)
     # THE TRUTH: the wall range at which a level, square-on boat puts the
-    # stream on the target window's TOP EDGE. The pool said ~3.22 m; the
-    # tree's fire_range_m is its belief about this, and fire_cal_error makes
-    # the two differ.
-    nozzle_hit_range_m: float = 3.22
+    # stream through the target window's CENTRE. The tree's fire_range_m is its
+    # belief about this. A 30 deg stream is forgiving in range (it crosses the
+    # upper-left over ~0.6 m of range), so a calibration error shows sideways
+    # (nozzle_yaw_bias_deg), not in range.
+    nozzle_hit_range_m: float = 1.4
     nozzle_yaw_bias_deg: float = 0.0           # + = the stream leaves LEFT of the bow
     sea: float = 0.0                           # rocking: 0 flat .. 3 rough (fake_boat)
     att_hz: float = 10.0                       # /crsd/attitude (SR0_EXTRA1 = 10)
@@ -909,6 +919,27 @@ class Camera:
         el = math.degrees(math.atan2(c[2], c[0]))
         return abs(az) <= self.HFOV / 2.0 and -self.DOWN <= el <= self.up_deg()
 
+    MIN_WINDOW_FRAC = 0.5      # less of a window than this in view: not reported
+
+    def window_seen(self, cam, f, lft, dock, centre, half, n=5):
+        """(fraction of the opening in the image, centre of the part that is).
+        The close-range detector (2026-10-03) finds windows cut off by the
+        image edge or the hull band, and its box - so the position the plane
+        gives - is the VISIBLE part's."""
+        rgt = dock.right
+        pts = []
+        for i in range(n):
+            su = -1.0 + 2.0 * (i + 0.5) / n
+            for j in range(n):
+                sz = -1.0 + 2.0 * (j + 0.5) / n
+                q = add((centre[0], centre[1]), mul(rgt, su * half[0]))
+                p = (q[0], q[1], centre[2] + sz * half[1])
+                if self.in_view(self.to_cam(cam, f, lft, p)):
+                    pts.append(p)
+        if not pts:
+            return 0.0, None
+        return len(pts) / float(n * n), tuple(sum(v[k] for v in pts) / len(pts) for k in range(3))
+
     def window_visible(self, cam, f, lft, dock, centre, half):
         """A window counts only if the whole opening is in the image."""
         rgt = dock.right
@@ -979,9 +1010,10 @@ class Camera:
             states = {}
             lit_w, lit_c = lights.window_colour(t) if bay == self.sc.green_bay else (-1, OFF)
             for w_idx, slot, wc, half in dock.windows(bay):
-                if not self.window_visible(cam, f, lft, dock, wc, half):
-                    continue                  # not seen whole: not reported
-                wcam = self.to_cam(cam, f, lft, wc)
+                frac, vc = self.window_seen(cam, f, lft, dock, wc, half)
+                if frac < self.MIN_WINDOW_FRAC:
+                    continue                  # mostly out of view: not reported
+                wcam = self.to_cam(cam, f, lft, vc)
                 true_c = lit_c if w_idx == lit_w else OFF
                 st, conf = self._read(true_c)
                 states[w_idx] = NAME[st]
@@ -1192,22 +1224,23 @@ class World:
         self.avoidance = bool(enable)
 
     def target_edge(self):
-        """(u, z) of the target window's top edge centre, in dock u and height."""
-        for idx, _slot, (we, wn, wz), (_hw, hh) in self.dock.windows(self.sc.green_bay):
+        """(u, z) of the target window's CENTRE, in dock u and height (the
+        name is from when the fit was to the top edge)."""
+        for idx, _slot, (we, wn, wz), (_hw, _hh) in self.dock.windows(self.sc.green_bay):
             if idx == self.sc.target_window:
-                return self.dock.uv((we, wn))[0], wz + hh
+                return self.dock.uv((we, wn))[0], wz
         raise ValueError("no target window")
 
     def _fit_nozzle(self):
         """The TRUE nozzle: the exit speed that puts a level, square-on stream
-        from `nozzle_hit_range_m` on the target window's top edge."""
+        from `nozzle_hit_range_m` through the target window's centre."""
         sc = self.sc
         _u, z = self.target_edge()
         x = sc.nozzle_hit_range_m - sc.nozzle_x
         th = math.radians(sc.nozzle_elev_deg)
         k = (sc.nozzle_z + x * math.tan(th) - z) / (x * x)
         if x <= 0 or k <= 0:
-            raise ValueError("no drag-free arc reaches the edge from nozzle_hit_range_m")
+            raise ValueError("no drag-free arc reaches the window from nozzle_hit_range_m")
         return NozzleModel(sc.nozzle_elev_deg, math.sqrt(G / (2.0 * k * math.cos(th) ** 2)),
                            sc.nozzle_z)
 
@@ -1305,7 +1338,7 @@ class World:
         sh["on_target_s"] = round(sh["on_target_s"], 2)
         self.shots.append(sh)
         where = ("no crossing" if du is None else
-                 "%+.0f cm %s, %+.0f cm %s of the top edge" % (
+                 "%+.0f cm %s, %+.0f cm %s of the centre" % (
                      abs(dz) * 100, "above" if dz > 0 else "below",
                      abs(du) * 100, "right" if du > 0 else "left"))
         self.judge.log(self.t, "nozzle", "shot %d from %.2f m: %s - %s" % (
@@ -1449,8 +1482,9 @@ class World:
 
     def target_visible_from_berth(self, berth_m=1.25):
         """Could a boat berthed in the green bay (body origin berth_m out, bow
-        in) see the fire window whole? The tree cannot put out what it cannot
-        see, and this is the first thing to know about a scenario."""
+        in) see the fire window - enough of it for the detector? The tree
+        cannot put out what it cannot see, and this is the first thing to know
+        about a scenario."""
         b = self.dock
         p = b.at((self.sc.green_bay - 2) * b.pitch, berth_m)
         heading = (self.sc.facing_deg + 180.0) % 360.0
@@ -1459,7 +1493,8 @@ class World:
         cam = (c[0], c[1], Boat.CAM_Z)
         for idx, _s, wc, half in b.windows(self.sc.green_bay):
             if idx == self.sc.target_window:
-                return self.camera.window_visible(cam, f, port(f), b, wc, half)
+                frac, _vc = self.camera.window_seen(cam, f, port(f), b, wc, half)
+                return frac >= self.camera.MIN_WINDOW_FRAC
         return False
 
     # -------------------------------------------------------------- outputs

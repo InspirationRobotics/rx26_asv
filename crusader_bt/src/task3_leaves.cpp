@@ -99,7 +99,7 @@ public:
   {
     const bool strict = getInput<bool>("need_others_red").value_or(true);
     std::lock_guard<std::mutex> lk(ctx_->mu);
-    const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs);
+    const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs, ctx_->dock_bays);
     return dock::chooseSafeBay(ctx_->dock, L, ctx_->dock_votes, strict).ok ?
            BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
   }
@@ -167,7 +167,7 @@ public:
     const dock::DockedCheck d = dock::dockedIn(
       ctx_->berth, ctx_->boat, ctx_->heading_deg, ctx_->berth.berth_m, at, lt, ht);
     if (!d.docked) {return BT::NodeStatus::FAILURE;}
-    const double pitch = dock::bayPitch(ctx_->dock, dock::layout(ctx_->dock, ctx_->dock_min_obs));
+    const double pitch = dock::bayPitch(ctx_->dock, dock::layout(ctx_->dock, ctx_->dock_min_obs, ctx_->dock_bays));
     if (!std::isfinite(pitch)) {return BT::NodeStatus::SUCCESS;}   // nothing to test against
     const double reach = dock::hullHalfWidthUsed(ctx_->berth, ctx_->boat, ctx_->heading_deg, hl, hb);
     if (reach > pitch / 2.0 - fm) {
@@ -206,9 +206,25 @@ public:
     if (t == nullptr || !ctx_->pose_fresh) {return BT::NodeStatus::FAILURE;}
     // Only the face and its normal matter here; the distances are placeholders.
     const dock::Berth b = dock::berthFor(
-      *t, dock::layout(ctx_->dock, ctx_->dock_min_obs), 3.0, 1.25);
+      *t, dock::layout(ctx_->dock, ctx_->dock_min_obs, ctx_->dock_bays), 3.0, 1.25);
     return dock::linedUp(b, ctx_->boat, ctx_->heading_deg, a, lt, ht) ?
            BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
+  }
+};
+
+/// A bay number is in hand for the docking report: committed in this run
+/// (CommitSafeBay), or given for a Task 3 part 2 run (bt_runner_node task3_bay).
+class BayChosen : public CrusaderCondition
+{
+public:
+  BayChosen(const std::string & n, const BT::NodeConfig & c)
+  : CrusaderCondition(n, c) {}
+  static BT::PortsList providedPorts() {return {};}
+
+  BT::NodeStatus tick() override
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    return ctx_->chosen_bay > 0 ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
   }
 };
 
@@ -253,7 +269,7 @@ public:
     std::string key, detail;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
-      const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs);
+      const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs, ctx_->dock_bays);
       if (L.ok) {
         for (std::size_t i = 0; i < L.ids.size(); ++i) {
           const dock::BayTrack * t = ctx_->dock.find(L.ids[i]);
@@ -351,7 +367,7 @@ public:
     dock::Choice c;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
-      const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs);
+      const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs, ctx_->dock_bays);
       c = dock::chooseSafeBay(ctx_->dock, L, ctx_->dock_votes, strict);
       if (c.ok) {
         ctx_->chosen_track = c.track_id;
@@ -402,7 +418,7 @@ public:
       std::lock_guard<std::mutex> lk(ctx_->mu);
       const dock::BayTrack * t = ctx_->dock.find(ctx_->chosen_track);
       if (t == nullptr || !ctx_->origin_set) {return BT::NodeStatus::FAILURE;}
-      const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs);
+      const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs, ctx_->dock_bays);
       ctx_->berth = dock::berthFor(*t, L, pre, bm, lead);
       if (!ctx_->berth.ok) {return BT::NodeStatus::FAILURE;}
       const Vec2 p = which == "lead" ? ctx_->berth.lead :
@@ -456,7 +472,9 @@ public:
   {
     return {
       BT::InputPort<double>("timeout_s", 60.0, "give up waiting for the light"),
-      BT::InputPort<double>("resend_s", 10.0, "re-send the docking report this often")};
+      BT::InputPort<double>("resend_s", 10.0, "re-send the docking report this often"),
+      BT::OutputPort<int>("window",
+        "the lit window's DockWindow.index (0 = upper-left), for StrafeKeep / FireBurst")};
   }
 
   BT::NodeStatus onStart() override
@@ -473,18 +491,25 @@ public:
   BT::NodeStatus onRunning() override
   {
     int bay = 0;
+    int lit = -1;
     bool resend = false;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       const bool red = ctx_->dock_pattern == "steady" && ctx_->dock_colours.size() == 1 &&
         ctx_->dock_colours[0] == dock::Colour::Red;
       if (red && ctx_->dock_target_window >= 0) {
-        RCLCPP_INFO(log(), "FIRE: window %d is steady RED", ctx_->dock_target_window);
-        return BT::NodeStatus::SUCCESS;
+        lit = ctx_->dock_target_window;
       }
       bay = ctx_->chosen_bay;
       resend = !ctx_->readiness_confirmed &&
         since(last_) >= getInput<double>("resend_s").value_or(10.0);
+    }
+    if (lit >= 0) {
+      // Optional: a tree that does not wire `window` gets an error value here,
+      // not an exception, and that is fine.
+      (void)setOutput("window", lit);
+      RCLCPP_INFO(log(), "FIRE: window %d is steady RED", lit);
+      return BT::NodeStatus::SUCCESS;
     }
     if (resend) {
       last_ = Clock::now();
@@ -749,6 +774,7 @@ void registerTask3Nodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<ChosenBaySafe>("ChosenBaySafe");
   factory.registerNodeType<DockedInBay>("DockedInBay");
   factory.registerNodeType<LinedUp>("LinedUp");
+  factory.registerNodeType<BayChosen>("BayChosen");
   factory.registerNodeType<TierAtLeast>("TierAtLeast");
   factory.registerNodeType<UpdateDockBook>("UpdateDockBook");
   factory.registerNodeType<PickVantage>("PickVantage");

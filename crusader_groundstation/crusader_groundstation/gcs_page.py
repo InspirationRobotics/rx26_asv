@@ -392,6 +392,22 @@ function renderTel(){
     ['World model', 'crsd/world_targets age',
      S.targets.age===null?'never':fmt(S.targets.age,2)+' s', S.targets.ok]
   ];
+  /* The dock detector's own latency, from crsd/dock_view_health. Shown only
+     while dock_view runs; a stale report reads "not running", never as numbers
+     that were true a minute ago. Green is a rough budget for the Jetson, not a
+     measured limit: detector under 100 ms, chain under 200, frame under 300. */
+  var d = S.dock_latency;
+  if(d && d.ok){
+    rows.push(['Dock detector', 'YOLO only, mean / worst in 1 s',
+               fmt(d.det_ms,0)+' / '+fmt(d.det_max_ms,0)+' ms', d.det_ms < 100]);
+    rows.push(['Dock chain', 'geometry + colour + plane',
+               fmt(d.chain_ms,0)+' ms', d.chain_ms < 200]);
+    rows.push(['Dock frame total', 'frame in -> DockObservation out',
+               fmt(d.total_ms,0)+' ms  ('+fmt(d.fps,1)+' fps)', d.total_ms < 300]);
+  } else {
+    rows.push(['Dock detector', 'crsd/dock_view_health',
+               d && d.age!==null ? 'stale '+fmt(d.age,0)+' s' : 'not running', false]);
+  }
   rows.forEach(function(r){
     out += '<div class="row"><span class="nm">'+r[0]+'</span>'
         +  '<span class="meta">'+r[1]+'</span>'

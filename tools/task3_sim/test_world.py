@@ -82,10 +82,12 @@ class DockGeometry(unittest.TestCase):
         (i0, s0, p0, _h0), (i1, s1, p1, _h1) = d.windows(2)
         self.assertEqual((i0, s0, i1, s1), (0, "UL", 1, "LR"))
         self.assertLess(p0[0], p1[0])                 # UL west of LR, facing north
-        # deck 0.3 + panel 0.605 + half of 0.29: the upper window's centre
-        self.assertAlmostEqual(p0[2], 0.3 + 0.605 + 0.145, places=2)
+        # deck 0.05 (the practice dock) + panel 0.605 + half of 0.29: the
+        # upper window's centre, 0.80 m up; the lower one's 0.56 m
+        self.assertAlmostEqual(p0[2], 0.05 + 0.605 + 0.145, places=2)
+        self.assertAlmostEqual(p1[2], 0.56, places=2)
         self.assertGreater(p0[2], p1[2])
-        self.assertAlmostEqual(d.indicator(2)[2], 0.3 + 0.08, places=2)
+        self.assertAlmostEqual(d.indicator(2)[2], 0.05 + 0.08, places=2)
 
     def test_berth_contact_and_bay_of(self):
         d = W.Dock(W.Scenario())
@@ -246,16 +248,17 @@ class CameraModel(unittest.TestCase):
         self.assertEqual(cam.frame(0, W.Boat(0.0, -10.0, 0.0), self.dock, self.lights)["bays"], [])
 
     def test_what_a_level_camera_sees_from_the_berth(self):
-        """THE finding: level at 0.41 m with the hull band masked, from the
-        berth the camera sees NEITHER window whole. -25 deg of pitch sees both."""
+        """THE finding, on the practice dock's height: level at 0.41 m with the
+        hull band masked, from the berth the camera sees the LOWER window but
+        not half of the upper one (the 2026-10-02 close-range frames agree).
+        -25 deg of pitch, or no hull band, sees both."""
+        def seen(**kw):
+            return W.World(W.Scenario(**kw)).target_visible_from_berth()
+        self.assertFalse(seen(target_window=0, cam_pitch_deg=0.0))
+        self.assertTrue(seen(target_window=1, cam_pitch_deg=0.0))
         for win in (0, 1):
-            level = W.World(W.Scenario(target_window=win, cam_pitch_deg=0.0))
-            up = W.World(W.Scenario(target_window=win, cam_pitch_deg=-25.0))
-            self.assertFalse(level.target_visible_from_berth(), "level, window %d" % win)
-            self.assertTrue(up.target_visible_from_berth(), "pitched up, window %d" % win)
-        # Without the hull band the lower window is still out of view level.
-        self.assertFalse(W.World(W.Scenario(target_window=1, cam_pitch_deg=0.0,
-                                            hull_band_rows=0)).target_visible_from_berth())
+            self.assertTrue(seen(target_window=win, cam_pitch_deg=-25.0), "pitched up, %d" % win)
+        self.assertTrue(seen(target_window=0, cam_pitch_deg=0.0, hull_band_rows=0))
 
     def test_pitched_frames_still_place_the_face(self):
         """A pitched camera reports in its tilted frame; levelling it with the
@@ -343,7 +346,7 @@ class Judging(unittest.TestCase):
 def fire_world(**kw):
     """sim.py --fire's course, with overrides. The boat's body origin at
     `rng` m in front of bay 2's deck edge, square on, u = `u` (+ right)."""
-    rng, u = kw.pop("rng", 3.22), kw.pop("u", 0.0)
+    rng, u = kw.pop("rng", 1.4), kw.pop("u", 0.0)
     sc = W.Scenario(fire_lit=True, target_window=0, green_bay=2, tier=0,
                     start_e=u, start_n=20.0 - rng, start_heading=0.0, **kw)
     return W.World(sc)
@@ -352,49 +355,55 @@ def fire_world(**kw):
 class FixedNozzle(unittest.TestCase):
     """The truth the fire tree is aimed against."""
 
-    def test_fitted_to_the_pool_number(self):
-        # level and square on at nozzle_hit_range_m, in line with the window:
-        # the stream crosses the face ON the upper-left window's top edge
+    def test_fitted_to_the_30_deg_shot(self):
+        # level and square on at nozzle_hit_range_m (1.4 m), in line with the
+        # window: the stream crosses the face through the upper-left's centre
         w = fire_world(u=-0.22)
         u, z, run = w._crossing()
-        self.assertAlmostEqual(run, 3.22 - 0.45, places=6)
-        self.assertAlmostEqual(z, 0.3 + 0.895, places=6)                # deck + 895 mm
+        self.assertAlmostEqual(run, 1.4 - 0.45, places=6)
+        self.assertAlmostEqual(z, 0.05 + 0.75, places=6)                # deck + 750 mm
         self.assertAlmostEqual(u, -0.22, places=6)
-        # a drag-free 45 deg arc that does that reaches ~3.9 m on the level
-        self.assertAlmostEqual(w.nozzle.v ** 2 / W.G, 3.885, delta=0.01)
+        # a drag-free 30 deg arc that does that: ~6.3 m/s, ~3.5 m on the level
+        self.assertAlmostEqual(w.nozzle.v, 6.30, delta=0.02)
 
-    def test_the_arc_is_falling_there_so_closer_is_higher(self):
-        near = fire_world(rng=3.0, u=-0.22)._crossing()[1]
-        far = fire_world(rng=3.4, u=-0.22)._crossing()[1]
-        self.assertGreater(near, far)
-        # ~0.43 m of height per metre of range on this arc
-        self.assertAlmostEqual((near - far) / 0.4, 0.43, delta=0.05)
+    def test_forgiving_in_range_and_one_speed_does_both_windows(self):
+        # still on the way up: further is higher, ~0.18 m over 1.0 -> 1.6 m,
+        # and all of it inside the upper-left (centre 0.80, +-0.145)
+        zs = [fire_world(rng=r, u=-0.22)._crossing()[1] for r in (1.0, 1.4, 1.6)]
+        self.assertLess(zs[0], zs[1])
+        self.assertLess(zs[1], zs[2])
+        for z in zs:
+            self.assertLess(abs(z - 0.80), 0.145 + W.World.STREAM_R)
+        # the same stream from 0.7-0.8 m on the lower-right's line goes in it
+        for r in (0.7, 0.8):
+            self.assertLess(abs(fire_world(rng=r, u=0.23)._crossing()[1] - 0.56), 0.155)
 
     def test_bow_up_lifts_the_stream_and_roll_moves_it_sideways(self):
         w = fire_world(u=-0.22)
         z0 = w._crossing()[1]
-        w.att = (0.0, 1.0, 0.0, 0.0)                     # 1 deg bow up
-        self.assertGreater(w._crossing()[1] - z0, 0.02)
+        w.att = (0.0, 1.0, 0.0, 0.0)                     # 1 deg bow up: ~2 cm at 0.95 m
+        self.assertGreater(w._crossing()[1] - z0, 0.015)
         w.att = (2.0, 0.0, 0.0, 0.0)                     # rolled right
-        self.assertGreater(w._crossing()[0], -0.22 + 0.02)
+        self.assertGreater(w._crossing()[0], -0.22 + 0.01)
 
     def test_turning_left_moves_the_stream_left(self):
         w = fire_world()
         u0 = w._crossing()[0]
         w.boat.yaw = 356.0                               # 4 deg left of square
         self.assertAlmostEqual(w._crossing()[0] - u0,
-                               -(3.22 - 0.45) * math.tan(math.radians(4.0))
+                               -(1.4 - 0.45) * math.tan(math.radians(4.0))
                                - 0.45 * math.sin(math.radians(4.0)), delta=0.01)
 
     def test_a_left_skewed_nozzle_lands_left(self):
         straight = fire_world()._crossing()[0]
         skewed = fire_world(nozzle_yaw_bias_deg=3.0)._crossing()[0]
-        self.assertAlmostEqual(skewed - straight, -2.77 * math.tan(math.radians(3.0)), delta=0.01)
+        self.assertAlmostEqual(skewed - straight, -0.95 * math.tan(math.radians(3.0)), delta=0.01)
 
-    def test_the_cal_error_scenario_misses_high(self):
-        # the truth is 3.6 m, the tree fires from 3.22 m: well over the top edge
-        w = fire_world(u=-0.22, nozzle_hit_range_m=3.6)
-        self.assertGreater(w._crossing()[1] - w.target_edge()[1], W.World.STREAM_R + 0.1)
+    def test_the_cal_error_scenario_misses_to_the_side(self):
+        # the stream leaves 10 deg left of the bow: ~17 cm left at 0.95 m, past
+        # the window's edge (half width 0.105 + the stream's 0.03)
+        w = fire_world(u=-0.22, nozzle_yaw_bias_deg=10.0)
+        self.assertGreater(w.target_edge()[0] - w._crossing()[0], 0.105 + W.World.STREAM_R)
 
 
 class WallRangeSensor(unittest.TestCase):

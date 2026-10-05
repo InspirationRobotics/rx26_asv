@@ -7,10 +7,10 @@
   Run it with bt_runner_node's tree_file pointing here (the same SafePassage
   action as every tree), or in the sim: tools/task3_sim, scenario fire_test.
 
-  THE NUMBERS come from tools/squirt_cal at the pool on 2026-09-25: the upper-
-  left window's TOP EDGE was hit with the LiDAR wall range at 3.1 to 3.4 m
-  (fire_range_m 3.22). Re-calibrate on the real dock: its deck height is not
-  the pool's, and 5 cm of height moves this range about 12 cm.
+  THE NUMBERS: fire_range_m 1.4, the 30 deg nozzle's (the upper-left goes in
+  from 1.0 to 1.6 m; task3_fire_manual.xml). The 3.22 m that was here was the
+  old 45 deg nozzle's (squirt_cal at the pool, 2026-09-25). Not re-tuned for
+  GUIDED at 1.4 m: its keep was set up for 3.22.
 
   TWO SWITCHES, both off by default, and both on bt_runner_node:
     publish_setpoints  may the tree MOVE the boat (Gate G1)
@@ -45,7 +45,7 @@
       <WallRangeAlive max_age_s="1.0"/>
       <AttitudeAlive max_age_s="0.5"/>
 
-      <StationKeep fire_range_m="3.22" window_lat_m="0.22" yaw_bias_deg="0.0"
+      <StationKeep fire_range_m="1.4" window_lat_m="0.22" yaw_bias_deg="0.0"
                    lateral="centreline" window_index="0"
                    deadband_m="0.05" kp="0.6" v_min="0.12" v_max="0.25"
                    accel="0.25" min_range_m="1.5" turn_first_deg="10.0"

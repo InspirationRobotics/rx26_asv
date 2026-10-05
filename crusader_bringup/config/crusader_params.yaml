@@ -194,9 +194,12 @@ squirt_cal:
     # The starting guess only. MEASURE these (docs/G7_pump_bench.md, Phase 0):
     nozzle_x_m: 0.45                       # nozzle ahead of the body origin
     nozzle_height_m: 0.4                   # above the water
-    nozzle_elev_deg: 45.0
-    nozzle_range_m: 3.0                    # level range at nozzle_elev_deg
-    deck_height_m: 0.3                     # face panel bottom above the water
+    nozzle_elev_deg: 30.0                  # the 30 deg nozzle (2026-09-28); was 45
+    nozzle_range_m: 3.5                    # level range at nozzle_elev_deg: ~6.3 m/s,
+                                           # inferred from the upper-left going in at
+                                           # 1.0-1.6 m and the lower-right at 0.7-0.8 m
+    deck_height_m: 0.05                    # face panel bottom above the water (practice
+                                           # dock: window centres ~0.80 / ~0.56 m up)
     face_setback_m: 0.0                    # panel behind the edge the LiDAR ranges
     branch: "near"                         # near = rising part of the arc
     target_ids: ["ul_top", "lr_top"]

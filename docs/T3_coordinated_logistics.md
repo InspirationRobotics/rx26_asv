@@ -17,7 +17,7 @@ Code: `crusader_bt/behavior_trees/task3_disruptive.xml`, `src/task3_leaves.cpp`,
 | Slips | **1.5 m wide**, fingers **2.0 m long**, 0.5 m wide; bays **2.0 m apart** | same |
 | Face | 1.0 × 1.0 m panel on the deck, at the back of each slip, facing in | same, front-panel drawing |
 | Windows | upper-left opening 210 × 290 mm, centre ~0.75 m up the panel; lower-right ~230 × 310, centre ~0.51 m up; indicator at the bottom centre | same |
-| Deck height | ~0.3 m above water | **assumed** (dock-cube freeboard) |
+| Deck height | ~0.05 m above water (face panel bottom) | every bay is the practice dock's height (2026-10-04); windows ~0.80 m (UL) / ~0.56 m (LR) up, **estimated** - measure |
 | USV limit | fits a 2 × 1 × 1 m box | handbook 5.3.1 |
 | The boat | ~1.0 × 0.6 m; camera 0.37 m ahead of centre, 0.41 m above water | team; `Resources.md` |
 
@@ -106,9 +106,11 @@ commands and acts on none).
 
 ## The fixed-nozzle shot
 
-The nozzle is fixed (~45°), so **the boat is the aim**: its range to the dock sets how high the
-water lands, its sideways position where. `tools/squirt_cal` found the range for the upper-left
-window's top edge at the pool: LiDAR wall range **3.1–3.4 m, 3.22 m** in the middle.
+The nozzle is fixed at **30°** (since 2026-09-28; it was ~45°), so **the boat is the aim**: its
+range to the dock sets how high the water lands, its sideways position where. The upper-left
+window takes water from LiDAR wall range **1.0 m** (squirt_cal, 2026-09-28) **to 1.6 m** (shot
+outside, 2026-10); the trees use **1.4 m**. The lower-right wants **0.7–0.8 m** (the trees: 0.8).
+The old 45° nozzle wanted 3.1–3.4 m.
 
 **`behavior_trees/task3_fire_manual.xml` — MANUAL, on the sticks.** This hull is OmniX: it
 strafes, but only in MANUAL (GUIDED turns and drives). So the tree drives the sticks the way the
@@ -116,7 +118,7 @@ team's `dp_hold` did — RC override on ch1 steer, ch3 throttle, ch4 lateral —
 
 | Axis | Held to | Measured by |
 |---|---|---|
-| surge (ch3) | the calibrated range, 3.22 m | the LiDAR wall range (`/crsd/wall_range`) |
+| surge (ch3) | the calibrated range, 1.4 m (upper-left) | the LiDAR wall range (`/crsd/wall_range`) |
 | sway (ch4) | the window on the nozzle's line | the **camera**: `DockWindow` x, y, z of the upper-left window, in the body frame |
 | yaw (ch1) | square to the face | the **camera**: the line through the face's two windows (or the face plane), as a compass heading held between frames |
 
@@ -169,9 +171,10 @@ the guard band ends the run at once.
 `/crsd/guided_heading_speed`, `guided_hs_core`): it cannot strafe, so it aims by turning. It is
 kept, tested (`guided_calm`, `guided_drop`), for when GUIDED can strafe.
 
-**Where it fires from.** 3.2 m is *outside* the 2 m fingers. In the full mission the boat would
-dock, report, back out to 3.2 m, and fire — whether that counts is a question for RoboNation
-(below).
+**Where it fires from.** With the 30° nozzle, inside the slip: at 1.4 m (upper-left) the
+stern is ~0.1 m inside the 2 m fingers, at 0.8 m (lower-right) well inside.
+`task3_part2_dock_fire.xml` docks at 1.4 m and fires from there or from 0.8 m. (With the old 45°
+nozzle the boat would have had to back out to 3.2 m.)
 
 ### Before it moves the real boat, in this order
 

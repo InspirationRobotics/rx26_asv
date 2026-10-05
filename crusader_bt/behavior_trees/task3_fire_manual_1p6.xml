@@ -1,5 +1,24 @@
 <?xml version="1.0"?>
 <!--
+  task3_fire_manual_1p6.xml - TEST VARIANT of task3_fire_manual.xml, as run in
+  the practice pool on 2026-10-02 to tune the strafe hold. NOT the competition
+  shot: the nozzle calibration (squirt_cal) is for 1.0 m.
+
+  Differs from task3_fire_manual.xml only in:
+    fire_range_m 1.6 (StrafeKeep + AwaitStrafeSolution)  the detector holds the
+        whole face from 1.2-1.6 m; at 1.0 m it misses the windows (until it is
+        retrained on close-range data)
+    lateral_bias_m +0.03   aim 3 cm RIGHT (+ = right; asked for on 2026-10-02 after 0 by
+        eye, entered that day as -0.03 under the wrong sign - check it by eye)
+    num_attempts 1000, AwaitStrafeSolution timeout_s 1000000   no practical
+        limit: the run lasts until the operator takes the boat back, so the
+        gains can be tuned live (bt_runner_node strafe.*, docs/T3_running.md)
+
+  The gains that held best that day were set LIVE, not here:
+    strafe.kp_lat 100  kd_lat 200  ki_lat 10  kp_yaw 5  kd_yaw 0.5
+    window_median_s 0.1  rate_window_s 0.5  ki_fwd 40  i_max_us 100
+-->
+<!--
   task3_fire_manual.xml - the fixed-nozzle shot in MANUAL, on the sticks: stand
   off the dock at the calibrated range, SQUARE to the face, SLIDE sideways
   until the upper-left window is on the nozzle's line, wait until the hull is
@@ -21,11 +40,9 @@
                        on the compass between frames
   The LiDAR's wall angle is not used: the wall may not be flat, the face is.
 
-  THE NUMBERS: fire_range_m 1.4. The 30 deg nozzle puts water in the upper-left
-  window from 1.0 m (squirt_cal 2026-09-28) to 1.6 m (shot outside, 2026-10);
-  1.4 is the middle, and the stern is still inside 2.0 m fingers there. The
-  lower-right wants 0.7-0.8 m; the old 45 deg nozzle wanted 3.22 m.
-  min_range_m 0.6 so the floor sits below the firing range.
+  THE NUMBERS: fire_range_m 1.0 is squirt_cal on 2026-09-28 with the nozzle at
+  30 deg (upper-left window; the lower-right wanted ~0.8 m, and the old 45 deg
+  nozzle 3.22 m). min_range_m 0.6 so the floor sits below the firing range.
   Gains and the 120 us cap are dp_hold's tune on this hull. Re-calibrate on the
   real dock.
 
@@ -57,7 +74,7 @@
       <WallRangeAlive max_age_s="1.0"/>
       <AttitudeAlive max_age_s="0.5"/>
 
-      <StrafeKeep fire_range_m="1.4" window_index="0" lateral_bias_m="0.0" nozzle_y_m="0.0"
+      <StrafeKeep fire_range_m="1.6" window_index="0" lateral_bias_m="0.03" nozzle_y_m="0.0"
                   cam_timeout_s="0.5" face_timeout_s="3.0"
                   range_check_m="0" face_setback_m="0.0"
                   deadband_range_m="0.05" deadband_lat_m="0.04" deadband_yaw_deg="3.0"
@@ -68,10 +85,10 @@
 
       <Sequence name="shots">
         <ForceSuccess>
-          <RetryUntilSuccessful num_attempts="5">
+          <RetryUntilSuccessful num_attempts="1000">
             <Sequence name="one_shot">
-              <AwaitStrafeSolution fire_range_m="1.4" range_tol_m="0.06" lat_tol_m="0.05"
-                                   yaw_tol_deg="5.0" hold_s="1.0" gap_s="2.0" timeout_s="60.0"/>
+              <AwaitStrafeSolution fire_range_m="1.6" range_tol_m="0.06" lat_tol_m="0.05"
+                                   yaw_tol_deg="5.0" hold_s="1.0" gap_s="2.0" timeout_s="1000000"/>
               <FireBurst burst_s="0.5" flight_s="0.8" ack_timeout_s="1.5"/>
               <!-- FAILURE until the window reads GREEN long enough, which
                    retries: line up, wait, fire again. With no lit window (the

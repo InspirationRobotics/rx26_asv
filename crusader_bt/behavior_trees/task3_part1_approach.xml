@@ -1,0 +1,106 @@
+<?xml version="1.0"?>
+<!--
+  task3_part1_approach.xml - Task 3, PART 1 of 2: the GPS approach, in GUIDED.
+  Find the GREEN bay, commit to it, drive the lead-in and line-up legs, and
+  STOP on the bay's centreline 3.5 m from its face, outside the fingers, bow in.
+  task3_part2_dock_fire.xml (MANUAL) takes it from there: in to the firing
+  spot on the camera and LiDAR, the docking report, the fire, the request.
+
+  WHY TWO TREES. The approach is GUIDED setpoints (GPS); the dock and the shot
+  are MANUAL stick overrides (this OmniX hull strafes only in MANUAL; GUIDED
+  turns instead - docs/OPERATIONS.md). Between the two, SC goes from GUIDED to
+  MANUAL. For practice that is the operator, and each part can be tested on its
+  own.
+
+  THE HANDOFF. A new goal (or a restarted bt_runner_node) forgets this part's
+  dock book: which bay is which, and the committed bay. Part 2 numbers them
+  again from where this part stops, by looking left and right (LookAround),
+  which is why it stops at 3.5 m and not the mission's 3.0: the three faces
+  span 5 m, and with the OAK-D LR's 82 deg the camera (0.37 m ahead of the body
+  origin) needs 2.9 m to the faces to see all three whole from in front of the
+  middle bay - 3.25 m of range, 3.5 with margin. From an outer bay no distance
+  short of ~5.5 m does it square on; turned 25 deg toward the others it does
+  from 3 m, hence the look. task3_bay (this part's "committed to bay N") still
+  overrides it.
+
+  FOR THE COMPETITION THE TWO MUST BECOME ONE RUN. A person moving SC, or
+  typing in the bay, mid-run is an intervention. The way through is one tree
+  with both parts, the dock book shared, and the mode change made by the tree
+  on /crsd/set_mode (telemetry_bridge already takes it; the pilot's SC still
+  outranks it). That needs a SetMode leaf and the team's sign-off on a tree
+  that puts itself in MANUAL. Not done here.
+
+  THE LEGS AND NUMBERS ARE task3_disruptive.xml's (read its header for the why
+  of each), but for the line-up at 3.5 m instead of 3.0 (the handoff, above):
+  looks from 5 m via a lead point, the strict GREEN + RED + RED rule before the
+  lenient lone GREEN, the choice re-read on every leg (ChosenBaySafe), lead-in
+  2 m beyond the line-up. The pool variant is
+  task3_approach_test.xml (line-up 4.0 m, one look, dock_bays 1).
+
+  PRECONDITIONS
+    * GUIDED on SC; tree.sh true false task3_part1_approach.xml (the setpoints
+      gate on; this tree never fires)
+    * an approach point in the goal (go.sh with its "here" flag, the boat
+      facing the dock) or the dock in view at the start
+    * WP_RADIUS well under 1 m (0.2 - 0.3): at 2.0 ArduRover parks 2 m short
+      of every point (task3_disruptive.xml point 5). Set it back afterwards.
+    * dock_bays = the bays actually there (3 on the course, 1 at the pool)
+
+  WHEN IT ENDS (SUCCESS) the boat loiters at the line-up point (3.5 m) in
+  GUIDED. The log names the bay: "committed to bay N".
+-->
+<root BTCPP_format="4" main_tree_to_execute="Task3Part1Approach">
+  <BehaviorTree ID="Task3Part1Approach">
+    <ReactiveSequence name="guard_band">
+
+      <IsAutonomous/>
+      <DockCameraAlive max_age_s="3.0"/>
+      <UpdateDockBook/>
+
+      <Sequence name="approach">
+
+        <SetTask token="TASK_COORDINATED_LOGISTICS"/>
+
+        <RetryUntilSuccessful num_attempts="3" name="dock_attempts">
+          <Sequence name="find_and_line_up">
+
+            <ReactiveFallback name="find_safe_bay">
+              <SafeBayKnown need_others_red="true"/>
+              <RetryUntilSuccessful num_attempts="4" name="looks">
+                <Sequence name="look">
+                  <PickVantage standoff="5.0" lead_m="2.0" out="{vantage}" lead="{lead}"/>
+                  <NavigateTo target="port" goal="{lead}" tolerance="1.0"/>
+                  <NavigateTo target="port" goal="{vantage}" tolerance="1.0"/>
+                  <!-- watch, then fail the look so the retry moves on; readings
+                       pile up meanwhile and SafeBayKnown above ends it early -->
+                  <ForceFailure>
+                    <Sleep msec="12000"/>
+                  </ForceFailure>
+                </Sequence>
+              </RetryUntilSuccessful>
+              <SafeBayKnown need_others_red="false"/>
+            </ReactiveFallback>
+
+            <CommitSafeBay/>
+
+            <Fallback name="lead_in">
+              <LinedUp min_along_m="3.2" lateral_tol="0.4" heading_tol_deg="20.0"/>
+              <ReactiveSequence name="to_lead">
+                <ChosenBaySafe min_ema="0.3"/>
+                <DockWaypoint point="lead" predock_m="3.5" berth_m="1.25" lead_m="2.0" out="{goal}"/>
+                <NavigateTo target="port" goal="{goal}" tolerance="1.0"/>
+              </ReactiveSequence>
+            </Fallback>
+            <ReactiveSequence name="line_up">
+              <ChosenBaySafe min_ema="0.3"/>
+              <DockWaypoint point="predock" predock_m="3.5" berth_m="1.25" lead_m="2.0" out="{goal}"/>
+              <NavigateTo target="port" goal="{goal}" tolerance="0.4" resend_m="0.2"/>
+            </ReactiveSequence>
+
+          </Sequence>
+        </RetryUntilSuccessful>
+
+      </Sequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>
