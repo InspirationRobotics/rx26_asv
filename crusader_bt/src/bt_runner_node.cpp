@@ -9,6 +9,7 @@
 //        dock/observations   (DockObservation)    Task 3: the bays, every frame
 //        /crsd/ocs_command   (String, JSON)       Task 3: RoboCommand's readiness
 //        /crsd/wall_range    (WallRange)          the fixed-nozzle shot: LiDAR to the dock
+//        /crsd/dock_slot     (DockSlot)           the pan/tilt cannon tree: the slip, from the LiDAR
 //        /crsd/attitude      (Attitude)           ...and whether the hull is still
 //        /crsd/pump_state    (PumpState)          ...and what the bridge did with a burst
 //        /crsd/autonomy_drop (Bool, latched)      ...the drop latch (ch9)
@@ -117,6 +118,7 @@
 #include "crusader_msgs/msg/rc_channels.hpp"
 #include "crusader_msgs/msg/tracked_target_array.hpp"
 #include "crusader_msgs/msg/wall_range.hpp"
+#include "crusader_msgs/msg/dock_slot.hpp"
 
 #include "crusader_bt/context.hpp"
 #include "crusader_bt/dock_math.hpp"
@@ -317,6 +319,9 @@ public:
     wall_sub_ = create_subscription<crusader_msgs::msg::WallRange>(
       "/crsd/wall_range", 10,
       [this](crusader_msgs::msg::WallRange::SharedPtr m) {onWallRange(m);});
+    slot_sub_ = create_subscription<crusader_msgs::msg::DockSlot>(
+      "/crsd/dock_slot", 10,
+      [this](crusader_msgs::msg::DockSlot::SharedPtr m) {onDockSlot(m);});
     att_sub_ = create_subscription<crusader_msgs::msg::Attitude>(
       "/crsd/attitude", 10,
       [this](crusader_msgs::msg::Attitude::SharedPtr m) {onAttitude(m);});
@@ -523,6 +528,12 @@ private:
   {
     std::lock_guard<std::mutex> lk(ctx_->mu);
     ingestWallRange(*ctx_, nowS(), m->valid, m->range_m, m->angle_deg, m->lat_m);
+  }
+
+  void onDockSlot(const crusader_msgs::msg::DockSlot::SharedPtr m)
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    ingestDockSlot(*ctx_, nowS(), m->valid, m->back_range_m, m->angle_deg, m->lateral_m, m->why);
   }
 
   void onAttitude(const crusader_msgs::msg::Attitude::SharedPtr m)
@@ -1694,6 +1705,7 @@ private:
   rclcpp::Publisher<crusader_msgs::msg::GuidedHeadingSpeed>::SharedPtr hs_pub_;
   rclcpp::Publisher<crusader_msgs::msg::PumpCommand>::SharedPtr pump_pub_;
   rclcpp::Subscription<crusader_msgs::msg::WallRange>::SharedPtr wall_sub_;
+  rclcpp::Subscription<crusader_msgs::msg::DockSlot>::SharedPtr slot_sub_;
   rclcpp::Subscription<crusader_msgs::msg::Attitude>::SharedPtr att_sub_;
   rclcpp::Subscription<crusader_msgs::msg::PumpState>::SharedPtr pump_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr drop_sub_;

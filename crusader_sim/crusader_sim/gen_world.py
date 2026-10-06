@@ -230,7 +230,11 @@ def dock(e):
         fz = dz + 0.5                            # face centre height
         block(f"bay{b}_face", fu, r0, 0.03, 1.0, 1.0, fz, "white")
         for si, (slot, wr, wu, hw, hh) in enumerate(windows):
-            on = (lit and int(lit["bay"]) == b and int(lit["slot"]) == si)
+            # Dark at the start unless the course says lit_at_start: RoboCommand
+            # lights the fire only once the boat reports docking, and the sim's
+            # task3_world does that (gz visual_config on bay<b>_win<si>).
+            on = (lit and lit.get("lit_at_start", False) and int(lit["bay"]) == b
+                  and int(lit["slot"]) == si)
             colour = lit["colour"] if on else "black"
             # border then the LED area, both on the water side of the face
             v.append(S.visual(f"bay{b}_win{si}_border", S.box(0.004, 2 * hw + 0.03, 2 * hh + 0.03),

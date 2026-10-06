@@ -38,16 +38,20 @@ SITL_RC_PORT = 5501          # AP_HAL_SITL RCIN_PORT (instance 0)
 CTRL_PORT = 5509             # this process's own control port (localhost only)
 RATE_HZ = 50.0
 
-IDLE = {1: 1500, 2: 1500, 3: 1500, 4: 1500, 5: 1500, 6: 1000,
+# Sticks 1-4 rest at the boat's RCn_TRIM (params/working_crusader.params, which
+# SITL now loads too): the same neutral bt_runner_node's stick_neutral_us uses.
+IDLE = {1: 1489, 2: 1495, 3: 1495, 4: 1495, 5: 1500, 6: 1000,
         7: 1500,             # SB mid: run, not e-stopped, not arming
         8: 1500,             # SC mid: MODE4 = HOLD
         9: 1000,             # autonomy-drop: not dropped
-        10: 1500, 11: 1500, 12: 1500, 13: 1500, 14: 1500, 15: 1500, 16: 1500}
+        10: 1000,            # SE, the pilot's pump switch: OFF (high = pump on)
+        11: 1500, 12: 1500, 13: 1500, 14: 1500, 15: 1500, 16: 1500}
 
 NAMED = {
     "estop": (7, {"on": 1000, "off": 1500}),
     "mode": (8, {"manual": 1000, "hold": 1500, "auto": 1900}),
     "drop": (9, {"on": 1900, "off": 1000}),
+    "pump": (10, {"on": 2000, "off": 1000}),
 }
 
 

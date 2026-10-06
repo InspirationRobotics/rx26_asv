@@ -264,6 +264,17 @@ struct Context
   /// tick and not this one.
   bool sticks_commanded = false;
 
+  // ---- the slip from the LiDAR (Task 3 with the pan/tilt cannon; SlotKeep) ----
+  // /crsd/dock_slot, as a WallFilter: range_m = the LiDAR's standoff from the
+  // back wall, angle_deg = the slip's axis (+ = turn left to square), lat_m =
+  // the slip's centreline at the body origin (+ = left), each sample stamped
+  // with the heading at receipt so the square heading survives a turn
+  // (WallFilter::inward_deg). slot_lat is the same lateral as a Series, for
+  // its rate. slot_why: the last sweep's reason, for the log.
+  fire::WallFilter slot;
+  fire::Series slot_lat;
+  std::string slot_why;
+
   // ---- the whole-field Task 1 plan (global_passage.hpp; src/global_leaves.cpp) ----
   //
   // task1_global.xml plans the WHOLE passage at once (approach, entry orbit, transit, exit
@@ -672,6 +683,27 @@ inline void ingestWallRange(
   s.lat_m = lat_m;
   s.heading_deg = c.heading_deg;
   c.wall.add(s);
+}
+
+/// One /crsd/dock_slot message (crusader_msgs/DockSlot). CALL UNDER ctx.mu.
+/// Valid only when the whole slip was found: both side walls (or one and the
+/// known width) and the back wall. Stamped with the heading at receipt, like
+/// the wall range.
+inline void ingestDockSlot(
+  Context & c, double t, bool valid, double back_range_m, double angle_deg, double lateral_m,
+  const std::string & why = "")
+{
+  fire::WallSample s;
+  s.t = t;
+  s.valid = valid && std::isfinite(back_range_m) && std::isfinite(angle_deg) &&
+    std::isfinite(lateral_m);
+  s.range_m = back_range_m;
+  s.angle_deg = angle_deg;
+  s.lat_m = lateral_m;
+  s.heading_deg = c.heading_deg;
+  c.slot.add(s);
+  if (s.valid) {c.slot_lat.add(t, lateral_m);}
+  c.slot_why = why;
 }
 
 /// The heading just set on ctx (heading_deg, from /crsd/pose), into the

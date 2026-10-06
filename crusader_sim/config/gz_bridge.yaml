@@ -45,6 +45,15 @@
   gz_type_name: gz.msgs.Odometry
   direction: GZ_TO_ROS
 
+# Task 3: the pan/tilt cannon's TRUE joint angles (30 Hz, gen_crusader), for
+# task3_world's water stream. Sim only, like everything under /sim. (The pump it
+# takes from /crsd/pump_state: SERVO_OUTPUT_RAW, the autopilot's own output.)
+- ros_topic_name: /sim/cannon/joint_states
+  gz_topic_name: /world/crusader_sim/model/crusader/joint_state
+  ros_type_name: sensor_msgs/msg/JointState
+  gz_type_name: gz.msgs.Model
+  direction: GZ_TO_ROS
+
 - ros_topic_name: /clock
   gz_topic_name: /world/crusader_sim/clock
   ros_type_name: rosgraph_msgs/msg/Clock

@@ -14,3 +14,5 @@ crusader_sim/lib/crusader_sim/panel_feed
 crusader_sim.sim_camera
 crusader_sim.sim_uav
 crusader_perception/lib/crusader_perception/lidar_cluster_node
+crusader_perception/lib/crusader_perception/dock_slot_node
+crusader_fcu/lib/crusader_fcu/cannon_aim_node

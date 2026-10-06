@@ -18,10 +18,18 @@ COMPASS_USE3 0
 # --- stream rates. MAVProxy's --streamrate=-1 leaves SR0_* alone, as on the
 # boat, so these ARE the ROS-side rates. The baseline file says SR0_EXTRA1 4,
 # but the newest real dump (QGC params/2026-09-07_crusader_ardurover463.params)
-# says 10, and docs/G7_pump_bench.md asks for 30. The last value MEASURED on the
-# boat wins here; at the baseline's 4 Hz /crsd/attitude ran ~3 Hz and
-# target_tracker dropped observations as stale. Team: settle the baseline.
-SR0_EXTRA1 10
+# says 10, and docs/G7_pump_bench.md asks for 30. At the baseline's 4 Hz
+# /crsd/attitude ran ~3 Hz and target_tracker dropped observations as stale.
+# 30, G7's value, since 2026-10-05: these rates are SIM time, and with the
+# Gazebo window open on a GTX 1080 Ti the sim runs at ~0.45x, so 10 arrived at
+# ~5 Hz of wall time and the fire trees' "steady" (attitude >= 8 Hz) never held:
+# no docking report, no fire. Team: settle the baseline (30 per G7).
+SR0_EXTRA1 30
+# SERVO_OUTPUT_RAW (and RC_CHANNELS) at 10 Hz, as docs/G7_pump_bench.md asks
+# the boat for. At the baseline's 4 the bridge's pump watchdog (OFF expected
+# 0.3 s after a burst ends) read a stale ON after the first burst and latched
+# the pump path off for the rest of the run (Task 3, 2026-10-05).
+SR0_RC_CHAN 10
 
 # --- IMU calibration, as ArduPilot's own gazebo-*.parm files do it. The gyros
 # calibrate at boot while the simulated hull is still settling on the water, the
@@ -46,3 +54,25 @@ BRD_SAFETY_DEFLT 0
 
 # --- logs: keep SITL dataflash small and on disarm only.
 LOG_DISARMED 0
+
+# --- Task 3: the pump and the pan/tilt cannon (crusader_sim task3_world).
+# THE PUMP: the boat's pump output is not configured yet (telemetry_bridge
+# pump_servo_channel 0, docs/G7_pump_bench.md). The sim puts it on SERVO10 as
+# G7 describes it: RCIN10 passes the pilot's switch (ch10, high = on) through,
+# TRIM = OFF so a DO_REPEAT_SERVO burst ends at OFF on the autopilot's clock.
+# gz_rig_up.sh gives the bridge pump_servo_channel 10 to match.
+SERVO10_FUNCTION 60
+SERVO10_MIN 1000
+SERVO10_MAX 2000
+SERVO10_TRIM 1000
+# THE CANNON: SERVO11 = AUX3 pan, SERVO12 = AUX4 tilt, function 0 so
+# DO_SET_SERVO may drive them - what working_crusader.params already has (the
+# baseline filter does not carry SERVO9+, so they are stated here).
+SERVO11_FUNCTION 0
+SERVO11_MIN 1100
+SERVO11_MAX 1900
+SERVO11_TRIM 1500
+SERVO12_FUNCTION 0
+SERVO12_MIN 1100
+SERVO12_MAX 1900
+SERVO12_TRIM 1500

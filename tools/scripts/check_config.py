@@ -78,6 +78,8 @@ CONFIG_DRIVEN_NODES = set("""
     nav_frames_node
     wall_range_node
     squirt_cal
+    dock_slot_node
+    cannon_aim_node
 """.split())
 
 # Packages that are deliberately NOT in crusader_bringup's closure: they run on the
@@ -118,6 +120,11 @@ TOPIC_PAIRS = (
     # waits for a datum nobody sends, and holds every planned leg.
     (("bt_runner_node", "nav_leg_topic"), ("ground_station", "nav_leg_topic")),
     (("nav_frames_node", "datum_topic"), ("bt_runner_node", "nav_datum_topic")),
+    # Not topics, the same failure: the pan/tilt cannon's aim solves within its
+    # own pwm_min..pwm_max and the bridge clamps to ITS limits. Disagreeing, the
+    # aim believes a servo is where the bridge never let it go.
+    (("telemetry_bridge", "cannon_pwm_min"), ("cannon_aim_node", "pwm_min")),
+    (("telemetry_bridge", "cannon_pwm_max"), ("cannon_aim_node", "pwm_max")),
 )
 
 # Ports that must stay distinct: two servers cannot bind one socket, and the

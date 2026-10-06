@@ -1,0 +1,28 @@
+# task3_ul — courses/task3.yaml with the fire in the UPPER-LEFT window (slot 0).
+#
+# The question this course answers: can the boat's camera see the upper-left
+# window (deck 0.3 m above the water) well enough for the dock detector to report
+# it? From the 1.1 m berth, only with the camera tilted up 12-15 deg; from the
+# 1.6 m watch range the tree backs out to, ~5 deg of tilt is enough. See
+# task3.yaml's header and docs/T3_cannon_sim.md for what the runs said.
+
+name: task3_ul
+origin: {lat: 1.28060, lon: 103.85570}
+draft_m: 0.24
+depth_m: 5.0
+boat_start: {x: 0.0, y: 0.0, yaw_deg: 90.0}
+tier: disruptive
+code: [green, red]
+extinguish_s: 2.0
+
+elements:
+  - type: dock
+    name: dock
+    x: 0.0
+    y: 20.0
+    facing_deg: -90.0
+    green_bay: 2
+    lit_window: {bay: 2, slot: 0, colour: red}   # the UPPER-LEFT
+  - {type: platform, name: platform_red,  x: -10.0, y: 12.0, circle: red}
+  - {type: platform, name: platform_blue, x:  10.0, y: 12.0, circle: blue}
+  - {type: launch_pad, name: uav_pad, x: -6.0, y: -4.0}

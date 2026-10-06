@@ -28,6 +28,7 @@ if docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q tru
 fi
 bash "$WS_SRC/tools/sitl/start_sitl.sh" --stop >/dev/null 2>&1
 pkill -f "crusader_sim.sim_transmitter" 2>/dev/null
+pkill -f "crusader_sim.task3_gz_agent" 2>/dev/null
 pkill -f "gz sim" 2>/dev/null
 # the server takes seconds to exit (still up 7 s after STOP SIM, 2026-09-30);
 # a LAUNCH straight after must not find the old one still on the partition

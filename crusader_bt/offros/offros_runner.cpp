@@ -47,6 +47,7 @@
 //   ocs_command   {data: {...}}                           /crsd/ocs_command
 //   mount         {x, y, yaw_deg, pitch_deg, face_dz}     bt_runner_node params
 //   wall_range    {valid, range_m, angle_deg, lat_m}      /crsd/wall_range
+//   dock_slot     {valid, back_range_m, angle_deg, lateral_m, why}  /crsd/dock_slot
 //   attitude      {roll, pitch, rollspeed, pitchspeed}    /crsd/attitude (rad)
 //   pump_state    {enabled, on, last_seq, last_result, last_reason}  /crsd/pump_state
 //   autonomy_drop {data: bool}                            /crsd/autonomy_drop
@@ -222,6 +223,8 @@ public:
         onMount(j);
       } else if (type == "wall_range") {
         onWallRange(j);
+      } else if (type == "dock_slot") {
+        onDockSlot(j);
       } else if (type == "attitude") {
         onAttitude(j);
       } else if (type == "pump_state") {
@@ -374,6 +377,15 @@ private:
     std::lock_guard<std::mutex> lk(ctx_->mu);
     ingestWallRange(*ctx_, nowS(), j.value("valid", false), num(j, "range_m", dock::kNaN),
       num(j, "angle_deg", dock::kNaN), num(j, "lat_m", dock::kNaN));
+  }
+
+  /// /crsd/dock_slot: crusader_msgs/DockSlot's fields as JSON (null = NaN).
+  void onDockSlot(const json & j)
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    ingestDockSlot(*ctx_, nowS(), j.value("valid", false), num(j, "back_range_m", dock::kNaN),
+      num(j, "angle_deg", dock::kNaN), num(j, "lateral_m", dock::kNaN),
+      j.value("why", std::string()));
   }
 
   /// /crsd/attitude: roll, pitch and their rates in radians (the autopilot's axes).

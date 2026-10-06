@@ -1,0 +1,157 @@
+<?xml version="1.0"?>
+<!--
+  task3_cannon.xml - Task 3 with the pan/tilt water cannon, as ONE run.
+
+    1. APPROACH (GUIDED)  task3_part1_approach.xml's legs: find the GREEN bay,
+                          commit to it, stop on its centreline 3.5 m out, bow in.
+    2. HAND-OVER          AwaitMode MANUAL: the pilot flips SC (in the sim, the
+                          operator script does it on /crsd/set_mode). The tree
+                          never changes the mode itself. The dock book is kept,
+                          so no LookAround is needed. Then FaceBay turns the bow
+                          into the slip on the yaw stick (GUIDED arrives with any
+                          heading) and the LiDAR gets 4 s to find the slip.
+    3. DOCK (MANUAL)      SlotKeep on the LiDAR alone (/crsd/dock_slot): the LiDAR
+                          1.1 m from the back wall (the stern ~8 cm inside the
+                          finger tips: the whole hull in the slip), centred
+                          between the side walls, square to them. Held 2 s =
+                          DockingReport.
+    4. THE FIRE           Back the hold out to the 1.6 m watch range (the bow
+                          still in the slip): from 1.1 m a level camera sees
+                          under half the lower-right window and none of the
+                          upper-left. AwaitFireTarget (the timing layer's steady
+                          RED), then SprayUntilHit: the window's aim point on
+                          /crsd/water_cannon every tick; cannon_aim_node turns it
+                          into pan/tilt and bursts. FirefightingReport when it
+                          reads GREEN.
+    5. THE REQUEST        Advanced/Disruptive only, from the watch range: the
+                          colour code, then ResourceDeliveryRequest to RoboCommand
+                          and the UAV.
+
+  RUN IN THE GAZEBO SIM ONLY (2026-10-05, at the GUI's 0.45x): PASS on all three bays and on the
+  upper-left window with the camera tilted up 5 deg (docs/T3_cannon_sim.md).
+  NOT YET RUN ON THE BOAT. On the boat: tools/scripts/task3/run.sh shadow|dry|live.
+-->
+<root BTCPP_format="4" main_tree_to_execute="Task3Cannon">
+  <BehaviorTree ID="Task3Cannon">
+    <Sequence name="task3">
+
+      <ReactiveSequence name="guard_approach">
+        <IsAutonomous/>
+        <DockCameraAlive max_age_s="3.0"/>
+        <UpdateDockBook/>
+        <Sequence name="approach">
+          <SetTask token="TASK_COORDINATED_LOGISTICS"/>
+          <RetryUntilSuccessful num_attempts="3" name="dock_attempts">
+            <Sequence name="find_and_line_up">
+              <ReactiveFallback name="find_safe_bay">
+                <SafeBayKnown need_others_red="true"/>
+                <RetryUntilSuccessful num_attempts="4" name="looks">
+                  <Sequence name="look">
+                    <PickVantage standoff="5.0" lead_m="2.0" out="{vantage}" lead="{lead}"/>
+                    <NavigateTo target="port" goal="{lead}" tolerance="1.0"/>
+                    <NavigateTo target="port" goal="{vantage}" tolerance="1.0"/>
+                    <ForceFailure>
+                      <Sleep msec="12000"/>
+                    </ForceFailure>
+                  </Sequence>
+                </RetryUntilSuccessful>
+                <SafeBayKnown need_others_red="false"/>
+              </ReactiveFallback>
+              <CommitSafeBay/>
+              <Fallback name="lead_in">
+                <LinedUp min_along_m="3.2" lateral_tol="0.4" heading_tol_deg="20.0"/>
+                <ReactiveSequence name="to_lead">
+                  <ChosenBaySafe min_ema="0.3"/>
+                  <DockWaypoint point="lead" predock_m="3.5" berth_m="1.25" lead_m="2.0" out="{goal}"/>
+                  <NavigateTo target="port" goal="{goal}" tolerance="1.0"/>
+                </ReactiveSequence>
+              </Fallback>
+              <ReactiveSequence name="line_up">
+                <ChosenBaySafe min_ema="0.3"/>
+                <DockWaypoint point="predock" predock_m="3.5" berth_m="1.25" lead_m="2.0" out="{goal}"/>
+                <NavigateTo target="port" goal="{goal}" tolerance="0.4" resend_m="0.2"/>
+              </ReactiveSequence>
+            </Sequence>
+          </RetryUntilSuccessful>
+        </Sequence>
+      </ReactiveSequence>
+
+      <AwaitMode mode="MANUAL" timeout_s="120.0"/>
+
+      <!-- Bow straight into the slip (GUIDED carries no heading: the approach
+           can stop pointing anywhere), then the LiDAR must see the slip. -->
+      <ReactiveSequence name="guard_turn">
+        <ModeIs mode="MANUAL"/>
+        <NotDropped/>
+        <AttitudeAlive max_age_s="0.5"/>
+        <Sequence name="face_and_find">
+          <FaceBay tol_deg="6.0" hold_s="0.5" turn_timeout_s="30.0"/>
+          <RetryUntilSuccessful num_attempts="40" name="find_slip">
+            <Sequence>
+              <Sleep msec="100"/>
+              <DockSlotAlive max_age_s="0.5"/>
+            </Sequence>
+          </RetryUntilSuccessful>
+        </Sequence>
+      </ReactiveSequence>
+
+      <!-- Dock at 1.1 m: the stern ~8 cm inside the 2 m fingers' tips (the
+           LiDAR is 0.32 m ahead of the hull's centre, the hull 1.0 m long), so
+           the hold's +-6 cm keeps the whole hull in the slip. At 1.2 m one run
+           reported with the stern 8 cm out. The fire and the code are watched
+           from 1.6 m. -->
+      <Script code="standoff := 1.1"/>
+
+      <ReactiveSequence name="guard_band">
+        <ModeIs mode="MANUAL"/>
+        <NotDropped/>
+        <DockSlotAlive max_age_s="2.0"/>
+        <AttitudeAlive max_age_s="0.5"/>
+        <DockCameraAlive max_age_s="3.0"/>
+        <UpdateDockBook/>
+        <SlotKeep standoff_m="{standoff}" lateral_bias_m="0.0" slot_timeout_s="0.6" min_range_m="0.9"
+                  max_us="90"/>
+        <Sequence name="mission">
+          <!-- Docked: the standoff to +-6 cm, the hull within 10 cm of the
+               centreline (the cannon aims, so centring is only for clearance:
+               a 0.6 m hull in a 1.5 m slip has 0.45 m each side; at 6 cm the
+               sticks' deadband kept bay 3 hunting for 120 s in the sim), square
+               to 5 deg, all for 2 s. NOT "steady" (hull still, sticks quiet):
+               that is the fixed nozzle's need, and a hold making 2 cm
+               corrections never passes it - the cannon aims itself, 20 Hz.
+               At 1.1 m the whole hull is between the fingers. -->
+
+          <AwaitStrafeSolution fire_range_m="{standoff}" range_tol_m="0.06" lat_tol_m="0.10"
+                               yaw_tol_deg="5.0" hold_s="2.0" gap_s="0.0" timeout_s="120.0"
+                               steady="false"/>
+          <ReportDocking/>
+          <!-- Back out to watch. The camera's view ends (the CV's hull band)
+               ~19 deg above its axis: from 1.1 m it sees 40% (level: under the
+               detector's 50%) to 80% (tilted up 5 deg) of the lower-right window
+               and nothing of the upper-left. From 1.6 m a level camera sees the
+               lower-right whole, and a 5 deg tilt the upper-left too. (Firing
+               from the berth when the fire was seen there failed in the sim:
+               bay 3 put the fire out at 1.16 m but never saw the window GREEN.)
+               A camera tilted up 12-15 deg sees both from the berth; then this
+               line can go. SlotKeep reads {standoff} every tick, and the cannon
+               aims from wherever the boat is. -->
+          <Script name="back_out" code="standoff := 1.6"/>
+          <AwaitFireTarget timeout_s="90.0" resend_s="10.0" window="{fire_window}"/>
+          <!-- the aim point may be 3 s old: docked, the window does not move -->
+          <SprayUntilHit timeout_s="90.0" min_green_s="0.4" max_aim_age_s="3.0"/>
+          <ReportFirefighting window_id_base="1"/>
+          <Fallback name="request">
+            <Inverter>
+              <TierAtLeast tier="1"/>
+            </Inverter>
+            <Sequence name="read_and_report">
+              <DecodeResourceRequest timeout_s="80.0" hold_s="5.0" min_frames="20"/>
+              <ReportResourceRequest/>
+            </Sequence>
+          </Fallback>
+        </Sequence>
+      </ReactiveSequence>
+
+    </Sequence>
+  </BehaviorTree>
+</root>

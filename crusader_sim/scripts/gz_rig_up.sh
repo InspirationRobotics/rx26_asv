@@ -20,6 +20,15 @@
 # NAV_MODE=off|shadow|on in the environment picks the tree's planning (default on
 # when Nav2 is present, forced off with a banner when it is not).
 #
+# TASK 3 (a course with a dock): the pan/tilt cannon tree (task3_cannon.xml) instead of
+# Task 1's, no UAV stand-in, and three more nodes:
+#     dock_slot_node (the boat's)  /livox/lidar --> /crsd/dock_slot   the slip, for SlotKeep
+#     cannon_aim_node (the boat's) /crsd/water_cannon --> /crsd/cannon_cmd + /crsd/pump_cmd
+#     task3_world (sim only)       RoboCommand's lights, the dock detector's DockObservation
+#                                  (from geometry), the water, the referee; its Gazebo half,
+#                                  task3_gz_agent, is gz_sim_up.sh's (it needs gz-transport)
+# and telemetry_bridge gets the sim's pump output (SERVO10, sitl_overlay.parm).
+#
 # SIM_DETECTOR=truth|yolo in the environment picks sim_camera's boxes: truth (default) is the
 # geometric oracle; yolo runs the team's REAL YOLO detector + LED classifier on the rendered
 # frames (crusader_sim/README.md, "The real YOLO detector in the sim"). It needs the venv from
@@ -36,6 +45,9 @@ set -uo pipefail
 COURSE="${1:-task1_core}"
 UAV=1
 [ "${2:-}" = "--no-uav" ] && UAV=0
+TASK3=0
+python3 -c "import sys; from crusader_sim import course as C; sys.exit(0 if any(e.get('type') == 'dock' for e in C.load(sys.argv[1])['elements']) else 1)" "$COURSE" 2>/dev/null && TASK3=1
+[ "$TASK3" = 1 ] && UAV=0
 WS=/root/robotx_ws
 SRC=$WS/src/rx26_asv
 CFG=$WS/install/crusader_bringup/share/crusader_bringup/config/crusader_params.yaml
@@ -48,7 +60,9 @@ if [ -n "${SIM_TUNING:-}" ]; then
 fi
 SIMSHARE=$WS/install/crusader_sim/share/crusader_sim
 BT=$WS/install/crusader_bt/share/crusader_bt/behavior_trees
-TREE="${TREE:-task1_global.xml}"    # the whole-field planner; TREE=task1_disruptive.xml = the per-gate tree
+TREE_DEFAULT=task1_global.xml      # the whole-field planner; TREE=task1_disruptive.xml = the per-gate tree
+[ "$TASK3" = 1 ] && TREE_DEFAULT=task3_cannon.xml
+TREE="${TREE:-$TREE_DEFAULT}"
 case "$TREE" in */*) ;; *) TREE="$BT/$TREE" ;; esac     # a bare name means crusader_bt's
 export GZ_PARTITION=crusader_sim
 export RX26_SRC=$SRC
@@ -91,9 +105,14 @@ fi
 up sim_camera /tmp/sim_camera.log   "${CAM_CMD[@]}" --ros-args -p course:="$COURSE" "${CAM_ARGS[@]}" ${SIM_CAMERA_ARGS:-}
 
 echo "=== the boat's stack ==="
+PUMP_ARGS=()
+# the sim's pump output, and a pump watchdog that allows for the sim running below
+# real time (with the Gazebo window open on a GTX 1080 Ti it runs at ~0.45x: a 1 s
+# burst on the autopilot's clock is ~2.2 s of the bridge's)
+[ "$TASK3" = 1 ] && PUMP_ARGS=(-p pump_servo_channel:=10 -p pump_return_timeout_s:=3.0)
 up telemetry_bridge /tmp/tb.log \
   ros2 run crusader_fcu telemetry_bridge --ros-args --params-file "$CFG" \
-  -p mav_endpoint:=udp:127.0.0.1:14551
+  -p mav_endpoint:=udp:127.0.0.1:14551 "${PUMP_ARGS[@]}"
 up lidar_cluster_node /tmp/lidar_cluster.log \
   ros2 run crusader_perception lidar_cluster_node --ros-args --params-file "$CFG"
 # rxl_endpoint on this branch is the RFD900 (/dev/crsd-rfd); the params file's
@@ -108,6 +127,16 @@ else
 fi
 up target_tracker /tmp/tt.log \
   ros2 run crusader_world_model target_tracker --ros-args --params-file "$CFG"
+if [ "$TASK3" = 1 ]; then
+  echo "=== Task 3 (the pan/tilt cannon) ==="
+  up dock_slot_node /tmp/dock_slot.log \
+    ros2 run crusader_perception dock_slot_node --ros-args --params-file "$CFG"
+  # the water is simulated, so the cannon may ask for it (on the boat: run.sh live)
+  up cannon_aim_node /tmp/cannon.log \
+    ros2 run crusader_fcu cannon_aim_node --ros-args --params-file "$CFG" -p fire_pump:=true
+  up task3_world /tmp/task3_world.log \
+    ros2 run crusader_sim task3_world --ros-args -p course:="$COURSE"
+fi
 
 # Nav2 avoidance (docs/nav2_avoidance_spec.md 10.1). The nav stack goes up BEFORE
 # bt_runner, which plans through it. NAV_MODE (env, default on): off = the legacy
@@ -127,7 +156,11 @@ if [ -n "$NAV_WHY" ]; then
   echo "  *** AVOIDANCE OFF: $NAV_WHY"
   NAV_MODE=off
 else
-  NAV_MODE="${NAV_MODE:-on}"
+  # Task 3 defaults to the straight legs: its approach is open water up to the
+  # dock, and there Nav2's costmap sees an EMPTY obstacle cloud, calls itself
+  # "not current" and refuses to plan (2026-10-05: planner timeout on every
+  # survey leg, the run failed in 97 s). NAV_MODE=on still asks for Nav2.
+  if [ "$TASK3" = 1 ]; then NAV_MODE="${NAV_MODE:-off}"; else NAV_MODE="${NAV_MODE:-on}"; fi
 fi
 if [ "$NAV_MODE" = off ]; then
   [ -n "$NAV_WHY" ] || echo "  nav stack            -- not started (NAV_MODE=off: the legacy straight legs)"

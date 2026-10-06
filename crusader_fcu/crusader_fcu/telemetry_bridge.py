@@ -53,6 +53,16 @@ Three jobs, deliberately fused into one node:
    chosen heading, which position setpoints cannot give this boat.
    NOTE: ArduRover's handling of the message is from memory until SITL (docs/G1).
 
+6. TX (payload): the pan/tilt water cannon's two servos. cannon_aim_node
+   publishes crusader_msgs/CannonCommand on /crsd/cannon_cmd (a PWM per axis);
+   this node clamps each to cannon_pwm_min..cannon_pwm_max, sends it at most
+   every cannon_min_period_s as MAV_CMD_DO_SET_SERVO on cannon_pan_channel /
+   cannon_tilt_channel (SERVO11 = AUX3, SERVO12 = AUX4; their SERVOn_FUNCTION
+   must be 0 for the autopilot to accept it), and reports both outputs from
+   SERVO_OUTPUT_RAW on /crsd/cannon_state. Like the pump, NOT mode-gated and NOT
+   latch-gated: it points a nozzle, it does not move the boat - the water itself
+   still goes through the pump's gates (job 4).
+
 The hardware e-stop (SB switch) remains below and independent of all of this.
 
 Why attitude is its OWN topic and not three more fields on LatLonHead: ATTITUDE
@@ -99,9 +109,9 @@ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
-from crusader_msgs.msg import (Attitude, FcuStatus, GuidedSetpoint, LatLonHead,
-                               GuidedHeadingSpeed, ObstacleDistance, PumpCommand,
-                               PumpState, RcChannels)
+from crusader_msgs.msg import (Attitude, CannonCommand, CannonState, FcuStatus,
+                               GuidedSetpoint, LatLonHead, GuidedHeadingSpeed,
+                               ObstacleDistance, PumpCommand, PumpState, RcChannels)
 
 from crusader_common import config as crsd_config
 from crusader_common import geo
@@ -110,7 +120,7 @@ from crusader_common.node_main import run_node
 from crusader_common.param_utils import declare_from_config
 from crusader_common.stream_cache import StreamCache
 
-from crusader_fcu import guided_hs_core, override_core, pump_core
+from crusader_fcu import cannon_aim_core, guided_hs_core, override_core, pump_core
 
 # MAVLink 2 is REQUIRED, and must be selected before pymavlink is first
 # imported anywhere in this process: mavutil binds its dialect module at
@@ -170,6 +180,20 @@ PARAM_SPEC = {
                            description="s from one burst's end to the next"),
     "pump_allow_disarmed": dict(read_only=True,
                                 description="bench only: bursts while disarmed"),
+    "pump_return_timeout_s": dict(read_only=True, lo=0.1, hi=10.0,
+                                  description="s after a burst's end the output must "
+                                              "read OFF, or the path latches off"),
+    # --- the pan/tilt cannon's servos (cannon_aim_core.ServoLimiter) ---
+    "cannon_pan_channel": dict(read_only=True, lo=0, hi=16,
+                               description="Pixhawk output of the pan servo; 0 = none"),
+    "cannon_tilt_channel": dict(read_only=True, lo=0, hi=16,
+                                description="Pixhawk output of the tilt servo; 0 = none"),
+    "cannon_pwm_min": dict(read_only=True, lo=800, hi=2200,
+                           description="us; every cannon command is clamped to this"),
+    "cannon_pwm_max": dict(read_only=True, lo=800, hi=2200,
+                           description="us; = SERVOn_MAX of both outputs"),
+    "cannon_min_period_s": dict(read_only=True, lo=0.01, hi=2.0,
+                                description="s between two commands on one axis"),
     "estop_channel": dict(read_only=True, lo=1, hi=18,
                           description="SB e-stop RC channel"),
     "hs_max_speed_mps": dict(read_only=True, lo=0.05, hi=1.5,
@@ -257,6 +281,7 @@ class TelemetryBridge(Node):
         self.rc_pub = self.create_publisher(RcChannels, "/crsd/rc_channels", 10)
         self.drop_pub = self.create_publisher(Bool, "/crsd/autonomy_drop", latched_qos)
         self.pump_pub = self.create_publisher(PumpState, "/crsd/pump_state", 10)
+        self.cannon_pub = self.create_publisher(CannonState, "/crsd/cannon_state", 10)
 
         self.create_subscription(RcChannels, "/crsd/rc_override",
                                  self._override_cb, 10)
@@ -288,6 +313,8 @@ class TelemetryBridge(Node):
         # autopilot. A topic, not a service: a service waiting on COMMAND_ACK
         # would block this single-threaded executor, force-disarm included.
         self.create_subscription(PumpCommand, "/crsd/pump_cmd", self._pump_cb, 10)
+        # The cannon's pan/tilt (job 6). Clamped and rate-limited per axis.
+        self.create_subscription(CannonCommand, "/crsd/cannon_cmd", self._cannon_cb, 10)
         # Sanctioned GUIDED heading+speed TX (job 5). Gated by the mode AND the
         # drop latch, with a dead-man; see _hs_cb.
         self.create_subscription(GuidedHeadingSpeed, "/crsd/guided_heading_speed",
@@ -317,6 +344,22 @@ class TelemetryBridge(Node):
         self._pump_result = pump_core.RESULT_NONE
         self._pump_reason = ""
         self._pump_ack_until = 0.0         # an ACK before this is ours
+        self._pump_ack_cmd = 0             # ...and of this command (the cannon sends DO_SET_SERVO too)
+        # the cannon: one limiter per axis, keyed by its output channel
+        self._cannon_ch = {"pan": int(p["cannon_pan_channel"]),
+                           "tilt": int(p["cannon_tilt_channel"])}
+        self._cannon_lim = {
+            k: cannon_aim_core.ServoLimiter(p["cannon_pwm_min"], p["cannon_pwm_max"],
+                                            p["cannon_min_period_s"])
+            for k in self._cannon_ch}
+        self._cannon_out = StreamCache(t_out)   # (pan_pwm, tilt_pwm) from SERVO_OUTPUT_RAW
+        self._cannon_reason = "no command yet"
+        if all(self._cannon_ch.values()):
+            self.get_logger().info(
+                f"cannon path: pan SERVO{self._cannon_ch['pan']}, tilt "
+                f"SERVO{self._cannon_ch['tilt']}, {p['cannon_pwm_min']}-{p['cannon_pwm_max']} us")
+        else:
+            self.get_logger().info("cannon path: none (cannon_pan/tilt_channel 0)")
         if self.pump.p.servo_channel:
             self.get_logger().info(
                 f"pump path: SERVO{self.pump.p.servo_channel} "
@@ -421,13 +464,18 @@ class TelemetryBridge(Node):
                     self._rc.set(rc, t, stamp)
                     if self.latch.rc_sample(rc, t):
                         self._handle_trip()
-                elif mtype == "SERVO_OUTPUT_RAW" and self.pump.p.servo_channel:
-                    pwm = pump_core.servo_raw(msg, self.pump.p.servo_channel)
-                    if pwm is not None:
-                        self._servo.set(pwm, t, stamp)
+                elif mtype == "SERVO_OUTPUT_RAW":
+                    if self.pump.p.servo_channel:
+                        pwm = pump_core.servo_raw(msg, self.pump.p.servo_channel)
+                        if pwm is not None:
+                            self._servo.set(pwm, t, stamp)
+                    if all(self._cannon_ch.values()):
+                        pan = pump_core.servo_raw(msg, self._cannon_ch["pan"])
+                        tilt = pump_core.servo_raw(msg, self._cannon_ch["tilt"])
+                        if pan is not None and tilt is not None:
+                            self._cannon_out.set((pan, tilt), t, stamp)
                 elif mtype == "COMMAND_ACK" and t < self._pump_ack_until and \
-                        msg.command in (pump_core.MAV_CMD_DO_REPEAT_SERVO,
-                                        pump_core.MAV_CMD_DO_SET_SERVO):
+                        msg.command == self._pump_ack_cmd:
                     # MAVProxy hands every output every ACK, and pymavlink here
                     # shares sysid 255 with it, so "ours" means "a servo ACK
                     # inside the window after we sent one". pump_min_gap_s keeps
@@ -492,6 +540,7 @@ class TelemetryBridge(Node):
             self.rc_pub.publish(m)
         try:
             self._pump_tick(t)
+            self._cannon_tick(t)
             with self._hs_lock:
                 stop = self.hs.tick(t)
             if stop is not None:
@@ -547,6 +596,7 @@ class TelemetryBridge(Node):
                 self._pump_result = pump_core.RESULT_SENT
                 self._pump_reason = f"OFF ({msg.source or '?'})"
                 self._pump_ack_until = t + 1.5
+                self._pump_ack_cmd = pump_core.MAV_CMD_DO_SET_SERVO
                 return
             ok, why = self.pump.check_burst(duration, self._pump_inputs(t))
             if not ok:
@@ -563,6 +613,7 @@ class TelemetryBridge(Node):
             self._pump_result = pump_core.RESULT_SENT
             self._pump_reason = f"burst {duration:.2f} s ({msg.source or '?'})"
             self._pump_ack_until = t + 1.5
+            self._pump_ack_cmd = pump_core.MAV_CMD_DO_REPEAT_SERVO
             self.get_logger().info(f"pump: {self._pump_reason}")
         except Exception as e:
             self._pump_result = pump_core.RESULT_REFUSED
@@ -592,6 +643,52 @@ class TelemetryBridge(Node):
         m.last_result = self._pump_result
         m.last_reason = self.pump.latched or self._pump_reason
         self.pump_pub.publish(m)
+
+    # ---------- the cannon's pan/tilt (job 6; clamped, rate-limited) ----------
+
+    def _cannon_send(self, axis, us):
+        self._pump_send(pump_core.set_servo_params(self._cannon_ch[axis], us),
+                        pump_core.MAV_CMD_DO_SET_SERVO)
+
+    def _cannon_cb(self, msg: CannonCommand):
+        """A pan/tilt PWM pair. Never raises (the executor carries force-disarm)."""
+        try:
+            if not all(self._cannon_ch.values()):
+                self._cannon_reason = "refused: no cannon path"
+                return
+            t = time.monotonic()
+            sent = []
+            for axis, pwm in (("pan", msg.pan_pwm), ("tilt", msg.tilt_pwm)):
+                us = self._cannon_lim[axis].request(int(pwm), t)
+                if us is not None:
+                    self._cannon_send(axis, us)
+                    sent.append(f"{axis} {us}")
+            if sent:
+                self._cannon_reason = (f"sent {', '.join(sent)} us ({msg.source or '?'}: "
+                                       f"pan {msg.pan_deg:+.1f} tilt {msg.tilt_deg:+.1f} deg)")
+        except Exception as e:
+            self._cannon_reason = f"error: {e}"
+            self.get_logger().error(f"cannon command failed: {e}", throttle_duration_sec=5.0)
+
+    def _cannon_tick(self, t):
+        if not all(self._cannon_ch.values()):
+            return
+        for axis in ("pan", "tilt"):                 # a command held back by the rate limit
+            us = self._cannon_lim[axis].due(t)
+            if us is not None:
+                self._cannon_send(axis, us)
+        with self._lock:
+            out = self._cannon_out.get(t)
+        m = CannonState()
+        if self._cannon_out.stamp is not None:
+            m.header.stamp = self._cannon_out.stamp
+        m.enabled = True
+        m.output_fresh = out is not None
+        m.pan_pwm, m.tilt_pwm = (int(out[0]), int(out[1])) if out is not None else (0, 0)
+        m.pan_cmd_pwm = int(self._cannon_lim["pan"].last_us or 0)
+        m.tilt_cmd_pwm = int(self._cannon_lim["tilt"].last_us or 0)
+        m.last_reason = self._cannon_reason
+        self.cannon_pub.publish(m)
 
     # ---------- GUIDED heading+speed TX (mode AND latch gated, dead-man) ----------
 

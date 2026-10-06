@@ -38,6 +38,11 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/PumpState.msg"
   "msg/WallRange.msg"
   "msg/GuidedHeadingSpeed.msg"
+  # Task 3 with the pan/tilt cannon: the slip from the LiDAR (dock_slot_node),
+  # and the cannon's two servos through telemetry_bridge (cannon_aim_node).
+  "msg/DockSlot.msg"
+  "msg/CannonCommand.msg"
+  "msg/CannonState.msg"
   # Nav2 avoidance: the known-hazard set bt_runner publishes for the costmap's
   # HazardLayer (crusader_nav_layers). Hazard must precede HazardArray.
   "msg/Hazard.msg"

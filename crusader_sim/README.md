@@ -20,7 +20,12 @@ boat's params file.
   correctly. `check_motion` passes all four checks.
 - **The hull is a placeholder** until the team sends CAD and a weight. See
   [MODEL_REQUEST.md](MODEL_REQUEST.md).
-- The Task 3 dock world is built and valid, but not yet flown.
+- **Task 3 runs end to end with the pan/tilt water cannon (2026-10-05).** `task3_cannon.xml`
+  passes the referee on `task3` (bay 2), the GREEN bay moved to 1 and 3, and `task3_ul` with
+  the camera tilted up 5 deg: docked on the LiDAR 1.1 m from the back wall (the whole hull in
+  the slip), backed out to 1.6 m to watch, the fire out after 2 s of water from the aimed
+  cannon, the reports and the code right. Checked at the GUI's ~0.45x as well as headless. One double-click:
+  `scripts/TASK3_SIM.cmd`. The whole story: [docs/T3_cannon_sim.md](../docs/T3_cannon_sim.md).
 
 ```
  Windows                    WSL2 Ubuntu-22.04                         crsd-sim container (ROS 2 Humble)
@@ -43,6 +48,7 @@ boat's params file.
 | Double-click | What it does |
 |---|---|
 | `crusader_sim/scripts/GZ_SIM_UP.cmd` | syncs your checkout into WSL, builds `crsd-sim` the first time, starts everything, locks the Gazebo camera on the boat, opens the ground station (:8090) and tree viewer (:8085), then **runs Task 1 in its own window after a 20 s countdown** (press N to skip it and drive yourself). Running it again restarts from scratch, with the boat back at the start |
+| `crusader_sim/scripts/TASK3_SIM.cmd` | the same on the Task 3 dock (`GZ_SIM_UP.cmd task3`): after the countdown it runs the whole Task 3 with the pan/tilt cannon (`gz_task3.sh`) and prints the referee's verdict. Log: `~/.cache/crusader_sim/task3_last.log` (WSL), the world's `/tmp/task3_world.log` (container) |
 | `crusader_sim/scripts/GZ_SIM_DOWN.cmd` | stops the rig and container, SITL, the transmitter and Gazebo, then releases the hidden WSL keep-alive (`gz_keepalive.sh`). WSL itself is left to idle out, because the distro is shared |
 
 The Gazebo window appears on the desktop through WSLg. The last Task 1 run's
@@ -511,6 +517,9 @@ manual, spins in AUTO". Fix it in the YAML, never in the params.
 | `crusader_sim/livox_shim.py`, `sim_camera.py` | `crsd-sim` | Gazebo sensors → the boat's driver topics |
 | `crusader_sim/yolo_detect.py`, `scripts/setup_yolo_venv.sh` | `crsd-sim` / WSL | the real YOLO + LED classifier on sim frames and its score; the venv + model-copy script (`SIM_DETECTOR=yolo`) |
 | `crusader_sim/sim_uav.py` | `crsd-sim` | Ekko's Task 1 radio, from the course's truth |
+| `crusader_sim/task3_world.py` | `crsd-sim` | Task 3: RoboCommand's lights, the dock detector's DockObservation from geometry (`tools/task3_sim/world.py`'s), the water, the referee |
+| `crusader_sim/task3_gz_agent.py` | WSL | Task 3: recolours the dock's windows and draws the water in Gazebo, on task3_world's word (udp 14558) |
+| `crusader_sim/task3_goal.py`, `scripts/gz_task3.sh` | `crsd-sim` / WSL | the Task 3 operator: arm, WP_RADIUS 0.3, GUIDED, latch reset, goal, MANUAL at the hand-over, the verdict |
 | `crusader_sim/sim_transmitter.py` | WSL | the RC transmitter |
 | `crusader_sim/task1_goal.py`, `manual_drive.py`, `check_motion.py` | `crsd-sim` / WSL | operator tools |
 | `crusader_sim/task1_judge.py` | `crsd-sim` | independent Task 1 referee, from ground truth; also the minimum-clearance figure (`--selftest`) |

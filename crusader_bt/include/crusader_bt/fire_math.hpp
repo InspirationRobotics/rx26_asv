@@ -784,7 +784,25 @@ struct StrafeParams
   // axis alone (-1 = min_us): this hull barely slides below ~50 us.
   double coast_lat_s = 1.5;
   double lat_min_us = -1.0;
+  // Surge and sway: inside the deadband the law commands NOTHING, so a hull
+  // with little drag coasts straight through it and gets a fresh kick from the
+  // other side - a limit cycle (the sim's Task 3 berth, 2026-10-05: +-11 cm about
+  // 1.6 m, 9 s period, forever). brake_mps: in the band and still moving faster
+  // than this, the D term alone brakes (deadband-compensated). NaN = never, the
+  // fixed-nozzle trees' tune; SlotKeep sets it.
+  double brake_mps = kNaN;
 };
+
+// The brake for one axis inside its band: -kd * rate, deadband-compensated and
+// capped, when |rate| > brake; 0 otherwise. `rate` is d(err)/dt in axisLaw's
+// sense (+ = the error growing).
+inline double bandBrake(double rate, double kd, double brake, double min_us, double max_us)
+{
+  if (!std::isfinite(brake) || !std::isfinite(rate) || std::fabs(rate) <= brake) {return 0.0;}
+  const double u = kd * rate;
+  if (u == 0.0) {return 0.0;}
+  return std::copysign(std::min(min_us + std::fabs(u), max_us), u);
+}
 
 // Live overrides of the keep's gains, from bt_runner_node's strafe.* parameters
 // (the ground station's Tuning tab, or ros2 param set), so a tune on the water
@@ -915,9 +933,17 @@ inline StrafeCmd strafeKeep(
     const double pd_fwd = axisLaw(rerr, in.range_rate, p.kp_fwd, p.kd_fwd, p.deadband_range_m,
         p.min_us, p.max_us);
     // window LEFT of the line -> slide left -> lateral stick NEGATIVE (+ = starboard)
-    const double pd_lat = -axisLaw(in.lat_err_m, in.lat_rate, p.kp_lat, p.kd_lat,
+    double pd_lat = -axisLaw(in.lat_err_m, in.lat_rate, p.kp_lat, p.kd_lat,
         p.deadband_lat_m, p.lat_min_us >= 0.0 ? p.lat_min_us : p.min_us, p.max_us, p.coast_lat_s);
-    c.correcting = yawing || pd_fwd != 0.0 || pd_lat != 0.0;
+    double pd_fwd_b = pd_fwd;
+    if (pd_fwd_b == 0.0 && c.range_ok) {
+      pd_fwd_b = bandBrake(in.range_rate, p.kd_fwd, p.brake_mps, p.min_us, p.max_us);
+    }
+    if (pd_lat == 0.0 && c.lat_ok) {
+      pd_lat = -bandBrake(in.lat_rate, p.kd_lat, p.brake_mps,
+          p.lat_min_us >= 0.0 ? p.lat_min_us : p.min_us, p.max_us);
+    }
+    c.correcting = yawing || pd_fwd_b != 0.0 || pd_lat != 0.0;
     const double h = std::max(0.0, dt);
     auto still = [&p](double r) {return !std::isfinite(r) || std::fabs(r) < p.i_rate_mps;};
     if (std::isfinite(rerr) && std::fabs(rerr) < p.i_zone_m && still(in.range_rate)) {
@@ -926,7 +952,7 @@ inline StrafeCmd strafeKeep(
     if (std::isfinite(in.lat_err_m) && std::fabs(in.lat_err_m) < p.i_zone_m && still(in.lat_rate)) {
       st.i_lat = std::clamp(st.i_lat - p.ki_lat * in.lat_err_m * h, -p.i_max_us, p.i_max_us);
     }
-    want.fwd_us = std::isfinite(rerr) ? std::clamp(pd_fwd + st.i_fwd, -p.max_us, p.max_us) : 0.0;
+    want.fwd_us = std::isfinite(rerr) ? std::clamp(pd_fwd_b + st.i_fwd, -p.max_us, p.max_us) : 0.0;
     want.lat_us = std::isfinite(in.lat_err_m) ?
       std::clamp(pd_lat + st.i_lat, -p.max_us, p.max_us) : 0.0;
     if (want.fwd_us > 0.0 && std::isfinite(in.range_m) && in.range_m <= p.min_range_m) {

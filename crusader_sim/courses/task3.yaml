@@ -3,11 +3,27 @@
 # Dock geometry mirrors tools/task3_sim/world.py (the team's no-ROS Task 3 sim)
 # so the Task 3 tree sees the same course in both: dock back edge 20 m north of
 # the start, bays opening SOUTH (world.py facing 180 compass = ENU yaw -90).
+# Deck 0.3 m above the water (the course's, not the practice dock's 0.05).
 # Handbook: 3.3.4 + docking-bay-structure.md; see gen_world.dock() for sources.
 #
 # USV job (3.3.4:13-51): find the GREEN bay, dock fully, DockingReport, spray the
-# lit window until RED -> GREEN, FirefightingReport. The lit window starts RED
-# here ("on fire"); the beacon_driver node can switch it.
+# lit window until RED -> GREEN, FirefightingReport; Advanced/Disruptive also
+# read the colour code and send the ResourceDeliveryRequest.
+#
+# RoboCommand is crusader_sim.task3_world: it lights `lit_window` RED once the
+# boat reports docking in the GREEN bay (and is really in it), turns it GREEN
+# after `extinguish_s` of water on the window (5 s), then flashes `code` for
+# 60 s (Disruptive: c1 1 s, off 1 s, c2 1 s, off 2 s). The windows start dark.
+#
+# THE LIT WINDOW IS THE LOWER-RIGHT (slot 1) HERE ON PURPOSE. The cannon tree
+# docks with the LiDAR 1.1 m from the deck edge, then backs out to 1.6 m to watch
+# the fire and the code. With the CV's 188-row hull band the camera sees nothing
+# more than ~19 deg above its axis, so a LEVEL camera sees 40% of the lower-right
+# window from 1.1 m (under the detector's 50%) and the whole of it from 1.6 m,
+# but the upper-left one (17-26 deg up from 1.6 m) never well enough for the
+# dock detector to report it.
+# courses/task3_ul.yaml is the same course with the upper-left lit: it shows
+# exactly that, until the camera is tilted up ~5 deg (cam_pitch_deg -5).
 #
 # The platforms and UAV pad are the UAV's half of Task 3 (tins, 40-50 g). Their
 # positions are image only (3.3.4:7) — placed for looks, not from the handbook.
@@ -18,6 +34,10 @@ draft_m: 0.24
 depth_m: 5.0
 boat_start: {x: 0.0, y: 0.0, yaw_deg: 90.0}
 tier: disruptive
+# RoboCommand (task3_world): the colour code after the fire (resource tin,
+# delivery circle) and how long the water must be on the window for GREEN
+code: [red, blue]
+extinguish_s: 2.0
 
 elements:
   - type: dock
@@ -26,7 +46,7 @@ elements:
     y: 20.0
     facing_deg: -90.0          # ENU yaw the faces point OUT (-90 = south)
     green_bay: 2               # 1..3, left to right as seen from the water
-    lit_window: {bay: 2, slot: 0, colour: red}   # slot 0 = upper-left, 1 = lower-right
+    lit_window: {bay: 2, slot: 1, colour: red}   # slot 0 = upper-left, 1 = lower-right
   - {type: platform, name: platform_red,  x: -10.0, y: 12.0, circle: red}
   - {type: platform, name: platform_blue, x:  10.0, y: 12.0, circle: blue}
   - {type: launch_pad, name: uav_pad, x: -6.0, y: -4.0}

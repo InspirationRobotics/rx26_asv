@@ -20,6 +20,8 @@ setup(
     entry_points={
         "console_scripts": [
             "telemetry_bridge = crusader_fcu.telemetry_bridge:main",
+            # Task 3 pan/tilt cannon: /crsd/water_cannon -> the servos and the pump
+            "cannon_aim_node = crusader_fcu.cannon_aim_node:main",
         ],
     },
 )

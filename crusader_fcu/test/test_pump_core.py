@@ -102,8 +102,20 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(pc.set_servo_params(10, 1000), (10.0, 1000.0, 0, 0, 0, 0, 0))
 
     def test_command_ids(self):
+        # MAVLink common.xml: DO_SET_SERVO 183, DO_REPEAT_SERVO 184 (211 is
+        # DO_GRIPPER - the value this file once pinned, and the autopilot
+        # refused every burst for it)
         self.assertEqual(pc.MAV_CMD_DO_SET_SERVO, 183)
-        self.assertEqual(pc.MAV_CMD_DO_REPEAT_SERVO, 211)
+        self.assertEqual(pc.MAV_CMD_DO_REPEAT_SERVO, 184)
+
+    def test_command_ids_match_pymavlink(self):
+        try:
+            os.environ.setdefault("MAVLINK20", "1")
+            from pymavlink import mavutil
+        except ImportError:
+            self.skipTest("no pymavlink here")
+        self.assertEqual(pc.MAV_CMD_DO_SET_SERVO, mavutil.mavlink.MAV_CMD_DO_SET_SERVO)
+        self.assertEqual(pc.MAV_CMD_DO_REPEAT_SERVO, mavutil.mavlink.MAV_CMD_DO_REPEAT_SERVO)
 
     def test_is_on_either_polarity(self):
         self.assertTrue(P.is_on(1990))

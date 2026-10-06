@@ -13,6 +13,15 @@ Two sources, on purpose:
 The ArduPilotPlugin block is what makes this an ArduRover vehicle: SITL runs the
 boat's real mixer (FRAME_TYPE=2 OmniX) and sends SERVO1..4 PWM here over JSON;
 each PWM becomes a thrust in newtons on one gz Thruster.
+
+TASK 3's PAN/TILT CANNON rides on the same plugin, so the sim drives it down the
+boat's own path (cannon_aim_node -> telemetry_bridge -> DO_SET_SERVO -> the
+autopilot's SERVO11/12 -> here): SERVO11 turns the pan joint and SERVO12 the tilt
+joint, each through a JointPositionController, with the PWM-to-angle map and the
+pivot's position read from crusader_params.yaml's cannon_aim_node section - the
+numbers the aim itself uses. SERVO10 (the pump output in the sim) is relayed as
+a 0..1 command on /crusader/pump; crusader_sim.task3_world flies the water when
+it is on. A JointStatePublisher reports both angles.
 """
 import argparse
 import math
@@ -28,6 +37,106 @@ RHO_WATER = 1000.0
 # visibility bit the MID360's mask excludes (= gen_world.WATER_FLAG): visuals
 # carrying ONLY this bit are invisible to the LiDAR, visible to the camera
 LIDAR_HIDDEN = 2
+
+
+def _cannon_mount(params_path):
+    """The pan/tilt pivot and servo map: cannon_aim_node's section (the aim's own
+    numbers). None if the params file has no cannon (an older checkout)."""
+    with open(params_path, encoding="utf-8") as f:
+        p = yaml.safe_load(f)
+    sec = p.get("cannon_aim_node", {}).get("ros__parameters")
+    if not sec:
+        return None
+    return {k: float(sec[k]) for k in (
+        "nozzle_x", "nozzle_y", "nozzle_z", "pan_center_us", "pan_us_per_deg", "pan_sign",
+        "tilt_center_us", "tilt_us_per_deg", "tilt_sign", "pwm_min", "pwm_max")}
+
+
+# SITL outputs (SERVOn) and what they drive here
+PUMP_SERVO, PAN_SERVO, TILT_SERVO = 10, 11, 12
+PUMP_TOPIC = "/crusader/pump"
+PAN_TOPIC = "/crusader/cannon/pan_cmd"
+TILT_TOPIC = "/crusader/cannon/tilt_cmd"
+
+
+def servo_command(prefix, c):
+    """ArduPilotPlugin's COMMAND mapping for one cannon servo: it publishes
+    multiplier * ((pwm - min) / (max - min) + offset), which must be the angle
+    in RADIANS that cannon_aim_core.ServoMap gives that PWM:
+        deg = sign * (pwm - centre) / us_per_deg."""
+    lo, hi = c["pwm_min"], c["pwm_max"]
+    mult = c[prefix + "_sign"] * math.radians((hi - lo) / c[prefix + "_us_per_deg"])
+    offset = -(c[prefix + "_center_us"] - lo) / (hi - lo)
+    return mult, offset, lo, hi
+
+
+def _cannon(c):
+    """Links, joints and plugins of the pan/tilt cannon and the pump relay, and
+    their ArduPilotPlugin <control> blocks. ("", "", "") without a cannon."""
+    if c is None:
+        return "", "", ""
+    nx, ny, nz = c["nozzle_x"], c["nozzle_y"], c["nozzle_z"]
+    lim = []
+    for ax in ("pan", "tilt"):
+        mult, off, lo, hi = servo_command(ax, c)
+        a, b = mult * (0.0 + off), mult * (1.0 + off)
+        lim.append((min(a, b), max(a, b)))
+    m = 0.05
+    inertia = S.box_inertia(m, 0.04, 0.04, 0.04)
+    links = (
+        # pan: a turntable about the hull's up axis (+ = LEFT)
+        f'<link name="cannon_pan">{S.pose(nx, ny, nz)}'
+        f"<inertial>{inertia}</inertial>"
+        f'{S.visual("base", S.cylinder(0.03, 0.03), "metal", S.pose(0, 0, -0.03))}</link>'
+        '<joint name="cannon_pan_joint" type="revolute">'
+        "<parent>base_link</parent><child>cannon_pan</child>"
+        f"<axis><xyz>0 0 1</xyz><limit><lower>{lim[0][0]:.4f}</lower><upper>{lim[0][1]:.4f}</upper>"
+        "<effort>50</effort><velocity>8</velocity></limit>"
+        "<dynamics><damping>0.05</damping></dynamics></axis></joint>"
+        # tilt: the barrel, about the pan link's y; axis -y so + raises the nozzle
+        f'<link name="cannon_tilt">{S.pose(nx, ny, nz)}'
+        f"<inertial>{inertia}</inertial>"
+        f'{S.visual("barrel", S.cylinder(0.012, 0.16), "orange", S.pose(0.08, 0, 0, 0, math.pi / 2, 0))}'
+        f'{S.visual("tip", S.sphere(0.016), "blue", S.pose(0.16, 0, 0))}</link>'
+        '<joint name="cannon_tilt_joint" type="revolute">'
+        "<parent>cannon_pan</parent><child>cannon_tilt</child>"
+        f"<axis><xyz>0 -1 0</xyz><limit><lower>{lim[1][0]:.4f}</lower><upper>{lim[1][1]:.4f}</upper>"
+        "<effort>50</effort><velocity>8</velocity></limit>"
+        "<dynamics><damping>0.05</damping></dynamics></axis></joint>"
+        # the pump relay: ArduPilotPlugin needs a joint for every control
+        f'<link name="pump_relay">{S.pose(0.0, 0.0, 0.3)}<inertial>{inertia}</inertial></link>'
+        '<joint name="pump_relay_joint" type="fixed">'
+        "<parent>base_link</parent><child>pump_relay</child></joint>")
+    plugins = ""
+    for ax, topic in (("pan", PAN_TOPIC), ("tilt", TILT_TOPIC)):
+        # velocity-commanded: the servo turns at up to cmd_max rad/s to the angle
+        plugins += (
+            '<plugin filename="gz-sim-joint-position-controller-system" '
+            'name="gz::sim::systems::JointPositionController">'
+            f"<joint_name>cannon_{ax}_joint</joint_name><topic>{topic}</topic>"
+            "<use_velocity_commands>true</use_velocity_commands>"
+            "<p_gain>12</p_gain><i_gain>0</i_gain><d_gain>0</d_gain>"
+            "<cmd_max>6.0</cmd_max><cmd_min>-6.0</cmd_min></plugin>")
+    plugins += (
+        '<plugin filename="gz-sim-joint-state-publisher-system" '
+        'name="gz::sim::systems::JointStatePublisher">'
+        "<joint_name>cannon_pan_joint</joint_name><joint_name>cannon_tilt_joint</joint_name>"
+        "<update_rate>30</update_rate></plugin>")      # every 1 ms step otherwise
+    controls = ""
+    for ax, servo, topic in (("pan", PAN_SERVO, PAN_TOPIC), ("tilt", TILT_SERVO, TILT_TOPIC)):
+        mult, off, lo, hi = servo_command(ax, c)
+        controls += (
+            f'<control channel="{servo - 1}"><jointName>cannon_{ax}_joint</jointName>'
+            f"<type>COMMAND</type><cmd_topic>{topic}</cmd_topic>"
+            f"<multiplier>{mult:.5f}</multiplier><offset>{off:.5f}</offset>"
+            f"<servo_min>{lo:.0f}</servo_min><servo_max>{hi:.0f}</servo_max></control>")
+    # the pump output: 1000 us off .. 2000 us on -> 0 .. 1
+    controls += (
+        f'<control channel="{PUMP_SERVO - 1}"><jointName>pump_relay_joint</jointName>'
+        f"<type>COMMAND</type><cmd_topic>{PUMP_TOPIC}</cmd_topic>"
+        "<multiplier>1</multiplier><offset>0</offset>"
+        "<servo_min>1000</servo_min><servo_max>2000</servo_max></control>")
+    return links, plugins, controls
 
 
 def _sensor_mounts(params_path):
@@ -301,13 +410,16 @@ def build(hull_path, params_path):
     mounts = _sensor_mounts(params_path)
     inertial, hull_geo, w_buoy = _hull_links(cfg["hull"], len(cfg["thrusters"]["units"]))
     th_links, th_plugins, controls = _thrusters(cfg["thrusters"])
+    cannon = _cannon_mount(params_path)
+    cn_links, cn_plugins, cn_controls = _cannon(cannon)
     sensors, sensor_vis = _sensors(cfg["sensors"], mounts)
     sdf = (
         '<?xml version="1.0"?>\n<sdf version="1.9"><model name="crusader">'
         '<link name="base_link">'
         f"{inertial}{hull_geo}{sensor_vis}{sensors}</link>"
-        f"{th_links}"
-        f"{_hydrodynamics(cfg['damping'])}{th_plugins}{_ardupilot_plugin(controls)}"
+        f"{th_links}{cn_links}"
+        f"{_hydrodynamics(cfg['damping'])}{th_plugins}{cn_plugins}"
+        f"{_ardupilot_plugin(controls + cn_controls)}"
         # ground truth for the sim's own nodes (sim_camera's oracle) ONLY —
         # the boat's stack never sees it; it gets /crsd/pose from SITL's EKF
         '<plugin filename="gz-sim-odometry-publisher-system" '
@@ -316,7 +428,10 @@ def build(hull_path, params_path):
         "<odom_publish_frequency>50</odom_publish_frequency><dimensions>3</dimensions>"
         "</plugin>"
         "</model></sdf>\n")
-    return sdf, {"buoyant_pontoon_width_m": round(w_buoy, 4), **mounts}
+    info = {"buoyant_pontoon_width_m": round(w_buoy, 4), **mounts}
+    if cannon:
+        info["cannon_pivot"] = (cannon["nozzle_x"], cannon["nozzle_y"], cannon["nozzle_z"])
+    return sdf, info
 
 
 def write_model(out_dir, hull_path=None, params_path=None):

@@ -1,0 +1,29 @@
+# task3_bay3 — courses/task3.yaml with the GREEN bay on the RIGHT (bay 3 of 1..3,
+# numbered left to right as seen from the water), and the fire in its lower-right
+# window. The middle bay and the other side one are RED.
+#
+# The question this course answers: does the approach pick and line up on a side
+# bay (the camera sees it off to one side on the way in, and the LiDAR then has a
+# neighbouring slip beside it) as well as the middle one? See task3.yaml's header
+# for the lights, RoboCommand and the camera, and docs/T3_cannon_sim.md for the runs.
+
+name: task3_bay3
+origin: {lat: 1.28060, lon: 103.85570}
+draft_m: 0.24
+depth_m: 5.0
+boat_start: {x: 0.0, y: 0.0, yaw_deg: 90.0}
+tier: disruptive
+code: [green, blue]
+extinguish_s: 2.0
+
+elements:
+  - type: dock
+    name: dock
+    x: 0.0
+    y: 20.0
+    facing_deg: -90.0
+    green_bay: 3
+    lit_window: {bay: 3, slot: 1, colour: red}   # the lower-right
+  - {type: platform, name: platform_red,  x: -10.0, y: 12.0, circle: red}
+  - {type: platform, name: platform_blue, x:  10.0, y: 12.0, circle: blue}
+  - {type: launch_pad, name: uav_pad, x: -6.0, y: -4.0}

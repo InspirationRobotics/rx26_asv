@@ -140,6 +140,25 @@ public:
   }
 };
 
+/// The LiDAR has found the slip recently (/crsd/dock_slot: side walls and the
+/// back wall). SlotKeep's every axis comes from it.
+class DockSlotAlive : public CrusaderCondition
+{
+public:
+  DockSlotAlive(const std::string & n, const BT::NodeConfig & c) : CrusaderCondition(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {BT::InputPort<double>("max_age_s", 2.0, "seconds without a VALID slip")};
+  }
+  BT::NodeStatus tick() override
+  {
+    const double max_age = getInput<double>("max_age_s").value_or(2.0);
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    return ctx_->slot.valid_age(ctx_->now_s) <= max_age ? BT::NodeStatus::SUCCESS :
+           BT::NodeStatus::FAILURE;
+  }
+};
+
 /// Attitude is arriving: without it "steady" is a guess.
 class AttitudeAlive : public CrusaderCondition
 {
@@ -858,6 +877,9 @@ public:
       BT::InputPort<double>("hold_s", 1.0, "everything true for this long"),
       BT::InputPort<double>("gap_s", 2.0, "from the last burst's end"),
       BT::InputPort<double>("timeout_s", 60.0, "give up after this"),
+      BT::InputPort<bool>("steady", true,
+        "also the hull still and the sticks quiet (a FIXED nozzle aims with the hull); "
+        "false for docking with the pan/tilt cannon, which aims itself"),
     };
   }
 
@@ -878,6 +900,7 @@ public:
     const double target = getInput<double>("fire_range_m").value_or(1.4);
     const double gap = getInput<double>("gap_s").value_or(2.0);
     const double timeout = getInput<double>("timeout_s").value_or(60.0);
+    const bool need_steady = getInput<bool>("steady").value_or(true);
     std::string why;
     bool held = false;
     double now = 0.0;
@@ -906,7 +929,7 @@ public:
       } else if (std::fabs(si.yaw_err_deg) > ytol) {
         std::snprintf(buf, sizeof(buf), "%+.1f deg off square", si.yaw_err_deg);
         why = buf;
-      } else if (!st.steady) {
+      } else if (need_steady && !st.steady) {
         why = "not steady: " + st.why;
       }
       held = gate_.update(now, why.empty());
@@ -931,6 +954,304 @@ public:
 private:
   fire::SolutionGate gate_;
   double t0_ = 0.0;
+};
+
+/// Task 3 with the pan/tilt cannon: hold the berth on the STICKS (MANUAL, RC
+/// override) from the LiDAR's slip alone (/crsd/dock_slot): the LiDAR
+/// `standoff_m` from the back wall (surge), the hull on the slip's centreline
+/// (sway), the bow square to the slip's side walls (yaw, closed on the compass
+/// as StrafeKeep's is, so one dropped sweep does not drop the heading). The
+/// camera only aims the cannon now; nothing here waits for a window.
+///
+/// The controller is StrafeKeep's (fire::strafeKeep): the same deadband
+/// compensation, integrators, caps, slew and "square first" rule, the same
+/// gains, and the same live strafe.* overrides. It writes the same strafe_in /
+/// strafe_block, so AwaitStrafeSolution judges "docked" for it unchanged (with
+/// fire_range_m = standoff_m). ALWAYS SUCCESS: "not there yet" is a stick
+/// command and a reason, never a FAILURE.
+class SlotKeep : public CrusaderSyncAction
+{
+public:
+  SlotKeep(const std::string & n, const BT::NodeConfig & c) : CrusaderSyncAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<double>("standoff_m", 1.1, "LiDAR -> back wall to hold (along the slip)"),
+      BT::InputPort<double>("lateral_bias_m", 0.0,
+        "+ holds the hull this far LEFT of the slip's centreline"),
+      BT::InputPort<double>("slot_timeout_s", 0.6, "slip older than this: every stick at zero"),
+      BT::InputPort<double>("deadband_range_m", 0.04, ""),
+      BT::InputPort<double>("deadband_lat_m", 0.04, ""),
+      BT::InputPort<double>("deadband_yaw_deg", 2.0, ""),
+      BT::InputPort<double>("kp_fwd", 90.0, "us per m"),
+      BT::InputPort<double>("kd_fwd", 60.0, "us per m/s"),
+      BT::InputPort<double>("kp_lat", 90.0, "us per m"),
+      BT::InputPort<double>("kd_lat", 60.0, "us per m/s"),
+      BT::InputPort<double>("kp_yaw", 4.0, "us per deg"),
+      BT::InputPort<double>("kd_yaw", 3.0, "us per deg/s"),
+      BT::InputPort<double>("min_us", 30.0, "added to every correction: the ESC deadband"),
+      BT::InputPort<double>("max_us", 120.0, "deflection cap (the bridge caps it too)"),
+      BT::InputPort<double>("slew_us_s", 200.0, "per axis"),
+      BT::InputPort<double>("min_range_m", 0.9, "never push ahead with the LiDAR inside this"),
+      BT::InputPort<double>("square_first_deg", 10.0, "further off square: turn only"),
+      BT::InputPort<double>("ki_fwd", 20.0, "us per m.s (holds against a current)"),
+      BT::InputPort<double>("ki_lat", 20.0, "us per m.s"),
+      BT::InputPort<double>("i_max_us", 80.0, "integral cap"),
+      BT::InputPort<double>("brake_mps", 0.03,
+        "in the deadband but moving faster than this: brake (0 = never)"),
+    };
+  }
+
+  BT::NodeStatus tick() override
+  {
+    fire::StrafeParams sp;
+    auto in = [this](const char * k, double d) {return getInput<double>(k).value_or(d);};
+    sp.fire_range_m = in("standoff_m", 1.1);
+    sp.brake_mps = in("brake_mps", 0.03) > 0.0 ? in("brake_mps", 0.03) : fire::kNaN;
+    sp.deadband_range_m = in("deadband_range_m", 0.04);
+    sp.deadband_lat_m = in("deadband_lat_m", 0.04);
+    sp.deadband_yaw_deg = in("deadband_yaw_deg", 2.0);
+    sp.kp_fwd = in("kp_fwd", sp.kp_fwd); sp.kd_fwd = in("kd_fwd", sp.kd_fwd);
+    sp.kp_lat = in("kp_lat", sp.kp_lat); sp.kd_lat = in("kd_lat", 60.0);
+    sp.kp_yaw = in("kp_yaw", sp.kp_yaw); sp.kd_yaw = in("kd_yaw", sp.kd_yaw);
+    sp.ki_fwd = in("ki_fwd", sp.ki_fwd); sp.ki_lat = in("ki_lat", 20.0);
+    sp.i_max_us = in("i_max_us", sp.i_max_us);
+    sp.min_us = in("min_us", sp.min_us); sp.max_us = in("max_us", sp.max_us);
+    sp.slew_us_s = in("slew_us_s", sp.slew_us_s);
+    sp.min_range_m = in("min_range_m", 0.9);
+    sp.square_first_deg = in("square_first_deg", sp.square_first_deg);
+    const double bias = in("lateral_bias_m", 0.0), slot_to = in("slot_timeout_s", 0.6);
+
+    fire::StrafeCmd cmd;
+    fire::StrafeInputs si;
+    bool publish = false;
+    std::string tuned, block;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      const double now = ctx_->now_s;
+      tuned = ctx_->strafe_tune.apply(sp);
+      const double rate_s = ctx_->strafe_tune.rate_window_s >= 0.0 ?
+        ctx_->strafe_tune.rate_window_s : 0.8;
+      const bool fresh = ctx_->slot.valid_age(now) <= slot_to;
+      if (fresh) {
+        si.range_m = ctx_->slot.range(now);
+        si.range_rate = ctx_->slot.rate(now, rate_s);
+        si.lat_err_m = ctx_->slot.lat(now) - bias;
+        si.lat_rate = ctx_->slot_lat.slope(now, rate_s);
+        // the heading that squares the bow to the slip, from each sweep's own
+        // heading: held through a turn, as StrafeKeep's face heading is
+        const double square = ctx_->slot.inward_deg(now);
+        if (std::isfinite(square) && std::isfinite(ctx_->heading_deg)) {
+          si.yaw_err_deg = fire::wrap180(square - ctx_->heading_deg);
+        }
+      } else {
+        block = "no slip from the LiDAR" + (ctx_->slot_why.empty() ? std::string() :
+          " (" + ctx_->slot_why + ")");
+      }
+      si.yaw_rate_dps = ctx_->yaw_rate_dps;
+      const double dt = ctx_->last_strafe_t < 0 ? 0.1 :
+        std::max(0.0, now - ctx_->last_strafe_t);
+      ctx_->last_strafe_t = now;
+      if (!block.empty()) {
+        cmd.why = block;                        // hold still: every stick at zero
+      } else {
+        cmd = fire::strafeKeep(sp, si, ctx_->strafe_state, dt);
+      }
+      ctx_->strafe_state.prev = cmd.sticks;
+      ctx_->strafe = cmd;
+      ctx_->strafe_in = si;
+      ctx_->strafe_block = block;
+      ctx_->steady.feed_cmd(now, cmd.correcting ? 1.0 : 0.0);
+      publish = ctx_->publish_setpoints;
+      if (publish) {ctx_->sticks_commanded = true;}
+      if (ctx_->task3_phase.rfind("LINE UP", 0) != 0) {
+        ctx_->task3_phase = "SLOT: " + cmd.why;
+      }
+    }
+    if (publish && ctx_->sticks) {
+      ctx_->sticks(cmd.sticks.fwd_us, cmd.sticks.lat_us, cmd.sticks.yaw_us);
+    }
+    if (ctx_->node) {
+      const std::string live = tuned.empty() ? "" : " [live: " + tuned + "]";
+      RCLCPP_INFO_THROTTLE(log(), *ctx_->node->get_clock(), 1000,
+        "slot: LiDAR %.2f m from the back wall, centreline %+.2f m left, square %+.1f deg | "
+        "sticks fwd %+.0f lat %+.0f yaw %+.0f us (%s)%s%s",
+        si.range_m, si.lat_err_m, si.yaw_err_deg, cmd.sticks.fwd_us, cmd.sticks.lat_us,
+        cmd.sticks.yaw_us, cmd.why.c_str(),
+        publish ? "" : " [shadow: publish_setpoints is off]", live.c_str());
+    }
+    return BT::NodeStatus::SUCCESS;
+  }
+};
+
+/// Wait for the autopilot to be in `mode` - for a mission whose next part runs
+/// in another mode than the last (Task 3: the approach in GUIDED, the dock and
+/// the shot in MANUAL). The TREE NEVER CHANGES THE MODE: the pilot does, on SC
+/// (or the sim's operator script, on /crsd/set_mode). RUNNING until then, with
+/// the phase saying what it waits for; FAILURE after timeout_s.
+class AwaitMode : public CrusaderAction
+{
+public:
+  AwaitMode(const std::string & n, const BT::NodeConfig & c) : CrusaderAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<std::string>("mode", "MANUAL", "the mode to wait for"),
+      BT::InputPort<double>("timeout_s", 120.0, "give up after this")};
+  }
+
+  BT::NodeStatus onStart() override
+  {
+    want_ = getInput<std::string>("mode").value_or("MANUAL");
+    for (auto & ch : want_) {ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));}
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      t0_ = ctx_->now_s;
+      ctx_->task3_phase = "WAITING FOR " + want_ + " (SC)";
+    }
+    RCLCPP_INFO(log(), "waiting for the pilot to select %s (SC)", want_.c_str());
+    return onRunning();
+  }
+
+  BT::NodeStatus onRunning() override
+  {
+    double now = 0.0;
+    std::string mode;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      now = ctx_->now_s;
+      mode = ctx_->mode;
+      ctx_->task3_phase = "WAITING FOR " + want_ + " (SC)";
+    }
+    if (mode == want_) {
+      RCLCPP_INFO(log(), "mode is %s after %.1f s", want_.c_str(), now - t0_);
+      return BT::NodeStatus::SUCCESS;
+    }
+    if (now - t0_ > getInput<double>("timeout_s").value_or(120.0)) {
+      RCLCPP_WARN(log(), "AwaitMode: still %s after %.0f s, not %s", mode.c_str(),
+        now - t0_, want_.c_str());
+      return BT::NodeStatus::FAILURE;
+    }
+    return BT::NodeStatus::RUNNING;
+  }
+
+  void onHalted() override {}
+
+private:
+  std::string want_;
+  double t0_ = 0.0;
+};
+
+/// Turn the bow straight into the committed bay's slip, on the yaw STICK only
+/// (MANUAL): the heading along -berth.out (face -> water, reversed), from the
+/// berth the approach computed. GUIDED setpoints carry no heading, so the
+/// approach can stop on the line-up point pointing anywhere (bay 1 in the sim,
+/// 2026-10-05: 74 deg off), and the LiDAR then has no slip ahead to see. SUCCESS
+/// once within tol_deg and nearly still for hold_s; FAILURE with no berth, no
+/// heading, or after turn_timeout_s. Shadow: succeeds at once (it cannot turn).
+class FaceBay : public CrusaderAction
+{
+public:
+  FaceBay(const std::string & n, const BT::NodeConfig & c) : CrusaderAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<double>("tol_deg", 6.0, "close enough to straight in"),
+      BT::InputPort<double>("hold_s", 0.5, "...and nearly still this long"),
+      BT::InputPort<double>("kp_yaw", 4.0, "us per deg"),
+      BT::InputPort<double>("kd_yaw", 1.0, "us per deg/s"),
+      BT::InputPort<double>("min_us", 30.0, "smallest yaw stick that turns the hull"),
+      BT::InputPort<double>("max_us", 100.0, "yaw stick cap"),
+      BT::InputPort<double>("turn_timeout_s", 30.0, "longer than this: FAILURE"),
+    };
+  }
+
+  BT::NodeStatus onStart() override
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    nav::Vec2 out{0.0, 0.0};
+    if (ctx_->berth.ok) {
+      out = ctx_->berth.out;
+    } else if (const dock::BayTrack * t = ctx_->dock.find(ctx_->chosen_track)) {
+      out = t->outward();
+    }
+    if (nav::norm(out) < 1e-6 || !std::isfinite(ctx_->heading_deg)) {
+      RCLCPP_WARN(log(), "FaceBay: no committed bay (or no heading) to face");
+      return BT::NodeStatus::FAILURE;
+    }
+    target_ = nav::bearingDeg(nav::Vec2{0.0, 0.0}, nav::Vec2{-out.x, -out.y});
+    t0_ = ctx_->now_s;
+    held_since_ = -1.0;
+    shadow_ = !ctx_->publish_setpoints;
+    ctx_->task3_phase = "FACE THE BAY";
+    RCLCPP_INFO(log(), "facing bay %d: heading %.0f, now %.0f", ctx_->chosen_bay, target_,
+      ctx_->heading_deg);
+    return BT::NodeStatus::RUNNING;
+  }
+
+  BT::NodeStatus onRunning() override
+  {
+    const double tol = getInput<double>("tol_deg").value_or(6.0);
+    const double hold = getInput<double>("hold_s").value_or(0.5);
+    double yaw_us = 0.0, err = fire::kNaN, now = 0.0;
+    bool publish = false, done = false, fail = false;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      now = ctx_->now_s;
+      if (shadow_) {
+        done = true;
+      } else if (!std::isfinite(ctx_->heading_deg)) {
+        fail = true;
+      } else {
+        err = fire::wrap180(target_ - ctx_->heading_deg);           // + = turn right
+        const double rate = ctx_->yaw_rate_dps;
+        const bool there = std::fabs(err) <= tol && (!std::isfinite(rate) || std::fabs(rate) < 5.0);
+        if (there) {
+          if (held_since_ < 0.0) {held_since_ = now;}
+          done = now - held_since_ >= hold;
+        } else {
+          held_since_ = -1.0;
+          fail = now - t0_ > getInput<double>("turn_timeout_s").value_or(30.0);
+        }
+        if (!done && !fail) {
+          yaw_us = fire::axisLaw(err, std::isfinite(rate) ? -rate : fire::kNaN,
+            getInput<double>("kp_yaw").value_or(4.0), getInput<double>("kd_yaw").value_or(1.0),
+            there ? 180.0 : 0.0,
+            getInput<double>("min_us").value_or(30.0), getInput<double>("max_us").value_or(100.0));
+        }
+        publish = ctx_->publish_setpoints;
+        if (publish) {ctx_->sticks_commanded = true;}
+      }
+    }
+    if (publish && ctx_->sticks) {ctx_->sticks(0.0, 0.0, done || fail ? 0.0 : yaw_us);}
+    if (fail) {
+      RCLCPP_WARN(log(), "FaceBay: %s", std::isfinite(err) ? "the turn took too long" : "lost the heading");
+      return BT::NodeStatus::FAILURE;
+    }
+    if (done) {
+      RCLCPP_INFO(log(), "facing the bay%s", shadow_ ? " [shadow: publish_setpoints is off]" : "");
+      return BT::NodeStatus::SUCCESS;
+    }
+    if (ctx_->node) {
+      RCLCPP_INFO_THROTTLE(log(), *ctx_->node->get_clock(), 1000,
+        "facing the bay: %+.1f deg to go | yaw stick %+.0f us", err, yaw_us);
+    }
+    return BT::NodeStatus::RUNNING;
+  }
+
+  void onHalted() override
+  {
+    bool publish = false;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      publish = ctx_->publish_setpoints;
+    }
+    if (publish && ctx_->sticks) {ctx_->sticks(0.0, 0.0, 0.0);}
+  }
+
+private:
+  double target_ = 0.0, t0_ = 0.0, held_since_ = -1.0;
+  bool shadow_ = false;
 };
 
 /// Speed zero, heading held. The runner also stops the boat on every exit;
@@ -974,6 +1295,10 @@ void registerFireNodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<LookAround>("LookAround");
   factory.registerNodeType<StrafeKeep>("StrafeKeep");
   factory.registerNodeType<AwaitStrafeSolution>("AwaitStrafeSolution");
+  factory.registerNodeType<DockSlotAlive>("DockSlotAlive");
+  factory.registerNodeType<SlotKeep>("SlotKeep");
+  factory.registerNodeType<AwaitMode>("AwaitMode");
+  factory.registerNodeType<FaceBay>("FaceBay");
 }
 
 }  // namespace crusader_bt

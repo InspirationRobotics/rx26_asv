@@ -211,6 +211,15 @@ if [ "$GUI" = 1 ]; then
   nohup gz sim -g > /tmp/gz_gui.log 2>&1 &
   echo "  GUI starting on the Windows desktop (WSLg)"
 fi
+# Task 3: the dock's lights and the water are drawn by gz-transport, which only this
+# side has; task3_world (in the container) says what to draw. Started for any course
+# with a dock; it waits for the world by itself.
+TASK3=0
+if python3 -c "import sys; from crusader_sim import course as C; sys.exit(0 if any(e.get('type') == 'dock' for e in C.load(sys.argv[1])['elements']) else 1)" "$SIM/courses/$COURSE.yaml" 2>/dev/null; then
+  TASK3=1
+  nohup python3 -u -m crusader_sim.task3_gz_agent > /tmp/task3_gz_agent.log 2>&1 &
+  echo "  task3_gz_agent: the dock's lights and the water (log /tmp/task3_gz_agent.log)"
+fi
 
 step "4/7  transmitter"
 nohup python3 -m crusader_sim.sim_transmitter > /tmp/sim_tx.log 2>&1 &
@@ -300,7 +309,7 @@ cat <<EOF
   Gazebo GUI      on the desktop (or: gz sim -g, with GZ_PARTITION=crusader_sim)
   ground station  http://localhost:8090     behaviour tree  http://localhost:8085
   QGroundControl  auto-connects on udp 14550 (Windows)
-  start Task 1:   bash $SIM/scripts/gz_task1.sh $COURSE
+  start the task: bash $SIM/scripts/$([ "$TASK3" = 1 ] && echo gz_task3.sh || echo gz_task1.sh) $COURSE
   drive MANUAL:   ros2 topic pub /crsd/rc_override ... (in $CONTAINER), mode MANUAL
   stop:           bash $SIM/scripts/gz_sim_down.sh
 EOF

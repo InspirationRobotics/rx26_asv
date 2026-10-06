@@ -49,6 +49,7 @@ ssh crusader@crusader-asv "docker exec asv /root/robotx_ws/src/rx26_asv/tools/sc
 | `go.sh [TIMEOUT_S] [--here] [tier=N] [-d]` | checks the mode, resets the drop latch, sends the goal: **this starts the run**. `tier=1`/`tier=2` (Advanced/Disruptive) makes the Task 3 trees read the resource request too |
 | `status.sh` | tree, mode, latch, SD, wall, dock_view, at a glance |
 | `watch.sh [SECONDS] [N]` | the last N lines of what the tree is doing |
+| `run.sh shadow\|dry\|live` | **the pan/tilt cannon, one word**: starts dock_slot_node and cannon_aim_node, checks dock_view, then `tree.sh` on `task3_cannon.xml` and `go.sh --here`. SC to MANUAL when it asks. [T3_cannon_sim.md](T3_cannon_sim.md) |
 
 `SETPOINTS` (`publish_setpoints`, Gate G1: may the tree move the boat) and `PUMP` (`fire_pump`,
 Gate G7: may it squirt) are required and spelled out every time. With both `false` the tree is a

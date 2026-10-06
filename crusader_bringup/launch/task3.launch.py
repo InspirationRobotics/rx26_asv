@@ -65,6 +65,9 @@ TREES = {
     # the mission in two halves, SC GUIDED -> MANUAL between them (part 1's header)
     "part1": "task3_part1_approach.xml",      # GUIDED: find the GREEN bay, line up 3 m out
     "part2": "task3_part2_dock_fire.xml",     # MANUAL: dock, report, fire, request
+    # the pan/tilt cannon, ONE run: GUIDED approach, SC to MANUAL, dock on the
+    # LiDAR's slip (dock_slot_node), aim + spray (cannon_aim_node), the reports
+    "cannon": "task3_cannon.xml",
     # TEST variants (headers say how they differ):
     "fire_1p6": "task3_fire_manual_1p6.xml",  # pool tuning: 1.6 m, no attempt limit
     "approach_test": "task3_approach_test.xml",  # GUIDED approach to line-up only; dock_bays:=1
@@ -103,11 +106,22 @@ def _nodes(context):
             "SHADOW (logs only, touches nothing)" if not pump else
             "PUMP WITHOUT STICKS")
 
+    # The cannon tree docks on the slip, not the wall range, and its water goes
+    # through cannon_aim_node (whose own fire_pump is this launch's).
+    if tree == "cannon":
+        lidar = [
+            Node(package="crusader_perception", executable="dock_slot_node",
+                 output="screen", parameters=[params]),
+            Node(package="crusader_fcu", executable="cannon_aim_node",
+                 output="screen", parameters=[params, {"fire_pump": pump}]),
+        ]
+    else:
+        lidar = [Node(package="crusader_perception", executable="wall_range_node",
+                      output="screen", parameters=[params])]
     return [
         LogInfo(msg=f"task3: tree {TREES[tree]} | publish_setpoints {setpoints} | "
                     f"fire_pump {pump} -> {mode}"),
-        Node(package="crusader_perception", executable="wall_range_node",
-             output="screen", parameters=[params]),
+        *lidar,
         ExecuteProcess(cmd=["python3", os.path.join(tools_dir, "dock_view.py")],
                        output="screen"),
         # The params file first, then the three overrides: a later entry wins, so
@@ -124,7 +138,8 @@ def _nodes(context):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("tree", default_value="fire_manual",
-                              description="fire_manual | fire_test | disruptive"),
+                              description="fire_manual | fire_test | disruptive | part1 | part2 | "
+                                          "cannon | fire_1p6 | approach_test"),
         DeclareLaunchArgument("publish_setpoints", default_value="false",
                               description="may the tree take the sticks (G1)"),
         DeclareLaunchArgument("fire_pump", default_value="false",

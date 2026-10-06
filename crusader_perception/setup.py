@@ -26,6 +26,8 @@ setup(
             "proximity_bridge = crusader_perception.proximity_bridge_node:main",
             # Task 3 fixed nozzle: not in core.launch.py until it has run on the boat
             "wall_range_node = crusader_perception.wall_range_node:main",
+            # Task 3 pan/tilt cannon: the slip from the LiDAR (task3.launch.py tree:=cannon)
+            "dock_slot_node = crusader_perception.dock_slot_node:main",
         ],
     },
 )

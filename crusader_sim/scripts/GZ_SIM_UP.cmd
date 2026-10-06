@@ -38,6 +38,7 @@ powershell -NoProfile -Command "Start-Process -WindowStyle Hidden -FilePath wsl.
 start "" http://localhost:8090
 start "" http://localhost:8085
 
+if /i "%COURSE:~0,5%"=="task3" goto :task3
 if /i not "%COURSE:~0,5%"=="task1" goto :idle
 echo.
 echo Gazebo is on the desktop; the ground station and the tree are in the browser.
@@ -47,6 +48,17 @@ echo.
 wsl.exe -d %DISTRO% --cd ~ -e bash robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_task1.sh %COURSE%
 echo.
 echo Task 1 run over. The log is ~/.cache/crusader_sim/task1_last.log in WSL.
+goto :idle
+
+:task3
+echo.
+echo Gazebo is on the desktop; the ground station and the tree are in the browser.
+choice /c YN /t 20 /d Y /m "Run Task 3 now? It starts by itself in 20 s. N = skip it and drive yourself"
+if "%errorlevel%"=="2" goto :idle
+echo.
+wsl.exe -d %DISTRO% --cd ~ -e bash robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_task3.sh %COURSE%
+echo.
+echo Task 3 run over. The log is ~/.cache/crusader_sim/task3_last.log in WSL.
 
 :idle
 echo.

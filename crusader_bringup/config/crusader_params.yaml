@@ -108,6 +108,24 @@ telemetry_bridge:
     pump_min_gap_s: 1.0                    # [RO] s from one burst's end to the next
     pump_allow_disarmed: false             # [RO] bench only, and only by a -p
                                            #      override on the command line
+    pump_return_timeout_s: 0.3             # [RO] s after a burst's end the output
+                                           #      must read OFF (SERVO_OUTPUT_RAW at
+                                           #      10 Hz: SR0_RC_CHAN 10, G7), or the
+                                           #      watchdog latches the path off. The
+                                           #      Gazebo sim gives 3.0: below real time
+                                           #      the autopilot's burst is longer in
+                                           #      wall seconds than the bridge's clock
+    # --- the pan/tilt cannon: /crsd/cannon_cmd -> DO_SET_SERVO (cannon_aim_node) ---
+    # Two servos on the Pixhawk's AUX outputs: AUX3 = SERVO11 pan, AUX4 = SERVO12
+    # tilt. Their SERVOn_FUNCTION must be 0 (the autopilot refuses DO_SET_SERVO on
+    # an output with a function) and SERVOn_MIN/MAX = cannon_pwm_min/max: both are
+    # already so in params/working_crusader.params (0, 1100, 1900). Not mode- or
+    # latch-gated: it points a nozzle; the water goes through the pump's gates.
+    cannon_pan_channel: 11                 # [RO] Pixhawk output; 0 = no cannon
+    cannon_tilt_channel: 12                # [RO]
+    cannon_pwm_min: 1100                   # [RO] us; every command clamped here
+    cannon_pwm_max: 1900                   # [RO] us
+    cannon_min_period_s: 0.05              # [RO] s between commands on one axis (20 Hz)
     # --- GUIDED heading+speed: /crsd/guided_heading_speed -> SET_ATTITUDE_TARGET ---
     # The fixed-nozzle shot's station keeping (crusader_fcu/guided_hs_core).
     # Gated by the MODE (GUIDED only) AND the drop latch; a stop is sent when
@@ -160,6 +178,91 @@ wall_range_node:
     finger_max_off_m: 1.5                  # [RO]
     finger_min_points: 15                  # [RO]
     finger_quantile: 0.1                   # [RO] inner edge = this quantile
+
+# ---- Task 3 pan/tilt cannon: the slip from the LiDAR (crusader_perception/dock_slot_node) ----
+# The cannon tree docks on this: SlotKeep holds the LiDAR 1.1 m from the back
+# wall (the deck edge between the fingers), centred between the slip's side
+# walls, square to them. The LiDAR's extrinsic, waterline and the point the
+# standoff is measured FROM all come from lidar_cluster_node's section.
+dock_slot_node:
+  ros__parameters:
+    cloud_topic: "/livox/lidar"            # [RO] livox container's PointCloud2
+    slot_topic: "/crsd/dock_slot"          # [RO] DockSlot out, every sweep
+    frame_id: "base_link"                  # [RO]
+    attitude_timeout_s: 0.5                # [RO] older = fit unlevelled
+    health_period_s: 2.0                   # [RO]
+    r_min: 0.3                             # [RO] m, horizontal, from the body origin
+    r_max: 6.0                             # [RO] part 1 hands over 3.5 m out
+    z_min_above_water: 0.03                # [RO] m; the band that is not water
+    z_max_above_water: 1.0                 # [RO]
+    side_min_off_m: 0.30                   # [RO] a side wall's inner face, sideways
+    side_max_off_m: 1.40                   # [RO]   from the body origin
+    side_x_min: -0.6                       # [RO] ...and between these x (body)
+    side_x_max: 4.5                        # [RO]
+    max_yaw_deg: 35.0                      # [RO] a side wall runs within this of the bow
+    parallel_deg: 10.0                     # [RO] the two walls agree within this
+    slip_width_m: 1.5                      # [RO] build guide; used when only one wall is seen
+    width_tol_m: 0.45                      # [RO] walls further from that: not a slip
+    tol_m: 0.03                            # [RO] RANSAC inlier distance
+    iters: 150                             # [RO]
+    max_points: 3000                       # [RO]
+    min_inliers: 25                        # [RO]
+    min_span_m: 0.4                        # [RO] this much side wall, along it
+    back_margin_m: 0.15                    # [RO] back wall looked for this far inside the walls
+    back_min_ahead_m: 0.2                  # [RO] ...and this far ahead of the LiDAR
+    back_band_m: 0.06                      # [RO] the 1-D search band along the axis
+    back_min_inliers: 20                   # [RO]
+    back_min_span_m: 0.3                   # [RO] across the slip
+
+# ---- Task 3 pan/tilt cannon: the aim (crusader_fcu/cannon_aim_node) ----
+# /crsd/water_cannon (the tree's SprayUntilHit: the burning window's x, y, z in
+# camera_link) -> pan/tilt on /crsd/cannon_cmd (telemetry_bridge -> SERVO11/12)
+# and, once the servos are on it, pump bursts on /crsd/pump_cmd (ONLY with
+# fire_pump: G7). The camera mount is target_tracker's cam_* (one camera, one
+# mount). cannon_aim_core's header has the chain. Gazebo's model reads the pivot
+# and the servo map from HERE too, so the sim's nozzle is where this says it is.
+cannon_aim_node:
+  ros__parameters:
+    # the pivot, body frame, hull-bottom datum. ASSUMED from the camera's mount
+    # (0.37, 0.0, 0.65) + the nozzle ~0.10 ahead, 0.30 left, 0.10 above it. MEASURE.
+    nozzle_x: 0.47                         # [RO] m forward of the body origin
+    nozzle_y: 0.30                         # [RO] m to PORT
+    nozzle_z: 0.75                         # [RO] m above the hull-bottom datum (0.51 above water)
+    # the stream: 0 = derive from one measured throw (3.0 m at 45 deg on the
+    # level, 2026-10: v = sqrt(g R) = 5.42 m/s, drag-free)
+    exit_speed_mps: 0.0                    # [RO]
+    throw_range_m: 3.0                     # [RO]
+    throw_elev_deg: 45.0                   # [RO]
+    # the servos: ASSUMED 1000-2000 us = -90..+90 deg until benched. + pan = LEFT,
+    # + tilt = UP; flip *_sign if a servo turns the other way.
+    pan_center_us: 1500.0                  # [RO] us at 0 deg (straight ahead)
+    pan_us_per_deg: 5.556                  # [RO] 500 us / 90 deg
+    pan_sign: 1.0                          # [RO]
+    tilt_center_us: 1500.0                 # [RO] us at 0 deg (level with the hull)
+    tilt_us_per_deg: 5.556                 # [RO]
+    tilt_sign: 1.0                         # [RO]
+    pwm_min: 1100                          # [RO] = telemetry_bridge cannon_pwm_min
+    pwm_max: 1900                          # [RO] = cannon_pwm_max
+    pan_min_deg: -60.0                     # [RO] software limits inside the servos'
+    pan_max_deg: 60.0                      # [RO]
+    tilt_min_deg: -10.0                    # [RO]
+    tilt_max_deg: 60.0                     # [RO]
+    pan_trim_deg: 0.0                      # [DYN] added to every solution: a
+    tilt_trim_deg: 0.0                     # [DYN]   calibration shot's correction
+    # firing (cannon_aim_core.FireGate)
+    aim_rate_hz: 20.0                      # [RO] solve + command this often
+    settle_s: 0.4                          # [RO] servos on the command this long, then water
+    servo_tol_us: 12.0                     # [RO] SERVO_OUTPUT_RAW this close to the command
+    aim_max_age_s: 3.0                     # [RO] an older aim point is not a target.
+                                           #      Docked, the window does not move: ride
+                                           #      through the camera losing it (from
+                                           #      the berth the window is at the hull
+                                           #      band's edge)
+    burst_s: 1.0                           # [RO] <= telemetry_bridge pump_max_burst_s
+    gap_s: 1.1                             # [RO] > pump_min_gap_s
+    cannon_timeout_s: 0.6                  # [RO] no /crsd/water_cannon this long: stop
+    fire_pump: false                       # [RO] G7: false = aim only, bursts DRY (logged)
+    status_period_s: 0.2                   # [RO] /crsd/cannon_status
 
 # ---- Task 3 fixed nozzle: the calibration tool (tools/squirt_cal) ----
 # A bench tool, not a node in the launch file: python3 tools/squirt_cal/squirt_cal.py

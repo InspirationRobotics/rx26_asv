@@ -23,7 +23,10 @@ coming out while someone is standing at the bow.
 from dataclasses import dataclass
 
 MAV_CMD_DO_SET_SERVO = 183
-MAV_CMD_DO_REPEAT_SERVO = 211
+# 184, NOT 211: 211 is MAV_CMD_DO_GRIPPER, which ArduRover answers FAILED (no
+# gripper) - every burst was refused that way until the Gazebo sim fired the
+# pump for real (2026-10-05). test_pump_core checks both against pymavlink.
+MAV_CMD_DO_REPEAT_SERVO = 184
 
 # PumpState.RESULT_* (kept equal by test_pump_core)
 RESULT_NONE, RESULT_SENT, RESULT_ACCEPTED, RESULT_REJECTED, RESULT_REFUSED = range(5)
@@ -52,7 +55,9 @@ class PumpParams:
                    min_gap_s=float(d["pump_min_gap_s"]),
                    allow_disarmed=bool(d["pump_allow_disarmed"]),
                    estop_channel=int(d["estop_channel"]),
-                   estop_threshold=int(d["estop_threshold"]))
+                   estop_threshold=int(d["estop_threshold"]),
+                   # optional: an older params file without it keeps 0.3 s
+                   return_timeout_s=float(d.get("pump_return_timeout_s", 0.3)))
 
     def is_on(self, pwm):
         """Nearer ON than OFF. Works whichever way round the pump's PWM runs."""

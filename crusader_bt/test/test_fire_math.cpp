@@ -367,6 +367,25 @@ int main()
     chk("on the spot: all zero", c.sticks.max_abs() == 0.0 && c.range_ok && c.lat_ok && c.yaw_ok &&
       c.why == "on the spot" && !c.correcting);
 
+    {
+      // in the band but coasting through it at 15 cm/s: off by default (the
+      // fixed-nozzle tune), and with brake_mps the D term stops it
+      StrafeInputs ib = in;
+      ib.range_m = 3.24; ib.range_rate = -0.15; ib.lat_err_m = 0.01; ib.lat_rate = 0.12;
+      StrafeState sb;
+      const StrafeCmd off = strafeKeep(p, ib, sb, 1.0);
+      chk("no brake by default: in the band is zero", off.sticks.fwd_us == 0.0 && off.sticks.lat_us == 0.0);
+      StrafeParams q = p; q.brake_mps = 0.03;
+      StrafeState sb2;
+      const StrafeCmd on = strafeKeep(q, ib, sb2, 1.0);
+      chk("brake: closing fast, push back (fwd -)", on.sticks.fwd_us < -q.min_us + 1e-9);
+      chk("brake: sliding right relative to the target, push left (lat -)", on.sticks.lat_us < 0.0);
+      chk("braking is correcting", on.correcting);
+      StrafeInputs slow = ib; slow.range_rate = -0.01; slow.lat_rate = 0.01;
+      StrafeState sb3;
+      chk("slower than brake_mps: no brake", strafeKeep(q, slow, sb3, 1.0).sticks.max_abs() < 1.0);  // the integrator alone
+    }
+
     StrafeState z2;
     in.range_m = 5.0;
     c = strafeKeep(p, in, z2, 0.1);

@@ -22,6 +22,12 @@ KEEP = re.compile(
     r"^(FRAME_|SERVO[1-4]_|MOT_|ATC_|PSC_|CRUISE_|WP_|TURN_|NAVL1_|LOIT_|PILOT_|"
     r"MODE\d|MODE_CH$|INITIAL_MODE$|SPEED_|ACRO_|MANUAL_|GUID_|RTL_|SAIL_|"
     r"FS_|ARMING_(CHECK|REQUIRE|RUDDER)$|RC\d+_OPTION$|AVOID_|PRX1_TYPE$|"
+    # RC1-4 trims, ranges and dead zones: the sticks' calibration. Left out, SITL
+    # put its defaults under the boat's sticks (trim 1500, a 30 us steering dead
+    # zone where the boat has RC1_DZ 0 and RC1_TRIM 1489), so a small yaw
+    # override from the tree's 1489 neutral fell inside the dead zone and the
+    # hull never squared up (Task 3 docking, 2026-10-05).
+    r"RC[1-4]_(TRIM|MIN|MAX|DZ)$|"
     r"EK3_SRC1_|AHRS_EKF_TYPE$|BAL_|SYSID_THISMAV$|STICK_MIXING$|OA_|"
     # SR0_*: the stream rates the ROS side is built around (ATTITUDE at 30 Hz,
     # telemetry_bridge's docstring). MAVProxy connects to SITL's SERIAL0 as it
