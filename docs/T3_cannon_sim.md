@@ -204,6 +204,8 @@ crusader_params.yaml), or a fire in the upper-left window is never seen.
 
 ## To measure on the boat
 
+The procedure, with the tool that records it, is [T3_cannon_cal.md](T3_cannon_cal.md) (`tools/scripts/task3/cal.sh`).
+
 | What | Where it goes |
 |---|---|
 | nozzle pivot x, y, z (body frame, hull-bottom datum) | `cannon_aim_node` `nozzle_*` |
