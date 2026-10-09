@@ -524,6 +524,45 @@ nothing until opened — but the page drops the `<img>` when you switch away rat
 merely hiding it, because a hidden `<img>` keeps its connection open and would keep the
 Jetson encoding for a tab nobody is looking at.
 
+## Running the page on the laptop
+
+The same page can be served from the Windows laptop, so the window survives a slow or rebooting
+Jetson and says which half went quiet. Double-click **`BOAT_GUI.cmd`** (in `tools/scripts/`; a one-line
+launcher that calls it sits at the top of the `RobotX_2026` folder), or `python tools/scripts/gcs_laptop.py`,
+then open **http://localhost:8150**. System `python` is enough — no ROS — but it needs `pymavlink`, `pyserial`
+and `PyYAML`. Nothing is installed on the boat and nothing changes there. The launcher opens the program in its
+own window (close it, or Ctrl+C, to stop) and does nothing but open the browser when one is already answering;
+extra arguments go through to the program. Options (`--help`): `--port` (8150), `--bind` (127.0.0.1), `--mav`
+(`udpin:127.0.0.1:14554`), `--sysid` (2), `--jetson` (`auto`), `--poll-ms`, `--stale-s` (3.0).
+
+| What | Where it runs |
+|---|---|
+| the page, `gcs_page.py` + `gcs_server.py`, imported unchanged and patched in memory | laptop, **8150** (`--port`) |
+| `/state` and every button (POST) | the Jetson's `ground_station`, **8090**: fetched and forwarded by the laptop program, which adds no rules of its own |
+| camera, LiDAR, Task 1 panel | still served by the Jetson on **8080 / 8081 / 8095**; the browser frames them at the Jetson's address directly (the patch swaps `location.hostname` for the Jetson's), so no video passes through the laptop |
+| the autopilot strip (link, mode, armed, **RC e-stop**, GPS and GPS yaw, position, battery, last warnings) | MAVLink read on the laptop from **`127.0.0.1:14554`**, which the OCS `fleet_link` router forwards from the boat's unicast to 14550. No router: `--mav udpin:0.0.0.0:14550` (that bind steals the port from QGroundControl) |
+
+**It never transmits MAVLink** — no heartbeat, no request, no `SET_MESSAGE_INTERVAL`. The autopilot's
+port-0 stream rates feed `telemetry_bridge`; a laptop that changed them would break the boat. The reader is
+handed an object that can only receive, and a test spies on the socket layer.
+
+**The Jetson is found automatically.** `--jetson auto` (default) tries `192.168.100.109:8090`, then
+`192.168.8.109:8090` (the Rocket/Bullet network), sticks with the one that answers, and after a failure
+re-probes at most every 5 s. `--jetson <host>` or `<host:port>` is used as given and never probed away from.
+The strip shows which one it is on. The page's red banner reads `NO CONNECTION TO THE BOAT'S JETSON (ground station
+API) - or to this laptop copy of the page. The strip above says which.` — the page cannot tell those two apart, the
+strip can: `Jetson API <host> UNREACHABLE` means the Jetson, and the MAVLink half keeps updating without it;
+`NO ANSWER FROM THE LAPTOP SERVER` means this program has stopped.
+
+**E-stop** is RC channel 7 (SB) below 1200 µs — read from `crusader_params.yaml` at startup, and a missing or
+inconsistent value stops the program rather than guessing. It keeps the boat ARMED, so it cannot be seen in the
+heartbeat; "ENGAGED / RC LOST" is one state because a lost RC reads 0. Stale values are dashes, never the last
+number; battery 0 V / 65535 is "no sensor".
+
+The page can power the Jetson off, so it binds to `127.0.0.1` and refuses requests whose `Host` or `Origin` is
+not this server (a web page elsewhere cannot press the boat's buttons through your browser). `--bind` widens it
+deliberately. Tests: `python -m unittest discover -s crusader_groundstation/test` (from the repo root).
+
 ## Ports
 
 | Port | Served by |
@@ -531,6 +570,7 @@ Jetson encoding for a tab nobody is looking at.
 | 8080 | `buoy_detector`'s annotated view, or `tools/oak_view.py` |
 | 8081 | `tools/lidar_view.py` |
 | 8090 | this |
+| 8150 | the same page served from the laptop (`tools/scripts/gcs_laptop.py`); not a boat port |
 
 `check_config.py` pins them distinct — two servers cannot bind one socket, and the loser
 dies with an address-in-use that reads like a crash.
@@ -541,7 +581,7 @@ dies with an address-in-use that reads like a crash.
 |---|---|
 | `node_registry.py` | it is pure — exercise it directly, then confirm the Nodes tab still groups correctly |
 | a protection or exclusion rule | call the endpoint with `curl`, not the button; the page is not where the rule lives |
-| `gcs_page.py` | open every tab, and check the **stale** paths: pull `/crsd/pose` and confirm the banner fires |
+| `gcs_page.py` | open every tab, and check the **stale** paths: pull `/crsd/pose` and confirm the banner fires. Also `python tools/scripts/gcs_laptop.py`: its patcher counts the text it replaces and refuses to start if the page changed (a new use of `location.hostname` would frame the laptop) |
 | `crsd_power_helper.py` | `sudo bash setup/install_jetson_host.sh`, `systemctl status crsd-power`, then confirm a bad verb is refused before testing a good one |
 | ports in `crusader_params.yaml` | `python3 tools/scripts/check_config.py` |
 | `system_info.py` | it must return `None`, never raise — one reader that throws blanks every tab, which is how the `os.statvfs` case was found |
