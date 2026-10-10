@@ -231,6 +231,12 @@ struct BaySighting
   double nz = 0.0;               ///< ... and its up component (matters when pitched)
   double d = kNaN;               ///< plane offset: n.p + d = 0, camera frame
   bool truncated = false;        ///< cut by the image edge: centre is biased
+  /// The face box runs into the image's LEFT / RIGHT edge (cutSides): its
+  /// bearing is the VISIBLE part's, short of the face centre on that side.
+  /// `truncated` also counts the top and the hull band, which do not move the
+  /// centre left or right.
+  bool cut_left = false;
+  bool cut_right = false;
   bool indicator_present = false;
   Colour indicator = Colour::Unknown;
   double indicator_conf = 0.0;
@@ -305,6 +311,92 @@ struct Frame
   std::string last_event;                ///< "", hit, hit_done, lost - THIS frame only
   double observed_fps = 0.0;
 };
+
+// ------------------------------------------------- the face for the strafe hold
+
+/// dock_view's frames are the OAK-D LR's full 1920 px across, and DockBay.bbox
+/// is in those pixels (dock_view warns when the camera gives another width).
+constexpr int kDockImageWidthPx = 1920;
+
+/// Which of a face box's sides (DockBay.bbox x1, x2) run into the image's
+/// left / right edge: there the detector sees part of the face, so the bearing
+/// of its centre is the visible part's. An empty box is unknown, not cut.
+struct SideCut
+{
+  bool left = false;
+  bool right = false;
+};
+
+inline SideCut cutSides(double x1, double x2, double width_px = kDockImageWidthPx,
+  double margin_px = 6.0)
+{
+  SideCut c;
+  if (!(x2 > x1)) {return c;}
+  c.left = x1 <= margin_px;
+  c.right = x2 >= width_px - margin_px;
+  return c;
+}
+
+/// The face centre, HORIZONTALLY, in the BODY frame (x forward, y to PORT, from
+/// the body origin), from one sighting: faceInBody's exact point when the plane
+/// is there, else the levelled ray at the bearing out to range_m - the two
+/// cases DockBook::ingest places a bay with - then through the camera mount.
+inline bool faceCentreBody(const BaySighting & s, const Mount & m, double face_dz, Vec2 & out)
+{
+  Vec2 fb;
+  if (!(s.has_normal &&
+    faceInBody(s.bearing_deg, s.nx, s.ny, s.nz, s.d, m.pitch_deg, face_dz, fb)))
+  {
+    if (!std::isfinite(s.bearing_deg) || !std::isfinite(s.range_m) || s.range_m <= 0.0) {
+      return false;
+    }
+    const double b = s.bearing_deg * nav::kDeg;
+    fb = levelled(std::cos(b), std::sin(b), 0.0, m.pitch_deg) * s.range_m;
+  }
+  const double y = m.yaw_deg * nav::kDeg;
+  out = Vec2{m.x + fb.x * std::cos(y) - fb.y * std::sin(y),
+    m.y + fb.x * std::sin(y) + fb.y * std::cos(y)};
+  return true;
+}
+
+/// Which bay of one frame the strafe hold steers on by its face, in order:
+///   1. the COMMITTED bay (CommitSafeBay), when the book placed this frame:
+///      `frame_tracks` is DockBook::ingest's track id per sighting and
+///      `chosen` the committed track, both resolve()d. Not in this frame = -1:
+///      the hold never takes another bay's face for it.
+///   2. else the bay whose indicator reads GREEN in this frame (the nearest
+///      the bow if more than one does);
+///   3. else the bay nearest the bow, as the windows' hold takes it.
+/// -1 when no bay has a bearing. `why` (optional) names the rule that picked.
+inline int pickHoldBay(
+  const Frame & f, const std::vector<int> & frame_tracks, int chosen,
+  const char ** why = nullptr)
+{
+  const bool placed = frame_tracks.size() == f.bays.size() &&
+    std::any_of(frame_tracks.begin(), frame_tracks.end(), [](int id) {return id >= 0;});
+  if (chosen >= 0 && placed) {
+    for (std::size_t i = 0; i < f.bays.size(); ++i) {
+      if (frame_tracks[i] == chosen && std::isfinite(f.bays[i].bearing_deg)) {
+        if (why) {*why = "committed bay";}
+        return static_cast<int>(i);
+      }
+    }
+    return -1;
+  }
+  int best = -1;
+  for (int pass = 0; pass < 2 && best < 0; ++pass) {
+    for (std::size_t i = 0; i < f.bays.size(); ++i) {
+      const BaySighting & b = f.bays[i];
+      if (!std::isfinite(b.bearing_deg)) {continue;}
+      if (pass == 0 && !(b.indicator_present && b.indicator == Colour::Green)) {continue;}
+      if (best < 0 || std::fabs(b.bearing_deg) < std::fabs(f.bays[best].bearing_deg)) {
+        best = static_cast<int>(i);
+      }
+    }
+    if (best >= 0 && why) {*why = pass == 0 ? "green bay" : "nearest the bow";}
+  }
+  return best;
+}
 
 // --------------------------------------------------------------- the book
 
@@ -1110,12 +1202,15 @@ inline std::string uavRequestJson(const Request & r, int seq)
 }
 
 /// The water cannon command: fire or not, aimed at a point in camera_link.
-inline std::string cannonJson(bool fire, double x, double y, double z)
+/// `window` (DockWindow.index 0 = UL, 1 = LR; -1 = not a window) is named so
+/// cannon_aim_node can add that window's own tilt trim.
+inline std::string cannonJson(bool fire, double x, double y, double z, int window = -1)
 {
-  char buf[160];
+  char buf[192];
   std::snprintf(buf, sizeof(buf),
-    "{\"fire\":%s,\"frame_id\":\"camera_link\",\"x\":%.3f,\"y\":%.3f,\"z\":%.3f}",
-    fire ? "true" : "false", x, y, z);
+    "{\"fire\":%s,\"frame_id\":\"camera_link\",\"x\":%.3f,\"y\":%.3f,\"z\":%.3f%s}",
+    fire ? "true" : "false", x, y, z,
+    window == 0 ? ",\"window\":\"UL\"" : window == 1 ? ",\"window\":\"LR\"" : "");
   return buf;
 }
 

@@ -129,14 +129,20 @@ public:
   WallRangeAlive(const std::string & n, const BT::NodeConfig & c) : CrusaderCondition(n, c) {}
   static BT::PortsList providedPorts()
   {
-    return {BT::InputPort<double>("max_age_s", 1.0, "seconds without a VALID wall range")};
+    return {BT::InputPort<double>("max_age_s", 1.0, "seconds without a VALID wall range"),
+      BT::InputPort<double>("face_max_age_s", 0.0,
+        "> 0: ALSO alive while the camera's bay face is this fresh (a StrafeKeep with "
+        "range_fallback=\"face\" ranges on it until the LiDAR has the wall)")};
   }
   BT::NodeStatus tick() override
   {
     const double max_age = getInput<double>("max_age_s").value_or(1.0);
+    const double face_age = getInput<double>("face_max_age_s").value_or(0.0);
     std::lock_guard<std::mutex> lk(ctx_->mu);
-    return ctx_->wall.valid_age(ctx_->now_s) <= max_age ? BT::NodeStatus::SUCCESS :
-           BT::NodeStatus::FAILURE;
+    const double now = ctx_->now_s;
+    const bool ok = ctx_->wall.valid_age(now) <= max_age ||
+      (face_age > 0.0 && ctx_->fire_face_x.age(now) <= face_age);
+    return ok ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
   }
 };
 
@@ -659,6 +665,12 @@ private:
 /// the camera's two windows or the face plane, closed on the compass so a
 /// dropped frame does not drop the heading). ALWAYS SUCCESS, like StationKeep:
 /// "not there yet" is a stick command and a reason, never a FAILURE.
+///
+/// lateral_ref="face" holds the bay's FACE CENTRE on the line instead of a
+/// window (ingestFireFace: the committed bay, else the GREEN one, else the
+/// nearest). The face is the steadier detection up close (the windows come and
+/// go: seen on the water, 2026-10-09), and with the pan/tilt cannon aiming
+/// itself the hold only has to keep the boat in front of the bay.
 class StrafeKeep : public CrusaderSyncAction
 {
 public:
@@ -668,6 +680,11 @@ public:
     return {
       BT::InputPort<double>("fire_range_m", 1.4, "LiDAR wall range to fire from (30 deg nozzle)"),
       BT::InputPort<int>("window_index", 0, "DockWindow.index to hit (0 = upper-left)"),
+      BT::InputPort<std::string>("lateral_ref", "window",
+        "window | face: hold window_index's window on the line, or the bay's face centre"),
+      BT::InputPort<std::string>("range_fallback", "none",
+        "none | face: with no valid LiDAR wall, range on the camera's face distance "
+        "(brings the boat in until the LiDAR has the wall)"),
       // The hold puts the window `bias` LEFT of the nozzle's line (lat_err =
       // wy - nozzle_y - bias -> 0), so the line, and the shot, moves RIGHT.
       BT::InputPort<double>("lateral_bias_m", 0.0,
@@ -717,6 +734,17 @@ public:
     sp.min_range_m = in("min_range_m", sp.min_range_m);
     sp.square_first_deg = in("square_first_deg", sp.square_first_deg);
     const int widx = std::clamp(getInput<int>("window_index").value_or(0), 0, 1);
+    const std::string ref = getInput<std::string>("lateral_ref").value_or("window");
+    if (ref != "window" && ref != "face") {
+      throw BT::RuntimeError("StrafeKeep: lateral_ref is window or face, not '" + ref + "'");
+    }
+    const bool on_face = ref == "face";
+    const std::string fb = getInput<std::string>("range_fallback").value_or("none");
+    if (fb != "none" && fb != "face") {
+      throw BT::RuntimeError("StrafeKeep: range_fallback is none or face, not '" + fb + "'");
+    }
+    const bool range_from_face = fb == "face";
+    bool range_cam = false;
     const double bias = in("lateral_bias_m", 0.0), noz_y = in("nozzle_y_m", 0.0);
     const double cam_to = in("cam_timeout_s", 0.5), face_to = in("face_timeout_s", 3.0);
     const double check = in("range_check_m", 0.5), setback = in("face_setback_m", 0.0);
@@ -725,12 +753,17 @@ public:
     fire::StrafeInputs si;
     bool publish = false;
     double heading_now = fire::kNaN;
-    std::string block, tuned;
+    std::string block, tuned, ref_name = ref;
     bool est_on = false;
     double est_p = fire::kNaN, est_v = fire::kNaN, est_age = fire::kNaN, cam_y = fire::kNaN;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       const double now = ctx_->now_s;
+      // what goes on the line: window_index's window, or the bay's face centre
+      fire::Series & ref_x = on_face ? ctx_->fire_face_x : ctx_->fire_win_x[widx];
+      fire::Series & ref_y = on_face ? ctx_->fire_face_y : ctx_->fire_win_y[widx];
+      ctx_->strafe_ref = ref;
+      if (on_face && !ctx_->face_pick.empty()) {ref_name = "face (" + ctx_->face_pick + ")";}
       // live gain overrides (bt_runner_node strafe.*) on top of the tree's
       tuned = ctx_->strafe_tune.apply(sp);
       const double med_s = ctx_->strafe_tune.window_median_s >= 0.0 ?
@@ -740,16 +773,26 @@ public:
       heading_now = ctx_->heading_deg;
       si.range_m = ctx_->wall.range(now);
       si.range_rate = ctx_->wall.rate(now);
-      const double age = ctx_->fire_win_y[widx].age(now);
+      // No wall from the LiDAR (too far out, or at an angle it cannot fit): the
+      // camera's distance to the bay face instead, until the LiDAR has it. Both
+      // are from the body origin; the face stands `setback` behind the LiDAR's.
+      if (!std::isfinite(si.range_m) && range_from_face &&
+        ctx_->fire_face_x.age(now) <= cam_to)
+      {
+        si.range_m = ctx_->fire_face_x.median(now, std::max(med_s, 0.3)) - setback;
+        si.range_rate = ctx_->fire_face_x.slope(now, rate_s);
+        range_cam = true;
+      }
+      const double age = ref_y.age(now);
       const bool fresh = age <= cam_to;
       // the median always spans the newest sample: a window shorter than its
       // age would find nothing and read as "not seen" while it is fresh
       const double win = std::max(med_s, age + 1e-6);
-      const double wx = fresh ? ctx_->fire_win_x[widx].median(now, win) : fire::kNaN;
-      const double wy = fresh ? ctx_->fire_win_y[widx].median(now, win) : fire::kNaN;
+      const double wx = fresh ? ref_x.median(now, win) : fire::kNaN;
+      const double wy = fresh ? ref_y.median(now, win) : fire::kNaN;
       if (fresh) {
         si.lat_err_m = wy - noz_y - bias;
-        si.lat_rate = ctx_->fire_win_y[widx].slope(now, rate_s);
+        si.lat_rate = ref_y.slope(now, rate_s);
         cam_y = si.lat_err_m;               // the raw camera value, for the log
       }
       if (ctx_->face_heading.age(now) <= face_to) {
@@ -770,15 +813,16 @@ public:
         if (tn.est_r >= 0.0) {kp.r = std::max(tn.est_r, 1e-3);}
         const double track = tn.track_s >= 0.0 ? tn.track_s : 1.0;
         auto & E = ctx_->lat_est;
-        if (ctx_->lat_est_widx != widx) {
+        const int est_key = on_face ? 2 : widx;   // 0, 1 the windows; 2 the face
+        if (ctx_->lat_est_widx != est_key) {
           E.reset();
-          ctx_->lat_est_widx = widx;
+          ctx_->lat_est_widx = est_key;
           ctx_->lat_est_seen_t = -1e18;
         }
         // the window's distance ahead: slow, so a median is right for it
-        const double xw = ctx_->fire_win_x[widx].median(now, 1.0);
+        const double xw = ref_x.median(now, 1.0);
         const double x_use = std::isfinite(xw) ? xw : 0.0;
-        for (const auto & s : ctx_->fire_win_y[widx].since(ctx_->lat_est_seen_t)) {
+        for (const auto & s : ref_y.since(ctx_->lat_est_seen_t)) {
           ctx_->lat_est_seen_t = s.first;
           const double h = ctx_->heading_hist.at(s.first);
           // no square reference or heading yet: no yaw to take out
@@ -802,7 +846,7 @@ public:
       }
       // the camera's distance to the face against the LiDAR's to the edge
       // (no LiDAR range - water in the air - is not a disagreement)
-      if (std::isfinite(wx) && std::isfinite(si.range_m) &&
+      if (!range_cam && std::isfinite(wx) && std::isfinite(si.range_m) &&
         !fire::rangesAgree(si.range_m + setback, wx, check))
       {
         char buf[112];
@@ -849,9 +893,11 @@ public:
           est_p, est_v, est_age, cam_y);
       }
       RCLCPP_INFO_THROTTLE(log(), *ctx_->node->get_clock(), 1000,
-        "strafe: range %.2f m, window %+.2f m left, square %+.1f deg | sticks fwd %+.0f "
+        "strafe: range %.2f m%s, %s %+.2f m left, square %+.1f deg | sticks fwd %+.0f "
         "lat %+.0f yaw %+.0f us (%s)%s%s%s",
-        si.range_m, si.lat_err_m, si.yaw_err_deg, cmd.sticks.fwd_us, cmd.sticks.lat_us,
+        si.range_m, range_cam ? " (camera)" : "", ref_name.c_str(), si.lat_err_m, si.yaw_err_deg,
+        cmd.sticks.fwd_us,
+        cmd.sticks.lat_us,
         cmd.sticks.yaw_us, cmd.why.c_str(), est,
         publish ? "" : " [shadow: publish_setpoints is off]", live.c_str());
     }
@@ -897,7 +943,7 @@ public:
     const double rtol = getInput<double>("range_tol_m").value_or(0.06);
     const double ltol = getInput<double>("lat_tol_m").value_or(0.05);
     const double ytol = getInput<double>("yaw_tol_deg").value_or(5.0);
-    const double target = getInput<double>("fire_range_m").value_or(1.4);
+    double target = getInput<double>("fire_range_m").value_or(1.4);
     const double gap = getInput<double>("gap_s").value_or(2.0);
     const double timeout = getInput<double>("timeout_s").value_or(60.0);
     const bool need_steady = getInput<bool>("steady").value_or(true);
@@ -909,6 +955,8 @@ public:
       now = ctx_->now_s;
       const fire::StrafeInputs & si = ctx_->strafe_in;
       const fire::SteadyStatus st = ctx_->steady.status(now);
+      // the live distance (strafe.fire_range_m) moves this check with the keep
+      if (ctx_->strafe_tune.fire_range_m >= 0.0) {target = ctx_->strafe_tune.fire_range_m;}
       char buf[96];
       if (!ctx_->strafe_block.empty()) {
         why = ctx_->strafe_block;
@@ -917,14 +965,15 @@ public:
       } else if (!ctx_->bursts.ready(now, gap)) {
         why = "gap after the last burst";
       } else if (!std::isfinite(si.lat_err_m)) {
-        why = "window not in view";
+        why = ctx_->strafe_ref + " not in view";
       } else if (!std::isfinite(si.yaw_err_deg)) {
         why = "no face angle yet";
       } else if (!fire::inBand(si.range_m, target, rtol)) {
         std::snprintf(buf, sizeof(buf), "range %.2f, want %.2f +-%.2f", si.range_m, target, rtol);
         why = buf;
       } else if (std::fabs(si.lat_err_m) > ltol) {
-        std::snprintf(buf, sizeof(buf), "window %+.2f m off the line", si.lat_err_m);
+        std::snprintf(buf, sizeof(buf), "%s %+.2f m off the line", ctx_->strafe_ref.c_str(),
+          si.lat_err_m);
         why = buf;
       } else if (std::fabs(si.yaw_err_deg) > ytol) {
         std::snprintf(buf, sizeof(buf), "%+.1f deg off square", si.yaw_err_deg);
@@ -1060,6 +1109,7 @@ public:
       ctx_->strafe_state.prev = cmd.sticks;
       ctx_->strafe = cmd;
       ctx_->strafe_in = si;
+      ctx_->strafe_ref = "slip";
       ctx_->strafe_block = block;
       ctx_->steady.feed_cmd(now, cmd.correcting ? 1.0 : 0.0);
       publish = ctx_->publish_setpoints;

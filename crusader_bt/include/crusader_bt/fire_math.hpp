@@ -814,6 +814,7 @@ inline double bandBrake(double rate, double kd, double brake, double min_us, dou
 // rate_window_s - at 12 Hz the 0.6 s median is ~0.3 s of lag in the loop.
 struct StrafeTune
 {
+  double fire_range_m = -1.0;      // the LiDAR range held (StrafeKeep fire_range_m, SlotKeep standoff_m)
   double kp_fwd = -1.0, kd_fwd = -1.0, ki_fwd = -1.0;
   double kp_lat = -1.0, kd_lat = -1.0, ki_lat = -1.0;
   double kp_yaw = -1.0, kd_yaw = -1.0;
@@ -836,6 +837,7 @@ struct StrafeTune
   std::string apply(StrafeParams & sp) const
   {
     const std::pair<const char *, std::pair<double, double *>> rows[] = {
+      {"range", {fire_range_m, &sp.fire_range_m}},
       {"kp_fwd", {kp_fwd, &sp.kp_fwd}}, {"kd_fwd", {kd_fwd, &sp.kd_fwd}},
       {"ki_fwd", {ki_fwd, &sp.ki_fwd}}, {"kp_lat", {kp_lat, &sp.kp_lat}},
       {"kd_lat", {kd_lat, &sp.kd_lat}}, {"ki_lat", {ki_lat, &sp.ki_lat}},

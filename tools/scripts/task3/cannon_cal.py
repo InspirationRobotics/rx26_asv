@@ -4,23 +4,26 @@
 Runs INSIDE the asv container (or crsd-sim), next to telemetry_bridge. The
 procedure is docs/T3_cannon_cal.md; this is the tool it uses.
 
-    cannon_cal.py node                 (re)start cannon_aim_node on the working copy, pump DRY
+    cannon_cal.py node                 (re)start cannon_aim_node on crusader_params.yaml, pump DRY
     cannon_cal.py pwm PAN_US TILT_US   hold the two servos at these PWMs
-    cannon_cal.py deg PAN TILT         ...at these angles, through the working copy's servo maps
+    cannon_cal.py deg PAN TILT         ...at these angles, through the file's servo maps (no trims)
     cannon_cal.py point X Y Z          aim at a tape-measured point until Ctrl-C (m from the
                                        camera's lens along the HULL: X forward, Y left, Z up)
     cannon_cal.py window lr|ul [--bay N]   aim at the window dock_view sees until Ctrl-C
-    cannon_cal.py set KEY VALUE        write a value into the working copy (trims also go live)
+    cannon_cal.py set KEY VALUE        write a value into crusader_params.yaml (trims also go live)
     cannon_cal.py speed D H TILT       exit speed from a hit on a vertical board
-    cannon_cal.py show                 the working copy's aim numbers vs the installed ones
+    cannon_cal.py show                 the aim numbers in crusader_params.yaml
 
-THE WORKING COPY. Everything measured today goes into
-/root/robotx_ws/t3tools/cannon_cal.yaml, a copy of the installed
-crusader_params.yaml made on first use. `node` starts cannon_aim_node with
-CRUSADER_PARAMS pointing at it, so the servo maps, the pivot, the exit speed
-AND the camera's mount (target_tracker's cam_*) all come from the copy; the
-rest of the boat keeps the installed file. `show` lists what changed, to copy
-into crusader_params.yaml afterwards.
+ONE FILE. `set` writes straight into crusader_params.yaml (the installed one is
+a link to the source tree's), the same file the ground station's Tuning tab
+saves into, so a value kept from either place is the one the next start uses.
+`git diff` on the Jetson shows what a session changed; commit what is right.
+(Until 2026-10-09 this worked on a copy, t3tools/cannon_cal.yaml, and nothing
+reached the boat's file until copied by hand.)
+
+THE TRIMS are per window (pan_trim_ul_deg ... tilt_trim_lr_deg): `window ul|lr`
+names its window, so cannon_aim_node adds that window's trims. `point` and
+`deg` name none and are untrimmed.
 
 NO WATER FROM HERE. cannon_aim_node always runs with fire_pump false: its
 bursts are logged DRY. The water is the pilot's pump switch (ch10), which works
@@ -32,7 +35,6 @@ import json
 import math
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -40,7 +42,6 @@ import time
 
 LOGDIR = "/root/robotx_ws/t3tools"
 INSTALLED = "/root/robotx_ws/install/crusader_bringup/share/crusader_bringup/config/crusader_params.yaml"
-COPY = os.path.join(LOGDIR, "cannon_cal.yaml")
 NODE_LOG = os.path.join(LOGDIR, "cannon_cal_node.log")
 G = 9.81
 
@@ -48,9 +49,10 @@ G = 9.81
 AIM_KEYS = ("nozzle_x", "nozzle_y", "nozzle_z", "exit_speed_mps", "throw_range_m",
             "throw_elev_deg", "pan_center_us", "pan_us_per_deg", "pan_sign",
             "tilt_center_us", "tilt_us_per_deg", "tilt_sign", "pan_min_deg", "pan_max_deg",
-            "tilt_min_deg", "tilt_max_deg", "pan_trim_deg", "tilt_trim_deg")
+            "tilt_min_deg", "tilt_max_deg",
+            "pan_trim_ul_deg", "tilt_trim_ul_deg", "pan_trim_lr_deg", "tilt_trim_lr_deg")
 CAM_KEYS = ("cam_x", "cam_y", "cam_z", "cam_yaw_deg", "cam_pitch_deg")
-LIVE_KEYS = ("pan_trim_deg", "tilt_trim_deg")
+LIVE_KEYS = ("pan_trim_ul_deg", "tilt_trim_ul_deg", "pan_trim_lr_deg", "tilt_trim_lr_deg")
 
 
 # ------------------------------------------------------------------ pure maths
@@ -79,11 +81,10 @@ def hull_to_camera(dx, dy, dz, cam_pitch_deg, cam_yaw_deg):
 # ------------------------------------------------------------------ the working copy
 
 def ensure_copy():
+    """The params file every value is read from and written to (the name is
+    from when this was a working copy)."""
     os.makedirs(LOGDIR, exist_ok=True)
-    if not os.path.isfile(COPY):
-        shutil.copyfile(INSTALLED, COPY)
-        print(f"[cal] working copy made: {COPY} (from the installed params)")
-    return COPY
+    return INSTALLED
 
 
 def section_params(path, section):
@@ -182,9 +183,10 @@ def publish_pwm(pan_us, tilt_us, source, pan_deg=0.0, tilt_deg=0.0):
               f"{' | ' + s.last_reason if s.last_reason else ''}")
 
 
-def aim_loop(get_point, label):
+def aim_loop(get_point, label, window=None):
     """Publish {"fire": true, x, y, z} at 10 Hz while get_point() has one, and
-    print what cannon_aim_node does with it, until Ctrl-C."""
+    print what cannon_aim_node does with it, until Ctrl-C. `window` ("UL"/"LR")
+    names the window, so the node adds that window's own tilt trim."""
     from std_msgs.msg import String
     n = ros_node("cannon_cal")
     pub = n.create_publisher(String, "/crsd/water_cannon", 10)
@@ -200,6 +202,8 @@ def aim_loop(get_point, label):
     while not stop["now"]:
         p = get_point(n)
         msg = {"fire": True, "frame_id": "camera_link"}
+        if window:
+            msg["window"] = window
         if p is not None:
             msg.update(x=p[0], y=p[1], z=p[2])
         pub.publish(String(data=json.dumps(msg)))
@@ -307,7 +311,7 @@ def cmd_window(a):
             return seen["p"]
         return None
 
-    aim_loop(get_point, f"the {want} window on {a.topic}")
+    aim_loop(get_point, f"the {want} window on {a.topic}", window=want)
     return 0
 
 
@@ -356,11 +360,10 @@ def cmd_speed(a):
 
 def cmd_show(a):
     path = ensure_copy()
-    mine, base = aim_params(path), aim_params(INSTALLED)
-    print(f"[cal] {path} vs the installed params:")
+    mine = aim_params(path)
+    print(f"[cal] the aim numbers in {path} (git diff on the Jetson: what changed):")
     for k in CAM_KEYS + AIM_KEYS:
-        tag = "   CHANGED" if str(mine.get(k)) != str(base.get(k)) else ""
-        print(f"  {k:18s} {str(mine.get(k)):>10s}   (installed {base.get(k)}){tag}")
+        print(f"  {k:18s} {str(mine.get(k)):>10s}")
     return 0
 
 

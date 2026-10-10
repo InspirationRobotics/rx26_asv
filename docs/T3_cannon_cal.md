@@ -4,9 +4,13 @@ The short version: check the servos, measure the water's speed with one shot, th
 at the windows and trim until they hit. About 40 minutes, two people: the **pilot** on
 the transmitter and the pump switch **SE (ch10)**, and the **operator** on the laptop.
 
-Everything you change goes into a working copy of the params on the Jetson
-(`~/robotx_ws/t3tools/cannon_cal.yaml`), not the boat's real file. `cal show` lists the
-changes at the end.
+Everything you change with `cal set` goes straight into `crusader_params.yaml` on the
+Jetson, the same file the ground station's Tuning tab **Save** writes. `git diff` there
+shows what a session changed; commit what is right. (Until 2026-10-09 this used a working
+copy, `t3tools/cannon_cal.yaml`; it is no longer read.)
+
+The trims are **per window**: `pan_trim_ul_deg`, `tilt_trim_ul_deg`, `pan_trim_lr_deg`,
+`tilt_trim_lr_deg` (Tuning tab: `/cannon_aim_node`). One trim did not hit both windows.
 
 ## Before you go
 
@@ -107,12 +111,14 @@ cal window lr
 3. Look where the stream hits the lower-right window.
 4. Ctrl-C.
 
-| The stream hits | Fix (live, no restart; 1° ≈ 2.5 cm) |
+| The stream hits | Fix, for the window you are shooting (`lr` or `ul`; live, no restart; 1° ≈ 2–3 cm) |
 |---|---|
-| to the RIGHT | `cal set pan_trim_deg <bigger>` (+ = left) |
-| to the LEFT | `cal set pan_trim_deg <smaller>` |
-| LOW | `cal set tilt_trim_deg <bigger>` (+ = up) |
-| HIGH | `cal set tilt_trim_deg <smaller>` |
+| to the RIGHT | `cal set pan_trim_lr_deg <bigger>` (+ = left) |
+| to the LEFT | `cal set pan_trim_lr_deg <smaller>` |
+| LOW | `cal set tilt_trim_lr_deg <bigger>` (+ = up) |
+| HIGH | `cal set tilt_trim_lr_deg <smaller>` |
+
+(The same in the Tuning tab, then **Save**.)
 
 Repeat until it hits the middle of the window. Then check the other one:
 
@@ -120,11 +126,10 @@ Repeat until it hits the middle of the window. Then check the other one:
 cal window ul
 ```
 
-**If the upper-left misses while the lower-right hits,** the trims aren't the problem:
-the water's speed is.
-- Upper-left lands LOW: the real stream is slower. Lower `exit_speed_mps` by ~5%.
-- Upper-left lands HIGH: raise it by ~5%.
-- After either change, `cal node`, then shoot both windows again.
+Each window has its own trims, so both can be made to hit from the hold. Trims of more
+than ~10° mean the model is off (the water's speed, the servo zero), and they will only be
+right at the distance they were set at: 1.2 m (2026-10-09: tilt +25 UL, +35 LR, at
+4.2 m/s).
 
 **No dock today?** Aim at a mark on the board instead. Give its position from the
 camera's middle lens, in metres: forward, left (+) or right (−), up (+) or down (−).
@@ -139,12 +144,43 @@ That point is roughly where the lower-right window would be.
 
 ## 4. Keep it
 
-```bash
-cal show
+They are already in `crusader_params.yaml` (`cal set`, or the Tuning tab's Save).
+`cal show` prints the aim numbers; `git diff` on the Jetson shows the session's changes.
+Commit them.
+
+## The fire test: hold, red, spray until green, the code
+
+`task3_cannon_fire.xml`: the boat holds 1.2 m in front of the bay on its face, waits for a
+window to go steady RED, sprays it until it reads GREEN, then reads the colour code
+(c1 on 1 s, off 1 s, c2 on 1 s, off 2 s, repeated), and waits for the next red. Each step
+prints one line, `TASK3 | ...`:
+
+```
+APPROACHING the bay
+DOCKING: lining up 1.2 m out
+DOCKED in bay 1: docking report sent
+ON FIRE: the upper-left (UL) window is steady RED
+FIRE OUT: the upper-left (UL) window is GREEN after 8.1 s of spray
+CODE: code: red then blue  ->  resource COLOR_RED, deliver to COLOR_BLUE
 ```
 
-Copy every line marked `CHANGED` into `crusader_params.yaml`, in the `cannon_aim_node`
-section, and commit it.
+1. Start everything (after any reboot too), in its own terminal, left running:
+   ```bash
+   docker exec -it asv bash -c 'source /opt/ros/humble/setup.bash && source /root/robotx_ws/install/setup.bash && ros2 launch crusader_bringup task3.launch.py tree:=cannon_fire publish_setpoints:=true'
+   ```
+2. Point the bow at the bay (the camera brings it in until the LiDAR has the wall), SC
+   to MANUAL, then:
+   ```bash
+   docker exec -it asv /root/robotx_ws/src/rx26_asv/tools/scripts/task3/go.sh 86400
+   ```
+3. Watch the steps:
+   ```bash
+   docker exec -it asv bash -c 'source /opt/ros/humble/setup.bash && ros2 topic echo /crsd/task3_events --qos-durability transient_local --qos-reliability reliable --field data'
+   ```
+
+Stop with SC out of MANUAL. Stop the launch with Ctrl-C in its terminal (closing the window
+leaves it running). The pump stays DRY: the pilot squirts with SE while it says it is
+spraying. `go.sh` refuses, and says why, when anything above is missing or doubled.
 
 ## If you have extra time
 

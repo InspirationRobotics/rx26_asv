@@ -1,0 +1,69 @@
+<?xml version="1.0"?>
+<!--
+  task3_cannon_hold.xml - HOLD the boat in front of a bay for the pan/tilt
+  cannon's aim test (docs/T3_cannon_cal.md, step 3): nothing else. The cannon
+  aims itself (cal window ul / lr, in another terminal) and the water is the
+  pilot's switch SE; this tree only keeps the boat still in front of the face.
+
+    range (surge)      the LiDAR wall range, to 1.2 m; until the LiDAR has the
+                       wall, the camera's distance to the face (range_fallback)
+    left/right (sway)  the bay's FACE CENTRE on the boat's centreline
+                       (StrafeKeep lateral_ref="face": the committed bay, else
+                       the one reading GREEN, else the nearest the bow). Not a
+                       window: up close the face is the steadier detection
+    yaw                square to the face (its two windows, else its plane)
+
+  WHY 1.2 m. The new nozzle's water leaves at ~4.2 m/s (2026-10-09: a foot low
+  from 1.6 m at the 5.42 m/s guess). From 1.6 m the upper-left is out of its
+  reach; from 1.2 m it is hit at ~40 deg with room for the stream to weaken to
+  ~3.8 m/s. Closer than ~1.2 m a LEVEL camera loses the upper-left window under
+  the hull band, and the cannon aims at what the camera sees.
+
+  NO SHOTS. There is no FireBurst here (the fixed nozzle's), so the tree never
+  asks for the pump even when started with fire_pump true. AwaitStrafeSolution
+  logs "firing solution held" once it has settled; the hold goes on after that
+  until the pilot takes the boat back.
+
+  RUN IT (the boat in front of the bay, ~2 m out, roughly square; MANUAL on SC)
+    tree.sh true false task3_cannon_hold.xml -p strafe.window_median_s:=0.1 -p strafe.rate_window_s:=0.5
+    go.sh 86400
+  Taking it back: SC out of MANUAL ends it and the bridge releases the sticks;
+  SD up trips the drop latch; SB is the e-stop (it does NOT stop the pump: SE does).
+-->
+<root BTCPP_format="4" main_tree_to_execute="CannonHold">
+  <BehaviorTree ID="CannonHold">
+    <ReactiveSequence name="guard_band">
+
+      <ModeIs mode="MANUAL"/>
+      <NotDropped/>
+      <!-- the LiDAR's wall, or the camera's face while it brings the boat in -->
+      <WallRangeAlive max_age_s="1.0" face_max_age_s="1.0"/>
+      <AttitudeAlive max_age_s="0.5"/>
+
+      <StrafeKeep fire_range_m="1.2" lateral_ref="face" range_fallback="face"
+                  lateral_bias_m="0.0" nozzle_y_m="0.0"
+                  cam_timeout_s="0.5" face_timeout_s="3.0"
+                  range_check_m="0" face_setback_m="0.0"
+                  deadband_range_m="0.05" deadband_lat_m="0.04" deadband_yaw_deg="3.0"
+                  kp_fwd="90" kd_fwd="60" kp_lat="100" kd_lat="200" kp_yaw="5" kd_yaw="0.5"
+                  ki_fwd="40" ki_lat="10" i_max_us="100"
+                  min_us="30" max_us="120" slew_us_s="200"
+                  min_range_m="0.6" square_first_deg="10"/>
+
+      <Sequence name="hold">
+        <Announce text="APPROACHING the bay"/>
+        <AwaitStrafeSolution fire_range_m="1.2" range_tol_m="0.40" lat_tol_m="0.30"
+                             yaw_tol_deg="10.0" hold_s="0.5" gap_s="0.0" timeout_s="1000000"
+                             steady="false"/>
+        <Announce text="DOCKING: lining up 1.2 m out"/>
+        <!-- the cannon aims itself: the hull need not be still to count -->
+        <AwaitStrafeSolution fire_range_m="1.2" range_tol_m="0.06" lat_tol_m="0.10"
+                             yaw_tol_deg="5.0" hold_s="1.0" gap_s="0.0" timeout_s="1000000"
+                             steady="false"/>
+        <Announce text="HOLDING 1.2 m out (this tree reports nothing)"/>
+        <Sleep msec="86400000"/>
+      </Sequence>
+
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

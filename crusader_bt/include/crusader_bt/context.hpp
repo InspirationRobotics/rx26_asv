@@ -157,6 +157,9 @@ struct Context
   double dock_obs_age_s = 1e9;                ///< since the last DockObservation
   std::uint32_t dock_seq = 0;                 ///< bumps on every DockObservation
   double dock_t = 0.0;                        ///< that frame's stamp, seconds
+  /// The book's track id for each bay of that frame (-1: not placed), as
+  /// DockBook::ingest matched them. All -1 when the book did not take the frame.
+  std::vector<int> dock_frame_tracks;
   // The timing layer's verdict on the latest frame, for the bay it tracks.
   std::string dock_pattern;                   ///< "", steady, flash, code, ...
   std::vector<dock::Colour> dock_colours;
@@ -240,6 +243,19 @@ struct Context
   fire::Series fire_win_x[2];
   fire::Series fire_win_y[2];
   fire::Series face_heading{true};
+  /// The FACE CENTRE of the bay the hold steers on (dock::pickHoldBay: the
+  /// committed bay, else the GREEN one, else the nearest), body frame, for
+  /// StrafeKeep lateral_ref="face". face_pick names the rule that chose it.
+  fire::Series fire_face_x;
+  fire::Series fire_face_y;
+  std::string face_pick;
+  /// The book's track (resolved) of the bay the face hold last steered on, -1
+  /// none: what SprayUntilHit aims at when no bay was committed (a hold-and-
+  /// fire test in front of one practice bay).
+  int hold_track = -1;
+  /// What the keep holds on the line ("window", "face", "slip"), for the
+  /// gate's reasons.
+  std::string strafe_ref = "window";
   std::string face_src;                       ///< "windows" / "plane": the last source
   double face_target = fire::kNaN;            ///< the last good square heading, held
   double yaw_rate_dps = fire::kNaN;           ///< ATTITUDE.yawspeed, + = turning right
@@ -352,13 +368,17 @@ struct Context
   // The three RoboCommand reports go out as JSON for the OCS to relay, like
   // the Task 1 report. Field names are rx_reports.proto's.
   std::function<void(int)> report_docking;          ///< DockingReport.bay_id
+  /// One line of the run's story for the operator ("DOCKED", "ON FIRE: ...",
+  /// "CODE: ..."): logged as "TASK3 | ..." and, on the boat, /crsd/task3_events.
+  std::function<void(const std::string &)> announce;
   std::function<void(int)> report_firefighting;     ///< FirefightingReport.window_id
   /// ResourceDeliveryRequest to RoboCommand.
   std::function<void(const dock::Request &)> report_request;
   /// The same request to the UAV, over the radio.
   std::function<void(const dock::Request &)> relay_request;
-  /// The water cannon: fire or not, aimed at a point in camera_link.
-  std::function<void(bool, double, double, double)> cannon;
+  /// The water cannon: fire or not, aimed at a point in camera_link, at
+  /// window (DockWindow.index; -1 = none) for that window's own tilt trim.
+  std::function<void(bool, double, double, double, int)> cannon;
 
   // ---- fixed-nozzle shot outputs ----
   /// GUIDED heading (compass deg) + signed speed (m/s): /crsd/guided_heading_speed.
@@ -657,9 +677,10 @@ inline void clearLeg(Context & c)
 /// timing layer's verdict does not depend on the pose, so it is always taken.
 inline void ingestDockObservation(Context & c, const dock::Frame & f)
 {
+  c.dock_frame_tracks.assign(f.bays.size(), -1);
   if (c.origin_set && c.pose_fresh && std::isfinite(c.heading_deg)) {
     c.dock.prm.face_dz = c.dock_face_dz;
-    c.dock.ingest(f, c.boat, c.heading_deg, c.cam_mount);
+    c.dock_frame_tracks = c.dock.ingest(f, c.boat, c.heading_deg, c.cam_mount);
   }
   ++c.dock_seq;
   c.dock_t = f.t;
@@ -725,14 +746,52 @@ inline void ingestAttitude(
   c.yaw_rate_dps = yaw_rate * d;     // NED yaw rate: + = clockwise = turning right
 }
 
+/// The face the strafe keep can hold on the line instead of a window
+/// (lateral_ref="face"). CALL UNDER ctx.mu, from ingestFireWindows. The bay is
+/// dock::pickHoldBay's (committed, else GREEN, else nearest); its face centre
+/// goes into the body frame through cam_mount.
+///
+/// A face cut at ONE side of the image is still used. Its bearing is the
+/// visible part's, which lies on the same side of the boat as the true centre
+/// and short of it by half the part cut off - so the hold pushes the right way,
+/// a little too gently, and is exact again once the whole face is back in view.
+/// Dropping it instead left a boat pushed sideways with no sideways error at
+/// all, and it never came back (2026-10-09, on the water). Cut at BOTH sides
+/// (the face wider than the view) the centre is anywhere: nothing.
+inline void ingestFireFace(Context & c, double t, const dock::Frame & f)
+{
+  std::vector<int> ids = c.dock_frame_tracks;
+  for (int & id : ids) {if (id >= 0) {id = c.dock.resolve(id);}}
+  const int chosen = c.chosen_track >= 0 ? c.dock.resolve(c.chosen_track) : -1;
+  const char * why = "";
+  const int i = dock::pickHoldBay(f, ids, chosen, &why);
+  if (i < 0) {return;}
+  const dock::BaySighting & s = f.bays[static_cast<std::size_t>(i)];
+  c.face_pick = why;
+  if (static_cast<std::size_t>(i) < ids.size() && ids[static_cast<std::size_t>(i)] >= 0) {
+    c.hold_track = ids[static_cast<std::size_t>(i)];
+  }
+  if (s.cut_left && s.cut_right) {
+    c.face_pick += ", wider than the view";
+    return;
+  }
+  if (s.cut_left || s.cut_right) {c.face_pick += s.cut_left ? ", cut at the left" : ", cut at the right";}
+  dock::Vec2 p;
+  if (!dock::faceCentreBody(s, c.cam_mount, c.dock_face_dz, p)) {return;}
+  c.fire_face_x.add(t, p.x);
+  c.fire_face_y.add(t, p.y);
+}
+
 /// The strafe keep's view of one DockObservation. CALL UNDER ctx.mu, after
 /// ingestDockObservation, with `t` on now_s's clock (the frame's own stamp is
-/// another clock). Takes the bay nearest the bow that has a positioned
-/// window; puts its windows into the body frame through cam_mount; and, when
-/// both windows are there at the face's spacing, the heading that would square
-/// the bow to it - else the same from the face plane's normal.
+/// another clock). The face first (ingestFireFace). Then takes the bay nearest
+/// the bow that has a positioned window; puts its windows into the body frame
+/// through cam_mount; and, when both windows are there at the face's spacing,
+/// the heading that would square the bow to it - else the same from the face
+/// plane's normal.
 inline void ingestFireWindows(Context & c, double t, const dock::Frame & f)
 {
+  ingestFireFace(c, t, f);
   constexpr double kFaceSepM = 0.45, kFaceSepTolM = 0.15;   // UL-LR, build guide
   const dock::BaySighting * best = nullptr;
   for (const auto & b : f.bays) {
@@ -800,6 +859,7 @@ inline void resetTask3(Context & c)
   c.survey_looks = 0;
   c.chosen_track = -1;
   c.chosen_bay = 0;
+  c.hold_track = -1;
   c.berth = dock::Berth{};
   c.readiness_confirmed = false;
   c.request = dock::Request{};

@@ -22,6 +22,8 @@
 //        /crsd/docking_report, /crsd/firefighting_report,
 //        /crsd/resource_delivery_request (String, JSON)  Task 3, for the OCS
 //        /crsd/uav_resource_request (String, JSON)       Task 3, for the radio
+//        /crsd/task3_events (String, latched x50)        Task 3, the run's story for
+//                                                        the operator (Announce)
 //        /crsd/water_cannon       (String, JSON)          Task 3, the pump
 //        /crsd/guided_heading_speed (GuidedHeadingSpeed) ONLY when publish_setpoints
 //        /crsd/pump_cmd           (PumpCommand)   ONLY when fire_pump
@@ -278,6 +280,9 @@ public:
     // Task 3. The three reports are JSON for the OCS to relay, like
     // safe_passage_report; the field names are rx_reports.proto's.
     docking_pub_ = create_publisher<std_msgs::msg::String>("/crsd/docking_report", 10);
+    // the run's story, one line per step: the last 50 kept for a late echo
+    events_pub_ = create_publisher<std_msgs::msg::String>(
+      "/crsd/task3_events", rclcpp::QoS(50).reliable().transient_local());
     firefighting_pub_ = create_publisher<std_msgs::msg::String>("/crsd/firefighting_report", 10);
     request_pub_ = create_publisher<std_msgs::msg::String>(
       "/crsd/resource_delivery_request", 10);
@@ -424,6 +429,8 @@ private:
   {
     struct Row {const char * name; double fire::StrafeTune::* field; double max; const char * what;};
     static const Row rows[] = {
+      {"fire_range_m", &fire::StrafeTune::fire_range_m, 5.0,
+        "the distance HELD: LiDAR range to the wall, m (the tree's fire_range_m / standoff_m)"},
       {"kp_fwd", &fire::StrafeTune::kp_fwd, 400.0, "range P, us per m (tree: 90)"},
       {"kd_fwd", &fire::StrafeTune::kd_fwd, 400.0, "range D, us per m/s (tree: 60)"},
       {"ki_fwd", &fire::StrafeTune::ki_fwd, 200.0, "range I, us per m.s (tree: 20)"},
@@ -489,6 +496,12 @@ private:
           if (window && v >= 0.0 && v < 0.05) {
             res.successful = false;
             res.reason = p.get_name() + ": use -1 (the tree's) or at least 0.05 s";
+            return res;
+          }
+          // a slip of the finger to 0 would be "hold against the wall"
+          if (row->field == &fire::StrafeTune::fire_range_m && v >= 0.0 && v < 0.6) {
+            res.successful = false;
+            res.reason = p.get_name() + ": use -1 (the tree's) or at least 0.6 m";
             return res;
           }
           next.*(row->field) = v < 0.0 ? -1.0 : v;
@@ -788,6 +801,12 @@ private:
     ctx_->report_docking = [this](int bay) {
         publishJson(docking_pub_, dock::dockingReportJson(bay));
       };
+    ctx_->announce = [this](const std::string & text) {
+        RCLCPP_INFO(get_logger(), "TASK3 | %s", text.c_str());
+        std_msgs::msg::String m;
+        m.data = text;
+        events_pub_->publish(m);
+      };
     ctx_->report_firefighting = [this](int w) {
         publishJson(firefighting_pub_, dock::firefightingReportJson(w));
       };
@@ -797,8 +816,8 @@ private:
     ctx_->relay_request = [this](const dock::Request & r) {
         publishJson(uav_request_pub_, dock::uavRequestJson(r, ++uav_seq_));
       };
-    ctx_->cannon = [this](bool fire, double x, double y, double z) {
-        publishJson(cannon_pub_, dock::cannonJson(fire, x, y, z));
+    ctx_->cannon = [this](bool fire, double x, double y, double z, int window) {
+        publishJson(cannon_pub_, dock::cannonJson(fire, x, y, z, window));
       };
     // The fixed-nozzle shot. The offros runner emits the same three as JSON.
     ctx_->heading_speed = [this](double heading, double speed) {
@@ -904,6 +923,9 @@ private:
       s.nz = b.plane_normal[2];
       s.d = b.plane_offset;
       s.truncated = b.truncated;
+      const dock::SideCut cut = dock::cutSides(b.bbox[0], b.bbox[2]);
+      s.cut_left = cut.left;
+      s.cut_right = cut.right;
       s.indicator_present = b.indicator_present;
       s.indicator = dock::colourFromCv(b.indicator_colour);
       s.indicator_conf = b.indicator_confidence;
@@ -1560,7 +1582,7 @@ private:
     // tells the OCS the attempt is still running on behalf of a mission that
     // has stopped. And the pump OFF: SprayUntilHit switches it off when it is
     // halted, but a tree that throws never halts its leaves.
-    if (ctx_->cannon) {ctx_->cannon(false, 0.0, 0.0, 0.0);}
+    if (ctx_->cannon) {ctx_->cannon(false, 0.0, 0.0, 0.0, -1);}
     {
       // The side fences are drawn from this plan: a finished mission leaves no walls behind.
       std::lock_guard<std::mutex> lk(ctx_->mu);
@@ -1686,6 +1708,7 @@ private:
   bool have_dock_ = false;
   int uav_seq_ = 0;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr docking_pub_, firefighting_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr events_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr request_pub_, uav_request_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr cannon_pub_;
   rclcpp::Subscription<crusader_msgs::msg::DockObservation>::SharedPtr dock_sub_;

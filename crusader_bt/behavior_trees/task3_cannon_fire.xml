@@ -1,0 +1,85 @@
+<?xml version="1.0"?>
+<!--
+  task3_cannon_fire.xml - Task 3 with the pan/tilt cannon in front of ONE bay
+  (the practice dock: no slip walls, no approach from far out), MANUAL on SC.
+  Every step says what it did on one line, "TASK3 | ..." in the tree's log and
+  on /crsd/task3_events:
+
+    APPROACHING   the hold brings the boat in on the camera's distance to the
+                  face (StrafeKeep range_fallback="face") until the LiDAR has
+                  the wall, then on the LiDAR
+    DOCKING       within ~0.4 m of the 1.2 m standoff: lining up
+    DOCKED        held there 2 s: the docking report (bay 1: the practice dock
+                  has one, and nothing is committed in this tree)
+    ON FIRE       the dock detector's timing layer calls a window steady RED
+    FIRE OUT      the cannon sprayed it until it read GREEN (90 s at most)
+    CODE          the colour code that follows, read and held 5 s: the two
+                  colours (resource, deliver to). Not reported: no RoboCommand
+                  at the practice dock
+    then back to ON FIRE for the next light, until the pilot takes the boat back.
+
+  The bay is the one the hold steers on (the GREEN-indicator one, else the one
+  ahead; SprayUntilHit's fireTrack). The steps are the Gazebo tree's
+  (task3_cannon.xml) from DockingReport on; its approach and slip dock are not.
+
+  THE WATER. tree.sh true false (or task3.launch.py tree:=cannon_fire
+  publish_setpoints:=true) = the sticks, pump DRY: the cannon aims and logs DRY
+  bursts; the pilot squirts with SE while it is spraying. Water from the tree
+  needs fire_pump true on the runner AND cannon_aim_node, and the pump path.
+  Do NOT run `cal window` at the same time: both aim the cannon.
+
+  THE CODE: c1 on 1 s, off 1 s, c2 on 1 s, off 2 s, repeated (+-0.35 s each);
+  two cycles to recognise it, then the same answer for 5 s more.
+-->
+<root BTCPP_format="4" main_tree_to_execute="CannonFire">
+  <BehaviorTree ID="CannonFire">
+    <ReactiveSequence name="guard_band">
+
+      <ModeIs mode="MANUAL"/>
+      <NotDropped/>
+      <!-- the LiDAR's wall, or the camera's face while it brings the boat in -->
+      <WallRangeAlive max_age_s="1.0" face_max_age_s="1.0"/>
+      <AttitudeAlive max_age_s="0.5"/>
+      <DockCameraAlive max_age_s="3.0"/>
+
+      <StrafeKeep fire_range_m="1.2" lateral_ref="face" range_fallback="face"
+                  lateral_bias_m="0.0" nozzle_y_m="0.0"
+                  cam_timeout_s="0.5" face_timeout_s="3.0"
+                  range_check_m="0" face_setback_m="0.0"
+                  deadband_range_m="0.05" deadband_lat_m="0.04" deadband_yaw_deg="3.0"
+                  kp_fwd="90" kd_fwd="60" kp_lat="100" kd_lat="200" kp_yaw="5" kd_yaw="0.5"
+                  ki_fwd="40" ki_lat="10" i_max_us="100"
+                  min_us="30" max_us="120" slew_us_s="200"
+                  min_range_m="0.6" square_first_deg="10"/>
+
+      <Sequence name="mission">
+        <Announce text="APPROACHING the bay"/>
+        <AwaitStrafeSolution fire_range_m="1.2" range_tol_m="0.40" lat_tol_m="0.30"
+                             yaw_tol_deg="10.0" hold_s="0.5" gap_s="0.0" timeout_s="1000000"
+                             steady="false"/>
+        <Announce text="DOCKING: lining up 1.2 m out"/>
+        <!-- the cannon aims itself, so the hull need not be still -->
+        <AwaitStrafeSolution fire_range_m="1.2" range_tol_m="0.10" lat_tol_m="0.15"
+                             yaw_tol_deg="8.0" hold_s="2.0" gap_s="0.0" timeout_s="1000000"
+                             steady="false"/>
+        <ReportDocking bay="1"/>
+
+        <KeepRunningUntilFailure>
+          <ForceSuccess>
+            <Sequence name="one_fire">
+              <AwaitFireTarget timeout_s="1000000" resend_s="1000000"/>
+              <!-- the aim point may be 3 s old: in front of the bay the window
+                   does not move -->
+              <SprayUntilHit timeout_s="90.0" min_green_s="0.4" max_aim_age_s="3.0"/>
+              <!-- GREEN 5 s, off 1 s, then the code for 60 s -->
+              <ForceSuccess>
+                <DecodeResourceRequest timeout_s="80.0" hold_s="5.0" min_frames="20"/>
+              </ForceSuccess>
+            </Sequence>
+          </ForceSuccess>
+        </KeepRunningUntilFailure>
+      </Sequence>
+
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

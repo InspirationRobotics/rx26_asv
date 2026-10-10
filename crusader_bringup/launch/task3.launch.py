@@ -5,6 +5,10 @@ needs ON TOP OF core.launch.py.
     ros2 launch crusader_bringup task3.launch.py publish_setpoints:=true   # hold, dry
     ros2 launch crusader_bringup task3.launch.py publish_setpoints:=true fire_pump:=true
 
+The pan/tilt cannon in front of one bay (after a reboot, this is everything):
+
+    ros2 launch crusader_bringup task3.launch.py tree:=cannon_fire publish_setpoints:=true
+
 then start the run, SD down and the transmitter on (MANUAL for the fire trees,
 GUIDED for the mission trees):
 
@@ -68,6 +72,11 @@ TREES = {
     # the pan/tilt cannon, ONE run: GUIDED approach, SC to MANUAL, dock on the
     # LiDAR's slip (dock_slot_node), aim + spray (cannon_aim_node), the reports
     "cannon": "task3_cannon.xml",
+    # the pan/tilt cannon in front of ONE bay, MANUAL (2026-10-09, the practice
+    # dock: no slip walls): hold 1.2 m out on the bay's face (cal window aims),
+    # or that hold + wait for a RED window and spray it until GREEN
+    "cannon_hold": "task3_cannon_hold.xml",
+    "cannon_fire": "task3_cannon_fire.xml",
     # TEST variants (headers say how they differ):
     "fire_1p6": "task3_fire_manual_1p6.xml",  # pool tuning: 1.6 m, no attempt limit
     "approach_test": "task3_approach_test.xml",  # GUIDED approach to line-up only; dock_bays:=1
@@ -108,16 +117,19 @@ def _nodes(context):
 
     # The cannon tree docks on the slip, not the wall range, and its water goes
     # through cannon_aim_node (whose own fire_pump is this launch's).
+    cannon = Node(package="crusader_fcu", executable="cannon_aim_node",
+                  output="screen", parameters=[params, {"fire_pump": pump}])
+    wall = Node(package="crusader_perception", executable="wall_range_node",
+                output="screen", parameters=[params])
     if tree == "cannon":
-        lidar = [
-            Node(package="crusader_perception", executable="dock_slot_node",
-                 output="screen", parameters=[params]),
-            Node(package="crusader_fcu", executable="cannon_aim_node",
-                 output="screen", parameters=[params, {"fire_pump": pump}]),
-        ]
+        lidar = [Node(package="crusader_perception", executable="dock_slot_node",
+                      output="screen", parameters=[params]), cannon]
+    elif tree in ("cannon_hold", "cannon_fire"):
+        # the hold is on the wall range and the face; the cannon aims (cal
+        # window during a hold, the tree in cannon_fire)
+        lidar = [wall, cannon]
     else:
-        lidar = [Node(package="crusader_perception", executable="wall_range_node",
-                      output="screen", parameters=[params])]
+        lidar = [wall]
     return [
         LogInfo(msg=f"task3: tree {TREES[tree]} | publish_setpoints {setpoints} | "
                     f"fire_pump {pump} -> {mode}"),
@@ -139,7 +151,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("tree", default_value="fire_manual",
                               description="fire_manual | fire_test | disruptive | part1 | part2 | "
-                                          "cannon | fire_1p6 | approach_test"),
+                                          "cannon | cannon_hold | cannon_fire | fire_1p6 | "
+                                          "approach_test"),
         DeclareLaunchArgument("publish_setpoints", default_value="false",
                               description="may the tree take the sticks (G1)"),
         DeclareLaunchArgument("fire_pump", default_value="false",

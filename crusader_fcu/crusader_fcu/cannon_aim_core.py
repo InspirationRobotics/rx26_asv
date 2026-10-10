@@ -41,7 +41,7 @@ Frames: body REP-103 (x forward, y LEFT, z up), z on the hull-bottom datum (the
 datum lidar_z and cam_z are quoted against). Pan + = LEFT, tilt + = UP.
 """
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 G = 9.81
 
@@ -120,7 +120,10 @@ class CannonParams:
                    exit_speed_mps=v, pan=servo("pan"), tilt=servo("tilt"),
                    pan_min_deg=float(d["pan_min_deg"]), pan_max_deg=float(d["pan_max_deg"]),
                    tilt_min_deg=float(d["tilt_min_deg"]), tilt_max_deg=float(d["tilt_max_deg"]),
-                   pan_trim_deg=float(d["pan_trim_deg"]), tilt_trim_deg=float(d["tilt_trim_deg"]))
+                   # the node trims per window now (with_trims); a file with the
+                   # old common trims still loads
+                   pan_trim_deg=float(d.get("pan_trim_deg", 0.0)),
+                   tilt_trim_deg=float(d.get("tilt_trim_deg", 0.0)))
 
 
 # ------------------------------------------------------------------ frames
@@ -227,6 +230,31 @@ def solve(target_body, cp: CannonParams, roll=0.0, pitch=0.0):
 def solve_from_camera(p_cam, cp: CannonParams, roll=0.0, pitch=0.0):
     """solve() for a camera_link aim point (the dock detector's DockWindow x, y, z)."""
     return solve(cam_to_body(p_cam, cp), cp, roll, pitch)
+
+
+# ------------------------------------------------------------------ per-window trim
+#
+# One trim does not hit both windows (2026-10-09, on the water: the two wanted
+# different heights). Until the stream model is right that is a calibration per
+# window, pan and tilt, at the distance it was found at.
+
+WINDOW_SLOTS = ("UL", "LR")        # DockWindow.index 0, 1
+
+
+def window_slot(v):
+    """An aim request's window ("UL"/"LR", either case, or DockWindow.index
+    0/1) -> "UL"/"LR", or None for none or anything else."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return WINDOW_SLOTS[v] if 0 <= v < len(WINDOW_SLOTS) else None
+    s = str(v).strip().upper() if v is not None else ""
+    return s if s in WINDOW_SLOTS else None
+
+
+def with_trims(cp: CannonParams, pan_deg, tilt_deg):
+    """cp with this pan and tilt trim (a window's own) in place of its own."""
+    return replace(cp, pan_trim_deg=float(pan_deg), tilt_trim_deg=float(tilt_deg))
 
 
 # ------------------------------------------------------------------ the stream

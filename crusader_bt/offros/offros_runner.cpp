@@ -136,6 +136,12 @@ dock::Frame frameFromJson(const json & j)
     s.nz = n[2];
     s.d = num(b, "plane_offset", dock::kNaN);
     s.truncated = b.value("truncated", false);
+    const json bb = b.value("bbox", json::array());
+    if (bb.size() == 4 && bb[0].is_number() && bb[2].is_number()) {
+      const dock::SideCut cut = dock::cutSides(bb[0].get<double>(), bb[2].get<double>());
+      s.cut_left = cut.left;
+      s.cut_right = cut.right;
+    }
     s.indicator_present = b.value("indicator_present", false);
     s.indicator = dock::colourFromCv(b.value("indicator_colour", 0));
     s.indicator_conf = num(b, "indicator_confidence", 0.0);
@@ -460,8 +466,11 @@ private:
     ctx_->relay_request = [this](const dock::Request & r) {
         emit({{"type", "uav_request"}, {"json", dock::uavRequestJson(r, ++uav_seq_)}});
       };
-    ctx_->cannon = [this](bool fire, double x, double y, double z) {
-        emit({{"type", "cannon"}, {"json", dock::cannonJson(fire, x, y, z)}});
+    ctx_->cannon = [this](bool fire, double x, double y, double z, int window) {
+        emit({{"type", "cannon"}, {"json", dock::cannonJson(fire, x, y, z, window)}});
+      };
+    ctx_->announce = [this](const std::string & text) {
+        RCLCPP_INFO(node_.get_logger(), "TASK3 | %s", text.c_str());
       };
     // The fixed-nozzle shot. bt_runner_node publishes the same three.
     ctx_->heading_speed = [this](double heading, double speed) {
@@ -765,7 +774,7 @@ private:
     emit({{"type", "result"}, {"outcome", outcome}, {"detail", detail}, {"elapsed_s", el}});
     // Every exit path: the cannon off, the boat stopped, avoidance back on,
     // the task stood down, the light off, no leg running.
-    if (ctx_->cannon) {ctx_->cannon(false, 0.0, 0.0, 0.0);}
+    if (ctx_->cannon) {ctx_->cannon(false, 0.0, 0.0, 0.0, -1);}
     stopIfSilent(true);
     resetLeg(el);
     emit({{"type", "avoidance"}, {"enable", true}});

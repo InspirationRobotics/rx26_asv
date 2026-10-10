@@ -176,7 +176,11 @@ def bay_obs(i, bay, depth_mm, rgb_size, intr, plane_kw=None):
         plane_offset=float(plane[1]) if plane is not None else 0.0,
         plane_rms_m=float(plane[2]) if plane is not None else float("nan"),
         range_from_size_m=float(rng) if rng else float("nan"),
-        bearing_deg=float(bay.get("bearing_deg", float("nan"))))
+        # The CV's bearing (geometry_core.bearing_deg) is + RIGHT, the image's
+        # way round; DockBay.bearing_deg is REP-103, + LEFT, like the plane and
+        # the windows here. Passed through unflipped, the tree's strafe hold on
+        # the face steered AWAY from it (2026-10-09, on the water).
+        bearing_deg=-float(bay.get("bearing_deg", float("nan"))))
 
 
 def observation(bays, depth_mm, rgb_size, intr, seq=None, seq_events=(), fps=0.0):

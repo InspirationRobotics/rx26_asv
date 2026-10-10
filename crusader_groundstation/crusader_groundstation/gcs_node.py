@@ -70,6 +70,7 @@ from crusader_common.stream_cache import StreamCache
 
 from crusader_groundstation import node_registry as reg
 from crusader_groundstation import bag_recorder, camera_profiles, lake_rig, param_client
+from crusader_groundstation import param_save
 from crusader_groundstation import planner_profiles
 from crusader_groundstation import power_client, proc_scan, radio_core
 from crusader_groundstation import system_info
@@ -824,6 +825,8 @@ class GroundStation(Node):
             return self._params_list(payload)
         if path == "/params/set":
             return self._params_set(payload)
+        if path == "/params/save":
+            return self._params_save(payload)
         if path == "/planner/profile/list":
             return self._planner_profiles()
         if path == "/planner/profile/save":
@@ -992,6 +995,43 @@ class GroundStation(Node):
                    else f"applied {', '.join(sorted(values))} on "
                         f"{name.lstrip('/')}")
         return {"ok": not bad, "message": message, "results": results}
+
+    def _params_save(self, payload):
+        """The Tuning tab's Save: these parameters' LIVE values into
+        crusader_params.yaml (param_save), so the next start uses them.
+
+        The page names the rows; the values are read from the node here rather
+        than taken from the page, so what is saved is what the node is running
+        on. Read-only and unknown names are skipped and said so.
+        """
+        names = payload.get("names")
+        if not isinstance(names, list) or not names:
+            return {"ok": False, "message": "nothing to save"}
+        name, rows, err = self._param_call(
+            payload, lambda n: self.tuning.list(n, _yaml_defaults(n)))
+        if err:
+            return err
+        live = {r["name"]: r for r in rows}
+        values = {k: live[k]["value"] for k in names if k in live and live[k]["editable"]}
+        skipped = [k for k in names if k not in values]
+        if not values:
+            return {"ok": False, "message": "nothing savable (read-only or unknown)"}
+        node = name.rstrip("/").split("/")[-1]
+        section = YAML_SECTION_ALIASES.get(node, node)
+        path = os.path.realpath(str(crsd_config.DEFAULT_CONFIG_PATH))
+        try:
+            how = param_save.save(path, section, values, PARAM_BACKUP_DIR)
+        except (KeyError, ValueError, OSError) as exc:
+            return {"ok": False, "message": f"not saved: {exc}"}
+        crsd_config.forget()
+        saved = sorted(k for k, h in how.items() if h != "same")
+        for k in saved:
+            self.get_logger().info(f"saved {section}.{k} = {values[k]} into {path}")
+        message = (f"saved {', '.join(saved)} to crusader_params.yaml" if saved
+                   else "already in crusader_params.yaml")
+        if skipped:
+            message += f" (not saved: {', '.join(skipped)})"
+        return {"ok": True, "message": message, "saved": saved}
 
     def _planner_save_dir(self):
         return os.path.expanduser(self.p["planner_profiles_save_dir"])
@@ -1376,6 +1416,10 @@ def _free_bytes(path):
 
 
 YAML_SECTION_ALIASES = {"dock_view": "oak_detector"}
+
+# The Tuning tab's Save keeps the file's previous version here, one per save.
+# Outside the git checkout, so backups never show up as changes to commit.
+PARAM_BACKUP_DIR = os.path.expanduser("~/robotx_ws/param_backups")
 
 
 def _yaml_defaults(node_name):

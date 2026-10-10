@@ -129,6 +129,18 @@ class TestAimPoints(unittest.TestCase):
 
 class TestMessageShape(unittest.TestCase):
 
+    def test_bearing_is_rep103_plus_left(self):
+        # dock_view's bearing (geometry_core.bearing_deg) is + RIGHT; the
+        # message's is + LEFT, the same way round as the windows' y. A face
+        # centre 0.5 m to the LEFT at 3 m:
+        depth, n, d, wins, boxes, fbox = face(3.0)
+        u = project(np.array([3.0, 0.5, 0.2]))[0]
+        cv = math.degrees(math.atan2(u - INTR[2], INTR[0]))     # geometry_core's
+        self.assertLess(cv, 0.0)
+        obs = do.observation([dict(bay_dict(boxes, fbox), bearing_deg=cv)], depth, (W, H), INTR)
+        self.assertAlmostEqual(obs["bays"][0]["bearing_deg"], math.degrees(math.atan2(0.5, 3.0)),
+                               places=6)
+
     def test_fields_and_numbering(self):
         depth, n, d, wins, boxes, fbox = face(3.0)
         obs = do.observation([bay_dict(boxes, fbox, states=("red", "off"))], depth, (W, H), INTR,

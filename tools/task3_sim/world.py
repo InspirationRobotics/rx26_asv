@@ -911,6 +911,28 @@ class Camera:
         pr = self.sc.cam_pitch_deg * DEG
         return (xb * math.cos(pr) - zb * math.sin(pr), yb, xb * math.sin(pr) + zb * math.cos(pr))
 
+    def face_box(self, cam, f, lft, face, dock, top, bot):
+        """The face's box in the full-res image, clipped to it as the detector's
+        is, and - when it runs off the left or right edge - the bearing (deg,
+        + left) of the clipped box's centre, which is what dock_view reports.
+        None for the bearing when the whole width is in view."""
+        us = []
+        for su in (-1, 1):
+            e = self.to_cam(cam, f, lft, (face[0] + dock.right[0] * su * FACE_W / 2.0,
+                                          face[1] + dock.right[1] * su * FACE_W / 2.0, dock.face_z))
+            # an edge behind the camera is off the image on its own side
+            us.append(self.W_PX / 2.0 - self.FX * e[1] / e[0] if e[0] > 0.05
+                      else (-1e6 if e[1] > 0 else 1e6))
+        x1 = min(max(min(us), 0.0), float(self.W_PX))
+        x2 = min(max(max(us), 0.0), float(self.W_PX))
+        vs = [self.H_PX / 2.0 - self.FX * p[2] / p[0] for p in (top, bot) if p[0] > 0.05]
+        y1 = min(max(min(vs), 0.0), float(self.H_PX)) if vs else 0.0
+        y2 = min(max(max(vs), 0.0), float(self.H_PX)) if vs else 0.0
+        box = [int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2))]
+        if min(us) >= 0.0 and max(us) <= self.W_PX:
+            return box, None
+        return box, math.degrees(math.atan2(self.W_PX / 2.0 - (x1 + x2) / 2.0, self.FX))
+
     def in_view(self, c):
         """Is a camera-frame point inside the image (and not the hull band)?"""
         if c[0] <= 0.05:
@@ -980,19 +1002,22 @@ class Camera:
                         face[1] + dock.right[1] * su * FACE_W / 2.0,
                         dock.face_z + sz * FACE_H / 2.0) for su in (-1, 1) for sz in (-1, 1)]
             truncated = not all(self.in_view(self.to_cam(cam, f, lft, q)) for q in corners)
-            seen.append((bay, face, r, c, truncated))
+            seen.append((bay, face, r, c, truncated, self.face_box(cam, f, lft, face, dock, top, bot)))
 
         # left to right in THIS frame: + bearing is left
         seen.sort(key=lambda s: -math.atan2(s[3][1], s[3][0]))
         bays = []
         tracked_states = None
         pr = self.sc.cam_pitch_deg * DEG
-        for idx, (bay, face, r, c, truncated) in enumerate(seen):
+        for idx, (bay, face, r, c, truncated, (box, b_vis)) in enumerate(seen):
             # the face centre, with range error along the line of sight
             rc = math.sqrt(c[0] ** 2 + c[1] ** 2 + c[2] ** 2)
             k = 1.0 + rnd.gauss(0.0, 0.01 + 0.004 * r * r) / rc
             cn = (c[0] * k, c[1] * k, c[2] * k)
-            b_n = math.degrees(math.atan2(cn[1], cn[0])) + rnd.gauss(0.0, 0.2)
+            # dock_view's bearing is its BOX's centre: the visible part's, when
+            # the face runs off the side of the image
+            b_n = (b_vis if b_vis is not None else math.degrees(math.atan2(cn[1], cn[0]))) \
+                + rnd.gauss(0.0, 0.2)
             has_plane = self.STEREO_MIN_M <= r <= self.PLANE_MAX_M
             # the face's normal, noisy in the horizontal, then into the tilted frame
             ang = rnd.gauss(0.0, 3.0) * DEG
@@ -1028,7 +1053,7 @@ class Camera:
             lit = [w["index"] for w in windows if w["state"] in LIT and w["state_confidence"] >= 0.5]
             h_px = self.FX * WINDOW_M / r
             bays.append({
-                "bay_index": idx, "detector_confidence": 0.9, "bbox": [0, 0, 0, 0],
+                "bay_index": idx, "detector_confidence": 0.9, "bbox": box,
                 "truncated": truncated,
                 "indicator_present": ind_present, "indicator_colour": ind_col,
                 "indicator_confidence": ind_conf, "indicator_bbox": [0, 0, 0, 0],

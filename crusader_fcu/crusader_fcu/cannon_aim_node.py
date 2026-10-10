@@ -4,7 +4,8 @@ Subscribes:
   /crsd/water_cannon  std_msgs/String (JSON)    the tree (SprayUntilHit), every tick
                       it wants water: {"fire": true, "frame_id": "camera_link",
                       "x", "y", "z"} = the burning window's aim point from the dock
-                      detector; {"fire": false} when it stops
+                      detector, and "window": "UL" / "LR" (optional) for that
+                      window's own pan/tilt trim; {"fire": false} when it stops
   /crsd/attitude      crusader_msgs/Attitude    roll/pitch, so the stream droops
                       in the world and not in the hull
   /crsd/cannon_state  crusader_msgs/CannonState the two servos' real outputs
@@ -55,10 +56,16 @@ PARAM_SPEC = {
     "pwm_min": dict(read_only=True, lo=800, hi=2200),
     "pwm_max": dict(read_only=True, lo=800, hi=2200),
     "pan_min_deg": RO, "pan_max_deg": RO, "tilt_min_deg": RO, "tilt_max_deg": RO,
-    "pan_trim_deg": dict(read_only=False, lo=-30.0, hi=30.0,
-                         description="added to every pan solution, deg (+ = left)"),
-    "tilt_trim_deg": dict(read_only=False, lo=-30.0, hi=30.0,
-                          description="added to every tilt solution, deg (+ = up)"),
+    # each window's own trim, added to its solution (none for an aim that names
+    # no window: cal point / deg)
+    "pan_trim_ul_deg": dict(read_only=False, lo=-45.0, hi=45.0,
+                            description="UPPER-LEFT window: added to the pan, deg (+ = left)"),
+    "tilt_trim_ul_deg": dict(read_only=False, lo=-45.0, hi=45.0,
+                             description="UPPER-LEFT window: added to the tilt, deg (+ = up)"),
+    "pan_trim_lr_deg": dict(read_only=False, lo=-45.0, hi=45.0,
+                            description="LOWER-RIGHT window: added to the pan, deg (+ = left)"),
+    "tilt_trim_lr_deg": dict(read_only=False, lo=-45.0, hi=45.0,
+                             description="LOWER-RIGHT window: added to the tilt, deg (+ = up)"),
     "aim_rate_hz": dict(read_only=True, lo=1.0, hi=100.0),
     "settle_s": dict(read_only=True, lo=0.0, hi=5.0),
     "servo_tol_us": dict(read_only=True, lo=1.0, hi=200.0),
@@ -81,6 +88,11 @@ class CannonAimNode(Node):
         for k in ("cam_x", "cam_y", "cam_z", "cam_yaw_deg", "cam_pitch_deg"):
             d[k] = cam.get(k, 0.0)
         self.cp = ca.CannonParams.from_dict(d)
+        # each window's own (pan, tilt) trim (0 if the params file predates
+        # them: then they are not declared either)
+        self.win_trim = {s: [float(p.get(f"pan_trim_{s.lower()}_deg", 0.0)),
+                             float(p.get(f"tilt_trim_{s.lower()}_deg", 0.0))]
+                         for s in ca.WINDOW_SLOTS}
         self.gate = ca.FireGate(ca.FireParams(
             settle_s=p["settle_s"], servo_tol_us=p["servo_tol_us"],
             aim_max_age_s=p["aim_max_age_s"], burst_s=p["burst_s"], gap_s=p["gap_s"]))
@@ -89,6 +101,7 @@ class CannonAimNode(Node):
 
         self._want = False
         self._aim = None             # (x, y, z) camera_link
+        self._aim_win = None         # "UL" / "LR": which window, for its own trim
         self._aim_t = -1e18          # receipt, monotonic
         self._cmd_t = -1e18          # the last /crsd/water_cannon of any kind
         self._att = (0.0, 0.0)
@@ -122,10 +135,10 @@ class CannonAimNode(Node):
 
     def _on_set(self, params):
         for prm in params:
-            if prm.name == "pan_trim_deg":
-                self.cp.pan_trim_deg = float(prm.value)
-            elif prm.name == "tilt_trim_deg":
-                self.cp.tilt_trim_deg = float(prm.value)
+            for s in ca.WINDOW_SLOTS:
+                for i, axis in enumerate(("pan", "tilt")):
+                    if prm.name == f"{axis}_trim_{s.lower()}_deg":
+                        self.win_trim[s][i] = float(prm.value)
         return SetParametersResult(successful=True)
 
     def _on_cannon(self, msg: String):
@@ -149,6 +162,7 @@ class CannonAimNode(Node):
                 p = None
             if p is not None and all(math.isfinite(v) for v in p):
                 self._aim, self._aim_t = p, now
+                self._aim_win = ca.window_slot(j.get("window"))
         if self._want and not want:
             self._stop("the tree stopped asking")
         self._want = want
@@ -188,7 +202,8 @@ class CannonAimNode(Node):
         if not self._want or self._aim is None:
             return
         roll, pitch = self._att if now - self._att_t <= 0.5 else (0.0, 0.0)
-        sol = ca.solve_from_camera(self._aim, self.cp, roll, pitch)
+        trim = self.win_trim.get(self._aim_win, (0.0, 0.0))
+        sol = ca.solve_from_camera(self._aim, ca.with_trims(self.cp, *trim), roll, pitch)
         self._sol = sol
         m = CannonCommand()
         m.header.stamp = self.get_clock().now().to_msg()
@@ -215,8 +230,10 @@ class CannonAimNode(Node):
             self.pump_pub.publish(pm)
         self.get_logger().info(
             f"cannon: burst #{self._bursts} {burst:.1f} s{'' if self.fire_pump else ' (DRY: fire_pump is off)'}"
-            f" | pan {sol.pan_deg:+.1f} tilt {sol.tilt_deg:+.1f} deg, target {sol.dist_m:.2f} m "
-            f"away {sol.height_m:+.2f} m up, throw {sol.elev_deg:.1f} deg")
+            f" | {self._aim_win or 'point'}: pan {sol.pan_deg:+.1f} tilt {sol.tilt_deg:+.1f} deg "
+            f"(trims {trim[0]:+.1f} {trim[1]:+.1f}), target {sol.dist_m:.2f} m "
+            f"away {sol.height_m:+.2f} m up, throw {sol.elev_deg:.1f} deg"
+            + (" CLIPPED" if sol.clipped else ""))
 
     def _status(self):
         s, sol = self._servo, self._sol
@@ -225,6 +242,8 @@ class CannonAimNode(Node):
             why=self.gate.why,
             aim_cam=None if self._aim is None else [round(v, 3) for v in self._aim],
             aim_age_s=None if self._aim is None else round(time.monotonic() - self._aim_t, 2),
+            window=self._aim_win,
+            trims=list(self.win_trim.get(self._aim_win, (0.0, 0.0))),
             pan_deg=round(sol.pan_deg, 2), tilt_deg=round(sol.tilt_deg, 2),
             pan_pwm=sol.pan_pwm, tilt_pwm=sol.tilt_pwm,
             servo_out=None if s is None or not s.output_fresh else [int(s.pan_pwm), int(s.tilt_pwm)],

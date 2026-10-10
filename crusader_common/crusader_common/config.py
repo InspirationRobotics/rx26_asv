@@ -101,6 +101,12 @@ def load(path=None) -> dict:
     return _cache[key]
 
 
+def forget(path=None):
+    """Drop load()'s cached parse, so the next load reads the file again (the
+    ground station after its Tuning tab saves into it)."""
+    _cache.pop(str(Path(path or DEFAULT_CONFIG_PATH)), None)
+
+
 def config_hash(path=None):
     p = Path(path or DEFAULT_CONFIG_PATH)
     try:

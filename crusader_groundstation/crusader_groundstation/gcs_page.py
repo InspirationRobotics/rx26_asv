@@ -1147,10 +1147,13 @@ function renderRadio(){
    see are different problems, and the second one sends somebody looking for it
    in the wrong file.
 
-   A set lands in the running node and dies with it. crusader_params.yaml is
-   the source of truth, so the drift marker is the real product of a tuning
-   session: it is the list of lines to write back into the file. */
+   A set lands in the running node and dies with it, until SAVE writes it into
+   crusader_params.yaml (param_save: the value on its own line, comments kept),
+   the file every node reads at start. The drift marker is what Save would
+   write: the rows that differ from the file, and the ones set here that the
+   file does not have (tuneTouched). */
 var tuneNode = '', tuneRows = [], tuneBusy = false, tuneErr = '', tuneKey = '';
+var tuneTouched = {};             /* node + '|' + name: set from this page */
 
 function tuneFmt(v){
   if(v === null || v === undefined) return '—';
@@ -1251,7 +1254,27 @@ function paramPost(node, values, after, done){
 function tunePost(name, v){
   var values = {};
   values[name] = v;
+  tuneTouched[tuneNode + '|' + name] = true;
   paramPost(tuneNode, values, function(){ tuneLoad(); });
+}
+
+/* What Save would write: editable rows that differ from the file, and editable
+   rows set from this page that the file does not have yet. */
+function tuneUnsaved(rows){
+  return rows.filter(function(p){
+    return p.editable && (tuneDrift(p) || (!p.in_yaml && tuneTouched[tuneNode + '|' + p.name]));
+  });
+}
+function tuneSave(names){
+  fetch('/params/save', {method:'POST', headers:{'Content-Type':'application/json'},
+                         body: JSON.stringify({node: tuneNode, names: names})})
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      toast(j.message || (j.ok ? 'saved' : 'not saved'), !j.ok);
+      if(j.ok) (j.saved || names).forEach(function(n){ delete tuneTouched[tuneNode + '|' + n]; });
+      tuneLoad();
+    })
+    .catch(function(err){ toast('request failed: ' + err, true); });
 }
 
 /* `prefix` namespaces the input ids. Both the Tuning tab and the Camera tab
@@ -1340,11 +1363,19 @@ function paintTune(){
   var fixed = tuneRows.filter(function(p){ return !p.editable; });
   if(planner.length && !plProf.loaded) plannerProfilesLoad();
 
+  var unsaved = tuneUnsaved(dyn);
   b.innerHTML = plannerSection(planner) + '<h3>Tunable while running</h3>'
-    + '<div class="hint">Applied to the running node immediately and <b>lost on '
-    + 'restart</b>. crusader_params.yaml is the source of truth; a row showing '
-    + '<span style="color:var(--warn)">yaml &lt;value&gt;</span> is one to write '
-    + 'back into it before the next run.</div>'
+    + '<div class="hint">Applied to the running node immediately, and <b>lost on '
+    + 'restart until saved</b>. <b>Save</b> writes the live values into '
+    + 'crusader_params.yaml (the file every node reads at start; its previous '
+    + 'version is kept in ~/robotx_ws/param_backups). A row showing '
+    + '<span style="color:var(--warn)">yaml &lt;value&gt;</span> is not saved yet.</div>'
+    + '<div class="row"><button id="tuneSaveBtn"' + (unsaved.length ? '' : ' disabled') + '>'
+    + (unsaved.length ? 'Save ' + plural(unsaved.length, 'change') + ' to crusader_params.yaml'
+                      : 'Everything here is saved') + '</button>'
+    + (unsaved.length ? '<span class="meta" style="margin-left:8px">'
+       + esc(unsaved.map(function(p){ return p.name; }).join(', ')) + '</span>' : '')
+    + '</div>'
     + (dyn.map(function(p){ return tuneRow(p, 'tv_'); }).join('')
        || '<div class="hint">none</div>')
     + '<h3>Fixed at startup</h3>'
@@ -1359,6 +1390,9 @@ function paintTune(){
     x.onclick = function(){ tuneApply(x.dataset.apply); }; });
   b.querySelectorAll('button[data-revert]').forEach(function(x){
     x.onclick = function(){ tuneRevert(x.dataset.revert); }; });
+  var sb = el('tuneSaveBtn');
+  if(sb && unsaved.length)
+    sb.onclick = function(){ tuneSave(unsaved.map(function(p){ return p.name; })); };
   /* Enter applies the row you are in. Reaching for the mouse after every number
      is the difference between sweeping a gate and giving up on it. The profile
      name box has its own Enter (plannerWire), and no tv_ id. */

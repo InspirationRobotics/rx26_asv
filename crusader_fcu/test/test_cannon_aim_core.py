@@ -118,6 +118,35 @@ class TestSolve(unittest.TestCase):
         self.assertAlmostEqual(sol.pan_deg, 20.0)
 
 
+class TestWindowTrim(unittest.TestCase):
+
+    def test_window_names(self):
+        self.assertEqual(ca.window_slot("UL"), "UL")
+        self.assertEqual(ca.window_slot("lr"), "LR")
+        self.assertEqual(ca.window_slot(0), "UL")
+        self.assertEqual(ca.window_slot(1), "LR")
+        for v in (None, "", "XX", 2, -1, True, 1.5):
+            self.assertIsNone(ca.window_slot(v), v)
+
+    def test_a_windows_trims(self):
+        cp = ca.CannonParams()
+        target = (1.6, -0.2, 1.0)
+        base = ca.solve(target, cp)
+        trimmed = ca.solve(target, ca.with_trims(cp, 3.0, 5.0))
+        self.assertAlmostEqual(trimmed.tilt_deg - base.tilt_deg, 5.0, places=6)
+        self.assertAlmostEqual(trimmed.pan_deg - base.pan_deg, 3.0, places=6)
+        self.assertEqual((cp.pan_trim_deg, cp.tilt_trim_deg), (0.0, 0.0))   # not in place
+
+    def test_params_without_the_old_common_trims(self):
+        d = dict(nozzle_x=0.47, nozzle_y=0.3, nozzle_z=0.75, cam_x=0.37, cam_y=0.0, cam_z=0.65,
+                 cam_yaw_deg=0.0, cam_pitch_deg=0.0, exit_speed_mps=4.2, throw_range_m=3.0,
+                 throw_elev_deg=45.0, pan_center_us=1500, pan_us_per_deg=5.556, pan_sign=1,
+                 tilt_center_us=1680, tilt_us_per_deg=5.556, tilt_sign=-1, pwm_min=1100,
+                 pwm_max=1900, pan_min_deg=-60, pan_max_deg=60, tilt_min_deg=-10, tilt_max_deg=60)
+        cp = ca.CannonParams.from_dict(d)
+        self.assertEqual((cp.pan_trim_deg, cp.tilt_trim_deg), (0.0, 0.0))
+
+
 class TestCamera(unittest.TestCase):
 
     def test_cam_to_body(self):

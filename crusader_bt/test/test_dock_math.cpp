@@ -198,6 +198,72 @@ int main()
     chk("neither: NaN", std::isnan(sightingRange(false, 0, 0, 0, 0.0, kNaN)));
   }
 
+  // ------------------------------------------------- the face for the strafe hold
+  std::printf("the face the strafe hold steers on\n");
+  {
+    chk("an empty box is not cut", !cutSides(0, 0).left && !cutSides(0, 0).right);
+    chk("touching the left edge: cut at the left",
+      cutSides(3, 900).left && !cutSides(3, 900).right);
+    chk("touching the right edge: cut at the right",
+      cutSides(1000, 1916).right && !cutSides(1000, 1916).left);
+    chk("clear of both edges: neither", !cutSides(100, 1800).left && !cutSides(100, 1800).right);
+    chk("edge to edge: both", cutSides(0, 1920).left && cutSides(0, 1920).right);
+
+    // A level camera at the default mount (0.37 m ahead of the origin), the
+    // face plane 1.15 m ahead (-x + 1.15 = 0) and its centre 0.10 m to PORT.
+    const Mount m;
+    BaySighting s;
+    s.bearing_deg = std::atan2(0.10, 1.15) / nav::kDeg;
+    s.has_normal = true;
+    s.nx = -1.0;
+    s.d = 1.15;
+    s.range_m = sightingRange(true, s.nx, s.ny, s.d, s.bearing_deg, kNaN);
+    Vec2 p;
+    chk("face centre from the plane", faceCentreBody(s, m, 0.39, p));
+    chk_near("  forward = mount + 1.15", p.x, 0.37 + 1.15, 1e-9);
+    chk_near("  0.10 m to port", p.y, 0.10, 1e-9);
+    BaySighting r = s;
+    r.has_normal = false;
+    chk("no plane: along the bearing to range_m", faceCentreBody(r, m, 0.39, p));
+    chk_near("  same point", p.y, 0.10, 1e-9);
+    Mount turned;
+    turned.yaw_deg = 90.0;                     // aimed to PORT: ahead of it is our left
+    chk("a camera turned to port", faceCentreBody(s, turned, 0.39, p));
+    chk_near("  1.15 m to port of it", p.y, 1.15, 1e-9);
+    chk_near("  0.10 m behind it", p.x, 0.37 - 0.10, 1e-9);
+    r.range_m = kNaN;
+    chk("no plane and no range: nothing", !faceCentreBody(r, m, 0.39, p));
+
+    // Three bays: 30 deg to port reading GREEN, 2 deg to port RED, 25 to starboard.
+    Frame f;
+    for (double b : {30.0, 2.0, -25.0}) {
+      BaySighting q;
+      q.bearing_deg = b;
+      f.bays.push_back(q);
+    }
+    f.bays[0].indicator_present = true;
+    f.bays[0].indicator = Colour::Green;
+    f.bays[1].indicator_present = true;
+    f.bays[1].indicator = Colour::Red;
+    const char * why = "";
+    chk("not committed: the GREEN bay", pickHoldBay(f, {-1, -1, -1}, -1, &why) == 0);
+    chk("  says so", std::string(why) == "green bay");
+    chk("committed, and the book placed it: that bay",
+      pickHoldBay(f, {5, 7, 9}, 9, &why) == 2 && std::string(why) == "committed bay");
+    chk("committed but not in this frame: none, never a neighbour",
+      pickHoldBay(f, {5, 7, -1}, 9) == -1);
+    chk("committed, the book took nothing this frame: the GREEN one",
+      pickHoldBay(f, {-1, -1, -1}, 9) == 0);
+    f.bays[2].indicator_present = true;
+    f.bays[2].indicator = Colour::Green;
+    f.bays[2].bearing_deg = -3.0;
+    chk("two read GREEN: the one nearer the bow", pickHoldBay(f, {}, -1) == 2);
+    for (auto & q : f.bays) {q.indicator = Colour::Unknown;}
+    chk("no colours: the nearest the bow",
+      pickHoldBay(f, {}, -1, &why) == 1 && std::string(why) == "nearest the bow");
+    chk("no bays: none", pickHoldBay(Frame{}, {}, -1) == -1);
+  }
+
   // --------------------------------------------------------------- the book
   //
   // THE COURSE USED FROM HERE ON: three faces on the line y = 20, facing SOUTH
@@ -599,6 +665,12 @@ int main()
     chk("Advanced: COLOR_ANY", resourceRequestJson(requestFrom("flash", {Colour::Green}))
       .find("\"resource_color\":\"COLOR_ANY\"") != std::string::npos);
     chk("cannon off", cannonJson(false, 0, 0, 0).find("\"fire\":false") != std::string::npos);
+    chk("cannon at the upper-left names it",
+      cannonJson(true, 1.2, 0.3, 0.4, 0).find(",\"window\":\"UL\"}") != std::string::npos);
+    chk("... the lower-right", cannonJson(true, 1.2, -0.2, 0.1, 1).find("\"window\":\"LR\"") !=
+      std::string::npos);
+    chk("... and no window, none",
+      cannonJson(true, 1.2, 0.0, 0.0).find("window") == std::string::npos);
   }
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fails);

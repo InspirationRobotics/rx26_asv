@@ -48,9 +48,30 @@ double since(Clock::time_point t0)
 }
 
 /// The chosen bay's latest window reading for `index`, or nullptr. CALL UNDER mu.
+/// "upper-left (UL)" / "lower-right (LR)" for DockWindow.index 0 / 1, for the
+/// operator's lines.
+std::string windowName(int index)
+{
+  return index == 0 ? "upper-left (UL)" : index == 1 ? "lower-right (LR)" :
+         "window " + std::to_string(index);
+}
+
+/// One line of the run's story (Context::announce). Not under ctx.mu.
+void say(Context & c, const std::string & text)
+{
+  if (c.announce) {c.announce(text);}
+}
+
+/// The bay the fire is fought at: the committed one, else (nothing committed:
+/// a hold-and-fire test in front of one bay) the one the face hold steers on.
+int fireTrack(const Context & c)
+{
+  return c.chosen_track >= 0 ? c.chosen_track : c.hold_track;
+}
+
 const dock::WindowSighting * chosenWindow(const Context & c, int index)
 {
-  const dock::BayTrack * t = c.dock.find(c.chosen_track);
+  const dock::BayTrack * t = c.dock.find(fireTrack(c));
   if (t == nullptr || index < 0) {return nullptr;}
   for (const auto & w : t->windows) {
     if (w.index == index) {return &w;}
@@ -431,26 +452,55 @@ public:
   }
 };
 
+/// A line of the run's story, from the tree itself ("APPROACHING", "DOCKING"):
+/// Context::announce, "TASK3 | <text>" in the log and on /crsd/task3_events.
+/// SUCCESS, at once.
+class Announce : public CrusaderSyncAction
+{
+public:
+  Announce(const std::string & n, const BT::NodeConfig & c)
+  : CrusaderSyncAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {BT::InputPort<std::string>("text", "", "what to say")};
+  }
+
+  BT::NodeStatus tick() override
+  {
+    say(*ctx_, getInput<std::string>("text").value_or(""));
+    return BT::NodeStatus::SUCCESS;
+  }
+};
+
 /// DockingReport(bay_id). RoboCommand activates the fire on this.
 class ReportDocking : public CrusaderSyncAction
 {
 public:
   ReportDocking(const std::string & n, const BT::NodeConfig & c)
   : CrusaderSyncAction(n, c) {}
-  static BT::PortsList providedPorts() {return {};}
+  static BT::PortsList providedPorts()
+  {
+    return {BT::InputPort<int>("bay", 0,
+      "the bay number to report; 0 = the committed one (CommitSafeBay / task3_bay). A "
+      "tree with no bay to commit (in front of one practice bay) names it here")};
+  }
 
   BT::NodeStatus tick() override
   {
-    int bay = 0;
+    int bay = getInput<int>("bay").value_or(0);
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
-      bay = ctx_->chosen_bay;
+      if (bay <= 0) {bay = ctx_->chosen_bay;}
       ctx_->readiness_confirmed = false;
       ctx_->task3_phase = "DOCKED";
     }
-    if (bay <= 0) {return BT::NodeStatus::FAILURE;}
+    if (bay <= 0) {
+      say(*ctx_, "DOCKED, but no bay number to report (none committed)");
+      return BT::NodeStatus::FAILURE;
+    }
     if (ctx_->report_docking) {ctx_->report_docking(bay);}
     RCLCPP_INFO(log(), "REPORTED: docked in bay %d", bay);
+    say(*ctx_, "DOCKED in bay " + std::to_string(bay) + ": docking report sent");
     return BT::NodeStatus::SUCCESS;
   }
 };
@@ -484,6 +534,13 @@ public:
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       ctx_->task3_phase = "AWAIT FIRE";
+      // A fire was just put out (SprayUntilHit's hit): the timing layer's
+      // verdict stays "steady RED" for a moment after the light changes, and
+      // that is not a new fire - for ANY window: on the water it was re-called
+      // on the same window (0.1 s after the hit, sprayed 90 s), then on the
+      // other one, which was off. So no fire until the verdict has been
+      // something other than steady RED once.
+      after_ = ctx_->fired_window;
     }
     return onRunning();
   }
@@ -497,8 +554,16 @@ public:
       std::lock_guard<std::mutex> lk(ctx_->mu);
       const bool red = ctx_->dock_pattern == "steady" && ctx_->dock_colours.size() == 1 &&
         ctx_->dock_colours[0] == dock::Colour::Red;
-      if (red && ctx_->dock_target_window >= 0) {
-        lit = ctx_->dock_target_window;
+      if (after_ >= 0 && !red) {
+        after_ = -1;                     // the old fire's verdict has changed
+      }
+      if (red && ctx_->dock_target_window >= 0 && after_ < 0) {
+        // ...and the camera's own reading of that window in the latest frame
+        // must not contradict it: a window it sees OFF or GREEN is no fire
+        const dock::WindowSighting * w = chosenWindow(*ctx_, ctx_->dock_target_window);
+        const bool contradicted = w != nullptr &&
+          (w->state == dock::Colour::Off || w->state == dock::Colour::Green);
+        if (!contradicted) {lit = ctx_->dock_target_window;}
       }
       bay = ctx_->chosen_bay;
       resend = !ctx_->readiness_confirmed &&
@@ -509,6 +574,7 @@ public:
       // not an exception, and that is fine.
       (void)setOutput("window", lit);
       RCLCPP_INFO(log(), "FIRE: window %d is steady RED", lit);
+      say(*ctx_, "ON FIRE: the " + windowName(lit) + " window is steady RED");
       return BT::NodeStatus::SUCCESS;
     }
     if (resend) {
@@ -525,6 +591,7 @@ public:
 
 private:
   Clock::time_point t0_, last_;
+  int after_ = -1;          ///< a fire was just put out: >= 0 until the RED verdict changes
 };
 
 /// Spray the target window until it turns GREEN.
@@ -558,6 +625,7 @@ public:
     t0_ = Clock::now();
     watch_.reset();
     firing_ = false;
+    aim_t_ = -1e18;
     std::lock_guard<std::mutex> lk(ctx_->mu);
     hits0_ = ctx_->dock_hits;
     window_ = ctx_->dock_target_window;
@@ -576,7 +644,7 @@ public:
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       const dock::WindowSighting * w = chosenWindow(*ctx_, window_);
-      const dock::BayTrack * t = ctx_->dock.find(ctx_->chosen_track);
+      const dock::BayTrack * t = ctx_->dock.find(fireTrack(*ctx_));
       // A NEW frame in which OUR bay was seen. The track keeps its last
       // windows when the bay drops out of a frame, and feeding that stale
       // state again would make a stale GREEN look like one held for seconds.
@@ -592,22 +660,40 @@ public:
         x = w->x;
         y = w->y;
         z = w->z;
+        aim_[0] = x;
+        aim_[1] = y;
+        aim_[2] = z;
+        aim_t_ = ctx_->dock_t;
+      } else if (aim_t_ > -1e17 && ctx_->dock_t - aim_t_ <= max_age) {
+        // This frame missed the window (the track keeps only its LATEST
+        // sighting's windows): keep the last good aim for max_aim_age_s rather
+        // than stopping the cannon on every dropped frame - in front of the
+        // bay the window does not move (2026-10-09: aim lost every other frame).
+        aim_ok = true;
+        x = aim_[0];
+        y = aim_[1];
+        z = aim_[2];
       }
       if (hit) {ctx_->fired_window = window_;}
     }
     if (hit) {
       stop();
       RCLCPP_INFO(log(), "HIT: window %d is GREEN after %.1fs of spray", window_, since(t0_));
+      char buf[48];
+      std::snprintf(buf, sizeof(buf), " after %.1f s of spray", since(t0_));
+      say(*ctx_, "FIRE OUT: the " + windowName(window_) + " window is GREEN" + buf);
       return BT::NodeStatus::SUCCESS;
     }
     if (since(t0_) >= getInput<double>("timeout_s").value_or(60.0)) {
       stop();
       RCLCPP_WARN(log(), "SprayUntilHit: window %d still not GREEN after %.0fs",
         window_, since(t0_));
+      say(*ctx_, "NOT OUT: the " + windowName(window_) + " window is still not GREEN after " +
+        std::to_string(static_cast<int>(since(t0_))) + " s: giving up on it");
       return BT::NodeStatus::FAILURE;
     }
     if (aim_ok) {
-      if (ctx_->cannon) {ctx_->cannon(true, x, y, z);}
+      if (ctx_->cannon) {ctx_->cannon(true, x, y, z, window_);}
       if (!firing_) {
         RCLCPP_INFO(log(), "spraying window %d at (%.2f, %.2f, %.2f) camera_link",
           window_, x, y, z);
@@ -625,7 +711,7 @@ public:
 private:
   void stop()
   {
-    if (ctx_->cannon) {ctx_->cannon(false, 0.0, 0.0, 0.0);}
+    if (ctx_->cannon) {ctx_->cannon(false, 0.0, 0.0, 0.0, -1);}
     firing_ = false;
   }
 
@@ -635,6 +721,8 @@ private:
   int window_ = -1;
   std::uint32_t seq_ = 0;
   bool firing_ = false;
+  double aim_[3] = {0.0, 0.0, 0.0};   ///< the last good aim point, camera_link
+  double aim_t_ = -1e18;              ///< ...and its frame's stamp (dock_t)
 };
 
 /// FirefightingReport(window_id). window_id = DockWindow.index + base.
@@ -720,16 +808,24 @@ public:
           ctx_->request = hold_.cand;
           ctx_->have_request = true;
           got = hold_.cand;
+          seen_ = ctx_->dock_pattern;
+          for (std::size_t i = 0; i < ctx_->dock_colours.size(); ++i) {
+            seen_ += std::string(i == 0 ? ": " : " then ") + dock::colourName(ctx_->dock_colours[i]);
+          }
         }
       }
     }
     if (done) {
       RCLCPP_INFO(log(), "decoded: %s (held %d frames)", got.why.c_str(), hold_.frames);
+      say(*ctx_, "CODE: " + seen_ + "  ->  resource " + dock::wireColourName(got.resource) +
+        ", deliver to " + dock::wireColourName(got.delivery));
       return BT::NodeStatus::SUCCESS;
     }
     if (since(t0_) >= getInput<double>("timeout_s").value_or(80.0)) {
       RCLCPP_WARN(log(), "DecodeResourceRequest: no steady code after %.0fs (last: %s)",
         since(t0_), hold_.cand.ok ? hold_.cand.why.c_str() : "nothing");
+      say(*ctx_, "NO CODE read after " + std::to_string(static_cast<int>(since(t0_))) +
+        " s (last: " + (hold_.cand.ok ? hold_.cand.why : std::string("nothing")) + ")");
       return BT::NodeStatus::FAILURE;
     }
     return BT::NodeStatus::RUNNING;
@@ -739,6 +835,7 @@ private:
   Clock::time_point t0_;
   dock::RequestHold hold_;
   std::uint32_t seq_ = 0;
+  std::string seen_;        ///< the pattern and colours as the timing layer read them
 };
 
 /// ResourceDeliveryRequest to RoboCommand, and the same request to the UAV.
@@ -781,6 +878,7 @@ void registerTask3Nodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<CommitSafeBay>("CommitSafeBay");
   factory.registerNodeType<DockWaypoint>("DockWaypoint");
   factory.registerNodeType<ReportDocking>("ReportDocking");
+  factory.registerNodeType<Announce>("Announce");
   factory.registerNodeType<AwaitFireTarget>("AwaitFireTarget");
   factory.registerNodeType<SprayUntilHit>("SprayUntilHit");
   factory.registerNodeType<ReportFirefighting>("ReportFirefighting");
