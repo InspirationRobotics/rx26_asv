@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 # gz_rig_up.sh — the ROS half of the Gazebo sim. Runs in: the crsd-sim container.
 #
-#     bash crusader_sim/scripts/gz_rig_up.sh [course] [--no-uav]
+#     bash crusader_sim/scripts/gz_rig_up.sh [course] [--no-uav] [--rxl-endpoint EP] [--ocs-host IP]
+#
+#     --rxl-endpoint EP  where rxl_link_node listens (a pymavlink endpoint). Default
+#                        udpin:127.0.0.1:14555, which only sim_uav in this container can reach.
+#                        udpin:0.0.0.0:14555 lets a radio relay on the Windows side (the real
+#                        Ekko's RFD traffic, forwarded) reach it. Give --no-uav too when Ekko is
+#                        the source: two transmitters make the plan alternate between them.
+#     --ocs-host IP      also start the boat's crusader_groundstation ocs_client, dialling the
+#                        Operator Control Station at IP (port 37564, the params file's ocs_port).
+#                        Without it ocs_client is not started, as before.
 #
 # Started by gz_sim_up.sh (WSL) after Gazebo and SITL are up. It is
 # tools/sitl/task1_sim_up.sh with ONE substitution: where that rig runs
@@ -33,9 +42,28 @@ source /opt/ros/humble/setup.bash
 source /root/robotx_ws/install/setup.bash
 set -uo pipefail
 
-COURSE="${1:-task1_core}"
+COURSE=task1_core
 UAV=1
-[ "${2:-}" = "--no-uav" ] && UAV=0
+RXL_EP=udpin:127.0.0.1:14555     # sim_uav's udpout:127.0.0.1:14555 lands here
+RXL_EP_DEFAULT=$RXL_EP
+OCS_HOST=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-uav) UAV=0 ;;
+    --rxl-endpoint)
+      [ $# -ge 2 ] || { echo "--rxl-endpoint needs an endpoint" >&2; exit 2; }
+      RXL_EP="$2"; shift ;;
+    --ocs-host)
+      [ $# -ge 2 ] || { echo "--ocs-host needs an address" >&2; exit 2; }
+      OCS_HOST="$2"; shift ;;
+    -*) echo "unknown flag $1" >&2; exit 2 ;;
+    *) COURSE="$1" ;;
+  esac
+  shift
+done
+# both values are words in a ros2 run line, so only the characters an endpoint or a host needs
+[[ "$RXL_EP" =~ ^[A-Za-z0-9_.:/@-]+$ ]] || { echo "*** --rxl-endpoint '$RXL_EP': letters, digits and _ . : / @ - only" >&2; exit 2; }
+[[ -z "$OCS_HOST" || "$OCS_HOST" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "*** --ocs-host '$OCS_HOST': letters, digits and _ . - only" >&2; exit 2; }
 WS=/root/robotx_ws
 SRC=$WS/src/rx26_asv
 CFG=$WS/install/crusader_bringup/share/crusader_bringup/config/crusader_params.yaml
@@ -97,10 +125,14 @@ up telemetry_bridge /tmp/tb.log \
 up lidar_cluster_node /tmp/lidar_cluster.log \
   ros2 run crusader_perception lidar_cluster_node --ros-args --params-file "$CFG"
 # rxl_endpoint on this branch is the RFD900 (/dev/crsd-rfd); the params file's
-# own comment gives the UDP form for a bench/sim, which is what sim_uav talks to
+# own comment gives the UDP form for a bench/sim, which is what sim_uav talks to.
+# --rxl-endpoint overrides it (a Windows-side radio relay needs udpin:0.0.0.0:14555)
 up rxl_link_node /tmp/rxl.log \
   ros2 run crusader_link rxl_link_node --ros-args --params-file "$CFG" \
-  -p rxl_endpoint:=udpin:127.0.0.1:14555
+  -p rxl_endpoint:="$RXL_EP"
+if [ "$RXL_EP" != "$RXL_EP_DEFAULT" ] && [ "$UAV" = 1 ]; then
+  echo "  *** rxl endpoint is $RXL_EP but sim_uav is still on: if the real Ekko is the source, add --no-uav (two transmitters make the plan alternate)"
+fi
 if [ "$UAV" = 1 ]; then
   up sim_uav /tmp/sim_uav.log python3 -u -m crusader_sim.sim_uav --course "$COURSE"
 else
@@ -146,6 +178,15 @@ fi
 up bt_view /tmp/btview.log python3 -u "$SRC/tools/bt_view.py"
 up ground_station /tmp/gcs.log \
   ros2 run crusader_groundstation ground_station --ros-args --params-file "$CFG"
+# the boat's heartbeat to the Operator Control Station, only when asked for: the OCS is a
+# laptop on the team network and the sim has no business dialling it unless told where it is.
+# The params file gives the rest (ocs_port 37564, team_id, vehicle_id); -p wins over it.
+if [ -n "$OCS_HOST" ]; then
+  up ocs_client /tmp/ocs_client.log \
+    ros2 run crusader_groundstation ocs_client --ros-args --params-file "$CFG" -p ocs_host:="$OCS_HOST"
+else
+  echo "  ocs_client           -- off (--ocs-host IP starts it)"
+fi
 # the boat's own picture for the Task 1 panel (crusader_sim/panel_feed.py): it only subscribes and
 # sends 4 datagrams a second to udp 127.0.0.1:14556, so it costs nothing measurable. Started before
 # bt_runner so it hears the first leg status; nothing breaks if the panel is not running
@@ -177,5 +218,6 @@ echo
 echo "=== up ==="
 ros2 node list 2>/dev/null | sort | sed 's/^/  /'
 echo "  tree: $(basename "$TREE")   course: $COURSE   nav_mode: $NAV_MODE   detector: $DETECTOR"
+echo "  rxl: $RXL_EP   ocs_client: ${OCS_HOST:-off}"
 timeout 5 ros2 topic echo /crsd/fcu_status --once 2>/dev/null \
   | grep -E '^mode|^armed' | tr '\n' ' ' | sed 's/^/  /'; echo

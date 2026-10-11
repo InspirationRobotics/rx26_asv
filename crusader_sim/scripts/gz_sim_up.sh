@@ -3,6 +3,7 @@
 #
 #     bash crusader_sim/scripts/gz_sim_up.sh [course | --course-file PATH] [--tuning FILE] [--no-gui] [--no-uav] [--no-rig]
 #                                            [--recreate-container] [--detector truth|yolo]
+#                                            [--rxl-endpoint EP] [--ocs-host IP]
 #
 #     NAV_MODE=off|shadow|on  (environment) the tree's Nav2 planning; default on
 #                 when the image has Nav2. docs/nav2_avoidance_spec.md.
@@ -33,6 +34,13 @@
 #                that copy is deleted, so an old tuning never leaks into a run
 #     --no-gui   Gazebo server only (the sim runs the same; you just can't watch)
 #     --no-uav   no Ekko stand-in: the boat is on its own camera (Core tier)
+#     --rxl-endpoint EP
+#                where the boat's rxl_link_node listens, instead of the rig's udpin:127.0.0.1:14555.
+#                udpin:0.0.0.0:14555 is what a Windows-side radio relay (the real Ekko's RFD traffic
+#                forwarded in) needs to reach it; add --no-uav then, or sim_uav and Ekko both transmit
+#     --ocs-host IP
+#                also start the boat's ocs_client in the rig, dialling the Operator Control Station
+#                at IP (port 37564, the params file's ocs_port). Absent: not started
 #     --no-rig   stop after Gazebo + SITL (for check_motion, or your own nodes)
 #
 # From Windows, double-click crusader_sim/scripts/GZ_SIM_UP.cmd instead.
@@ -50,6 +58,7 @@
 set -uo pipefail
 
 COURSE=task1_core; COURSE_FILE=""; TUNING_FILE=""; GUI=1; UAV_ARG=""; RIG=1; RECREATE=0
+RXL_EP=""; OCS_HOST=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --recreate-container) RECREATE=1 ;;
@@ -65,6 +74,12 @@ while [ $# -gt 0 ]; do
     --tuning)
       [ $# -ge 2 ] || { echo "--tuning needs a path" >&2; exit 2; }
       TUNING_FILE="$2"; shift ;;
+    --rxl-endpoint)
+      [ $# -ge 2 ] || { echo "--rxl-endpoint needs an endpoint, e.g. udpin:0.0.0.0:14555" >&2; exit 2; }
+      RXL_EP="$2"; shift ;;
+    --ocs-host)
+      [ $# -ge 2 ] || { echo "--ocs-host needs the OCS's address" >&2; exit 2; }
+      OCS_HOST="$2"; shift ;;
     -*) echo "unknown flag $1" >&2; exit 2 ;;
     *) COURSE="$1" ;;
   esac
@@ -106,6 +121,18 @@ fi
 
 step() { printf '\n=== %s ===\n' "$1"; }
 die()  { printf '\n*** FAILED: %s\n' "$1" >&2; exit 2; }
+
+# the two rig flags cross into `docker exec bash -lc "..."` as words, so they are checked here,
+# before the sim that is running now is torn down (gz_rig_up.sh checks them again)
+RIG_ARGS=""
+if [ -n "$RXL_EP" ]; then
+  [[ "$RXL_EP" =~ ^[A-Za-z0-9_.:/@-]+$ ]] || die "--rxl-endpoint '$RXL_EP': letters, digits and _ . : / @ - only"
+  RIG_ARGS="$RIG_ARGS --rxl-endpoint $RXL_EP"
+fi
+if [ -n "$OCS_HOST" ]; then
+  [[ "$OCS_HOST" =~ ^[A-Za-z0-9_.-]+$ ]] || die "--ocs-host '$OCS_HOST': letters, digits and _ . - only"
+  RIG_ARGS="$RIG_ARGS --ocs-host $OCS_HOST"
+fi
 
 # Reuse, create or (only with --recreate-container) recreate the sim container.
 # `docker start` never changes a container's image, so an existing crsd-sim stays on
@@ -257,13 +284,13 @@ else
   # --base-paths src: colcon crawls /root/robotx_ws otherwise, and a second workspace under it (gcs_ws/src/rx26_asv, made
   # 2026-10-02 for the ground-station work) is a "duplicate package names" failure; so are venvs/ and yolo_dev/ for the crawl itself.
   docker exec "$CONTAINER" bash -lc \
-    "set -o pipefail; cd /root/robotx_ws && source install/setup.bash && P=''; for p in crusader_msgs crusader_common crusader_bringup crusader_world_model crusader_bt crusader_perception crusader_sim crusader_nav crusader_nav_layers crusader_groundstation; do [ -d src/rx26_asv/\$p ] && P=\"\$P \$p\"; done; flock /root/robotx_ws/.colcon.lock colcon build --base-paths src --packages-select \$P 2>&1 | tail -2" \
+    "set -o pipefail; cd /root/robotx_ws && source install/setup.bash && P=''; for p in crusader_msgs crusader_common crusader_bringup crusader_world_model crusader_link crusader_bt crusader_perception crusader_sim crusader_nav crusader_nav_layers crusader_groundstation; do [ -d src/rx26_asv/\$p ] && P=\"\$P \$p\"; done; flock /root/robotx_ws/.colcon.lock colcon build --base-paths src --packages-select \$P 2>&1 | tail -2" \
     | sed 's/^/  /' || die "colcon build failed (a crusader_* package did not build): not starting the sim on the previous build"
 fi
 # docker exec does not inherit this shell's environment: TREE, NAV_MODE and SIM_* (SIM_TUNING too) cross explicitly
 docker exec -e TREE="${TREE:-}" -e NAV_MODE="${NAV_MODE:-}" -e SIM_DETECTOR="${SIM_DETECTOR:-}" \
   -e SIM_CAMERA_ARGS="${SIM_CAMERA_ARGS:-}" -e SIM_TUNING="$SIM_TUNING_C" "$CONTAINER" bash -lc \
-  "bash /root/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_rig_up.sh $COURSE $UAV_ARG" 2>&1 | sed 's/^/  /'
+  "bash /root/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_rig_up.sh $COURSE $UAV_ARG$RIG_ARGS" 2>&1 | sed 's/^/  /'
 
 if [ "$GUI" = 1 ]; then
   # The GUI sometimes segfaults at startup inside NVIDIA's WSL driver

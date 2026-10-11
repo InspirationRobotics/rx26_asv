@@ -62,7 +62,11 @@ bash ~/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_sim_down.sh
 | `--no-gui` | Gazebo server only. The sim is identical, you just can't watch it |
 | `--no-uav` | no Ekko stand-in; the boat has only its own camera (Core-tier test) |
 | `--no-rig` | stop after Gazebo + SITL, for `check_motion` or your own nodes |
+| `--rxl-endpoint EP` | where the boat's `rxl_link_node` listens, instead of the rig's `udpin:127.0.0.1:14555`. A Windows-side radio relay forwarding the real Ekko's RFD traffic needs `udpin:0.0.0.0:14555`. Add `--no-uav` as well: with `sim_uav` still on, two transmitters make the plan alternate |
+| `--ocs-host IP` | also start the boat's `ocs_client` in the rig, dialling the Operator Control Station at `IP` (port 37564 from the params file), log `/tmp/ocs_client.log`. Absent: not started, as before |
 | `--recreate-container` | remove the `crsd-sim` container if it was made from a different image than `RX26_IMAGE` and make a new one. Only with the sim down; see "Nav2 avoidance in the sim" |
+
+`gz_rig_up.sh` (the container half) takes the same two flags, plus `[course] [--no-uav]`, in any order.
 
 Environment, set in front of the command: `NAV_MODE=off`, `shadow` or `on` (the tree's planning, below), `TREE=<xml>` (a name in `crusader_bt/behavior_trees` or a path), `SIM_DETECTOR=truth` or `yolo` (the camera's boxes: the oracle, or the real YOLO; see "The real YOLO detector in the sim"), `RX26_IMAGE` (the image a *new* container is made from; default `crsd-sim:nav2` when it exists, else `crsd-sim:humble`).
 
@@ -511,6 +515,7 @@ manual, spins in AUTO". Fix it in the YAML, never in the params.
 | `crusader_sim/livox_shim.py`, `sim_camera.py` | `crsd-sim` | Gazebo sensors → the boat's driver topics |
 | `crusader_sim/yolo_detect.py`, `scripts/setup_yolo_venv.sh` | `crsd-sim` / WSL | the real YOLO + LED classifier on sim frames and its score; the venv + model-copy script (`SIM_DETECTOR=yolo`) |
 | `crusader_sim/sim_uav.py` | `crsd-sim` | Ekko's Task 1 radio, from the course's truth |
+| `crusader_sim/ekko_fake_map.py` | any (plain python) | the course as the `uav_msgs/BuoyMap` the REAL Ekko would publish, for a radio test: `python3 -m crusader_sim.ekko_fake_map task1_core --command` prints the `ros2 topic pub -r 1 /uav/perception/buoy_map ...` line to paste on Ekko (`--noise-m R` moves each buoy by a fixed-seed offset under R metres) |
 | `crusader_sim/sim_transmitter.py` | WSL | the RC transmitter |
 | `crusader_sim/task1_goal.py`, `manual_drive.py`, `check_motion.py` | `crsd-sim` / WSL | operator tools |
 | `crusader_sim/task1_judge.py` | `crsd-sim` | independent Task 1 referee, from ground truth; also the minimum-clearance figure (`--selftest`) |
