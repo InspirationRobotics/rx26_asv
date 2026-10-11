@@ -1005,7 +1005,7 @@ function renderLogs(){
    closed missed nothing, and a page reloaded mid-test does not restart the
    estimate. Incremental like the Logs tab, for the same reason.
 
-   TWO RATES, ON PURPOSE. The aircraft may be sending BUOY_MAP (its own TUNNEL
+   TWO RATES, ON PURPOSE. The aircraft may be sending LIGHTS (its own TUNNEL
    format, 1 Hz) or SAFE_PASSAGE (the RXL design, 0.2 Hz). Scoring both is what
    separates "the aircraft is quiet" from "the aircraft is talking in the other
    format", which is not a distinction an operator should have to make by

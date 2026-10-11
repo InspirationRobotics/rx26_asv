@@ -13,8 +13,9 @@ scroll-back:
     is meant to send it at.
 
 WHY TWO PERIODIC MESSAGES AND NOT ONE. The aircraft may be speaking either of
-two formats -- Ekko's telemetry_bridge sends BUOY_MAP (TUNNEL 0x8001) at 1 Hz,
-while the RXL design in rxl_codec has it send SAFE_PASSAGE at 0.2 Hz. Scoring
+two formats -- Ekko's telemetry_bridge sends LIGHTS (TUNNEL 0x8005, the v3 whole-
+map heartbeat) at 1 Hz, while the RXL design in rxl_codec has it send
+SAFE_PASSAGE at 0.2 Hz. Scoring
 both means the tab distinguishes "the aircraft is quiet" from "the aircraft is
 talking, in the other format", which is a difference that has already cost this
 team an afternoon.
@@ -33,7 +34,7 @@ NAMES = {1: "Ekko", 2: "Crusader", 3: "Graey", 42: "Crusader (link node)",
 
 #: (message name, expected Hz, who sends it). The Radio tab scores each one.
 PERIODIC = (
-    ("BUOY_MAP", 1.0, "Ekko's telemetry_bridge, TUNNEL 0x8001"),
+    ("LIGHTS", 1.0, "Ekko's telemetry_bridge, TUNNEL 0x8005"),
     ("SAFE_PASSAGE", 0.2, "the RXL design, native 42011"),
 )
 

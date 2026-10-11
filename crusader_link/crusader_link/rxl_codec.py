@@ -6,18 +6,23 @@ exercisable on a laptop with nothing installed.
 
     python3 -m crusader_link.rxl_codec --selftest
 
-WHAT THE BOAT SPEAKS. Three messages, and only three:
+WHAT THE BOAT SPEAKS. Three native messages:
 
     RXL_SAFE_PASSAGE    42011  UAV -> USV   the whole passage, 0.2 Hz
     RXL_NEXT_BUOY_SET   42019  UAV -> USV   the next gate pair
-    RXL_USV_REACHED_GATE 42018 USV -> UAV   the only thing the boat SENDS
+    RXL_USV_REACHED_GATE 42018 USV -> UAV   the boat's checkpoint request
+
+...and Ekko's own format, which is what the real aircraft actually transmits:
+MAVLink TUNNEL frames (POSITIONS, LIGHTS, GNSS, TEST) packed by tunnel_link, a
+copy of Ekko's boat_link.py. `decode` hands every TUNNEL on to the node as it
+is; rxl_link_node acts on the ones from the aircraft's system id and ekko_map
+turns them into a plan, and it answers with a BOAT TUNNEL (send_tunnel below).
 
 Everything else on the air is someone else's traffic and is ignored here --
 `decode` returns None for it and the boat acts on none of it. It is still
 DESCRIBED, by `describe` below, because the Radio tab has to show what is on the
-air whether or not this boat speaks it. Ekko's own code currently sends TUNNEL
-payloads instead of these three messages; crusader_link/tunnel_link.py reads
-those, and the tab lists anything else by its number.
+air whether or not this boat speaks it; the tab lists anything it cannot name by
+its number.
 
 DECODE THROUGH THE GENERATED DIALECT, NEVER struct.unpack. MAVLink orders
 fields on the wire by descending type width, not by declaration order, and
@@ -160,6 +165,16 @@ def decode(msg):
         # Our own transmission, heard back. Decoded for completeness so a log
         # of the link reads symmetrically; the node ignores it.
         return {"msg": "USV_REACHED_GATE", "gate_seq": int(msg.gate_seq)}
+
+    if t == "TUNNEL":
+        # NOT interpreted here: which system sent it decides whether it means
+        # anything (the node checks), and what it means is tunnel_link's.
+        return {
+            "msg": "TUNNEL",
+            "src": int(msg.get_srcSystem()),
+            "payload_type": int(msg.payload_type),
+            "payload": tunnel_link.body(msg),
+        }
 
     return None
 
@@ -374,6 +389,27 @@ def selftest():
     chk("describe decodes the aircraft's TUNNEL test frame",
         name == "TEST" and ptype == tunnel_link.PAYLOAD_TEST
         and summary == "test 1 from ekko")
+
+    # --- Ekko's v3 TUNNEL traffic: decode hands it on whole, describe names it
+    payload = tunnel_link.pack_lights({1: "FLASHING_BLUE", 2: "SOLID_BLUE"}, [1], epoch=9)
+    m = rxlink.MAVLink_tunnel_message(0, 0, tunnel_link.PAYLOAD_LIGHTS,
+                                      len(payload), tunnel_link.pad(payload))
+    d = decode(roundtrip(m))
+    chk("a TUNNEL is handed on with its sender, type and exact payload",
+        d is not None and d["msg"] == "TUNNEL" and d["src"] == 1
+        and d["payload_type"] == tunnel_link.PAYLOAD_LIGHTS and d["payload"] == payload)
+    name, ptype, summary = describe(roundtrip(m))
+    chk("describe names Ekko's LIGHTS packet and its map",
+        name == "LIGHTS" and ptype == tunnel_link.PAYLOAD_LIGHTS
+        and "map 9" in summary and "2 light(s)" in summary)
+
+    boat = tunnel_link.pack_boat(1.2806, 103.8557, 0, 0, acked=(1, 2), epoch=9)
+    m = rxlink.MAVLink_tunnel_message(0, 0, tunnel_link.PAYLOAD_BOAT,
+                                      len(boat), tunnel_link.pad(boat))
+    d = decode(roundtrip(m))
+    chk("a BOAT packet survives MAVLink 2 zero-trimming at its true length",
+        d is not None and tunnel_link.unpack_boat(d["payload"])["acked"] == {1, 2}
+        and tunnel_link.unpack_boat(d["payload"])["epoch"] == 9)
 
     m = rxlink.MAVLink_tunnel_message(2, 0, 0x8042, 4, tunnel_link.pad(b"\x01\x02\x03\x04"))
     name, ptype, summary = describe(roundtrip(m))
