@@ -5,8 +5,10 @@
   <version>0.1.0</version>
   <description>
     The boat's end of the UAV link. rxl_link_node decodes the RXL dialect off a
-    radio and republishes it as ROS messages, and sends back the one message the
-    boat transmits.
+    radio -- and Ekko's own TUNNEL format (POSITIONS, LIGHTS), which is what the
+    real aircraft sends -- and republishes both as the same ROS passage plan. It
+    sends back the checkpoint request and, to Ekko, the BOAT packet (position
+    and the map held).
 
     It speaks MAVLink but it is NOT a second autopilot gateway: a different
     endpoint, a different dialect, and a message set with no command in it. It

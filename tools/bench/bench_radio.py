@@ -6,8 +6,8 @@ No ROS, no boat, no radio:
     python3 tools/bench/bench_radio.py
 
 Drives crusader_groundstation.radio_core with its own clock, so a minute of
-link takes no time, and crusader_link.tunnel_link with payloads packed the way
-Ekko's telemetry_bridge packs them.
+link takes no time, and crusader_link.tunnel_link (a copy of Ekko's v3
+boat_link.py) with payloads packed the way Ekko's telemetry_bridge packs them.
 
 The NATIVE side of the link (RXL_SAFE_PASSAGE and friends) is covered by
 `python3 -m crusader_link.rxl_codec --selftest`, which needs the generated
@@ -40,15 +40,10 @@ class Clock:
         return self.t
 
 
-def pack_map(n_buoys=3, confirmed=(1, 2)):
-    buoys = [(i + 1, 32.9 + i * 1e-4, -117.0, "FLASHING_RED")
-             for i in range(n_buoys)]
-    out = bytearray([len(buoys)] + [int(i) & 0xFF for i in confirmed]
-                    + [0] * (2 - len(confirmed)))
-    for bid, lat, lon, label in buoys:
-        out += tl._BUOY.pack(bid, int(round(lat * 1e7)), int(round(lon * 1e7)),
-                             tl.CODE[label])
-    return bytes(out)
+def pack_lights(n_buoys=3, confirmed=(1, 2)):
+    """A v3 LIGHTS payload: the whole map of `n_buoys` red buoys, map number 7."""
+    return tl.pack_lights({i + 1: "FLASHING_RED" for i in range(n_buoys)},
+                          confirmed, epoch=7)
 
 
 def heard(log, name, ptype=0, summary="", src=200):
@@ -58,20 +53,29 @@ def heard(log, name, ptype=0, summary="", src=200):
 def main():
     r = []
 
-    print("\ntunnel_link.describe -- the aircraft's format, read by the boat")
-    name, s = tl.describe(tl.PAYLOAD_BOAT, tl.pack_boat(32.9238, -117.0386, 3, 4))
+    print("\ntunnel_link.describe -- the aircraft's v3 format, read by the boat")
+    name, s = tl.describe(tl.PAYLOAD_BOAT, tl.pack_boat(
+        32.9238, -117.0386, 3, 4, acked=(1, 2), epoch=7))
     r.append(check("boat packet named BOAT", name == "BOAT", name))
-    r.append(check("  ...says what the aircraft thinks the boat is doing",
-                   "transiting" in s and "target B4" in s, s))
-    name, s = tl.describe(tl.PAYLOAD_BUOYS, pack_map())
-    r.append(check("buoy map named BUOY_MAP", name == "BUOY_MAP", name))
+    r.append(check("  ...says what the boat is doing, what it wants, what it holds",
+                   "transiting" in s and "wants slot 4" in s
+                   and "holds 2 position(s)" in s and "of map 7" in s, s))
+    name, s = tl.describe(tl.PAYLOAD_LIGHTS, pack_lights())
+    r.append(check("the lights packet named LIGHTS", name == "LIGHTS", name))
     r.append(check("  ...a confirmed gate reads red then green",
-                   "3 buoys" in s and "red B1" in s and "green B2" in s, s))
-    _, s = tl.describe(tl.PAYLOAD_BUOYS, pack_map(confirmed=(5,)))
-    r.append(check("  ...a single confirmed id reads as the exit", "exit B5" in s, s))
-    _, s = tl.describe(tl.PAYLOAD_BUOYS, pack_map(confirmed=()))
+                   "3 light(s)" in s and "red slot 1" in s and "green slot 2" in s
+                   and "map 7" in s, s))
+    _, s = tl.describe(tl.PAYLOAD_LIGHTS, pack_lights(confirmed=(5,)))
+    r.append(check("  ...a single confirmed slot reads as the exit",
+                   "exit slot 5" in s, s))
+    _, s = tl.describe(tl.PAYLOAD_LIGHTS, pack_lights(confirmed=()))
     r.append(check("  ...no confirmation reads as nothing",
                    "confirmed nothing" in s, s))
+    name, s = tl.describe(tl.PAYLOAD_POSITIONS, tl.pack_positions(
+        [(1, 12, 32.9, -117.0), (2, 14, 32.9001, -117.0)], 7)[0])
+    r.append(check("the positions packet named POSITIONS, with the real ids",
+                   name == "POSITIONS" and "B12 as slot 1" in s
+                   and "B14 as slot 2" in s, (name, s)))
     name, s = tl.describe(tl.PAYLOAD_TEST, tl.pack_test("test 4 from ekko"))
     r.append(check("test frame decodes to its text",
                    name == "TEST" and s == "test 4 from ekko", (name, s)))
@@ -94,10 +98,10 @@ def main():
     r.append(check("empty log reads empty",
                    recs == [] and newest == 0 and dropped == 0))
     log.add(rc.TX, 42, 191, 1, "USV_REACHED_GATE", 0, "gate 3", 24)
-    heard(log, "BUOY_MAP", tl.PAYLOAD_BUOYS, "10 buoys, confirmed nothing")
+    heard(log, "LIGHTS", tl.PAYLOAD_LIGHTS, "10 lights, confirmed nothing")
     recs, newest, _ = log.read()
     r.append(check("records come back oldest first",
-                   [x["name"] for x in recs] == ["USV_REACHED_GATE", "BUOY_MAP"],
+                   [x["name"] for x in recs] == ["USV_REACHED_GATE", "LIGHTS"],
                    recs))
     r.append(check("TX is named by where it went",
                    recs[0]["who"] == "Ekko", recs[0]["who"]))
@@ -130,29 +134,29 @@ def main():
     log = rc.RadioLog(clock=clock)
     streams = {s["name"]: s for s in log.streams()}
     r.append(check("both formats are scored", sorted(streams) ==
-                   ["BUOY_MAP", "SAFE_PASSAGE"], sorted(streams)))
+                   ["LIGHTS", "SAFE_PASSAGE"], sorted(streams)))
     r.append(check("never heard: no rate, no percentage",
-                   streams["BUOY_MAP"]["rate_hz"] is None
-                   and streams["BUOY_MAP"]["pct"] is None))
+                   streams["LIGHTS"]["rate_hz"] is None
+                   and streams["LIGHTS"]["pct"] is None))
     for _ in range(60):
-        heard(log, "BUOY_MAP", tl.PAYLOAD_BUOYS, "10 buoys")
+        heard(log, "LIGHTS", tl.PAYLOAD_LIGHTS, "10 lights")
         clock.t += 1.0
     streams = {s["name"]: s for s in log.streams()}
-    r.append(check("a steady 1 Hz buoy map scores ~100%",
-                   streams["BUOY_MAP"]["pct"] > 99, streams["BUOY_MAP"]))
+    r.append(check("a steady 1 Hz lights packet scores ~100%",
+                   streams["LIGHTS"]["pct"] > 99, streams["LIGHTS"]))
     r.append(check("  ...and the other format still reads as never heard",
                    streams["SAFE_PASSAGE"]["rate_hz"] is None,
                    streams["SAFE_PASSAGE"]))
     r.append(check("  ...longest silence is about a second",
-                   abs(streams["BUOY_MAP"]["longest_gap_s"] - 1.0) < 1e-6,
-                   streams["BUOY_MAP"]))
+                   abs(streams["LIGHTS"]["longest_gap_s"] - 1.0) < 1e-6,
+                   streams["LIGHTS"]))
     clock = Clock()
     log = rc.RadioLog(clock=clock)
     for i in range(60):
         if not 20 <= i < 30:
-            heard(log, "BUOY_MAP", tl.PAYLOAD_BUOYS, "10 buoys")
+            heard(log, "LIGHTS", tl.PAYLOAD_LIGHTS, "10 lights")
         clock.t += 1.0
-    st = {s["name"]: s for s in log.streams()}["BUOY_MAP"]
+    st = {s["name"]: s for s in log.streams()}["LIGHTS"]
     r.append(check("ten missing packets lower the estimate", 80 < st["pct"] < 90, st))
     r.append(check("  ...and show as an eleven-second silence",
                    abs(st["longest_gap_s"] - 11.0) < 1e-6, st))
