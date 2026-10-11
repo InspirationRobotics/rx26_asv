@@ -39,6 +39,13 @@ from crusader_sim.goal_client import TIERS, install_stop, run_goal
 from crusader_sim.operator_tools import arm, set_mode
 from crusader_sim.task1_judge import Task1Judge, format_verdict
 
+# bt_runner enforces the mission timeout against its own now(), and the sim runs on WALL clock
+# (nav2_params.yaml: never use_sim_time), so a slow machine burns it at real-time-factor speed.
+# 400 s killed the first Intel Iris Xe laptop run at 95% of task1_core; measured 2026-10-11: that
+# course takes 615 s wall at RTF ~0.5-0.9. 1200 s leaves ~2x headroom for slower runs; a faster
+# machine just finishes early, the timeout only ever fires on a stuck mission.
+DEFAULT_TIMEOUT_S = 1200.0
+
 
 def approach_point(course):
     """(lat, lon) of the goal's approach point."""
@@ -83,7 +90,9 @@ def main():
     ap.add_argument("--course", default="task1_core")
     ap.add_argument("--tier", choices=sorted(TIERS), default=None,
                     help="default: the course's `tier`")
-    ap.add_argument("--timeout-s", type=float, default=400.0)
+    ap.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S,
+                    help="mission timeout, WALL-CLOCK seconds (bt_runner counts its own now(); the "
+                         "sim runs on wall clock, no use_sim_time). default: %(default).0f")
     ap.add_argument("--no-judge", action="store_true",
                     help="no referee (the Task 1 panel runs its own)")
     a = ap.parse_args()
