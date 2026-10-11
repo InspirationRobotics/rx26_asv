@@ -46,3 +46,12 @@ BRD_SAFETY_DEFLT 0
 
 # --- logs: keep SITL dataflash small and on disarm only.
 LOG_DISARMED 0
+
+# --- MAVLink system id. The real Crusader's FC runs SYSID_THISMAV 2 (QGC dump
+# 2026-10-03; fleet_link/fleet.toml, boat_gui and the OCS all expect the boat at
+# sysid 2) because Ekko's Cube is sysid 1 and shares the RFD link. The baseline
+# file params/working_crusader.params still says 1, and sitl_params.py keeps
+# SYSID_THISMAV from it, so without this line the sim boat's heartbeat landed
+# on Ekko's sysid in fleet_link --sim-boat runs (2026-10-11 dry run). Sim only:
+# the baseline, param_guard and the boat's own params are untouched.
+SYSID_THISMAV 2
