@@ -673,6 +673,127 @@ int main()
       cannonJson(true, 1.2, 0.0, 0.0).find("window") == std::string::npos);
   }
 
+  // ---- readCode: the colour code from the window's own per-frame colour ----
+  {
+    // the ESP32 light, read at `fps`: GREEN 5 s, off 1 s, then the code
+    struct Light
+    {
+      Colour c1, c2;
+      double fps = 10.0;
+      Colour dark = Colour::Off;     // what an unlit panel reads as
+      Colour c1_reads = Colour::Unknown;   // != Unknown: c1 misread as this
+      double start = 0.0;            // seconds into the sequence the reading starts
+      double secs = 40.0;
+      double jitter = 0.0;           // each phase this much longer (+) / shorter (-)
+      int drop_every = 0;            // every Nth frame out of view
+      std::vector<CodeReading> read() const
+      {
+        std::vector<CodeReading> v;
+        int n = 0;
+        for (double t = start; t < start + secs; t += 1.0 / fps, ++n) {
+          Colour c;
+          if (t < 5.0) {
+            c = Colour::Green;
+          } else if (t < 6.0) {
+            c = dark;
+          } else {
+            const double on = 1.0 + jitter, off1 = 1.0 - jitter, off2 = 2.0 - jitter;
+            const double ph = std::fmod(t - 6.0, on + off1 + on + off2);
+            if (ph < on) {
+              c = c1_reads != Colour::Unknown ? c1_reads : c1;
+            } else if (ph < on + off1) {
+              c = dark;
+            } else if (ph < on + off1 + on) {
+              c = c2;
+            } else {
+              c = dark;
+            }
+          }
+          CodeReading r;
+          r.t = t;
+          r.seen = !(drop_every > 0 && n % drop_every == 0);
+          r.c = c;
+          v.push_back(r);
+        }
+        return v;
+      }
+    };
+    auto is = [](const CodeResult & r, Colour a, Colour b) {
+        return r.ok && r.c1 == a && r.c2 == b;
+      };
+
+    Light l{Colour::Blue, Colour::Red};
+    const CodeResult r = readCode(l.read());
+    chk("code: blue then red, clean", is(r, Colour::Blue, Colour::Red));
+    std::printf("    (%s)\n", r.why.c_str());
+
+    Light u{Colour::Blue, Colour::Red};
+    u.dark = Colour::Unknown;
+    chk("... the unlit panel reading 'unknown'", is(readCode(u.read()), Colour::Blue, Colour::Red));
+
+    Light j{Colour::Green, Colour::Blue};
+    j.jitter = 0.3;
+    j.fps = 6.0;
+    chk("... 0.3 s off every phase at 6 fps", is(readCode(j.read()), Colour::Green, Colour::Blue));
+    j.jitter = -0.3;
+    chk("... and 0.3 s the other way", is(readCode(j.read()), Colour::Green, Colour::Blue));
+
+    Light d{Colour::Red, Colour::Green};
+    d.drop_every = 4;
+    chk("... every 4th frame out of view", is(readCode(d.read()), Colour::Red, Colour::Green));
+
+    Light same{Colour::Red, Colour::Red};
+    chk("same colour twice", is(readCode(same.read()), Colour::Red, Colour::Red));
+
+    Light m{Colour::Red, Colour::Blue};
+    m.start = 20.0;
+    m.secs = 25.0;
+    chk("started mid-code", is(readCode(m.read()), Colour::Red, Colour::Blue));
+
+    // a colour never read: NO answer, never a wrong one
+    Light miss{Colour::Blue, Colour::Red};
+    miss.c1_reads = Colour::Off;
+    const CodeResult rm = readCode(miss.read());
+    chk("blue never read: no answer", !rm.ok);
+    std::printf("    (%s)\n", rm.why.c_str());
+
+    // one cycle read wrong among the right ones still decides right
+    Light good{Colour::Blue, Colour::Red};
+    good.secs = 30.0;
+    std::vector<CodeReading> mixed = good.read();
+    for (auto & x : mixed) {
+      if (x.t >= 11.0 && x.t < 12.0) {x.c = Colour::Green;}   // the 2nd cycle's c1 misread
+    }
+    chk("one cycle misread among 4", is(readCode(mixed), Colour::Blue, Colour::Red));
+
+    // not enough yet: one whole cycle is not an answer
+    Light early{Colour::Blue, Colour::Red};
+    early.secs = 15.0;
+    chk("one cycle is not enough", !readCode(early.read()).ok);
+
+    // a plain steady RED (a fire) is never a code
+    std::vector<CodeReading> fire;
+    for (double t = 0.0; t < 30.0; t += 0.1) {fire.push_back(CodeReading{t, true, Colour::Red});}
+    chk("a steady RED is no code", !readCode(fire).ok);
+    // nor a 1 s / 1 s flash
+    std::vector<CodeReading> flash;
+    for (double t = 0.0; t < 30.0; t += 0.1) {
+      flash.push_back(CodeReading{t, true, std::fmod(t, 2.0) < 1.0 ? Colour::Red : Colour::Off});
+    }
+    chk("a 1 s / 1 s flash is no code", !readCode(flash).ok);
+    // the window out of view for long breaks the cycle it is in
+    Light lost{Colour::Blue, Colour::Red};
+    lost.secs = 24.0;
+    std::vector<CodeReading> lv = lost.read();
+    for (auto & x : lv) {
+      if (x.t >= 13.0 && x.t < 15.0) {x.seen = false;}
+    }
+    chk("2 s out of view drops that cycle", readCode(lv).cycles < readCode(lost.read()).cycles);
+    chk("codeChar", codeChar(CodeReading{0, true, Colour::Blue}) == 'B' &&
+      codeChar(CodeReading{0, false, Colour::Red}) == '-' &&
+      codeChar(CodeReading{0, true, Colour::Unknown}) == '?');
+  }
+
   std::printf("\n%d checks, %d failed\n", g_checks, g_fails);
   std::printf("%s\n", g_fails == 0 ? "PASS" : "FAIL");
   return g_fails == 0 ? 0 : 1;

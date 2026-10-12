@@ -38,7 +38,7 @@ Three jobs, deliberately fused into one node:
    crusader_fcu.pump_core (pump path configured, RC fresh, SB not in e-stop, the
    pilot's pump switch OFF, armed, output reading OFF, burst length and gap) and
    sends ONE-cycle MAV_CMD_DO_REPEAT_SERVO, so the autopilot itself ends the
-   burst. A watchdog sends the pump OFF if it is on under e-stop or RC loss (the
+   burst. A burst asked while one is running extends it (continuous water). A watchdog sends the pump OFF if it is on under e-stop or RC loss (the
    e-stop stops motors, not a pass-through output), and latches the path off if
    a burst does not end. State on /crsd/pump_state. Disabled unless
    pump_servo_channel is set; NOT mode-gated and NOT latch-gated (it moves water,
@@ -611,10 +611,16 @@ class TelemetryBridge(Node):
                                                           duration),
                             pump_core.MAV_CMD_DO_REPEAT_SERVO)
             self._pump_result = pump_core.RESULT_SENT
-            self._pump_reason = f"burst {duration:.2f} s ({msg.source or '?'})"
+            extends = why != "ok"
+            self._pump_reason = (f"burst {duration:.2f} s ({msg.source or '?'}"
+                                 + (", extends" if extends else "") + ")")
             self._pump_ack_until = t + 1.5
             self._pump_ack_cmd = pump_core.MAV_CMD_DO_REPEAT_SERVO
-            self.get_logger().info(f"pump: {self._pump_reason}")
+            if extends:      # several a second while the cannon sprays
+                self.get_logger().info(f"pump: {self._pump_reason}",
+                                       throttle_duration_sec=5.0)
+            else:
+                self.get_logger().info(f"pump: {self._pump_reason}")
         except Exception as e:
             self._pump_result = pump_core.RESULT_REFUSED
             self._pump_reason = f"error: {e}"

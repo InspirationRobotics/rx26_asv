@@ -78,9 +78,29 @@ class TestRefusals(unittest.TestCase):
 
     def test_running_and_gap(self):
         self.g.start_burst(0.3, 100.0)
-        self.assertIn("still running", self.refused(now=100.1))
+        self.assertEqual(self.g.check_burst(0.3, ok_inputs(now=100.1, output_pwm=2000)),
+                         (True, "extends the running burst"))
         self.assertIn("too soon", self.refused(now=100.9))
         self.assertTrue(self.g.check_burst(0.3, ok_inputs(now=101.4))[0])
+
+    def test_extend_a_running_burst(self):
+        g = pc.PumpGate(P)
+        g.start_burst(1.0, 100.0)
+        # running, output ON: extended, not refused
+        self.assertEqual(g.check_burst(1.0, ok_inputs(now=100.6, output_pwm=2000)),
+                         (True, "extends the running burst"))
+        g.start_burst(1.0, 100.6)
+        self.assertAlmostEqual(g.burst_until, 101.6)
+        # the safety checks still apply to an extension
+        self.assertFalse(g.check_burst(1.0, ok_inputs(now=101.0, output_pwm=2000,
+                                                      rc=rc(ch7=994)))[0])
+        self.assertFalse(g.check_burst(1.0, ok_inputs(now=101.0, output_pwm=2000,
+                                                      armed=False))[0])
+        self.assertFalse(g.check_burst(1.5, ok_inputs(now=101.0, output_pwm=2000))[0])
+        # once it has ended, the gap holds as before
+        self.assertIn("too soon", g.check_burst(1.0, ok_inputs(now=102.0))[1])
+        # and the extended burst does not trip the watchdog while it runs
+        self.assertEqual(g.watchdog(ok_inputs(now=101.4, output_pwm=2000)), "")
 
     def test_latched_refuses_everything(self):
         self.g.latched = "test"

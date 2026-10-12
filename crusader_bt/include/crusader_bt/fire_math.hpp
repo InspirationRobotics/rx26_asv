@@ -815,6 +815,7 @@ inline double bandBrake(double rate, double kd, double brake, double min_us, dou
 struct StrafeTune
 {
   double fire_range_m = -1.0;      // the LiDAR range held (StrafeKeep fire_range_m, SlotKeep standoff_m)
+  double watch_range_m = -1.0;     // ...and after docking, watching the lights (StrafeKeep watch)
   double kp_fwd = -1.0, kd_fwd = -1.0, ki_fwd = -1.0;
   double kp_lat = -1.0, kd_lat = -1.0, ki_lat = -1.0;
   double kp_yaw = -1.0, kd_yaw = -1.0;
@@ -853,7 +854,8 @@ struct StrafeTune
       std::snprintf(buf, sizeof(buf), "%s%s %g", out.empty() ? "" : " ", r.first, r.second.first);
       out += buf;
     }
-    for (const auto & w : {std::make_pair("median_s", window_median_s),
+    for (const auto & w : {std::make_pair("watch", watch_range_m),
+                           std::make_pair("median_s", window_median_s),
                            std::make_pair("rate_s", rate_window_s),
                            std::make_pair("est", est_enable), std::make_pair("est_q", est_q),
                            std::make_pair("est_r", est_r), std::make_pair("track_s", track_s)}) {
@@ -891,6 +893,7 @@ struct StrafeState
 {
   Sticks prev;
   double i_fwd = 0.0, i_lat = 0.0;    // us; i_lat in the lateral stick's sense (+ starboard)
+  bool approach = true;               // StrafeKeep approach_m: still pointing the bow at the bay
 };
 
 // One axis: nothing inside the band; outside it P + D, with the thruster

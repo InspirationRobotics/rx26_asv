@@ -454,7 +454,7 @@ public:
 
 /// A line of the run's story, from the tree itself ("APPROACHING", "DOCKING"):
 /// Context::announce, "TASK3 | <text>" in the log and on /crsd/task3_events.
-/// SUCCESS, at once.
+/// "%RANGE%" in the text becomes the range the strafe keep holds. SUCCESS, at once.
 class Announce : public CrusaderSyncAction
 {
 public:
@@ -467,7 +467,20 @@ public:
 
   BT::NodeStatus tick() override
   {
-    say(*ctx_, getInput<std::string>("text").value_or(""));
+    // %RANGE% = the range the strafe keep is holding now (live overrides too)
+    std::string text = getInput<std::string>("text").value_or("");
+    const std::size_t at = text.find("%RANGE%");
+    if (at != std::string::npos) {
+      double r = fire::kNaN;
+      {
+        std::lock_guard<std::mutex> lk(ctx_->mu);
+        r = ctx_->strafe_target_range;
+      }
+      char buf[16];
+      std::snprintf(buf, sizeof(buf), "%.2f", r);
+      text.replace(at, 7, std::isfinite(r) ? buf : "?");
+    }
+    say(*ctx_, text);
     return BT::NodeStatus::SUCCESS;
   }
 };
@@ -523,6 +536,11 @@ public:
     return {
       BT::InputPort<double>("timeout_s", 60.0, "give up waiting for the light"),
       BT::InputPort<double>("resend_s", 10.0, "re-send the docking report this often"),
+      BT::InputPort<double>("confirm_s", 2.5,
+        "the window itself must read RED this long without a break (a code flash is "
+        "red 1 s at most)"),
+      BT::InputPort<double>("dropout_s", 0.5,
+        "no RED reading of the window for longer than this breaks it"),
       BT::OutputPort<int>("window",
         "the lit window's DockWindow.index (0 = upper-left), for StrafeKeep / FireBurst")};
   }
@@ -531,6 +549,10 @@ public:
   {
     t0_ = Clock::now();
     last_ = t0_;
+    red_window_ = -1;
+    red_since_ = -1.0;
+    last_red_ = -1.0;
+    seen_t_ = -1.0;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       ctx_->task3_phase = "AWAIT FIRE";
@@ -549,6 +571,8 @@ public:
   {
     int bay = 0;
     int lit = -1;
+    int waiting = -1;
+    double red_for = 0.0;
     bool resend = false;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
@@ -557,13 +581,38 @@ public:
       if (after_ >= 0 && !red) {
         after_ = -1;                     // the old fire's verdict has changed
       }
-      if (red && ctx_->dock_target_window >= 0 && after_ < 0) {
-        // ...and the camera's own reading of that window in the latest frame
-        // must not contradict it: a window it sees OFF or GREEN is no fire
-        const dock::WindowSighting * w = chosenWindow(*ctx_, ctx_->dock_target_window);
-        const bool contradicted = w != nullptr &&
-          (w->state == dock::Colour::Off || w->state == dock::Colour::Green);
-        if (!contradicted) {lit = ctx_->dock_target_window;}
+      // The timing layer's "steady RED" is not enough on its own: on the water
+      // (2026-10-11) it called a code (blue, then red) "steady RED" 7.6 s after
+      // the code was read, and the boat went back in to spray. A code's colour
+      // is on 1 s at a time; a fire stays red. So the window's OWN reading,
+      // frame by frame, must be RED for confirm_s without a break, a break
+      // being dropout_s with no RED reading of it (OFF, GREEN, BLUE, or dark
+      // frames read "unknown"). A single misread frame inside a real fire is
+      // shorter than that; a code's 1 s and 2 s offs are not.
+      const double confirm = getInput<double>("confirm_s").value_or(2.5);
+      const double dropout = getInput<double>("dropout_s").value_or(0.5);
+      const int target = ctx_->dock_target_window;
+      if (target != red_window_) {
+        red_window_ = target;
+        red_since_ = -1.0;
+      }
+      const dock::BayTrack * track = ctx_->dock.find(fireTrack(*ctx_));
+      const dock::WindowSighting * w = chosenWindow(*ctx_, target);
+      if (track != nullptr && w != nullptr && track->windows_t > seen_t_) {
+        seen_t_ = track->windows_t;      // a new reading of that window
+        if (w->state == dock::Colour::Red) {
+          if (red_since_ < 0.0 || seen_t_ - last_red_ > dropout) {red_since_ = seen_t_;}
+          last_red_ = seen_t_;
+        }
+      }
+      if (red_since_ >= 0.0 && ctx_->dock_t - last_red_ > dropout) {red_since_ = -1.0;}
+      red_for = red_since_ >= 0.0 ? last_red_ - red_since_ : 0.0;
+      if (red && target >= 0 && after_ < 0) {
+        if (red_for >= confirm) {
+          lit = target;
+        } else {
+          waiting = target;
+        }
       }
       bay = ctx_->chosen_bay;
       resend = !ctx_->readiness_confirmed &&
@@ -573,9 +622,15 @@ public:
       // Optional: a tree that does not wire `window` gets an error value here,
       // not an exception, and that is fine.
       (void)setOutput("window", lit);
-      RCLCPP_INFO(log(), "FIRE: window %d is steady RED", lit);
+      RCLCPP_INFO(log(), "FIRE: window %d is steady RED (read red %.1f s)", lit, red_for);
       say(*ctx_, "ON FIRE: the " + windowName(lit) + " window is steady RED");
       return BT::NodeStatus::SUCCESS;
+    }
+    if (waiting >= 0) {
+      RCLCPP_INFO_THROTTLE(log(), *ctx_->node->get_clock(), 2000,
+        "window %d: the timing layer says steady RED, the window has read red %.1f s "
+        "of the %.1f s a fire needs", waiting, red_for,
+        getInput<double>("confirm_s").value_or(2.5));
     }
     if (resend) {
       last_ = Clock::now();
@@ -592,6 +647,10 @@ public:
 private:
   Clock::time_point t0_, last_;
   int after_ = -1;          ///< a fire was just put out: >= 0 until the RED verdict changes
+  int red_window_ = -1;     ///< the window the RED reading below is about
+  double red_since_ = -1.0; ///< frame time its unbroken RED reading began, < 0 = none
+  double last_red_ = -1.0;  ///< frame time it last read RED
+  double seen_t_ = -1.0;    ///< the newest window reading already counted
 };
 
 /// Spray the target window until it turns GREEN.
@@ -778,8 +837,13 @@ public:
   {
     t0_ = Clock::now();
     hold_.reset();
+    readings_.clear();
+    code_ = dock::CodeResult{};
+    trace_t_ = -1e18;
     std::lock_guard<std::mutex> lk(ctx_->mu);
     seq_ = ctx_->dock_seq;
+    // the window whose code it is: the one just put out
+    window_ = ctx_->fired_window >= 0 ? ctx_->fired_window : ctx_->dock_target_window;
     ctx_->have_request = false;
     ctx_->task3_phase = "DECODING";
     return BT::NodeStatus::RUNNING;
@@ -791,6 +855,7 @@ public:
     const int frames = getInput<int>("min_frames").value_or(20);
     dock::Request got;
     bool done = false;
+    std::string trace;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       // Below ~4 fps a 1 s on / 1 s off light cannot be resolved (Nyquist);
@@ -802,9 +867,42 @@ public:
       }
       if (ctx_->dock_seq != seq_) {
         seq_ = ctx_->dock_seq;
+        // Two readers; the first to answer wins. (1) dock::readCode, on the
+        // window's own colour frame by frame, cycle by cycle (2026-10-11:
+        // the timing layer's strict "code" read it once in three runs). It
+        // needs the window in THIS frame: a held reading would stretch it.
+        const dock::BayTrack * track = ctx_->dock.find(fireTrack(*ctx_));
+        const dock::WindowSighting * w = chosenWindow(*ctx_, window_);
+        dock::CodeReading cr;
+        cr.t = ctx_->dock_t;
+        cr.seen = track != nullptr && w != nullptr && track->windows_t >= ctx_->dock_t;
+        if (cr.seen) {cr.c = w->state;}
+        readings_.push_back(cr);
+        while (readings_.size() > 1 && readings_.front().t < cr.t - 40.0) {
+          readings_.erase(readings_.begin());
+        }
+        code_ = dock::readCode(readings_);
+        if (cr.t - trace_t_ >= 5.0) {   // what it saw, for the log: 5 s a line
+          trace_t_ = cr.t;
+          for (const auto & x : readings_) {
+            if (x.t > cr.t - 5.0) {trace += dock::codeChar(x);}
+          }
+          trace += "  | " + code_.why;
+        }
+        if (code_.ok) {
+          const dock::Request r = dock::requestFrom("code", {code_.c1, code_.c2});
+          if (r.ok) {
+            done = true;
+            ctx_->request = r;
+            ctx_->have_request = true;
+            got = r;
+            seen_ = "code: " + code_.why;
+          }
+        }
+        // (2) the timing layer's verdict, held hold_s
         const dock::Request r = dock::requestFrom(ctx_->dock_pattern, ctx_->dock_colours);
-        done = hold_.update(r, ctx_->dock_t, hold, frames);
-        if (done) {
+        if (!done && hold_.update(r, ctx_->dock_t, hold, frames)) {
+          done = true;
           ctx_->request = hold_.cand;
           ctx_->have_request = true;
           got = hold_.cand;
@@ -815,17 +913,23 @@ public:
         }
       }
     }
+    if (!trace.empty()) {
+      RCLCPP_INFO(log(), "code, window %d (R G B, o off, ? unknown, - not in view): %s",
+        window_, trace.c_str());
+    }
     if (done) {
-      RCLCPP_INFO(log(), "decoded: %s (held %d frames)", got.why.c_str(), hold_.frames);
+      RCLCPP_INFO(log(), "decoded: %s (%s)", got.why.c_str(), seen_.c_str());
       say(*ctx_, "CODE: " + seen_ + "  ->  resource " + dock::wireColourName(got.resource) +
         ", deliver to " + dock::wireColourName(got.delivery));
       return BT::NodeStatus::SUCCESS;
     }
     if (since(t0_) >= getInput<double>("timeout_s").value_or(80.0)) {
-      RCLCPP_WARN(log(), "DecodeResourceRequest: no steady code after %.0fs (last: %s)",
-        since(t0_), hold_.cand.ok ? hold_.cand.why.c_str() : "nothing");
+      const std::string last = code_.votes > 0 ? code_.why :
+        (hold_.cand.ok ? hold_.cand.why : std::string("nothing"));
+      RCLCPP_WARN(log(), "DecodeResourceRequest: no code after %.0fs (last: %s)",
+        since(t0_), last.c_str());
       say(*ctx_, "NO CODE read after " + std::to_string(static_cast<int>(since(t0_))) +
-        " s (last: " + (hold_.cand.ok ? hold_.cand.why : std::string("nothing")) + ")");
+        " s (last: " + last + ")");
       return BT::NodeStatus::FAILURE;
     }
     return BT::NodeStatus::RUNNING;
@@ -835,7 +939,11 @@ private:
   Clock::time_point t0_;
   dock::RequestHold hold_;
   std::uint32_t seq_ = 0;
-  std::string seen_;        ///< the pattern and colours as the timing layer read them
+  std::string seen_;        ///< the pattern and colours, as whichever reader read them
+  int window_ = -1;         ///< the window whose code it is
+  std::vector<dock::CodeReading> readings_;   ///< its colour, frame by frame (40 s)
+  dock::CodeResult code_;
+  double trace_t_ = -1e18;
 };
 
 /// ResourceDeliveryRequest to RoboCommand, and the same request to the UAV.

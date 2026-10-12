@@ -46,13 +46,17 @@ from dataclasses import dataclass, field, replace
 G = 9.81
 
 
-def exit_speed_from_range(range_m, elev_deg):
-    """The exit speed that throws `range_m` on the level at `elev_deg`
-    (landing at the nozzle's own height): R = v^2 sin(2 el) / g."""
-    s = math.sin(math.radians(2.0 * elev_deg))
-    if range_m <= 0 or s <= 0:
-        raise ValueError("need a positive range and 0 < elev < 90 deg")
-    return math.sqrt(G * range_m / s)
+def exit_speed_from_range(range_m, elev_deg, drop_m=0.0):
+    """The exit speed of a drag-free stream that, leaving at `elev_deg`, lands
+    `range_m` away horizontally and `drop_m` BELOW the nozzle (0 = at the
+    nozzle's own height: R = v^2 sin(2 el) / g). A throw measured from the boat
+    lands on the water, ~0.5 m below the nozzle: 9 ft at 30 deg is 4.85 m/s
+    with the drop, 5.57 without (2026-10-11)."""
+    t = math.radians(elev_deg)
+    den = 2.0 * math.cos(t) ** 2 * (range_m * math.tan(t) + drop_m)
+    if range_m <= 0 or not 0.0 < elev_deg < 90.0 or den <= 0:
+        raise ValueError("need a positive range, 0 < elev < 90 deg, and a reachable landing")
+    return math.sqrt(G * range_m * range_m / den)
 
 
 @dataclass
@@ -112,7 +116,8 @@ class CannonParams:
                             min_us=float(d["pwm_min"]), max_us=float(d["pwm_max"]))
         v = float(d["exit_speed_mps"])
         if v <= 0:                     # 0 = derive it from the measured throw
-            v = exit_speed_from_range(float(d["throw_range_m"]), float(d["throw_elev_deg"]))
+            v = exit_speed_from_range(float(d["throw_range_m"]), float(d["throw_elev_deg"]),
+                                      float(d.get("throw_drop_m", 0.0)))
         return cls(nozzle_x=float(d["nozzle_x"]), nozzle_y=float(d["nozzle_y"]),
                    nozzle_z=float(d["nozzle_z"]),
                    cam_x=float(d["cam_x"]), cam_y=float(d["cam_y"]), cam_z=float(d["cam_z"]),
@@ -297,55 +302,72 @@ class FireParams:
     settle_s: float = 0.4          # servos at the command and the target still, this long
     servo_tol_us: float = 12.0     # SERVO_OUTPUT_RAW within this of the command
     aim_max_age_s: float = 1.0     # an aim point older than this is not a target
-    burst_s: float = 1.0           # one pump burst (the bridge caps it: pump_max_burst_s)
-    gap_s: float = 1.1             # from a burst's start + burst_s to the next ask (> pump_min_gap_s)
+    burst_s: float = 1.0           # each ask: water for this long from now (<= pump_max_burst_s)
+    resend_s: float = 0.3          # ask again this often while spraying (< burst_s)
 
 
 class FireGate:
     """When to ask the bridge for water: the tree wants it (fire true), the aim
     point is fresh, the solution reaches and is not clipped, and the servos have
-    been AT the command for settle_s. Then a burst every burst_s + gap_s while
-    that holds. Pure: the node feeds it and sends what it returns."""
+    been AT the command for settle_s. Then the water stays ON: another ask
+    every resend_s, each extending the last at the bridge (two asks per burst,
+    so one lost on the way does not stop the stream), with the servos free to
+    track the target, until a hard reason (not asked, aim old, out of reach,
+    clipped). No penalty for too much water (2026-10-11): it sprays until the
+    tree sees GREEN. Pure: the node feeds it and sends what it returns."""
 
     def __init__(self, p: FireParams = None):
         self.p = p or FireParams()
+        if not 0.05 <= self.p.resend_s < self.p.burst_s:
+            raise ValueError(f"resend_s {self.p.resend_s} must be under burst_s "
+                             f"{self.p.burst_s}: the water would stop between asks")
         self.reset()
 
     def reset(self):
         self.ok_since = None
         self.next_burst_t = -1e18
+        self.firing = False
         self.why = "idle"
 
     def update(self, now, want, aim_age_s, sol: AimSolution, servo_err_us):
         """Returns the burst length to ask for now (s), or 0.0 for nothing."""
         p = self.p
+        hard = ""
         if not want:
-            why = "not asked"
+            hard = "not asked"
         elif aim_age_s > p.aim_max_age_s:
-            why = f"aim point {aim_age_s:.1f} s old"
+            hard = f"aim point {aim_age_s:.1f} s old"
         elif not sol.ok or not sol.reachable:
-            why = sol.why or "no solution"
+            hard = sol.why or "no solution"
         elif sol.clipped:
-            why = sol.why
+            hard = sol.why
         elif servo_err_us is None:
-            why = "servo position unknown (no SERVO_OUTPUT_RAW)"
-        elif servo_err_us > p.servo_tol_us:
-            why = f"servos moving ({servo_err_us:.0f} us off)"
-        else:
-            why = ""
-        if why:
+            hard = "servo position unknown (no SERVO_OUTPUT_RAW)"
+        if hard:
             self.ok_since = None
-            self.why = why
+            self.firing = False
+            self.why = hard
+            return 0.0
+        if self.firing:
+            # the water is on: keep it on while the aim tracks
+            if now < self.next_burst_t:
+                self.why = "spraying"
+                return 0.0
+            self.next_burst_t = now + p.resend_s
+            self.why = "FIRE"
+            return p.burst_s
+        if servo_err_us > p.servo_tol_us:
+            self.ok_since = None
+            self.firing = False
+            self.why = f"servos moving ({servo_err_us:.0f} us off)"
             return 0.0
         if self.ok_since is None:
             self.ok_since = now
         if now - self.ok_since < p.settle_s:
             self.why = "settling"
             return 0.0
-        if now < self.next_burst_t:
-            self.why = "between bursts"
-            return 0.0
-        self.next_burst_t = now + p.burst_s + p.gap_s
+        self.firing = True
+        self.next_burst_t = now + p.resend_s
         self.why = "FIRE"
         return p.burst_s
 

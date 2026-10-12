@@ -40,7 +40,7 @@
       <WallRangeAlive max_age_s="1.0" face_max_age_s="1.0"/>
       <AttitudeAlive max_age_s="0.5"/>
 
-      <StrafeKeep fire_range_m="1.2" lateral_ref="face" range_fallback="face"
+      <StrafeKeep fire_range_m="1.2" lateral_ref="face" range_fallback="face" approach_m="0.8"
                   lateral_bias_m="0.0" nozzle_y_m="0.0"
                   cam_timeout_s="0.5" face_timeout_s="3.0"
                   range_check_m="0" face_setback_m="0.0"
@@ -51,16 +51,16 @@
                   min_range_m="0.6" square_first_deg="10"/>
 
       <Sequence name="hold">
-        <Announce text="APPROACHING the bay"/>
+        <Announce text="APPROACHING the bay, bow on it"/>
         <AwaitStrafeSolution fire_range_m="1.2" range_tol_m="0.40" lat_tol_m="0.30"
                              yaw_tol_deg="10.0" hold_s="0.5" gap_s="0.0" timeout_s="1000000"
                              steady="false"/>
-        <Announce text="DOCKING: lining up 1.2 m out"/>
+        <Announce text="DOCKING: lining up %RANGE% m out"/>
         <!-- the cannon aims itself: the hull need not be still to count -->
         <AwaitStrafeSolution fire_range_m="1.2" range_tol_m="0.06" lat_tol_m="0.10"
                              yaw_tol_deg="5.0" hold_s="1.0" gap_s="0.0" timeout_s="1000000"
                              steady="false"/>
-        <Announce text="HOLDING 1.2 m out (this tree reports nothing)"/>
+        <Announce text="HOLDING %RANGE% m out (this tree reports nothing)"/>
         <Sleep msec="86400000"/>
       </Sequence>
 

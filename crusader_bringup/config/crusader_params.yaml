@@ -99,7 +99,7 @@ telemetry_bridge:
     # refused. Then set it to the Pixhawk output whose SERVOn_FUNCTION is
     # 50 + pump_rc_channel (RCIN10 = 60), with SERVOn_TRIM = pump_off_pwm: the
     # autopilot ends every burst by returning the output to TRIM.
-    pump_servo_channel: 10                 # [RO] Pixhawk output 1..16; 0 = none (2026-10-09: 10)
+    pump_servo_channel: 9                  # [RO] Pixhawk OUTPUT 1..16 (AUX1 = 9; 2026-10-11); 0 = none. NOT the RC channel: that is pump_rc_channel
     pump_rc_channel: 10                    # [RO] the pilot's pump switch. NOT 9:
                                            #      that is drop_channel above
     pump_on_pwm: 2000                      # [RO] us; MEASURE on the bench (G7)
@@ -225,15 +225,18 @@ cannon_aim_node:
   ros__parameters:
     # the pivot, body frame, hull-bottom datum. ASSUMED from the camera's mount
     # (0.37, 0.0, 0.65) + the nozzle ~0.10 ahead, 0.30 left, 0.10 above it. MEASURE.
-    nozzle_x: 0.47                         # [RO] m forward of the body origin
-    nozzle_y: 0.30                         # [RO] m to PORT
-    nozzle_z: 0.75                         # [RO] m above the hull-bottom datum (0.51 above water)
+    nozzle_x: 0.47                         # [DYN] m forward of the body origin
+    nozzle_y: 0.279                        # [DYN] m to PORT: 11 in left of the camera's centre (2026-10-11)
+    nozzle_z: 0.75                         # [DYN] m above the hull-bottom datum (0.51 above water)
     # the stream: 0 = derive from one measured throw (3.0 m at 45 deg on the
     # level, 2026-10: v = sqrt(g R) = 5.42 m/s, drag-free). The NEW nozzle,
     # 2026-10-09: a foot low from 1.6 m at 5.42 = ~4.2 m/s (3.9-4.3 over 5 shots)
-    exit_speed_mps: 4.2                    # [RO]
-    throw_range_m: 3.0                     # [RO]
-    throw_elev_deg: 45.0                   # [RO]
+    # 2026-10-11: the model instead of big trims. One throw from the boat: ~9 ft
+    # out at ~30 deg, landing on the water (0.51 m below the nozzle) = 4.85 m/s.
+    exit_speed_mps: 0.0                    # [DYN] 0 = from the throw below
+    throw_range_m: 2.74                    # [DYN] m out (9 ft)
+    throw_elev_deg: 30.0                   # [DYN] deg above level
+    throw_drop_m: 0.51                     # [DYN] m below the nozzle where it landed (the water)
     # the servos: ASSUMED 1000-2000 us = -90..+90 deg until benched. + pan = LEFT,
     # + tilt = UP; flip *_sign if a servo turns the other way.
     pan_center_us: 1500.0                  # [RO] us at 0 deg (straight ahead)
@@ -252,9 +255,9 @@ cannon_aim_node:
     # (2026-10-09, on the water). From the hold at 1.2 m; at another distance
     # they will be off. An aim naming no window (cal point / deg) is untrimmed.
     pan_trim_ul_deg: 0.0                   # [DYN] upper-left, deg (+ = left)
-    tilt_trim_ul_deg: 25.0                 # [DYN] upper-left, deg (+ = up); 2026-10-09
+    tilt_trim_ul_deg: 0.0                  # [DYN] upper-left, deg (+ = up); was 25 / 15 on the old model
     pan_trim_lr_deg: 0.0                   # [DYN] lower-right, deg (+ = left)
-    tilt_trim_lr_deg: 35.0                 # [DYN] lower-right, deg (+ = up); 2026-10-09
+    tilt_trim_lr_deg: 0.0                  # [DYN] lower-right, deg (+ = up); was 35 on the old model
     # firing (cannon_aim_core.FireGate)
     aim_rate_hz: 20.0                      # [RO] solve + command this often
     settle_s: 0.4                          # [RO] servos on the command this long, then water
@@ -264,8 +267,10 @@ cannon_aim_node:
                                            #      through the camera losing it (from
                                            #      the berth the window is at the hull
                                            #      band's edge)
-    burst_s: 1.0                           # [RO] <= telemetry_bridge pump_max_burst_s
-    gap_s: 1.1                             # [RO] > pump_min_gap_s
+    burst_s: 1.0                           # [RO] each ask: water this long from now
+                                           #      (<= telemetry_bridge pump_max_burst_s)
+    resend_s: 0.3                          # [RO] ask again this often while spraying:
+                                           #      the water stays ON until GREEN
     cannon_timeout_s: 0.6                  # [RO] no /crsd/water_cannon this long: stop
     fire_pump: false                       # [RO] G7: false = aim only, bursts DRY (logged)
     status_period_s: 0.2                   # [RO] /crsd/cannon_status

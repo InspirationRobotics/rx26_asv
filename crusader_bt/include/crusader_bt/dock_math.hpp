@@ -1136,6 +1136,175 @@ struct RequestHold
   }
 };
 
+/// The colour code, read from the fire window's OWN per-frame colour, and more
+/// forgiving than the timing layer's "code" verdict.
+///
+/// The light, after the fire is out: GREEN 5 s, off 1 s, then for 60 s
+///     c1 on 1 s, off 1 s, c2 on 1 s, off 2 s, repeated.
+/// The timing layer calls "code" only when 8 pieces in a row (two cycles) each
+/// land within +-0.35 s of those lengths, and the tree then wanted that verdict
+/// unbroken for 5 s: one misread piece anywhere reset it all. On the water
+/// (2026-10-11) the code was read once in three runs while the colours
+/// themselves read well.
+///
+/// So: every dark stretch of >= long_off_s (the 2 s off; the other off is 1 s)
+/// ends a cycle. Each stretch between two of them is one cycle: its first lit
+/// colour is c1 and its last is c2 (one lit run of >= single_min_s = both the
+/// same colour, the 1 s off between them not seen). A cycle votes only if it
+/// spans a plausible c1 + off + c2 (min_span_s .. max_span_s) and the window
+/// was not out of view in it. min_votes cycles agreeing, with no more than
+/// half as many for anything else, is the answer.
+///
+/// "unknown" with the window in view counts as dark: an unlit panel is what
+/// the colour rule abstains on. A colour it never reads makes NO answer, not a
+/// wrong one: that cycle is too short (its colour is dark, so the long off
+/// swallows it) and does not vote.
+struct CodeReading
+{
+  double t = 0.0;
+  bool seen = false;               ///< the window was in this frame
+  Colour c = Colour::Unknown;
+};
+
+struct CodeParams
+{
+  double debounce_s = 0.25;        ///< a colour must last this long to count
+  double bridge_s = 0.6;           ///< out of view shorter than this is ignored
+  double long_off_s = 1.5;         ///< the 2 s off that ends a cycle
+  double min_span_s = 2.0;         ///< c1 + off + c2: 3 s nominal
+  double max_span_s = 4.5;
+  double single_min_s = 1.8;       ///< one lit run this long = c1 == c2
+  int min_votes = 2;
+};
+
+struct CodeResult
+{
+  bool ok = false;
+  Colour c1 = Colour::Unknown, c2 = Colour::Unknown;
+  int votes = 0;                   ///< cycles for (c1, c2)
+  int cycles = 0;                  ///< cycles that voted at all
+  std::string why;
+};
+
+namespace code_detail
+{
+// symbols: 0 = dark, 1..3 = Red/Green/Blue (Colour values 2..4), -1 = out of view
+inline int symbol(const CodeReading & r)
+{
+  if (!r.seen) {return -1;}
+  return isLit(r.c) ? static_cast<int>(r.c) : 0;
+}
+
+struct Run
+{
+  int s;
+  double t0, t1;
+  double dur() const {return t1 - t0;}
+};
+}  // namespace code_detail
+
+inline CodeResult readCode(const std::vector<CodeReading> & rs, const CodeParams & p = CodeParams{})
+{
+  using code_detail::Run;
+  CodeResult out;
+  if (rs.size() < 2) {
+    out.why = "no readings";
+    return out;
+  }
+  // runs of one symbol, each boundary half-way between the frames either side
+  std::vector<Run> runs;
+  for (std::size_t i = 0; i < rs.size(); ++i) {
+    const int s = code_detail::symbol(rs[i]);
+    if (!runs.empty() && runs.back().s == s) {
+      runs.back().t1 = rs[i].t;
+      continue;
+    }
+    const double cut = runs.empty() ? rs[i].t : 0.5 * (rs[i - 1].t + rs[i].t);
+    if (!runs.empty()) {runs.back().t1 = cut;}
+    runs.push_back(Run{s, cut, rs[i].t});
+  }
+  auto merge = [](std::vector<Run> & v) {
+      std::vector<Run> m;
+      for (const auto & r : v) {
+        if (!m.empty() && m.back().s == r.s) {m.back().t1 = r.t1;} else {m.push_back(r);}
+      }
+      v.swap(m);
+    };
+  // short times out of view: the run before carries on through them
+  for (std::size_t i = 1; i < runs.size(); ++i) {
+    if (runs[i].s == -1 && runs[i].dur() < p.bridge_s) {runs[i].s = runs[i - 1].s;}
+  }
+  merge(runs);
+  // blips shorter than debounce_s: the run before carries on through them
+  for (std::size_t i = 1; i < runs.size(); ++i) {
+    if (runs[i].s != -1 && runs[i].dur() < p.debounce_s && i + 1 < runs.size()) {
+      runs[i].s = runs[i - 1].s;
+    }
+  }
+  merge(runs);
+
+  // the cycles: between consecutive long darks (the last may still be going)
+  std::vector<std::pair<int, int>> pairs;
+  int last_long = -1;
+  for (std::size_t i = 0; i < runs.size(); ++i) {
+    const bool long_dark = runs[i].s == 0 && runs[i].dur() >= p.long_off_s;
+    if (runs[i].s == -1) {last_long = -1;}          // lost the window: start over
+    if (!long_dark) {continue;}
+    if (last_long >= 0) {
+      const double span = runs[i].t0 - runs[static_cast<std::size_t>(last_long)].t1;
+      std::vector<const Run *> lit;
+      for (std::size_t k = static_cast<std::size_t>(last_long) + 1; k < i; ++k) {
+        if (runs[k].s > 0) {lit.push_back(&runs[k]);}
+      }
+      bool ok = span >= p.min_span_s && span <= p.max_span_s && !lit.empty();
+      if (ok && lit.size() == 1) {ok = lit[0]->dur() >= p.single_min_s;}
+      if (ok) {pairs.emplace_back(lit.front()->s, lit.back()->s);}
+    }
+    last_long = static_cast<int>(i);
+  }
+  out.cycles = static_cast<int>(pairs.size());
+  // the vote
+  std::pair<int, int> best{0, 0};
+  int best_n = 0, second_n = 0;
+  for (const auto & a : pairs) {
+    const int n = static_cast<int>(std::count(pairs.begin(), pairs.end(), a));
+    if (n > best_n) {
+      best_n = n;
+      best = a;
+    }
+  }
+  for (const auto & a : pairs) {
+    if (a != best) {
+      second_n = std::max(second_n, static_cast<int>(std::count(pairs.begin(), pairs.end(), a)));
+    }
+  }
+  out.votes = best_n;
+  if (best_n == 0) {
+    out.why = "no whole cycle yet";
+    return out;
+  }
+  out.c1 = static_cast<Colour>(best.first);
+  out.c2 = static_cast<Colour>(best.second);
+  out.why = std::string(colourName(out.c1)) + " then " + colourName(out.c2) + ": " +
+    std::to_string(best_n) + " of " + std::to_string(out.cycles) + " cycles";
+  out.ok = best_n >= p.min_votes && best_n >= 2 * second_n;
+  return out;
+}
+
+/// One character per reading, for the log: R G B, o = off, ? = unknown,
+/// - = window not in the frame.
+inline char codeChar(const CodeReading & r)
+{
+  if (!r.seen) {return '-';}
+  switch (r.c) {
+    case Colour::Red: return 'R';
+    case Colour::Green: return 'G';
+    case Colour::Blue: return 'B';
+    case Colour::Off: return 'o';
+    default: return '?';
+  }
+}
+
 /// "Did the fire go out?", independent of the timing layer's one-frame "hit".
 ///
 /// DockObservation.last_event is set on ONE frame; a dropped message loses it.

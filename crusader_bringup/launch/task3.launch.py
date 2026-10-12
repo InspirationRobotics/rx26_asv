@@ -1,13 +1,16 @@
 """task3.launch.py — what Task 3 (coordinated logistics / the fixed-nozzle shot)
 needs ON TOP OF core.launch.py.
 
-    ros2 launch crusader_bringup task3.launch.py                       # shadow
-    ros2 launch crusader_bringup task3.launch.py publish_setpoints:=true   # hold, dry
-    ros2 launch crusader_bringup task3.launch.py publish_setpoints:=true fire_pump:=true
+    ros2 launch crusader_bringup task3.launch.py tree:=fire_manual
 
 The pan/tilt cannon in front of one bay (after a reboot, this is everything):
 
-    ros2 launch crusader_bringup task3.launch.py tree:=cannon_fire publish_setpoints:=true
+    ros2 launch crusader_bringup task3.launch.py tree:=cannon_fire
+
+What the run may do is crusader_params.yaml's, read at launch (2026-10-11: no
+switches on the command line): bt_runner_node publish_setpoints (the sticks,
+G1) and fire_pump, and cannon_aim_node fire_pump (the WATER, G7). The first line
+the launch prints says which.
 
 then start the run, SD down and the transmitter on (MANUAL for the fire trees,
 GUIDED for the mission trees):
@@ -47,11 +50,11 @@ WHAT IT DOES NOT START, ON PURPOSE:
     buoy_detector, oakd_publisher and oak_view first (or it fails to open the
     device), and do NOT also start dock_view from the Nodes tab while this runs.
 
-THE TWO SWITCHES DEFAULT OFF. publish_setpoints (may the tree take the sticks,
-Gate G1) and fire_pump (may it squirt, Gate G7) are false unless given here, so a
-bare `ros2 launch` is a shadow run: the tree logs what it would do and touches
-nothing. Turning either on is a deliberate act on the command line, never a
-default in a file. See docs/T3_coordinated_logistics.md.
+THE SWITCHES ARE THE FILE'S. publish_setpoints (may the tree take the sticks,
+Gate G1) and fire_pump (may it squirt, Gate G7) come from crusader_params.yaml,
+so check them there before a run: false/false is a shadow run that logs what it
+would do and touches nothing. tree.sh still takes them as arguments, for a run
+that differs from the file on purpose. See docs/T3_coordinated_logistics.md.
 """
 import os
 
@@ -83,14 +86,6 @@ TREES = {
 }
 
 
-def _truthy(text):
-    v = str(text).strip().lower()
-    if v in ("true", "1", "yes", "on"):
-        return True
-    if v in ("false", "0", "no", "off"):
-        return False
-    raise ValueError(f"expected true/false, got {text!r}")
-
 
 def _nodes(context):
     params = os.path.join(get_package_share_directory("crusader_bringup"),
@@ -105,8 +100,13 @@ def _nodes(context):
         raise ValueError(f"tree:={tree!r}: one of {sorted(TREES)}")
     tree_file = os.path.join(get_package_share_directory("crusader_bt"),
                              "behavior_trees", TREES[tree])
-    setpoints = _truthy(LaunchConfiguration("publish_setpoints").perform(context))
-    pump = _truthy(LaunchConfiguration("fire_pump").perform(context))
+    # the switches, from the file (see the header)
+    with open(params, encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    bt = cfg["bt_runner_node"]["ros__parameters"]
+    setpoints = bool(bt.get("publish_setpoints", False))
+    pump = bool(bt.get("fire_pump", False))
+    water = bool(cfg.get("cannon_aim_node", {}).get("ros__parameters", {}).get("fire_pump", False))
     bays = int(LaunchConfiguration("dock_bays").perform(context))
     if bays not in (1, 2, 3):
         raise ValueError(f"dock_bays:={bays}: 1..3 (3 on the course)")
@@ -114,11 +114,13 @@ def _nodes(context):
             "HOLD (sticks, pump DRY)" if setpoints else
             "SHADOW (logs only, touches nothing)" if not pump else
             "PUMP WITHOUT STICKS")
+    if tree in ("cannon", "cannon_hold", "cannon_fire"):
+        mode += " | cannon " + ("FIRES THE PUMP" if water else "DRY")
 
     # The cannon tree docks on the slip, not the wall range, and its water goes
     # through cannon_aim_node (whose own fire_pump is this launch's).
     cannon = Node(package="crusader_fcu", executable="cannon_aim_node",
-                  output="screen", parameters=[params, {"fire_pump": pump}])
+                  output="screen", parameters=[params])
     wall = Node(package="crusader_perception", executable="wall_range_node",
                 output="screen", parameters=[params])
     if tree == "cannon":
@@ -131,18 +133,16 @@ def _nodes(context):
     else:
         lidar = [wall]
     return [
-        LogInfo(msg=f"task3: tree {TREES[tree]} | publish_setpoints {setpoints} | "
-                    f"fire_pump {pump} -> {mode}"),
+        LogInfo(msg=f"task3: tree {TREES[tree]} | from crusader_params.yaml: publish_setpoints "
+                    f"{setpoints}, fire_pump {pump} -> {mode}"),
         *lidar,
         ExecuteProcess(cmd=["python3", os.path.join(tools_dir, "dock_view.py")],
                        output="screen"),
-        # The params file first, then the three overrides: a later entry wins, so
-        # the file stays the source of truth for everything else on the node.
+        # The params file first, then the tree and the bays: a later entry wins,
+        # so the file is the source of truth for everything else, the switches too.
         Node(package="crusader_bt", executable="bt_runner_node",
              output="screen",
              parameters=[params, {"tree_file": tree_file,
-                                  "publish_setpoints": setpoints,
-                                  "fire_pump": pump,
                                   "dock_bays": bays}]),
     ]
 
@@ -153,10 +153,6 @@ def generate_launch_description():
                               description="fire_manual | fire_test | disruptive | part1 | part2 | "
                                           "cannon | cannon_hold | cannon_fire | fire_1p6 | "
                                           "approach_test"),
-        DeclareLaunchArgument("publish_setpoints", default_value="false",
-                              description="may the tree take the sticks (G1)"),
-        DeclareLaunchArgument("fire_pump", default_value="false",
-                              description="may the tree fire the pump (G7)"),
         DeclareLaunchArgument("dock_bays", default_value="3",
                               description="bays in the dock; 1 only to test against one practice bay"),
         OpaqueFunction(function=_nodes),

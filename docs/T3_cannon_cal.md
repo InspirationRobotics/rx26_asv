@@ -150,23 +150,29 @@ Commit them.
 
 ## The fire test: hold, red, spray until green, the code
 
-`task3_cannon_fire.xml`: the boat holds 1.2 m in front of the bay on its face, waits for a
-window to go steady RED, sprays it until it reads GREEN, then reads the colour code
-(c1 on 1 s, off 1 s, c2 on 1 s, off 2 s, repeated), and waits for the next red. Each step
-prints one line, `TASK3 | ...`:
+`task3_cannon_fire.xml`: the boat approaches with its bow on the bay, docks 1.2 m in front
+of it, reports, backs off to 1.7 m to watch, waits for a window to go steady RED, sprays it
+until it reads GREEN, then reads the colour code (c1 on 1 s, off 1 s, c2 on 1 s, off 2 s,
+repeated), and waits for the next red. The two distances are live in the Tuning tab
+(`bt_runner_node`: `strafe.fire_range_m`, `strafe.watch_range_m`). Each step prints one line,
+`TASK3 | ...`:
 
 ```
-APPROACHING the bay
-DOCKING: lining up 1.2 m out
+APPROACHING the bay, bow on it
+DOCKING: lining up 1.20 m out
 DOCKED in bay 1: docking report sent
+WATCHING the lights from 1.70 m
 ON FIRE: the upper-left (UL) window is steady RED
 FIRE OUT: the upper-left (UL) window is GREEN after 8.1 s of spray
 CODE: code: red then blue  ->  resource COLOR_RED, deliver to COLOR_BLUE
 ```
 
-1. Start everything (after any reboot too), in its own terminal, left running:
+1. Check the switches in `crusader_params.yaml` (the launch reads them): `bt_runner_node`
+   `publish_setpoints: true` (the sticks) and `fire_pump`, `cannon_aim_node` `fire_pump`
+   (true = the tree fires the pump; false = dry, the pilot squirts with SE). Then start
+   everything (after any reboot too), in its own terminal, left running:
    ```bash
-   docker exec -it asv bash -c 'source /opt/ros/humble/setup.bash && source /root/robotx_ws/install/setup.bash && ros2 launch crusader_bringup task3.launch.py tree:=cannon_fire publish_setpoints:=true'
+   docker exec -it asv bash -c 'source /opt/ros/humble/setup.bash && source /root/robotx_ws/install/setup.bash && ros2 launch crusader_bringup task3.launch.py tree:=cannon_fire'
    ```
 2. Point the bow at the bay (the camera brings it in until the LiDAR has the wall), SC
    to MANUAL, then:
@@ -179,8 +185,9 @@ CODE: code: red then blue  ->  resource COLOR_RED, deliver to COLOR_BLUE
    ```
 
 Stop with SC out of MANUAL. Stop the launch with Ctrl-C in its terminal (closing the window
-leaves it running). The pump stays DRY: the pilot squirts with SE while it says it is
-spraying. `go.sh` refuses, and says why, when anything above is missing or doubled.
+leaves it running). `go.sh` prints whether the cannon fires the pump, and refuses, saying
+why, when anything above is missing or doubled. Don't run `cal node` while the launch is
+up: it replaces the launch's cannon node with a dry one.
 
 ## If you have extra time
 

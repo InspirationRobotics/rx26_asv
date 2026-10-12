@@ -47,12 +47,14 @@ G = 9.81
 
 # the keys the aim uses, and the sections they live in
 AIM_KEYS = ("nozzle_x", "nozzle_y", "nozzle_z", "exit_speed_mps", "throw_range_m",
-            "throw_elev_deg", "pan_center_us", "pan_us_per_deg", "pan_sign",
+            "throw_elev_deg", "throw_drop_m", "pan_center_us", "pan_us_per_deg", "pan_sign",
             "tilt_center_us", "tilt_us_per_deg", "tilt_sign", "pan_min_deg", "pan_max_deg",
             "tilt_min_deg", "tilt_max_deg",
             "pan_trim_ul_deg", "tilt_trim_ul_deg", "pan_trim_lr_deg", "tilt_trim_lr_deg")
 CAM_KEYS = ("cam_x", "cam_y", "cam_z", "cam_yaw_deg", "cam_pitch_deg")
-LIVE_KEYS = ("pan_trim_ul_deg", "tilt_trim_ul_deg", "pan_trim_lr_deg", "tilt_trim_lr_deg")
+LIVE_KEYS = ("pan_trim_ul_deg", "tilt_trim_ul_deg", "pan_trim_lr_deg", "tilt_trim_lr_deg",
+             "nozzle_x", "nozzle_y", "nozzle_z", "exit_speed_mps", "throw_range_m",
+             "throw_elev_deg", "throw_drop_m")
 
 
 # ------------------------------------------------------------------ pure maths

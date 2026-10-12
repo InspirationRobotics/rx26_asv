@@ -256,6 +256,10 @@ struct Context
   /// What the keep holds on the line ("window", "face", "slip"), for the
   /// gate's reasons.
   std::string strafe_ref = "window";
+  /// The range the keep is holding THIS tick (the tree's, a live override, or
+  /// the watch range), so AwaitStrafeSolution and Announce use the same one.
+  double strafe_target_range = fire::kNaN;
+  double strafe_target_t = -1e18;
   std::string face_src;                       ///< "windows" / "plane": the last source
   double face_target = fire::kNaN;            ///< the last good square heading, held
   double yaw_rate_dps = fire::kNaN;           ///< ATTITUDE.yawspeed, + = turning right

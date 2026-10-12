@@ -682,6 +682,13 @@ public:
       BT::InputPort<int>("window_index", 0, "DockWindow.index to hit (0 = upper-left)"),
       BT::InputPort<std::string>("lateral_ref", "window",
         "window | face: hold window_index's window on the line, or the bay's face centre"),
+      BT::InputPort<double>("approach_m", 0.0,
+        "> 0: farther than the held range + this, point the BOW at the bay (heading, keeps "
+        "the whole face in view) and do not strafe; nearer, square up and strafe"),
+      BT::InputPort<bool>("watch", false,
+        "true: hold the WATCH range (live strafe.watch_range_m, else watch_range_m) "
+        "instead of fire_range_m - backed off after docking, to see the lights"),
+      BT::InputPort<double>("watch_range_m", 1.7, "the watch range, when watch is true"),
       BT::InputPort<std::string>("range_fallback", "none",
         "none | face: with no valid LiDAR wall, range on the camera's face distance "
         "(brings the boat in until the LiDAR has the wall)"),
@@ -744,6 +751,11 @@ public:
       throw BT::RuntimeError("StrafeKeep: range_fallback is none or face, not '" + fb + "'");
     }
     const bool range_from_face = fb == "face";
+    const double approach_m = in("approach_m", 0.0);
+    const bool watching = getInput<bool>("watch").value_or(false);
+    const double watch_port = in("watch_range_m", 1.7);
+    bool approach = false;
+    double brg = fire::kNaN;
     bool range_cam = false;
     const double bias = in("lateral_bias_m", 0.0), noz_y = in("nozzle_y_m", 0.0);
     const double cam_to = in("cam_timeout_s", 0.5), face_to = in("face_timeout_s", 3.0);
@@ -766,6 +778,12 @@ public:
       if (on_face && !ctx_->face_pick.empty()) {ref_name = "face (" + ctx_->face_pick + ")";}
       // live gain overrides (bt_runner_node strafe.*) on top of the tree's
       tuned = ctx_->strafe_tune.apply(sp);
+      if (watching) {
+        sp.fire_range_m = ctx_->strafe_tune.watch_range_m >= 0.0 ?
+          ctx_->strafe_tune.watch_range_m : watch_port;
+      }
+      ctx_->strafe_target_range = sp.fire_range_m;
+      ctx_->strafe_target_t = now;
       const double med_s = ctx_->strafe_tune.window_median_s >= 0.0 ?
         ctx_->strafe_tune.window_median_s : 0.6;
       const double rate_s = ctx_->strafe_tune.rate_window_s >= 0.0 ?
@@ -802,6 +820,26 @@ public:
         si.yaw_err_deg = fire::wrap180(ctx_->face_target - heading_now);
       }
       si.yaw_rate_dps = ctx_->yaw_rate_dps;
+      // THE APPROACH (approach_m): far out, the bow points AT the bay - the
+      // heading keeps both sides of the face in view - and nothing strafes.
+      // On the water (2026-10-11) squaring to the face from 4.8 m and strafing
+      // across drove in 6-12 deg off with the bay sliding out of the image.
+      // Hysteresis 0.5 m, so it does not flick between the two at the line.
+      if (approach_m > 0.0 && std::isfinite(si.range_m)) {
+        auto & st = ctx_->strafe_state;
+        if (st.approach && si.range_m < sp.fire_range_m + approach_m) {st.approach = false;}
+        if (!st.approach && si.range_m > sp.fire_range_m + approach_m + 0.5) {st.approach = true;}
+        if (st.approach && ctx_->fire_face_y.age(now) <= cam_to) {
+          const double w = std::max(med_s, 0.3);
+          const double fx = ctx_->fire_face_x.median(now, w) - ctx_->cam_mount.x;
+          const double fy = ctx_->fire_face_y.median(now, w) - ctx_->cam_mount.y;
+          brg = std::atan2(fy, fx) / fire::kDeg;     // + = the bay is to port
+          si.yaw_err_deg = -brg;                     // + = turn right
+          si.lat_err_m = 0.0;
+          si.lat_rate = 0.0;
+          approach = true;
+        }
+      }
       // THE LATERAL ESTIMATOR (strafe.est_enable). Every new camera sample of
       // this window, yaw taken out with the heading at ITS capture time, into
       // the filter; the result projected to now and the current yaw put back.
@@ -862,6 +900,16 @@ public:
         cmd.why = block;                        // hold still: every stick at zero
       } else {
         cmd = fire::strafeKeep(sp, si, ctx_->strafe_state, dt);
+        if (approach) {
+          // in toward the bay only as fast as the bow is on it: full under 5 deg
+          // off, a fifth by 17 deg (strafeKeep turns in place past square_first_deg)
+          if (cmd.sticks.fwd_us > 0.0) {
+            cmd.sticks.fwd_us *= std::clamp(1.0 - (std::fabs(brg) - 5.0) / 15.0, 0.2, 1.0);
+          }
+          char why[64];
+          std::snprintf(why, sizeof(why), "approach: bow on the bay, %+.0f deg", brg);
+          cmd.why = why;
+        }
         if (ctx_->wall.blanked(now)) {          // water in the air: hold still
           cmd.sticks = fire::Sticks{};
           cmd.why = "shot in the air";
@@ -956,7 +1004,12 @@ public:
       const fire::StrafeInputs & si = ctx_->strafe_in;
       const fire::SteadyStatus st = ctx_->steady.status(now);
       // the live distance (strafe.fire_range_m) moves this check with the keep
-      if (ctx_->strafe_tune.fire_range_m >= 0.0) {target = ctx_->strafe_tune.fire_range_m;}
+      // the range the keep is holding now (a live override, the watch range)
+      if (std::isfinite(ctx_->strafe_target_range) && now - ctx_->strafe_target_t <= 1.0) {
+        target = ctx_->strafe_target_range;
+      } else if (ctx_->strafe_tune.fire_range_m >= 0.0) {
+        target = ctx_->strafe_tune.fire_range_m;
+      }
       char buf[96];
       if (!ctx_->strafe_block.empty()) {
         why = ctx_->strafe_block;

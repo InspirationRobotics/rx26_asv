@@ -43,6 +43,16 @@ class TestExitSpeed(unittest.TestCase):
         hit = ca.crossing((0, 0, 0), ca.direction(0, 45), v, (0, 0, 0), (0, 0, 1))
         self.assertAlmostEqual(hit[1][0], 3.0, places=6)
 
+    def test_landing_below_the_nozzle(self):
+        # 9 ft at 30 deg onto the water 0.51 m below the nozzle (2026-10-11)
+        v = ca.exit_speed_from_range(2.743, 30.0, 0.51)
+        self.assertAlmostEqual(v, 4.85, delta=0.01)
+        self.assertAlmostEqual(ca.exit_speed_from_range(2.743, 30.0, 0.0),
+                               math.sqrt(9.81 * 2.743 / math.sin(math.radians(60))), places=9)
+        # ...and that stream does come down 0.51 m below, 2.743 m out
+        hit = ca.crossing((0, 0, 0), ca.direction(0, 30), v, (0, 0, -0.51), (0, 0, 1))
+        self.assertAlmostEqual(hit[1][0], 2.743, places=3)
+
 
 class TestServoMap(unittest.TestCase):
 
@@ -168,15 +178,6 @@ class TestCamera(unittest.TestCase):
 
 class TestFireGate(unittest.TestCase):
 
-    def test_settle_then_bursts(self):
-        g = ca.FireGate(ca.FireParams(settle_s=0.4, burst_s=1.0, gap_s=1.1))
-        sol = ca.AimSolution(ok=True, reachable=True)
-        self.assertEqual(g.update(0.0, True, 0.1, sol, 3.0), 0.0)     # settling
-        self.assertEqual(g.update(0.3, True, 0.1, sol, 3.0), 0.0)
-        self.assertEqual(g.update(0.45, True, 0.1, sol, 3.0), 1.0)    # FIRE
-        self.assertEqual(g.update(1.0, True, 0.1, sol, 3.0), 0.0)     # between
-        self.assertEqual(g.update(2.6, True, 0.1, sol, 3.0), 1.0)     # next
-
     def test_refusals(self):
         g = ca.FireGate()
         ok = ca.AimSolution(ok=True, reachable=True)
@@ -189,6 +190,53 @@ class TestFireGate(unittest.TestCase):
         self.assertIn("unknown", g.why)
         far = ca.AimSolution(ok=True, reachable=False, why="out of reach")
         self.assertEqual(g.update(4, True, 0.1, far, 0), 0.0)
+
+    def test_settle_then_the_water_stays_on(self):
+        g = ca.FireGate(ca.FireParams(settle_s=0.4, burst_s=1.0, resend_s=0.3))
+        sol = ca.AimSolution(ok=True, reachable=True)
+        self.assertEqual(g.update(0.0, True, 0.1, sol, 3.0), 0.0)     # settling
+        self.assertEqual(g.update(0.3, True, 0.1, sol, 3.0), 0.0)
+        self.assertEqual(g.update(0.45, True, 0.1, sol, 3.0), 1.0)    # water ON
+        # the servos track the target while it sprays: no stop, no re-settle
+        self.assertEqual(g.update(0.6, True, 0.1, sol, 40.0), 0.0)
+        self.assertEqual(g.why, "spraying")
+        asks = [0.45]
+        t = 0.6
+        while t < 10.0:                                              # 50 Hz ticks
+            if g.update(t, True, 0.1, sol, 40.0 if int(t) % 2 else 3.0) > 0.0:
+                asks.append(t)
+            t = round(t + 0.02, 2)
+        # it never left a burst to run out (and two asks per burst: one lost
+        # on the way to the autopilot does not stop the water)
+        self.assertGreater(len(asks), 25)
+        for a, b in zip(asks, asks[1:]):
+            self.assertLessEqual(b - a, 0.5 + 1e-9)
+
+    def test_a_hard_reason_stops_it(self):
+        g = ca.FireGate(ca.FireParams(settle_s=0.4, burst_s=1.0, resend_s=0.3))
+        sol = ca.AimSolution(ok=True, reachable=True)
+        g.update(0.0, True, 0.1, sol, 3.0)
+        self.assertEqual(g.update(0.45, True, 0.1, sol, 3.0), 1.0)
+        far = ca.AimSolution(ok=True, reachable=False, why="out of reach")
+        self.assertEqual(g.update(0.6, True, 0.1, far, 3.0), 0.0)
+        self.assertFalse(g.firing)
+        # back in reach: settles again before the water goes back on
+        self.assertEqual(g.update(0.8, True, 0.1, sol, 3.0), 0.0)
+        self.assertEqual(g.why, "settling")
+        self.assertEqual(g.update(1.25, True, 0.1, sol, 3.0), 1.0)
+        # the servos far off the command before it is on: it waits
+        g.reset()
+        self.assertEqual(g.update(2.0, True, 0.1, sol, 40.0), 0.0)
+        self.assertIn("moving", g.why)
+        # the tree says stop (GREEN)
+        g.update(2.0, True, 0.1, sol, 3.0)
+        self.assertEqual(g.update(2.45, True, 0.1, sol, 3.0), 1.0)
+        self.assertEqual(g.update(2.5, False, 0.1, sol, 3.0), 0.0)
+        self.assertFalse(g.firing)
+
+    def test_resend_must_beat_the_burst(self):
+        with self.assertRaises(ValueError):
+            ca.FireGate(ca.FireParams(burst_s=1.0, resend_s=1.0))
 
 
 class TestServoLimiter(unittest.TestCase):

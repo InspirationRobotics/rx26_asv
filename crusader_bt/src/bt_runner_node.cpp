@@ -430,7 +430,10 @@ private:
     struct Row {const char * name; double fire::StrafeTune::* field; double max; const char * what;};
     static const Row rows[] = {
       {"fire_range_m", &fire::StrafeTune::fire_range_m, 5.0,
-        "the distance HELD: LiDAR range to the wall, m (the tree's fire_range_m / standoff_m)"},
+        "the distance HELD to dock and fire: LiDAR range to the wall, m (the tree's fire_range_m)"},
+      {"watch_range_m", &fire::StrafeTune::watch_range_m, 5.0,
+        "the distance held AFTER docking, watching the lights, spraying, reading the code, m "
+        "(the tree's watch_range_m)"},
       {"kp_fwd", &fire::StrafeTune::kp_fwd, 400.0, "range P, us per m (tree: 90)"},
       {"kd_fwd", &fire::StrafeTune::kd_fwd, 400.0, "range D, us per m/s (tree: 60)"},
       {"ki_fwd", &fire::StrafeTune::ki_fwd, 200.0, "range I, us per m.s (tree: 20)"},
@@ -499,7 +502,9 @@ private:
             return res;
           }
           // a slip of the finger to 0 would be "hold against the wall"
-          if (row->field == &fire::StrafeTune::fire_range_m && v >= 0.0 && v < 0.6) {
+          if ((row->field == &fire::StrafeTune::fire_range_m ||
+            row->field == &fire::StrafeTune::watch_range_m) && v >= 0.0 && v < 0.6)
+          {
             res.successful = false;
             res.reason = p.get_name() + ": use -1 (the tree's) or at least 0.6 m";
             return res;

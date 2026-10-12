@@ -5,13 +5,19 @@
   Every step says what it did on one line, "TASK3 | ..." in the tree's log and
   on /crsd/task3_events:
 
-    APPROACHING   the hold brings the boat in on the camera's distance to the
-                  face (StrafeKeep range_fallback="face") until the LiDAR has
-                  the wall, then on the LiDAR
-    DOCKING       within ~0.4 m of the 1.2 m standoff: lining up
+    APPROACHING   bow pointed AT the bay (heading, not strafing: the whole face
+                  stays in view), in on the camera's distance to the face
+                  (range_fallback="face") until the LiDAR has the wall
+    DOCKING       within ~0.4 m of the docking range: square up, line up
     DOCKED        held there 2 s: the docking report (bay 1: the practice dock
                   has one, and nothing is committed in this tree)
-    ON FIRE       the dock detector's timing layer calls a window steady RED
+    WATCHING      backed off to the watch range (1.7 m), where the camera sees
+                  the whole upper-left window: the fire and the code are watched
+                  from there (from 1.2 m the code was never read, 2026-10-11: the
+                  upper-left was half out of the picture). The SPRAY is from the
+                  docking range: from 1.7 m the stream does not reach.
+    ON FIRE       the dock detector's timing layer calls a window steady RED;
+                  MOVING IN to spray, BACKING OUT to read the code
     FIRE OUT      the cannon sprayed it until it read GREEN (90 s at most)
     CODE          the colour code that follows, read and held 5 s: the two
                   colours (resource, deliver to). Not reported: no RoboCommand
@@ -22,10 +28,12 @@
   ahead; SprayUntilHit's fireTrack). The steps are the Gazebo tree's
   (task3_cannon.xml) from DockingReport on; its approach and slip dock are not.
 
-  THE WATER. tree.sh true false (or task3.launch.py tree:=cannon_fire
-  publish_setpoints:=true) = the sticks, pump DRY: the cannon aims and logs DRY
-  bursts; the pilot squirts with SE while it is spraying. Water from the tree
-  needs fire_pump true on the runner AND cannon_aim_node, and the pump path.
+  THE WATER. task3.launch.py reads publish_setpoints and fire_pump from
+  crusader_params.yaml. Water from the tree needs fire_pump true on the runner
+  AND cannon_aim_node, and the pump path; with fire_pump false the cannon aims
+  and logs DRY bursts. The water stays ON from the moment the cannon is on
+  target until the window reads GREEN (2026-10-11: no penalty for too much
+  water).
   Do NOT run `cal window` at the same time: both aim the cannon.
 
   THE CODE: c1 on 1 s, off 1 s, c2 on 1 s, off 2 s, repeated (+-0.35 s each);
@@ -42,7 +50,10 @@
       <AttitudeAlive max_age_s="0.5"/>
       <DockCameraAlive max_age_s="3.0"/>
 
+      <!-- the distances, live in the Tuning tab: strafe.fire_range_m (docking)
+           and strafe.watch_range_m (after it); -1 = these -->
       <StrafeKeep fire_range_m="1.2" lateral_ref="face" range_fallback="face"
+                  approach_m="0.8" watch="{watching}" watch_range_m="1.7"
                   lateral_bias_m="0.0" nozzle_y_m="0.0"
                   cam_timeout_s="0.5" face_timeout_s="3.0"
                   range_check_m="0" face_setback_m="0.0"
@@ -53,25 +64,45 @@
                   min_range_m="0.6" square_first_deg="10"/>
 
       <Sequence name="mission">
-        <Announce text="APPROACHING the bay"/>
+        <Script code="watching := false"/>
+        <Announce text="APPROACHING the bay, bow on it"/>
+        <!-- (fire_range_m below is a fallback: the gate checks the range the
+             keep is actually holding, live overrides included) -->
         <AwaitStrafeSolution fire_range_m="1.2" range_tol_m="0.40" lat_tol_m="0.30"
                              yaw_tol_deg="10.0" hold_s="0.5" gap_s="0.0" timeout_s="1000000"
                              steady="false"/>
-        <Announce text="DOCKING: lining up 1.2 m out"/>
+        <Announce text="DOCKING: lining up %RANGE% m out"/>
         <!-- the cannon aims itself, so the hull need not be still -->
         <AwaitStrafeSolution fire_range_m="1.2" range_tol_m="0.10" lat_tol_m="0.15"
                              yaw_tol_deg="8.0" hold_s="2.0" gap_s="0.0" timeout_s="1000000"
                              steady="false"/>
         <ReportDocking bay="1"/>
 
+        <!-- back off to watch the lights -->
+        <Script code="watching := true"/>
+        <AwaitStrafeSolution fire_range_m="1.7" range_tol_m="0.12" lat_tol_m="0.20"
+                             yaw_tol_deg="8.0" hold_s="1.0" gap_s="0.0" timeout_s="1000000"
+                             steady="false"/>
+        <Announce text="WATCHING the lights from %RANGE% m"/>
+
         <KeepRunningUntilFailure>
           <ForceSuccess>
             <Sequence name="one_fire">
+              <!-- the light is watched from the watch range... -->
+              <Script code="watching := true"/>
               <AwaitFireTarget timeout_s="1000000" resend_s="1000000"/>
-              <!-- the aim point may be 3 s old: in front of the bay the window
-                   does not move -->
+              <!-- ...the water goes in from the docking range: from 1.7 m the
+                   upper-left is out of the stream's reach (2026-10-11: 1.98 m
+                   from the nozzle, +0.42 m up, at 4.8 m/s). The cannon holds
+                   fire until it is in reach, so the spray starts on the way in.
+                   The aim point may be 3 s old: the window does not move. -->
+              <Script code="watching := false"/>
+              <Announce text="MOVING IN to spray"/>
               <SprayUntilHit timeout_s="90.0" min_green_s="0.4" max_aim_age_s="3.0"/>
-              <!-- GREEN 5 s, off 1 s, then the code for 60 s -->
+              <!-- back out to read the code (GREEN 5 s, off 1 s, then 60 s of
+                   it) with the whole window in view -->
+              <Script code="watching := true"/>
+              <Announce text="BACKING OUT to read the code"/>
               <ForceSuccess>
                 <DecodeResourceRequest timeout_s="80.0" hold_s="5.0" min_frames="20"/>
               </ForceSuccess>

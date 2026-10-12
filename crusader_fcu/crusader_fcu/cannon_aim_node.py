@@ -12,15 +12,17 @@ Subscribes:
   /crsd/pump_state    crusader_msgs/PumpState   for the log
 Publishes:
   /crsd/cannon_cmd    crusader_msgs/CannonCommand  pan/tilt PWM -> telemetry_bridge
-  /crsd/pump_cmd      crusader_msgs/PumpCommand    bursts, ONLY with fire_pump (G7)
+  /crsd/pump_cmd      crusader_msgs/PumpCommand    water, ONLY with fire_pump (G7)
   /crsd/cannon_status std_msgs/String (JSON)       what it is doing, and why not
 
 THE LOOP (Bumblebee's lesson from 2024: a slow aim loop lags the boat's motion,
 so this re-solves every aim_rate_hz on the newest aim point and attitude, and
 keeps doing so WHILE the water runs): the aim point -> cannon_aim_core.solve ->
 the servos; when SERVO_OUTPUT_RAW says both servos are at the command and have
-been for settle_s, a burst (FireGate), and another every burst_s + gap_s while
-it holds. The bridge's pump gates still apply to every burst.
+been for settle_s, the water goes ON (FireGate) and STAYS on: a burst_s burst
+asked every resend_s, each extending the last at the bridge, while the servos
+keep tracking, until the tree says stop (the window reads GREEN). No penalty
+for too much water. The bridge's pump gates still apply to every ask.
 
 STOPPING. The tree says fire false, or goes quiet for cannon_timeout_s, or the
 aim point goes stale: the pump is sent OFF (once) and the cannon holds where it
@@ -47,10 +49,24 @@ from crusader_fcu import cannon_aim_core as ca
 
 RO = dict(read_only=True)
 PARAM_SPEC = {
-    "nozzle_x": RO, "nozzle_y": RO, "nozzle_z": RO,
-    "exit_speed_mps": dict(read_only=True, lo=0.0, hi=50.0),
-    "throw_range_m": dict(read_only=True, lo=0.1, hi=50.0),
-    "throw_elev_deg": dict(read_only=True, lo=1.0, hi=89.0),
+    # THE MODEL, live (2026-10-11: tuned on the water rather than trimmed): where
+    # the nozzle is, and how fast the water leaves it - from one measured throw
+    # unless exit_speed_mps is given. A change rebuilds the aim at once.
+    "nozzle_x": dict(read_only=False, lo=-1.0, hi=2.0,
+                     description="nozzle pivot, m forward of the body origin"),
+    "nozzle_y": dict(read_only=False, lo=-1.0, hi=1.0,
+                     description="nozzle pivot, m to PORT of the centreline (the camera's is cam_y)"),
+    "nozzle_z": dict(read_only=False, lo=0.0, hi=2.0,
+                     description="nozzle pivot, m above the hull-bottom datum"),
+    "exit_speed_mps": dict(read_only=False, lo=0.0, hi=50.0,
+                           description="the water's speed, m/s; 0 = from the measured throw (throw_*)"),
+    "throw_range_m": dict(read_only=False, lo=0.1, hi=50.0,
+                          description="measured throw: how far out it landed, m (horizontal)"),
+    "throw_elev_deg": dict(read_only=False, lo=1.0, hi=89.0,
+                           description="measured throw: the nozzle's angle above level, deg"),
+    "throw_drop_m": dict(read_only=False, lo=-1.0, hi=3.0,
+                         description="measured throw: it landed this far BELOW the nozzle, m "
+                                     "(on the water ~0.51; 0 = level with it)"),
     "pan_center_us": RO, "pan_us_per_deg": RO, "pan_sign": RO,
     "tilt_center_us": RO, "tilt_us_per_deg": RO, "tilt_sign": RO,
     "pwm_min": dict(read_only=True, lo=800, hi=2200),
@@ -70,8 +86,10 @@ PARAM_SPEC = {
     "settle_s": dict(read_only=True, lo=0.0, hi=5.0),
     "servo_tol_us": dict(read_only=True, lo=1.0, hi=200.0),
     "aim_max_age_s": dict(read_only=True, lo=0.05, hi=10.0),
-    "burst_s": dict(read_only=True, lo=0.05, hi=2.0),
-    "gap_s": dict(read_only=True, lo=0.0, hi=30.0),
+    "burst_s": dict(read_only=True, lo=0.05, hi=2.0,
+                    description="each ask: water for this long from now"),
+    "resend_s": dict(read_only=True, lo=0.05, hi=2.0,
+                     description="ask again this often while spraying (< burst_s)"),
     "cannon_timeout_s": dict(read_only=True, lo=0.1, hi=10.0),
     "fire_pump": dict(read_only=True, description="G7: may it ask for water"),
     "status_period_s": dict(read_only=True, lo=0.05, hi=10.0),
@@ -88,6 +106,7 @@ class CannonAimNode(Node):
         for k in ("cam_x", "cam_y", "cam_z", "cam_yaw_deg", "cam_pitch_deg"):
             d[k] = cam.get(k, 0.0)
         self.cp = ca.CannonParams.from_dict(d)
+        self._d = d                  # what cp is built from: the model's live keys change it
         # each window's own (pan, tilt) trim (0 if the params file predates
         # them: then they are not declared either)
         self.win_trim = {s: [float(p.get(f"pan_trim_{s.lower()}_deg", 0.0)),
@@ -95,7 +114,8 @@ class CannonAimNode(Node):
                          for s in ca.WINDOW_SLOTS}
         self.gate = ca.FireGate(ca.FireParams(
             settle_s=p["settle_s"], servo_tol_us=p["servo_tol_us"],
-            aim_max_age_s=p["aim_max_age_s"], burst_s=p["burst_s"], gap_s=p["gap_s"]))
+            aim_max_age_s=p["aim_max_age_s"], burst_s=p["burst_s"],
+            resend_s=p["resend_s"]))
         self.fire_pump = bool(p["fire_pump"])
         self.timeout_s = float(p["cannon_timeout_s"])
 
@@ -110,6 +130,7 @@ class CannonAimNode(Node):
         self._pump = None            # PumpState
         self._sol = ca.AimSolution()
         self._firing = False         # bursts asked (or DRY) since the last stop
+        self._log_t = -1e18          # the spray's log line, every 5 s
         self._seq = 200000           # our PumpCommand numbering (the tree's starts at 100000)
         self._bursts = 0
 
@@ -133,7 +154,23 @@ class CannonAimNode(Node):
 
     # ---------------------------------------------------------------- inputs
 
+    MODEL_KEYS = ("nozzle_x", "nozzle_y", "nozzle_z", "exit_speed_mps",
+                  "throw_range_m", "throw_elev_deg", "throw_drop_m")
+
     def _on_set(self, params):
+        d = dict(self._d)
+        for prm in params:
+            if prm.name in self.MODEL_KEYS:
+                d[prm.name] = float(prm.value)
+        if d != self._d:
+            try:
+                cp = ca.CannonParams.from_dict(d)
+            except ValueError as e:      # a throw no stream could make: refused
+                return SetParametersResult(successful=False, reason=str(e))
+            self._d, self.cp = d, cp
+            self.get_logger().info(
+                f"cannon model: exit {cp.exit_speed_mps:.2f} m/s, pivot ({cp.nozzle_x:.2f}, "
+                f"{cp.nozzle_y:.2f}, {cp.nozzle_z:.2f}) m")
         for prm in params:
             for s in ca.WINDOW_SLOTS:
                 for i, axis in enumerate(("pan", "tilt")):
@@ -228,8 +265,12 @@ class CannonAimNode(Node):
             pm.seq = self._seq
             pm.source = "cannon_aim"
             self.pump_pub.publish(pm)
+        if self._bursts > 1 and now - self._log_t < 5.0:
+            return
+        self._log_t = now
+        what = "water ON" if self._bursts == 1 else f"spraying ({self._bursts} asks)"
         self.get_logger().info(
-            f"cannon: burst #{self._bursts} {burst:.1f} s{'' if self.fire_pump else ' (DRY: fire_pump is off)'}"
+            f"cannon: {what}{'' if self.fire_pump else ' (DRY: fire_pump is off)'}"
             f" | {self._aim_win or 'point'}: pan {sol.pan_deg:+.1f} tilt {sol.tilt_deg:+.1f} deg "
             f"(trims {trim[0]:+.1f} {trim[1]:+.1f}), target {sol.dist_m:.2f} m "
             f"away {sol.height_m:+.2f} m up, throw {sol.elev_deg:.1f} deg"

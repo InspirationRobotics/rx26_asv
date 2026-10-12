@@ -69,9 +69,25 @@ N=$(count "[c]rusader_bt/bt_runner_node")
 [ "$N" -ge 1 ] || fail "bt_runner_node is not running - start it with tree.sh (or task3.launch.py)"
 [ "$N" -eq 1 ] || fail "$N tree runners are running, and the goal would go to either one. Stop them all
        (pkill -f crusader_bt/bt_runner_node, and Ctrl-C any task3.launch.py), then start ONE"
-param() { ros2 param get /bt_runner_node "$1" 2>/dev/null | awk '{print $NF}'; }
+# A parameter read can fail for a few seconds after a node starts or the boat
+# boots ("Node not found" while discovery settles: 2026-10-11). Retry, and treat
+# a value never read as UNKNOWN - never as false.
+nparam() {
+  local v="" i
+  for i in 1 2 3 4; do
+    v=$(timeout 6 ros2 param get "$1" "$2" 2>/dev/null | awk '/value is:/{print $NF}')
+    [ -n "$v" ] && break
+    sleep 1
+  done
+  echo "$v"
+}
+param() { nparam /bt_runner_node "$1"; }
 SP=$(param publish_setpoints); PUMP=$(param fire_pump)
-TREE=$(basename "$(param tree_file)")
+TF=$(param tree_file)
+[ -n "$SP" ] && [ -n "$PUMP" ] && [ -n "$TF" ] || fail "could not read bt_runner_node's parameters
+       (publish_setpoints '${SP}', fire_pump '${PUMP}', tree_file '${TF}'): it may still be
+       starting, or ROS discovery is slow after a boot. Run go.sh again in a few seconds"
+TREE=$(basename "$TF")
 case "$SP/$PUMP" in
   False/False) MODE="SHADOW - logs only, cannot move the boat or fire" ;;
   True/False)  MODE="TAKES THE BOAT (sticks or GUIDED setpoints); pump DRY" ;;
@@ -83,17 +99,27 @@ say "mode:  $MODE"
 if [ "$SP" != "True" ] && [ "$SHADOW" != 1 ]; then
   fail "this runner is SHADOW (publish_setpoints $SP): it would not move the boat.
        Load the tree with the sticks:  tree.sh true false $TREE
-       (or task3.launch.py ... publish_setpoints:=true); or 'go.sh ... shadow' on purpose"
+       (or bt_runner_node publish_setpoints: true in crusader_params.yaml and restart
+       task3.launch.py); or 'go.sh ... shadow' on purpose"
 fi
 
 # 2. the flight mode this tree runs in
-FCU_MODE=$(timeout 5 ros2 topic echo --once /crsd/fcu_status 2>/dev/null | awk '/^mode:/{print $2}')
+FCU_MODE=""
+for i in 1 2 3; do
+  FCU_MODE=$(timeout 5 ros2 topic echo --once /crsd/fcu_status 2>/dev/null | awk '/^mode:/{print $2}')
+  [ -n "$FCU_MODE" ] && break
+done
 case "$TREE" in
   task3_fire_manual*|task3_part2_*|task3_cannon_hold*|task3_cannon_fire*)
     [ "$FCU_MODE" = "MANUAL" ] || fail "flight mode is '${FCU_MODE:-unknown}'; this tree strafes on the sticks and needs MANUAL (SC)"
     ;;
   *)
-    ALLOWED=$(ros2 param get /bt_runner_node autonomous_modes 2>/dev/null | tr -d "[],'" | sed 's/.*://')
+    ALLOWED=""
+    for i in 1 2 3; do
+      ALLOWED=$(timeout 6 ros2 param get /bt_runner_node autonomous_modes 2>/dev/null | tr -d "[],'" | sed 's/.*://')
+      [ -n "$ALLOWED" ] && break
+      sleep 1
+    done
     echo " $ALLOWED " | grep -q " ${FCU_MODE:-none} " \
       || fail "flight mode is '${FCU_MODE:-unknown}'; this tree runs in one of:$ALLOWED (SC to GUIDED)"
     ;;
@@ -110,14 +136,14 @@ case "$TREE" in
     n=$(count "[d]ock_view.py")
     [ "$n" -ge 1 ] || fail "dock_view is not running (the camera): ground station Nodes tab, or task3.launch.py"
     [ "$n" -eq 1 ] || fail "$n dock_views are running and only one can have the camera: stop the extra"
-    W=$(timeout 3 ros2 topic echo --once /crsd/wall_range 2>/dev/null | awk '/^valid:/{print $2}')
+    W=""; for i in 1 2 3; do W=$(timeout 4 ros2 topic echo --once /crsd/wall_range 2>/dev/null | awk '/^valid:/{print $2}'); [ "$W" = "true" ] && break; done
     if [ "$W" = "true" ]; then
       say "inputs: one wall_range_node (wall seen), one dock_view"
     else
       case "$TREE" in
         task3_cannon_hold*|task3_cannon_fire*)
           # these range on the camera's face until the LiDAR has the wall
-          B=$(timeout 3 ros2 topic echo --once /dock/observations 2>/dev/null | grep -c "bay_index")
+          B=0; for i in 1 2 3; do B=$(timeout 4 ros2 topic echo --once /dock/observations 2>/dev/null | grep -c "bay_index"); [ "${B:-0}" -gt 0 ] && break; done
           [ "${B:-0}" -gt 0 ] || fail "neither the LiDAR (no wall) nor the camera (no bay) sees the dock:
        point the bow at the bay"
           say "inputs: the LiDAR has no wall yet - the camera brings the boat in until it does"
@@ -132,8 +158,20 @@ case "$TREE" in
 esac
 case "$TREE" in
   task3_cannon_hold*|task3_cannon_fire*)
-    [ "$(count "[c]rusader_fcu/cannon_aim_node")" -ge 1 ] \
-      || fail "cannon_aim_node is not running: cal node (or start with task3.launch.py)"
+    n=$(count "[c]rusader_fcu/cannon_aim_node")
+    [ "$n" -ge 1 ] || fail "cannon_aim_node is not running: cal node (or start with task3.launch.py)"
+    [ "$n" -eq 1 ] || fail "$n cannon_aim_nodes are running (cal node AND task3.launch.py?): they fight
+       over the nozzle, and either may be the dry one. pkill -f crusader_fcu/cannon_aim_node,
+       then start ONE: the launch (its fire_pump is crusader_params.yaml's), or cal node (always dry)"
+    # the WATER is cannon_aim_node's own fire_pump, not the runner's
+    CP=$(nparam /cannon_aim_node fire_pump)
+    if [ "$CP" = "True" ]; then
+      say "water: cannon_aim_node FIRES THE PUMP (SE off; SB e-stop and SE still stop it)"
+    else
+      say "water: cannon_aim_node is DRY (fire_pump ${CP:-unknown}): no water from the tree.
+     For water: cannon_aim_node fire_pump: true in crusader_params.yaml, then Ctrl-C the
+     launch and start it again (cal node is always dry)"
+    fi
     ;;
 esac
 case "$TREE" in

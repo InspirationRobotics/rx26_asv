@@ -114,13 +114,17 @@ class PumpGate:
             return False, "disarmed"
         if inp.output_pwm is None:
             return False, "pump output not reported (SERVO_OUTPUT_RAW stale)"
+        # A burst asked while one of ours is still running EXTENDS it: re-sent,
+        # ON for its length from now, so the water never stops while the asks
+        # keep coming, and still ends on the autopilot's own timer within one
+        # burst of the last ask. Every check above applies to it all the same.
+        # (The pan/tilt cannon sprays until the window reads GREEN: 2026-10-11.)
+        if self.burst_until is not None and inp.now < self.burst_until:
+            return True, "extends the running burst"
         if p.is_on(inp.output_pwm):
             return False, f"pump output already ON ({inp.output_pwm})"
-        if self.burst_until is not None:
-            if inp.now < self.burst_until:
-                return False, "a burst is still running"
-            if inp.now - self.burst_until < p.min_gap_s:
-                return False, f"too soon ({p.min_gap_s:.1f} s between bursts)"
+        if self.burst_until is not None and inp.now - self.burst_until < p.min_gap_s:
+            return False, f"too soon ({p.min_gap_s:.1f} s between bursts)"
         return True, "ok"
 
     def start_burst(self, duration, now):
