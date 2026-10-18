@@ -140,6 +140,7 @@ button.big{padding:9px 16px;font-weight:700}
         crusader_sim/courses/ on the laptop to replay the same layout in Gazebo. A loaded course is placed from the datum, whatever its own origin.
         SAVE JSON: the field as a buoy map in Ekko's own format, downloaded to this computer, for Ekko to send to the boat
         (rx26_uav tools/scripts/send_buoy_field.py). Do not COMMIT FIELD while Ekko sends it: the boat would get two plans.</div>
+      <div class="sub" id="saveResult"></div>
     </div>
     <div class="card"><h3>Boat</h3><div id="boatinfo" class="sub"></div></div>
   </section>
@@ -233,7 +234,7 @@ function addLatLon(){var la=parseFloat(val('llat')),lo=parseFloat(val('llon'));
   post('/api/add_latlon',{lat:la,lon:lo,state:pick}).then(function(d){if(d&&d.ok){$('llat').value='';$('llon').value=''}poll1()})}
 function saveAs(route,ext,fetchNow){var n=val('saveName');post(route,{name:n}).then(function(d){
   if(d&&d.ok){var a=$('dl');a.href=d.download;a.textContent='download '+n+'.'+ext;a.style.display='';
-    $('saveInfo').textContent='saved '+d.n+' buoys on the boat: '+d.path+(fetchNow?' (and downloaded to this computer)':'');
+    $('saveResult').textContent='saved '+d.n+' buoys on the boat: '+d.path+(fetchNow?' (and downloaded to this computer)':'');
     if(fetchNow)a.click()}poll1()})}
 function saveCourse(){saveAs('/api/save','yaml',false)}
 function saveJson(){saveAs('/api/save_json','json',true)}
