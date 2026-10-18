@@ -6,11 +6,10 @@ Shared by the two things that stand in for Ekko:
     bench_uav.py                    a scripted run, no browser
     bench_world_model.py --uav      the same radio, driven from the GUI
 
-EXTRACTED RATHER THAN COPIED, for the reason mjpeg_server.py was: two copies of
-a handshake drift, and only one of them gets the fix. The gate protocol has
-exactly one subtle rule in it (below) and it must not exist twice.
+Extracted rather than copied: two copies of a handshake drift, and only one
+gets the fix.
 
-THE HANDSHAKE, and the one rule that is easy to get wrong:
+THE HANDSHAKE:
 
     here  -> RXL_SAFE_PASSAGE               ten buoys, positions and colours
     boat  -> RXL_USV_REACHED_GATE(seq)      "past a checkpoint -- still current?"
@@ -19,29 +18,24 @@ THE HANDSHAKE, and the one rule that is easy to get wrong:
 
     SEQ COUNTS CHECKPOINTS, NOT GATES. The boat asks once after circling the
     ENTRY buoy and once after each gate, so seq 1 is the entry and seq 2 is
-    gate 1. Nothing here can tell them apart -- the wire carries only a number --
-    which is why these log lines say "checkpoint" and leave naming it to the
-    boat, which knows. The message id still says GATE because it is on the air
-    between two vehicles and renaming it would break the one that was not
-    updated.
+    gate 1. The wire carries only a number, so these log lines say
+    "checkpoint" and leave naming it to the boat. The message id still says
+    GATE because renaming an on-air id breaks whichever vehicle is not updated.
 
-    THE AIRCRAFT NO LONGER ASSIGNS GATES. It transmits ten buoys with their
-    colours; the boat pairs them and picks the order itself (nav::planPassage).
-    RXL_NEXT_BUOY_SET survives only as the acknowledgement -- its two buoy_id
-    fields are vestigial and are sent as NO_BUOY. The boat ignores them, and
-    says so in a log line if an older aircraft fills them in.
+    THE AIRCRAFT DOES NOT ASSIGN GATES. The boat pairs the buoys and picks the
+    order itself (nav::planPassage). RXL_NEXT_BUOY_SET is only the
+    acknowledgement; its two buoy_id fields are sent as NO_BUOY and the boat
+    ignores them (and logs it if an older aircraft fills them in).
 
-    A REPEATED seq MUST GET THE SAME ANSWER. On a lossy radio the boat re-asks
-    when our reply is lost, and the re-ask must be answered immediately rather
-    than waiting on the operator again. `_answered` is what makes that work.
+    A REPEATED seq MUST GET THE SAME ANSWER, immediately: on a lossy radio the
+    boat re-asks when our reply is lost. `_answered` makes that work.
 
-    CONFIRMING IS AN OPERATOR ACTION, not an automatic one, because the whole
-    point of the confirmation is that a human may be about to change the field.
-    poll() records the request and confirm() answers it. Scripts that want the
-    old automatic behaviour pass auto_confirm=True.
+    CONFIRMING IS AN OPERATOR ACTION, because the point of the confirmation is
+    that a human may be about to change the field. poll() records the request
+    and confirm() answers it; scripts pass auto_confirm=True.
 
-This module never decides where the boat goes. It transmits what it is given
-and answers what it is asked; the passage layout comes from the caller.
+This module never decides where the boat goes; the passage layout comes from
+the caller.
 """
 import collections
 import threading
@@ -54,11 +48,9 @@ from crusader_link import rxl_codec
 def offsets_to_latlon(east_m, north_m, anchor):
     """(east, north) metres from `anchor` -> (lat, lon).
 
-    Straight through crusader_common.geo, which owns M_PER_DEG. This file had
-    its own copy of that constant for about an hour; geo.py warns by name
-    against exactly that -- "a target the USV reports and the UAV re-derives
-    must land in the same place" -- and a bench that places buoys with a
-    different earth radius from the boat that reads them is the drift it means.
+    Through crusader_common.geo, which owns M_PER_DEG: a bench that places
+    buoys with a different earth radius from the boat that reads them puts
+    them somewhere else.
     """
     return geo.xy_to_latlon(east_m, north_m, anchor)
 
@@ -80,10 +72,9 @@ class UavLink:
         self._log = collections.deque(maxlen=40)
         self._plan = None                # last (buoys, entry, exit) transmitted
         self._sent = 0
-        # The deque is for the GUI, which re-reads the whole tail each poll. A
-        # script cannot follow a BOUNDED deque by index -- once it wraps, the
-        # index means a different line -- so a caller that wants every line as
-        # it happens passes a callback instead.
+        # The deque is for the GUI, which re-reads the tail each poll. A bounded
+        # deque cannot be followed by index once it wraps, so a caller that
+        # wants every line passes a callback instead.
         self._on_log = on_log
 
     # ------------------------------------------------------------- outbound
@@ -113,10 +104,8 @@ class UavLink:
                 len(buoys), lat + [0] * pad, lon + [0] * pad, col + [0] * pad)
             self._plan = (list(buoys), entry, exit_)
             self._sent += 1
-            # A routine retransmission is the link WORKING, not news. Logging
-            # every one at 0.2 Hz buries the gate handshake -- the thing the
-            # panel exists to show -- under a minute of identical lines. The
-            # count is in status() for anyone who wants it.
+            # Routine retransmissions are not logged: at 0.2 Hz they bury the
+            # gate handshake the panel exists to show. The count is in status().
             if not quiet:
                 self._say("transmitted %d buoys (send #%d)"
                           % (len(buoys), self._sent))
@@ -124,9 +113,8 @@ class UavLink:
     def resend(self):
         """Retransmit the last plan unchanged, the way a real aircraft would.
 
-        The boat does NOT treat this as a re-tasking: rxl_link_node versions the
-        plan by CONTENT, so an identical retransmission does not bump the
-        version and PlanChanged stays quiet.
+        Not a re-tasking: rxl_link_node versions the plan by CONTENT, so
+        PlanChanged stays quiet.
         """
         with self._lock:
             p = self._plan
@@ -142,10 +130,6 @@ class UavLink:
 
         Non-blocking. `budget` caps one call so a flood cannot hold a GUI
         thread; whatever is left is still there next time.
-
-        A request for a seq already confirmed is re-answered HERE and now: that
-        is the lost-reply case and it must not wait on the operator a second
-        time. A new seq is recorded as pending and waits for confirm().
         """
         got = 0
         for _ in range(budget):
@@ -164,11 +148,11 @@ class UavLink:
         """Handle one confirmation request.
 
         Split out of poll() so a bench can drive the protocol with no socket
-        peer, and so the re-ask rule below exists once rather than twice.
+        peer.
 
-        A seq already confirmed is answered HERE and now: that is the lost-reply
-        case, and making it wait on the operator again would turn every dropped
-        packet into a stall at a gate. A new seq waits for confirm().
+        A seq already confirmed is answered now: that is the lost-reply case,
+        and waiting on the operator again would turn every dropped packet into
+        a stall at a gate. A new seq waits for confirm().
         """
         with self._lock:
             if seq in self._answered:
@@ -185,15 +169,12 @@ class UavLink:
     def confirm(self, buoys=None, entry=None, exit_=None):
         """Answer the outstanding request: the field as it is NOW, then the ack.
 
-        THE FIELD GOES FIRST, and the order is the whole point. The boat treats
-        the acknowledgement as permission to drive on, so an ack that overtook
-        the new positions would let it leave on the old ones. Sending the plan
-        first means that by the time the ack lands the boat has already re-planned
-        against the new field.
+        THE FIELD GOES FIRST. The boat treats the ack as permission to drive on,
+        so an ack that overtook the new positions would let it leave on the old
+        ones.
 
-        Pass buoys/entry/exit_ to change the field in the same breath -- that is
-        what "recolour a buoy, then confirm" does from the page. Omit them and
-        the last transmitted field is repeated unchanged.
+        Pass buoys/entry/exit_ to change the field in the same breath ("recolour
+        a buoy, then confirm"); omit them to repeat the last field unchanged.
         """
         with self._lock:
             seq = self._pending
@@ -220,10 +201,9 @@ class UavLink:
     def rewind(self):
         """Forget which sequence numbers have been confirmed.
 
-        For starting a fresh run against the same radio. Without it the next
-        run's first request -- seq 1 again -- is answered instantly from the
-        cache as a lost-reply repeat, and the operator never gets the chance to
-        change the field before the boat drives on.
+        For a fresh run against the same radio. Without it the next run's seq 1
+        is answered instantly as a lost-reply repeat, and the operator never
+        gets to change the field before the boat drives on.
         """
         with self._lock:
             self._answered.clear()
@@ -234,8 +214,7 @@ class UavLink:
     def _ack_locked(self, seq):
         """Put RXL_NEXT_BUOY_SET on the wire. Call with the lock held.
 
-        The two buoy_id fields are NO_BUOY on purpose: the boat plans its own
-        gate order, so there is nothing to assign. See the header.
+        The buoy_id fields are NO_BUOY on purpose; see the header.
         """
         self.conn.mav.rxl_next_buoy_set_send(
             int(time.time() * 1e3) & 0xFFFFFFFF, seq,

@@ -3,39 +3,31 @@
     python3 -u -m crusader_sim.task1_panel --lake --datum LAT,LON --port 8095
 
 Runs in: the `asv` container on the Jetson (ROS 2 sourced, PYTHONPATH on the checkout's
-crusader_sim). lake_rig_up.sh starts it with everything else; LAKE_MODE.md is the procedure.
-The laptop only runs a browser at http://<jetson>:8095 and PULLS everything over HTTP: no UDP
-reaches it (WSL NAT, firewall = a security setting), and nothing is pushed.
+crusader_sim). lake_rig_up.sh starts it; LAKE_MODE.md is the procedure. The laptop only runs
+a browser at http://<jetson>:8095 and PULLS everything over HTTP: no UDP reaches it (WSL NAT,
+firewall = a security setting).
 
-WHAT IT IS. task1_panel in the sim lays out a course, launches Gazebo and answers the boat's
-checkpoints as the UAV. At the lake there is no simulator: the buoys are real, the field has to
-be BUILT from what the boat sees and where it is, and the boat is the real one. Everything about
-the RXL handshake is the sim panel's (Panel, inherited): whole-field plans, 5 s resends, SEND /
-ACK / SEND+ACK / auto-ACK, checkpoint labels, the UAV position-error setting (default 0 here).
-This file adds only what the water changes:
+WHAT IT IS. No simulator: the buoys are real, and the field is BUILT from what the boat sees
+and where it is. The RXL handshake is inherited from the sim panel (Panel), with the UAV
+position error defaulting to 0 here. This file adds what the water changes:
 
-  field          clicked camera tracks, "PIN AT BOAT" (the boat's fresh pose averaged over the last ~2 s, with an
-                 optional "bow offset": that many metres ahead along the heading, to nose up to a buoy),
-                 typed lat/lon, a loaded course; each buoy is
-                 ENTRY / EXIT / RED / GREEN / BLACK, at most 10 (RXL). COMMIT FIELD puts it on the
-                 air (this is what LAUNCH SIM is in the sim); after that positions are locked and
-                 colours change through SEND, exactly as in the sim.
+  field          clicked camera tracks, PIN AT BOAT (act_pin), typed lat/lon, a loaded course;
+                 each buoy ENTRY / EXIT / RED / GREEN / BLACK, at most 10 (RXL). COMMIT FIELD
+                 puts it on the air (the sim's LAUNCH SIM); after that positions are locked and
+                 colours change through SEND, as in the sim.
   boat           pose, trail, FCU mode + armed: the feed's pose/fcu layers (panel_feed.py), not gz.
-  dead-man       the field is resent ONLY while a browser has polled /api/state in the last 3 s.
-                 If the WiFi drops the resends stop, and the boat's own plan-freshness guard
-                 (plan_timeout_s 15) aborts the mission ~15 s later. The same gate holds back
-                 auto-ACK: no operator, no UAV.
-  START          lake_goal (a child process; the tier you chose, Advanced or Disruptive (default), the
-                 approach point you clicked, 600 s). Enabled only while the feed says ARMED + GUIDED, which is the PILOT's doing: this panel
-                 cannot arm, disarm or change the mode, and lake_goal refuses to start unless the
-                 autopilot says both anyway.
+  dead-man       the field is resent ONLY while a browser has polled /api/state in the last 3 s,
+                 so if the WiFi drops the boat's plan-freshness guard (plan_timeout_s 15) aborts
+                 the mission ~15 s later. The same gate holds back auto-ACK: no operator, no UAV.
+  START          lake_goal (a child process: the chosen tier, the clicked approach point, 600 s).
+                 Enabled only while the feed says ARMED + GUIDED, which is the PILOT's doing: this
+                 panel cannot arm, disarm or change the mode, and lake_goal refuses to start
+                 unless the autopilot says both anyway.
   ABORT          SIGINT to lake_goal = CANCEL the goal, then a banner: the boat is still armed and
                  may be moving under its last command; the pilot takes it with the RC (SC to HOLD).
-  STOP UAV       closes the radio: all transmission stops. A running goal then aborts on the boat's
-                 own plan-freshness guard.
-  SAVE AS COURSE the field as a crusader_sim course YAML (origin = the datum, metres east/north of
-                 it, the same schema as courses/*.yaml) so the same layout can be replayed in
-                 Gazebo; loading one (template / load) is the reverse.
+  STOP UAV       closes the radio. A running goal then aborts on the boat's plan-freshness guard.
+  SAVE AS COURSE the field as a course YAML (origin = the datum, the schema of courses/*.yaml)
+                 so the layout can be replayed in Gazebo; template / load is the reverse.
 
 SAFETY BOUNDARY, kept by construction and by test/test_lake.py (which reads this file's code):
 this process never arms, disarms, sets a mode, publishes /crsd/set_mode or /crsd/rc_override,
@@ -112,9 +104,8 @@ def round_or_none(v, ndigits):
 
 class PoseAverager:
     """The boat's pose over the last `window_s`, for PIN AT BOAT: one sample per NEW feed packet whose pose layer
-    is fresh (blanks over guesses: a stale pose adds nothing, and a stale feed refuses the pin). `note()` is fed
-    by the panel's loop and by every pin / state call; it is idempotent per packet. A leaf lock: nothing is called
-    while it is held. The clock is wall time, like the layer's age it subtracts."""
+    is fresh (blanks over guesses: a stale pose adds nothing, and a stale feed refuses the pin). `note()` is
+    idempotent per packet. A leaf lock. The clock is wall time, like the layer's age it subtracts."""
 
     def __init__(self, window_s=POSE_WINDOW_S, clock=time.time):
         self.window_s, self.clock = window_s, clock
@@ -176,8 +167,8 @@ def pin_problem(avg):
 
 
 def heading_problem(avg):
-    """Why the bow offset must be refused (the heading is blank or stale), or None. The heading comes from GPS
-    yaw (the compass is disabled): it is null until the RTK moving baseline fixes."""
+    """Why the bow offset must be refused (the heading is blank or stale), or None. The heading is GPS yaw
+    (no compass): null until the RTK moving baseline fixes."""
     if avg["yaw"] is None:
         return "no heading: the GPS yaw is not valid yet (RTK moving baseline), so the bow offset cannot be placed; pin with offset 0"
     if avg["heading_age"] > HEADING_MAX_AGE_S or avg["heading_n"] < PIN_MIN_HEADING_SAMPLES:
@@ -195,8 +186,7 @@ def pin_place(avg, offset_m):
 
 def read_rig(path):
     """What lake_rig_up.sh chose (rig.json: tree, nav_mode and why, POOL, the overlay's keys), for the page.
-    None when no file was given; {"error": why} when it was and cannot be read: the page says so rather than
-    showing a rig it does not know."""
+    None when no file was given; {"error": why} when it cannot be read, so the page never shows a guessed rig."""
     if not path:
         return None
     try:
@@ -296,7 +286,7 @@ class LakePanel(Panel):
         return time.time() - self.last_poll <= DEADMAN_S
 
     def _logs_since(self, q):
-        """Only the two buffers the lake page has tabs for (the sim's `sim` and `judge` are empty here)."""
+        """Only the two buffers the lake page has tabs for."""
         return {k: v for k, v in super()._logs_since(q).items() if k in ("radio", "mission")}
 
     def _gates(self):
@@ -346,8 +336,8 @@ class LakePanel(Panel):
         return None if p is None else (p["x"], p["y"], p["yaw"], feed["pose"]["age"])
 
     def _origin_problem(self, feed):
-        """Why the field cannot be placed (the feed and this panel use different origins), or None.
-        Both convert metres <-> lat/lon around their own origin, so they must be the same place."""
+        """Why the field cannot be placed (the feed and this panel convert metres <-> lat/lon about
+        different origins), or None."""
         o = feed["origin"]
         if feed["up"] and o and not self._is_datum(o):
             return ("panel_feed's origin (%.7f, %.7f) is not this panel's datum (%.7f, %.7f): every "
@@ -356,8 +346,8 @@ class LakePanel(Panel):
         return None
 
     def _datum_note(self, feed):
-        """A warning when the nav datum the boat actually uses is not this panel's origin. The feed
-        converts the boat's layers correctly either way, so this is a heads-up, not an error."""
+        """A warning when the boat's nav datum is not this panel's origin: a heads-up, not an error,
+        because the feed converts the boat's layers correctly either way."""
         d = feed["datum"]
         if not d:
             return None
@@ -368,8 +358,7 @@ class LakePanel(Panel):
         return None
 
     def _lake_tick(self):
-        """Worker thread, every poll: the dead-man's transitions into the Radio log, and the
-        boat's trail from the feed's pose."""
+        """Worker thread, every poll: dead-man transitions into the Radio log, and the trail."""
         now = time.time()
         gap = now - self.last_poll
         if gap > DEADMAN_S and not self._tripped:
@@ -425,8 +414,8 @@ class LakePanel(Panel):
     def act_pin(self, body):
         """PIN AT BOAT {state, offset_m}: a buoy where the boat is, the feed's fresh pose averaged over the last
         ~2 s; `offset_m` (default 0, at most 10) moves it that far AHEAD along the heading, so the operator can
-        nose the bow up to a buoy. Refused, never guessed: no fresh pose, too few samples, a boat that moved more
-        than PIN_MAX_SPREAD_M in the window, and for an offset a heading that is blank or stale."""
+        nose the bow up to a buoy. Refused, never guessed: no fresh pose, too few samples, too much spread, or
+        for an offset a blank or stale heading."""
         off = body.get("offset_m")
         off = 0.0 if off is None else off
         if not (_num(off) and 0.0 <= off <= MAX_BOW_OFFSET_M):
@@ -447,7 +436,7 @@ class LakePanel(Panel):
         return r
 
     def _pin_view(self, avg, why):
-        """The `pin` block of /api/state (and of a pin's reply): what a pin taken now would be made of, and why not."""
+        """The `pin` block of /api/state and of a pin's reply: what a pin taken now would be, or why not."""
         if avg is None:
             return {"problem": why, "n": 0, "window_s": POSE_WINDOW_S, "heading_problem": why}
         warn = (None if avg["spread_m"] <= PIN_WARN_SPREAD_M else
@@ -466,8 +455,8 @@ class LakePanel(Panel):
         return self._add_buoy(x, y, body.get("state", "off"), "from %.7f, %.7f" % (lat, lon))
 
     def act_approach(self, body):
-        """The point lake_goal drives to before it looks (a point you clicked). {clear: true}
-        drops it (the goal then skips the drive); {at_boat: true} takes the boat's position."""
+        """The point lake_goal drives to before it looks. {clear: true} drops it (the goal then
+        skips the drive); {at_boat: true} takes the boat's position."""
         if body.get("clear"):
             ap = None
         elif body.get("at_boat"):
@@ -520,8 +509,8 @@ class LakePanel(Panel):
         return {"ok": True}
 
     def act_stop_uav(self, _body):
-        """STOP UAV: all transmission stops (the radio closes). The field you were running comes
-        back as the one you edit, in the colours last SENT."""
+        """STOP UAV: the radio closes. The running field comes back as the one you edit, in the
+        colours last SENT."""
         with self.lock:
             if self.sim != "up":
                 return {"ok": False, "error": "nothing is being transmitted"}
@@ -544,9 +533,9 @@ class LakePanel(Panel):
                                  self.mission["running"], self._operator_present())
 
     def act_start(self, body):
-        """START {"tier": "advanced" | "disruptive"} (default disruptive): the goal's tier. Advanced plans once
-        and asks no checkpoints; Disruptive asks at the entry orbit and every gate (task1_global.xml picks its
-        subtree by it; the field you send is the same)."""
+        """START {"tier": "advanced" | "disruptive"} (default disruptive). Advanced plans once and asks no
+        checkpoints; Disruptive asks at the entry orbit and every gate (task1_global.xml picks its subtree by
+        it; the field sent is the same)."""
         tier = (body or {}).get("tier")
         tier = DEFAULT_TIER if tier is None else tier
         if tier not in LAKE_TIERS:
@@ -574,8 +563,8 @@ class LakePanel(Panel):
         return {"ok": True}
 
     def _stop_mission(self):
-        """SIGINT to lake_goal: it CANCELS the goal and waits for the tree to finish it. A
-        lake_goal that has not exited by ABORT_KILL_S is hung and is killed."""
+        """SIGINT to lake_goal: it CANCELS the goal and waits for the tree to finish it. One still
+        running after ABORT_KILL_S is hung and is killed."""
         p = self.proc_mission
         if p is None or not p.running():
             return
@@ -609,8 +598,8 @@ class LakePanel(Panel):
         return course_yaml(course_of(name, buoys, origin=self.origin, boat_start=start, approach=ap))
 
     def act_save(self, body):
-        """SAVE AS COURSE: <dir>/layouts/<name>.yaml, in crusader_sim's course schema; the page
-        offers it as a download (GET /api/course/<name>.yaml)."""
+        """SAVE AS COURSE: <dir>/layouts/<name>.yaml; the page offers it as a download
+        (GET /api/course/<name>.yaml)."""
         name = body.get("name")
         if not (isinstance(name, str) and NAME_RE.match(name)):
             return {"ok": False, "error": "name: letters, digits, - and _ (max 40)"}

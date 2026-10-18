@@ -8,10 +8,9 @@ ArduPilot's lat/lon comes from the JSON position relative to that home, so a
 mismatch would silently shift every GPS fix against the buoys.
 
 Every task element is a STATIC model built from primitives, except the
-RoboBuoy body: a frustum, which SDF has no primitive for, so it is a small OBJ
-written to <out>/meshes beside the world. Geometry, with sources, is in the
-builder docstrings; "image only" values are estimates (handbook text has no
-number) and say so.
+RoboBuoy body, a frustum: a small OBJ written to <out>/meshes beside the world.
+Geometry sources are in the builder docstrings; "image only" values are
+estimates (the handbook text has no number).
 """
 import argparse
 import functools
@@ -65,12 +64,11 @@ def _normal(p0, p1, p2):
 
 def robobuoy_obj():
     """The RoboBuoy body as Wavefront OBJ text: the frustum, base centred on
-    the origin at z=0. SDF has no frustum primitive, and a box stand-in sticks
-    out past the 7.25" top — exactly the wrong silhouette for a detector.
+    the origin at z=0. A box stand-in sticks out past the 7.25" top: the wrong
+    silhouette for a detector.
 
-    Flat-shaded (one normal per face), every face wound counter-clockwise seen
-    from OUTSIDE, so the renderer culls the inside and lights the outside. No
-    material: the visual's SDF <material> colours it, like every other part."""
+    Flat-shaded, every face wound counter-clockwise seen from OUTSIDE so the
+    renderer culls the inside. No material: the SDF <material> colours it."""
     b, t = RB_BASE / 2.0, RB_TOP / 2.0
     # 1-4 base, 5-8 top, each counter-clockwise seen from above
     vs = [(-b, -b, 0.0), (b, -b, 0.0), (b, b, 0.0), (-b, b, 0.0),
@@ -88,8 +86,8 @@ def robobuoy_obj():
 
 def write_robobuoy_mesh(out_dir):
     """robobuoy.obj into <out_dir>/meshes; returns its ABSOLUTE path, which the
-    world references directly — the world dir is not on GZ_SIM_RESOURCE_PATH,
-    and the GUI resolves the same path, being on the same machine."""
+    world references directly: the world dir is not on GZ_SIM_RESOURCE_PATH,
+    and the GUI is on the same machine."""
     d = os.path.join(out_dir, "meshes")
     os.makedirs(d, exist_ok=True)
     path = os.path.abspath(os.path.join(d, "robobuoy.obj"))
@@ -101,19 +99,15 @@ def write_robobuoy_mesh(out_dir):
 def robobuoy(e, body_mesh):
     """RoboBuoy + light beacon (robobuoy-build-guide.md, light-beacon-specifications.md).
 
-    Body: four white corrugated-plastic panels on a 3/4" PVC frame (RB:9,77),
-    each a trapezoid 17" / 7.25" / 12" slant (RB:71) — a truncated square
-    pyramid, 0.432 m square at the base, 0.184 m at the top, 0.2785 m high,
-    faces 24 deg off vertical (RB_* above; `body_mesh` is that frustum, see
-    robobuoy_obj). Floated on pool noodles round the base (RB:23,51-55) —
-    modelled with the base AT the waterline. Marking: diamond (Task 1), circle
-    (Task 2), letter, or none; ~8" (0.203 m) tall, centred, from 2.5" (0.064 m)
-    up the face (RB:67), so it lies on the sloped panel. Marking colour is
-    image only: black here.
-    Beacon (NEW 2026-09-14 design, LB:9,19): 3" PVC, OD 3.5" (0.0889 m), 5"
-    (0.127 m) long, on top; LED band ~4 wraps (~0.055 m, estimate) outside = the
-    SIDE beacon; reflector cone inside = the UPWARD beacon; 10" (0.254 m) black
-    sun hat on top (LB:23).
+    Body: four white corrugated-plastic panels on a 3/4" PVC frame (RB:9,77):
+    the frustum `body_mesh` (RB_* above). Floated on pool noodles round the
+    base (RB:23,51-55), modelled with the base AT the waterline. Marking:
+    diamond (Task 1), circle (Task 2), letter, or none; ~8" (0.203 m) tall,
+    centred, from 2.5" (0.064 m) up the face (RB:67), so it lies on the sloped
+    panel. Marking colour is image only: black here.
+    Beacon (LB:9,19): 3" PVC, OD 3.5" (0.0889 m), 5" (0.127 m) long, on top;
+    LED band ~4 wraps (~0.055 m, estimate) outside = the SIDE beacon; reflector
+    cone inside = the UPWARD beacon; 10" (0.254 m) black sun hat on top (LB:23).
     """
     name = e["name"]
     x, y = e["x"], e["y"]
@@ -168,10 +162,9 @@ def robobuoy(e, body_mesh):
     v.append(S.visual("beacon_up", S.cylinder(0.035, 0.003), up_c,
                       S.pose(0, 0, pz + 0.127 + 0.006),
                       emissive=1.0 if up_c != "black" else 0.0))
-    # Collision stays a box, the base footprint up to the sun hat: only the
-    # boat's hull ever touches it, and a primitive is what contact handles
-    # cheapest and surest. The LiDAR and cameras RENDER the visuals, so they
-    # see the frustum, not this.
+    # Collision stays a box up to the sun hat: only the hull touches it, and
+    # contact handles a primitive cheapest and surest. The LiDAR and cameras
+    # RENDER the visuals, so they see the frustum, not this.
     top = RB_H + 0.13
     coll = S.collision("body", S.box(W, W, top), S.pose(0, 0, z0 + top / 2))
     return (f'<model name="{name}"><static>true</static>{S.pose(x, y, 0, 0, 0, yaw)}'
@@ -183,14 +176,15 @@ def robobuoy(e, body_mesh):
 def dock(e):
     """Docking cubes + one Docking Bay Structure per bay.
 
-    Geometry mirrors tools/task3_sim/world.py so the Task 3 tree sees the same
-    course in both sims (W:192-198, 268-279): 0.5 m cubes; three 1.5 m slips
-    between 0.5 m fingers 2.0 m long; a main deck 1.0 m deep; deck 0.3 m above
-    the water (ASSUMED there too). Each bay's structure is a 1.0 x 1.0 m white
-    face on the deck's front edge, facing into the slip, with two windows —
-    upper-left 210 x 290 mm, lower-right ~230 x 310 mm — and a 160 mm indicator
-    at the bottom centre. Handbook: window 25 cm square (3.3.4:9) or 210 x 280 mm
-    (docking-bay-structure.md:72) — the dimensions conflict; W's are used.
+    Geometry mirrors tools/task3_sim/world.py (W: Scenario's dock fields,
+    WINDOW_SLOTS) so the Task 3 tree sees the same course in both sims: 0.5 m
+    cubes; three 1.5 m slips between 0.5 m fingers 2.0 m long; a main deck
+    1.0 m deep; deck 0.3 m above the water (ASSUMED there too). Each bay's
+    structure is a 1.0 x 1.0 m white face on the deck's front edge, facing
+    into the slip, with two windows — upper-left 210 x 290 mm, lower-right
+    ~230 x 310 mm — and a 160 mm indicator at the bottom centre. The handbook
+    conflicts on the window (25 cm square, 3.3.4:9; 210 x 280 mm,
+    docking-bay-structure.md:72); W's are used.
 
     Frame: (x, y) = centre of the BACK edge of the main deck; facing_deg =
     compass-style ENU yaw the faces point OUT (0 = +x/east, 90 = north).
@@ -205,9 +199,8 @@ def dock(e):
     lit = e.get("lit_window", {"bay": green_bay, "slot": 0, "colour": "red"})
 
     # Dock-local frame = the model frame: x = u, out toward the water; y = r, the
-    # viewer's RIGHT when looking at the faces from the water (bays 1..3 run
-    # along +r). The viewer faces -u, so their right is u rotated +90 deg — which
-    # is exactly local +y under a model yaw of face_yaw.
+    # viewer's RIGHT looking at the faces from the water (bays 1..3 along +r).
+    # The viewer faces -u, so their right is u rotated +90 deg = local +y.
     v, c = [], []
 
     def block(nm, u, r, su, sr, sz, zc, colour="dock"):
@@ -298,7 +291,7 @@ def world_sdf(course, buoy_mesh, world_name="crusader_sim"):
                    "water", "", alpha=0.85, flags=WATER_FLAG)
         # the seabed is hidden from the LiDAR too: a real MID360 does not see
         # through water, and with only the surface hidden every downward ray
-        # came back off the bottom (8155 "water" points a scan, 0 clusters)
+        # comes back off the bottom and swamps the clusterer
         + S.visual("seabed", "<geometry><plane><normal>0 0 1</normal><size>600 600</size></plane></geometry>",
                    (0.35, 0.32, 0.25), S.pose(0, 0, -float(course.get("depth_m", 5.0))),
                    flags=WATER_FLAG)

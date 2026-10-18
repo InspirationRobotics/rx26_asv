@@ -4,63 +4,35 @@ No ROS, no numpy, nothing to install. sim.py steps this in real time and trades
 JSON lines with the off-ROS runner (crusader_bt/offros), which runs the real
 behaviour tree. test_world.py exercises it on its own.
 
-WHAT IS MODELLED, and how honestly:
+WHAT IS MODELLED:
 
-  the course     the RobotX 2026 build guide ("Docking Bay Structure"):
-                 0.5 m dock cubes, three 1.5 m slips between 0.5 m fingers
-                 2.0 m long, a 1 m deep main deck, and on it a 1 m square face
-                 per bay with the two windows and the indicator where the
-                 front-panel drawing puts them. Numbered left to right FACING
-                 them (handbook 3.3.4); one GREEN indicator. The deck's height
-                 above the water (0.3 m) is ASSUMED.
-  the boat       ~1.0 x 0.6 m, driven like ArduRover GUIDED on this hull:
-                 position setpoints only, it TURNS rather than strafes,
-                 WP_SPEED 1.0, ATC_ACCEL_MAX 1.0, and on arrival it loiters
-                 with LOIT_RADIUS 2.0 / LOIT_TYPE 0 - drift under 2 m is not
-                 corrected, and over it the boat drives forward OR in reverse
-                 back to the point. params/working_crusader.params.
-  the camera     an OAK-D LR at the bow (cam_x 0.37, 0.41 m above water -
-                 Resources.md), fx 1173 px at 1920x1200, with the CV config's
-                 188-row hull band masked off the top, and a PITCH. It reports
-                 what the dock detector's DRAFT DockObservation carries, field
-                 for field, in the tilted camera frame, with the CV report's
-                 error rates: faces to ~9 m, indicators weakening past 6 m
-                 (92/125 at 6-10 m), colours that abstain but are never wrong
-                 (unless you turn on `miscolour`). A window it cannot see whole
-                 is not reported. target_pattern comes from the CV team's own
-                 timing stage (vendor/dock_sequence_core.py), on these frames.
-  RoboCommand    lights the fire when the boat reports docking IN the green
-                 bay, and only then (strict judge); checks every report.
+  the course     the build guide's Docking Bay Structure (Scenario,
+                 WINDOW_SLOTS); bays numbered left to right FACING them
+                 (handbook 3.3.4).
+  the boat       ArduRover GUIDED as configured (params/working_crusader.params).
+  the camera     an OAK-D LR at the bow (Resources.md) with a hull band and a
+                 PITCH, reporting the dock detector's DRAFT DockObservation in
+                 the tilted camera frame with the CV report's error rates
+                 (indicators 92/125 at 6-10 m); colours abstain but are never
+                 wrong unless `miscolour`. target_pattern comes from the CV
+                 team's own timing stage (vendor/dock_sequence_core.py).
+  RoboCommand    lights the fire only on a docking report IN the green bay.
   the lights     handbook: RED until hit, GREEN 5 s, off 1 s, then the tier's
-                 signal for 60 s. The cannon puts the fire out after
-                 `extinguish_s` of spray on the right window.
+                 signal for 60 s.
 
 THE FIXED-NOZZLE SHOT (behavior_trees/task3_fire_test.xml) adds:
 
-  the nozzle     fixed on the bow, a drag-free parabola (squirt_cal's
-                 nozzle_model) whose exit speed is FITTED so that a level,
-                 square-on boat at `nozzle_hit_range_m` puts the stream on the
-                 target window's top edge - the pool's answer, 3.22 m. The
-                 water goes where the boat's TRUE pose, pitch and roll send it.
-  the sea        squirt_cal's fake_boat rocking (a few sines under a slow
-                 envelope), plus a pitch kick whenever the boat accelerates.
-  the LiDAR      /crsd/wall_range from the true pose: range to the dock edge,
-                 the wall's bearing, the offset between the slip fingers, noise,
-                 and spray returns while water is in the air. `wall_on_fingers`
-                 makes it lock onto the finger tips instead.
-  the autopilot  GUIDED heading+speed (SET_ATTITUDE_TARGET) as remembered, NOT
-                 verified: acted on only in GUIDED, turns toward the heading,
-                 speed as asked, and after 3 s without a new target a boat
-                 loiters. The SITL check (docs/G1) is what makes this true.
-                 MANUAL: the sticks straight to the thrusters on this OmniX
-                 hull - ahead, SIDEWAYS and yaw, each with a deadzone about
-                 the RC trim and a first-order lag for the water; an RC
-                 override stands RC_OVERRIDE_TIME (3 s) after the last one.
-                 GUESSED numbers: the real hull tunes them.
-  the bridge     telemetry_bridge's gates for heading+speed, the sticks and the
-                 pump, running telemetry_bridge's OWN rule code
-                 (guided_hs_core, override_core, pump_core): mode, drop latch,
-                 channels, clamp, dead-man, every refusal.
+  the nozzle     a drag-free parabola (squirt_cal's nozzle_model) fitted to
+                 `nozzle_hit_range_m`; the water goes where the boat's TRUE
+                 pose, pitch and roll send it.
+  the sea        squirt_cal's fake_boat rocking, plus a pitch kick on thrust.
+  the LiDAR      /crsd/wall_range from the true pose, with spray returns while
+                 water is in the air.
+  the autopilot  GUIDED heading+speed as remembered, NOT verified: the SITL
+                 check (docs/G1) decides. MANUAL: the sticks straight to the
+                 OmniX thrusters with GUESSED numbers.
+  the bridge     telemetry_bridge's OWN rule code (guided_hs_core,
+                 override_core, pump_core), every refusal included.
 
 WHAT IS NOT: hydrodynamics, wind, waves, the fingers stopping the hull (contact
 is recorded, not simulated), the water stream's flight time and droop, any
@@ -71,9 +43,8 @@ Headings are compass degrees. The camera frame is REP-103 (x forward, y left,
 z up) - so a bearing in it is POSITIVE TO PORT.
 
 THE PROJECTION matches crusader_bt's nav_math (spherical, R = 6371 km), not
-crusader_common.geo's M_PER_DEG. This file stands in for the GPS that feeds a
-C++ consumer using nav_math, and matching it makes "the boat is 1 cm off" mean
-the same thing on both sides.
+crusader_common.geo's M_PER_DEG: this stands in for the GPS feeding a C++
+consumer that uses nav_math, so "1 cm off" means the same on both sides.
 """
 import math
 import os
@@ -84,7 +55,7 @@ from dataclasses import dataclass, field, asdict
 from vendor.dock_sequence_core import DockSequence
 
 # The bridge's rules and the nozzle's arc, imported rather than re-written: the
-# sim refuses exactly what the boat would. All three are stdlib only.
+# sim refuses exactly what the boat would. All are stdlib only.
 _REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 for _p in (os.path.join(_REPO, "crusader_fcu"), os.path.join(_REPO, "tools", "squirt_cal")):
     if _p not in sys.path:
@@ -197,9 +168,8 @@ class Scenario:
     deck_depth: float = 1.0
     deck_z: float = 0.3                        # ASSUMED: dock-cube freeboard
     green_bay: int = 2                         # 1..3, left to right facing them
-    # the goal's approach point, metres out in front of the dock centre. The
-    # operator's rough "the dock is over there", on the water side and clear
-    # of the fingers.
+    # the goal's approach point, metres out in front of the dock centre: the
+    # operator's rough "the dock is over there", clear of the fingers
     approach_m: float = 7.0
     # RoboCommand
     tier: int = 2                              # 0 Core, 1 Advanced, 2 Disruptive
@@ -211,10 +181,9 @@ class Scenario:
     extinguish_s: float = 2.0                  # spray-on-target to put it out
     # sensing
     camera_ok: bool = True
-    # + = aimed DOWN (cam_pitch_deg). THE BOAT'S CAMERA IS LEVEL TODAY (0), and
-    # level it sees NEITHER window whole from a berth inside the slip; -25 is
-    # what that takes with the hull band. The default shows the tree working
-    # with the mount it needs; test_e2e level_camera pins today's failing.
+    # + = aimed DOWN. The boat's camera is level (0), and level it sees NEITHER
+    # window whole from a berth inside the slip; -25 is what that takes with
+    # the hull band. test_e2e level_camera pins the level mount failing.
     cam_pitch_deg: float = -25.0
     hull_band_rows: int = 188                  # CV config occluded_top_rows
     miscolour: float = 0.0                     # P(a lit colour read as another)
@@ -233,9 +202,8 @@ class Scenario:
     nozzle_z: float = 0.40                     # above the water
     nozzle_elev_deg: float = 45.0
     # THE TRUTH: the wall range at which a level, square-on boat puts the
-    # stream on the target window's TOP EDGE. The pool said ~3.22 m; the
-    # tree's fire_range_m is its belief about this, and fire_cal_error makes
-    # the two differ.
+    # stream on the target window's TOP EDGE (the pool said ~3.22 m). The
+    # tree's fire_range_m is its belief; fire_cal_error makes them differ.
     nozzle_hit_range_m: float = 3.22
     nozzle_yaw_bias_deg: float = 0.0           # + = the stream leaves LEFT of the bow
     sea: float = 0.0                           # rocking: 0 flat .. 3 rough (fake_boat)
@@ -245,9 +213,8 @@ class Scenario:
     wall_on_fingers: bool = False              # ...but fits the finger tips, finger_len short
     pump_path: bool = True                     # the bridge has a pump output (G7 done)
     # ArduRover's simple avoidance: stop short of anything within 2 m while
-    # /crsd/avoidance_enable is true. Off by default: whether the boat's
-    # proximity path is live is unverified, and the Task 3 tree never turns
-    # it off (see the README).
+    # /crsd/avoidance_enable is true. Off by default: the boat's proximity
+    # path is unverified, and the Task 3 tree never turns it off (README).
     autopilot_avoidance: bool = False
     start_mode: str = "GUIDED"                 # the autopilot's mode at t = 0 (SC)
     drop_at_s: float = -1.0                    # the autonomy-drop latch trips at this world
@@ -388,8 +355,7 @@ class Boat:
     ARRIVAL IS WP_RADIUS, NOT THE POINT. ArduRover calls a GUIDED destination
     reached once inside WP_RADIUS and, on a boat, starts loitering - at its
     STOPPING POINT, not at the target (mode_loiter.enter). This boat's
-    WP_RADIUS is 2.0 m, so it parks up to 2 m short of wherever it was sent.
-    `wp_radius` is a knob for exactly that reason.
+    WP_RADIUS is 2.0 m, so it parks up to 2 m short: hence the `wp_radius` knob.
 
     LOITERING: nothing is corrected inside LOIT_RADIUS (2.0 m). Outside it the
     boat returns to the loiter point forward OR ASTERN, whichever needs less
@@ -405,9 +371,8 @@ class Boat:
     RATE_MAX = 60.0            # deg/s actually achieved (ATC_STR_RAT_MAX is 90)
     YAW_ACCEL = 90.0           # deg/s^2
     HS_TIMEOUT_S = 3.0         # GUIDED heading+speed: no new target for this long -> stop
-    # MANUAL on the OmniX hull. GUESSES, to be replaced by the water: full stick
-    # (500 us past the deadzone) ahead / astern / sideways / yaw, and the time
-    # the water takes to bring the hull to a new speed.
+    # MANUAL on the OmniX hull, GUESSES until the water says otherwise: speeds
+    # at full stick (500 us past the deadzone), and the lag to a new speed.
     RC_TRIM = {1: 1489, 3: 1495, 4: 1495}      # RCn_TRIM: steer, throttle, lateral
     RC_DZ_US = 25              # no thrust within this of trim
     V_FULL_AHEAD, V_FULL_ASTERN, V_FULL_SIDE = 1.5, 1.0, 0.9   # m/s
@@ -463,9 +428,9 @@ class Boat:
 
     def _carrot(self):
         """Where to steer on the current leg: `look` metres ahead of the boat's
-        projection onto the origin->destination line. Following the line, not
-        the point, is what lets it hold a centreline across a current - it
-        crabs into it - which pure pursuit of the point cannot."""
+        projection onto the origin->destination line. Following the line lets
+        it hold a centreline across a current by crabbing; pure pursuit of the
+        point cannot."""
         o, dst = self.origin or self.p, self.sp
         seg = sub(dst, o)
         length = norm(seg)
@@ -667,8 +632,8 @@ class Lights:
 
 class Sea:
     """Roll and pitch: tools/squirt_cal/fake_boat.py's rocking (a few sines
-    under a slow envelope, so there are calm spells and rough ones), and a
-    pitch kick that follows the boat's own acceleration - thrust rocks it."""
+    under a slow envelope: calm spells and rough ones), and a pitch kick that
+    follows the boat's own acceleration."""
 
     def __init__(self, sc: Scenario, rnd: random.Random):
         self.sc = sc
@@ -700,10 +665,10 @@ class Sea:
 # ------------------------------------------------------------------ the bridge
 
 class Bridge:
-    """telemetry_bridge's heading+speed and pump paths, gates and all, running
-    the bridge's own rule modules. What it lets through reaches the Boat the
-    way MAVLink would: heading+speed decoded from SET_ATTITUDE_TARGET, a burst
-    as DO_REPEAT_SERVO timed by the autopilot.
+    """telemetry_bridge's heading+speed, override and pump paths, gates and
+    all. What it lets through reaches the Boat the way MAVLink would:
+    heading+speed decoded from SET_ATTITUDE_TARGET, a burst as DO_REPEAT_SERVO
+    timed by the autopilot.
 
     The pump parameters are the ones G7 will set (crusader_params.yaml ships
     pump_servo_channel 0 until then); `pump_path` False is that 0."""
@@ -1028,9 +993,8 @@ class Camera:
         pat, cols = ("", ())
         if target is not None and target in self.seq.patterns:
             pat, cols = self.seq.patterns[target]
-        # The MEAN rate over the last 30 frames. Not the median gap: frames land
-        # on 20 Hz world steps, so gaps alternate 0.05 / 0.10 s and the median
-        # says 20 fps for a 15 fps camera.
+        # The MEAN rate over 30 frames, not the median gap: frames land on 20 Hz
+        # world steps, so gaps alternate 0.05 / 0.10 s and the median says 20 fps.
         self._stamps = (self._stamps + [t])[-31:]
         span = self._stamps[-1] - self._stamps[0]
         fps = (len(self._stamps) - 1) / span if span > 0 else self.FPS
@@ -1423,9 +1387,8 @@ class World:
     def _spray_hits(self):
         """Which window the stream is landing on, or None.
 
-        The command's aim point is in camera_link (tilted by the pitch); put it
-        in the world with the boat's TRUE pose, and it is a hit when it lands
-        inside a window's opening on the face. The stream reaches 6 m.
+        The aim point is in camera_link (tilted by the pitch), put in the world
+        with the boat's TRUE pose. The stream reaches 6 m.
         """
         c = self.cannon
         if not c.get("fire"):
@@ -1450,7 +1413,7 @@ class World:
     def target_visible_from_berth(self, berth_m=1.25):
         """Could a boat berthed in the green bay (body origin berth_m out, bow
         in) see the fire window whole? The tree cannot put out what it cannot
-        see, and this is the first thing to know about a scenario."""
+        see."""
         b = self.dock
         p = b.at((self.sc.green_bay - 2) * b.pitch, berth_m)
         heading = (self.sc.facing_deg + 180.0) % 360.0
