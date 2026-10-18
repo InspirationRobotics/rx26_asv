@@ -1,49 +1,33 @@
 """ocs_client — publishes Crusader's heartbeat to the Operator Control Station.
 
-NOT PROVEN ON THE BOAT. Deliberately absent from core.launch.py for the same
-reason ground_station is: it has never carried a real run. Start it by hand.
+NOT PROVEN ON THE BOAT; absent from core.launch.py like ground_station. Start
+it by hand:
 
     ros2 run crusader_groundstation ocs_client
 
-The OCS holds the team's single connection to RoboNation's RoboCommand and is the
-only thing allowed to talk to it. This node's whole job is to keep the OCS
-supplied with a 2 Hz heartbeat -- the rate the handbook mandates for every active
-vehicle -- over one TCP connection that also carries commands back.
+The OCS holds the team's single connection to RoboNation's RoboCommand. This
+node keeps it supplied with the handbook's 2 Hz heartbeat over one TCP
+connection that also carries commands back.
 
-WHAT THIS NODE MUST NEVER DO IS ACT. Inbound commands are republished to
-/crsd/ocs_command and nothing else. The mission executive may choose to read them;
-this node has no opinion. The standing rule holds unchanged: the RC e-stop is the
-only safety path, and WiFi is never a safety mechanism.
+THIS NODE NEVER ACTS. Inbound commands are republished to /crsd/ocs_command and
+nothing else. The RC e-stop is the only safety path; WiFi never is.
 
-THE TASK IT REPORTS IS THE ONE A MISSION CLAIMS. `current_task` comes from
-/crsd/current_task, published by whichever mission action server is running, and
-it is not a cosmetic field: the handbook (3.4.11) makes the transition INTO a
-task value the start of that attempt and the transition to TASK_NONE the stand
-down, and above Core the beacons activate on it. Two rules guard it, both in
-_on_task/_current_task:
+`current_task` comes from /crsd/current_task and is not cosmetic: handbook
+3.4.11 makes the transition INTO a task value the start of that attempt and
+TASK_NONE the stand-down, and above Core the beacons activate on it. Unknown
+tokens are refused and a vanished publisher stands us down (_on_task,
+_current_task).
 
-  * a token not in RoboCommand's RxTask enum is REFUSED, not forwarded —
-    protobuf's ParseDict rejects the whole frame on an unknown enum name, so a
-    typo would cost every heartbeat sent while it was set, not just the field;
-  * if the publisher disappears while a task is claimed, we stand down to
-    TASK_NONE. The topic is latched and published only on transitions, so a dead
-    mission node would otherwise leave us telling RoboCommand a task is under way
-    on behalf of a process that no longer exists.
+FINDING THE OCS. `ocs_host: "auto"` listens for the OCS's UDP beacon (which
+must carry this node's `team_id`) on `ocs_discovery_port` and dials the sender,
+falling back to `ocs_fallback_hosts`; a fixed IP is dialled and nothing else.
+Rules in ocs_link.py; the OCS's half in OCS/rx_bridge/beacon.py.
 
-FINDING THE OCS. `ocs_host: "auto"` (the shipped value) listens for the OCS's UDP
-beacon on `ocs_discovery_port` and dials the sender, falling back to
-`ocs_fallback_hosts` in turn when none is heard; a fixed IP is dialled and nothing
-else, as before. The beacon must carry this node's `team_id`. Once connected the
-node stays put until the link drops. The rules live in ocs_link.py; the
-OCS's half, and where it never broadcasts, in OCS/rx_bridge/beacon.py.
-
-TELEMETRY IT WILL NOT INVENT. If /crsd/pose or /crsd/fcu_status has gone stale,
-no heartbeat is sent at all. A fabricated position is worse than a gap: the gap is
-visible on the OCS as rising silence, while a made-up fix is indistinguishable
-from a real one and scores as though the boat were somewhere it is not. The same
-reasoning bans STATE_UNKNOWN -- it is the proto zero value, the OCS validator
-refuses it outright, and "the reporter forgot" and "the boat does not know" are
-not the same claim.
+TELEMETRY IT WILL NOT INVENT. If /crsd/pose or /crsd/fcu_status is stale, no
+heartbeat is sent: the gap shows on the OCS as rising silence, while a made-up
+fix scores as though the boat were somewhere it is not. STATE_UNKNOWN is banned
+for the same reason -- it is the proto zero value and the OCS validator refuses
+it.
 """
 import json
 import math
@@ -119,12 +103,10 @@ class OcsClient(Node):
         self._pose = StreamCache(p["pose_timeout_s"])
         self._att = StreamCache(p["attitude_timeout_s"])
         self._status = StreamCache(p["status_timeout_s"])
-        # `_autonomy` (/crsd/autonomy_active) is still subscribed because the
-        # ground station shows it, but it no longer decides STATE_AUTO -- the
-        # flight mode does. See _build().
+        # Recorded but unused: STATE_AUTO comes from the flight mode, see _build().
         self._autonomy = False
         self._kill = False
-        # The task a mission node claims to be attempting. See _current_task().
+        # The task a mission node claims to be attempting.
         self._task = TASK_NONE
         self._warned_tasks = set()
         self._auto_modes = {str(m).upper() for m in
@@ -135,10 +117,9 @@ class OcsClient(Node):
         self._t0 = time.time()
         self._skipped = 0
 
-        # Commands arrive on the link thread; rclpy publishers are not promised
-        # to be thread-safe, so they are parked here and published from the
-        # timer. Bounded: if nothing is draining, dropping the oldest advisory
-        # is better than growing without limit.
+        # Commands arrive on the link thread and rclpy publishers are not
+        # promised thread-safe, so they are parked here for the timer. Bounded:
+        # dropping the oldest advisory beats growing without limit.
         self._inbox = deque(maxlen=32)
         self._cmd_pub = self.create_publisher(String, "/crsd/ocs_command", 10)
 
@@ -154,19 +135,16 @@ class OcsClient(Node):
             self.create_subscription(Bool, "/crsd/autonomy_active",
                                      self._on_autonomy, 10)
             self.create_subscription(Bool, "/crsd/kill_active", self._on_kill, 10)
-            # TRANSIENT_LOCAL to match safe_passage_server: current_task is
-            # published on TRANSITIONS, not periodically, so a VOLATILE
-            # subscription that starts mid-mission would never learn the task
-            # was already under way and would report TASK_NONE through the
-            # whole attempt.
+            # TRANSIENT_LOCAL to match bt_runner's latched publisher:
+            # current_task is published on transitions only, so a VOLATILE
+            # subscriber starting mid-mission would report TASK_NONE throughout.
             self.create_subscription(
                 String, "/crsd/current_task", self._on_task,
                 QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                            durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
-        # .get with a default for the two discovery keys only so an older params
-        # file (no such keys, a fixed ocs_host) still starts; they are ignored
-        # unless ocs_host is "auto".
+        # .get so a params file without the discovery keys still starts; they
+        # matter only when ocs_host is "auto".
         self.link = OcsLink(
             str(p["ocs_host"]).strip(), int(p["ocs_port"]),
             on_command=self._inbox.append,
@@ -204,16 +182,12 @@ class OcsClient(Node):
         self._kill = bool(msg.data)
 
     def _on_task(self, msg):
-        """Accept a task token only if RoboCommand's schema has that name.
+        """Accept a task token only if RoboCommand's RxTask enum has that name.
 
-        A token the OCS cannot parse is not a cosmetic error: ParseDict rejects
-        the frame and the heartbeat never reaches RoboCommand at all. So an
-        unknown token costs EVERY heartbeat sent while it is set, not just the
-        field. Falling back to TASK_NONE keeps the position, speed and state
-        flowing, which is the part that cannot be reconstructed later.
-
-        Warned once per distinct bad token — a typo at 2 Hz would otherwise bury
-        the log in the same line.
+        ParseDict rejects the whole frame on an unknown enum name, so a bad
+        token would cost EVERY heartbeat while set, not just the field.
+        TASK_NONE keeps position, speed and state flowing. Warned once per
+        distinct bad token.
         """
         token, error = coerce_task(msg.data)
         if error and str(msg.data) not in self._warned_tasks:
@@ -226,18 +200,11 @@ class OcsClient(Node):
     def _current_task(self):
         """The task to report, or TASK_NONE if nothing is claiming one.
 
-        THE LIVENESS CHECK IS THE POINT. current_task is latched and published
-        only on transitions, so if the mission node dies mid-attempt the last
-        value sits here forever and this node keeps telling RoboCommand a task
-        is under way. The handbook makes the transition to TASK_NONE the
-        stand-down signal, so a frozen token is not a stale field — it is a
-        claim we are still trying, made on behalf of a process that no longer
-        exists.
-
-        A publisher count of zero says exactly that, and needs no keepalive from
-        the mission node. The normal path is still the mission server's own
-        `finally`, which publishes TASK_NONE on every exit; this covers the
-        abnormal one.
+        current_task is latched and published only on transitions, so if the
+        publisher dies mid-attempt the last token would sit here, still telling
+        RoboCommand a task is under way. A publisher count of zero catches that
+        with no keepalive; the normal stand-down is the publisher's own
+        TASK_NONE on exit.
         """
         if self._task != TASK_NONE and not self.count_publishers(
                 "/crsd/current_task"):
@@ -280,15 +247,10 @@ class OcsClient(Node):
             self._skipped += 1
             return None
 
-        # STATE_AUTO is decided by the SAME list telemetry_bridge gates commands
-        # on and pixhawk_led_status lights GREEN for (shared.autonomous_modes).
-        # Before this, three places decided "are we autonomous" independently and
-        # could disagree: the bridge could be refusing every setpoint while this
-        # reported STATE_AUTO to RoboCommand. Reporting a state we are not in is
-        # worse than reporting a boring one.
-        #
-        # `armed` stays in the AND: a disarmed boat is not driving itself
-        # whatever mode is selected.
+        # STATE_AUTO uses the same shared.autonomous_modes list telemetry_bridge
+        # gates commands on and pixhawk_led_status lights GREEN for, so the
+        # three cannot disagree. A disarmed boat is not driving itself whatever
+        # the mode.
         if self._kill:
             state = "STATE_KILLED"
         elif status.armed and str(status.mode).upper() in self._auto_modes:
@@ -300,21 +262,16 @@ class OcsClient(Node):
             "state": state,
             "position": {"latitude": pose.latitude, "longitude": pose.longitude},
             "spd_mps": pose.ground_speed,
-            # Passed through as-is, NaN and all. telemetry_bridge sets it NaN
-            # when GPS yaw is unresolved, and the OCS validator exists to catch
-            # exactly that -- scrubbing it here would hide a real fault.
+            # NaN passed through: telemetry_bridge sets it when GPS yaw is
+            # unresolved, and the OCS validator exists to catch exactly that.
             "heading_deg": pose.heading,
             "vehicle_type": "TYPE_USV",
-            # From /crsd/current_task, published by whichever mission action
-            # server is running. Validated against RoboCommand's own RxTask enum
-            # and defaulted to TASK_NONE — see _on_task and _current_task.
             "current_task": self._current_task(),
         }
 
         att = self._att.get(now)
         if att is not None:
-            # Attitude is radians in the autopilot's own NED axes; the report
-            # wants degrees.
+            # Radians in the autopilot's NED axes; the report wants degrees.
             hb["roll_deg"] = math.degrees(att.roll)
             hb["pitch_deg"] = math.degrees(att.pitch)
 
