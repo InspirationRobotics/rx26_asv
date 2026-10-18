@@ -7,7 +7,7 @@ the sim's Task 1 panel (`task1_panel`) with the simulator taken out: same radio 
 By default the boat runs the **whole-field planner** (`task1_global.xml`, Advanced and Disruptive tier) with `nav_mode off`:
 it drives its own plan with GUIDED setpoints and never calls Nav2, so the `asv` container needs no Nav2 for it. START picks
 the tier ([Advanced vs Disruptive](#advanced-vs-disruptive)). Saturday's pool test is `POOL=1`
-([Pool test](#pool-test-saturday)).
+([Pool test](#pool-test)).
 
 ## Safety, before anything else
 
@@ -103,7 +103,7 @@ drive the planner's paths.
 | `NAV_MODE` | not given: `off` with the global tree, `shadow` with a per-gate tree | `off` no Nav2 / `shadow` plan + draw, drive legacy / `on` drive the plans. With the global tree shadow/on only start the nav stack and draw its planner: it does not drive the boat (the banner says so) |
 | `PUBLISH` | false | `1` lets the tree send setpoints (the pilot still has to arm + GUIDED) |
 | `LAKE_TUNING` | none | a planner-tuning file, see [Planner tuning](#planner-tuning-overlay-lake_tuning) |
-| `POOL` | off | `1` = the pool test, see [Pool test](#pool-test-saturday) |
+| `POOL` | off | `1` = the pool test, see [Pool test](#pool-test) |
 | `PANEL_PORT`, `LAKE_LOGDIR`, `LAKE_SRC` | 8095, `~/.cache/crusader_lake`, `/root/robotx_ws/src/rx26_asv` | logs: `<LAKE_LOGDIR>/<name>.log` |
 | `LAKE_FEED_PORT` | 14556 | the udp port `panel_feed` sends to; change it only to run beside the sim's own panel |
 | `LAKE_RXL` | `replace` | see below |
@@ -206,11 +206,16 @@ Most keys are read once at start: change them by restarting the rig. With the gl
 orbit ones (`nav_orbit_radius_m`: the largest orbit, shrunk to fit the water round each blue buoy); the gate/fence keys are the
 per-gate tree's.
 
-## Pool test (Saturday)
+## Pool test
 
-A small outdoor pool, **camera only**: the LiDAR must feed nothing that plans.
+A small outdoor pool, **camera only**: the LiDAR sees walls everywhere and must feed nothing that plans.
 
     POOL=1 PUBLISH=1 LAKE_DATUM=<lat>,<lon> bash /root/robotx_ws/src/rx26_asv/crusader_sim/scripts/lake_rig_up.sh
+
+**Or from the GCS** (`:8090`, Task 1 tab, **rig** strip, no SSH): **pool (camera only)**, **setpoints ON**, START / RESTART /
+STOP RIG (~40 s). The datum is the boat's position (refused with no fresh pose) unless a field in progress is within 1 km,
+which keeps its own (**new datum here** overrides): pin the buoys with setpoints off, then RESTART RIG with setpoints ON and
+they come back. START / STOP RIG are refused while armed in GUIDED or AUTO; START RIG never starts a mission.
 
 `POOL=1` does four things, and the banner says `POOL: camera-only, LiDAR not used for planning`:
 - **`NAV_MODE` is forced off** (a `NAV_MODE=` you give is ignored and the banner says so): no Nav2, no STVL, no planner,
@@ -223,11 +228,32 @@ A small outdoor pool, **camera only**: the LiDAR must feed nothing that plans.
   tuned for a 3-5 m field in the sim, not for any particular pool: read the keys the banner lists.
 - The tree is the global tree unless you say otherwise.
 
-**The pool is not measured yet, so there is no pool profile.** When the satellite image (or a tape) gives the dimensions, a
+**There is no pool profile yet.** Measure the water with a tape (the ~15 x 6 m backyard pool is ~13 x 5 m usable); a
 profile belongs in `crusader_sim/config/tuning_profiles/pool_<name>.yaml` in `tight_3to5m.yaml`'s format, and the run is
 `POOL=1 LAKE_TUNING=<that file> ...`. Numbers in it must come from the pool, not from a guess. The `lidar_cluster_node` and
 the LiDAR driver still run (they are core's): only their use in tracks and plans is off. With `nav_mode off` the page's hazards
 and costmap layers are blank (no nav datum): the camera tracks, the fused passage, the field and the boat still draw.
+
+**Sizing.** An orbit of radius r needs ~2 x (r + 0.82 m `robot_radius`) across: the tight profile's 3 m needs ~7.6 m. 2 m
+touched the ENTRY buoy in the sim; in the ~6 m-wide pool the real boat flew the ENTRY orbit and transit at 1.7 m, 0.2-0.7 m off.
+- Autonomous points >= 2 m from the end walls, >= 1.5 m from the sides (hull + GPS slack); under 5 m wide, centreline only.
+- Gate: RED to starboard (3.3.2); buoys at +/-1.5 m leave ~0.4 m a side (1.5 - 0.82 - 0.3 buoy radius); too tight, widen it.
+- `nav_orbit_radius_m` changes live (GCS Tuning tab, `/bt_runner_node`, Planner) and takes at the next START (`bt.log`:
+  `nav_*: 1 changed since the previous goal`). A rig restart reloads the profile: read it before every START.
+
+**On the water.**
+- SB e-stop drops the relay in MANUAL **and** GUIDED (`docs/G1_bench_procedure.md`): watch its RC channel move in QGC. A pole
+  for the walls. The RC mode switch (ch8) is MANUAL / HOLD / GUIDED only: AUTO is set from QGC.
+- **GPS yaw valid** outdoors, heading = the bow. `GPS_RAW_INT.yaw = 65535` is normal under a roof but is also the UM982
+  baseline fault: still invalid after 5 min of open sky, MANUAL and camera only. No RTK (+/-1.3-1.5 m): PIN AT BOAT's
+  relative error mostly cancels, the absolute does not.
+- `WP_SPEED` 0.5 m/s suits the pool, not the lake. Within `LOIT_RADIUS` (2.0) of a hold point the boat drifts uncorrected:
+  expect that at a checkpoint hold (probe: GUIDED 1.5 m, pole it ~1 m).
+- Leaving GUIDED ends the mission (`IsAutonomous`; `RESULT 4 ... the pilot took control`). With setpoints off the boat never
+  reaches the ENTRY orbit, so no checkpoint is asked: such a run tests START, the drawn plan, ABORT, the dead-man.
+- Camera in daylight only: its daytime exposure (-3 EV, 8 ms cap) is blind after dusk.
+- Preflight `no /crsd/fcu_status within 8 s` is often a false alarm on a busy Jetson: if the panel shows FCU fresh, ignore it.
+- The rig's logs and layouts live inside `asv`: after each run, Jetson host: `docker cp asv:/root/.cache/crusader_lake <dest>`.
 
 ## Replaying the lake layout in Gazebo ("sim-real")
 
