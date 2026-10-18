@@ -2,13 +2,13 @@
 ROS-side parameters.
 
 Consumed by node code for declaration defaults, so a code default can't drift
-from the file the launch system loads. Nodes still receive their live values
-through normal ROS parameter machinery — this loader only supplies defaults.
+from the file the launch system loads. Nodes still receive live values through
+normal ROS parameter machinery; this loader only supplies defaults.
 
 WHERE THE FILE LIVES, AND WHY THIS IS NOT PATH ARITHMETIC
 ---------------------------------------------------------
-The params file ships in `crusader_bringup`'s share dir, next to the launch files
-that pass it to nodes. Resolution order, first hit wins:
+The params file ships in `crusader_bringup`'s share dir, next to the launch
+files. Resolution order, first hit wins:
 
   1. $CRUSADER_PARAMS                     — explicit override (bench, CI, a
                                             second boat, a one-off experiment)
@@ -16,19 +16,16 @@ that pass it to nodes. Resolution order, first hit wins:
   3. <repo>/crusader_bringup/config/      — the source tree, for off-boat tooling
                                             that has no ROS workspace sourced
 
-Do NOT "simplify" this into `Path(__file__).parents[N]`. In the INSTALLED layout
-this module lives in `install/crusader_common/lib/python3.10/site-packages/` while
-the config lives in `install/crusader_bringup/share/` — different packages, and
-lib/ and share/ are siblings. No fixed number of `parents` reaches it from here,
-which is exactly the bug that killed every node at rclpy.init() on 2026-07-29.
-Ask ament where the package is; keep the relative path only as a source-tree
-fallback.
+Do NOT "simplify" this into `Path(__file__).parents[N]`: in the INSTALLED layout
+this module lives in `install/crusader_common/lib/python3.10/site-packages/` and
+the config in `install/crusader_bringup/share/`, different packages with lib/
+and share/ as siblings, so no fixed number of `parents` reaches it. Ask ament
+where the package is; keep the relative path only as a source-tree fallback.
 
-Note the direction: crusader_common looks up crusader_bringup by NAME at runtime,
-and has no build dependency on it. That is deliberate — bringup depends on the
-code packages, never the reverse. The cost is that a workspace with the code but
-no bringup installed has no params, which `load()` reports loudly rather than
-falling back to invented defaults.
+crusader_common looks up crusader_bringup by NAME at runtime and has no build
+dependency on it (bringup depends on the code packages, never the reverse). A
+workspace with the code but no bringup has no params, which `load()` reports
+loudly rather than falling back to invented defaults.
 """
 import hashlib
 import os
@@ -84,8 +81,8 @@ def load(path=None) -> dict:
             with open(p, encoding="utf-8") as f:
                 _cache[key] = yaml.safe_load(f)
         except FileNotFoundError as e:
-            # The bare errno message names one path and gives no hint which
-            # layout was assumed — that cost a boat-side debugging session.
+            # The bare errno message names one path, with no hint which layout
+            # was assumed.
             raise FileNotFoundError(
                 f"{PARAMS_FILENAME} not found at {p}.\n"
                 f"  override:         ${ENV_OVERRIDE} "
@@ -110,14 +107,14 @@ def config_hash(path=None):
 
 
 def shared_params(path=None) -> dict:
-    """The `shared` section: canonical values for anything duplicated across
-    node sections.
+    """The `shared` section: canonical values for anything duplicated across node
+    sections.
 
-    Not a real node — rcl forbids YAML aliases in a params file, so values that
-    must stay equal are written out literally per-node and pinned to this
-    section by tools/scripts/check_config.py. The section carries a
-    `ros__parameters` level only because rcl rejects a top-level scalar; no node
-    is named `shared`, so nothing ever loads it.
+    Not a real node: rcl forbids YAML aliases in a params file, so values that
+    must stay equal are written out per-node and pinned to this section by
+    tools/scripts/check_config.py. It has a `ros__parameters` level only because
+    rcl rejects a top-level scalar; no node is named `shared`, so nothing loads
+    it.
     """
     return node_params("shared", path)
 

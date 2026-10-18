@@ -1,40 +1,33 @@
 // fire_math.hpp — the fixed-nozzle shot: hold a range and a heading, wait until
 // the boat is still, fire. Every number in it, and nothing else.
 //
-// Same contract as nav_math.hpp and dock_math.hpp: header-only, stdlib only, no
-// ROS, no BehaviorTree.CPP, so it runs on a laptop in a second:
+// Header-only, stdlib only, no ROS, no BehaviorTree.CPP (same contract as
+// nav_math.hpp), so it runs on a laptop in a second:
 //
 //     g++ -std=c++17 -O2 -I include -o t test/test_fire_math.cpp && ./t
 //
 // WHY A NOZZLE NEEDS ITS OWN MATHS. The Task 3 nozzle is fixed (~45 deg, no pan,
-// no tilt), so the boat IS the aim. Its distance from the dock sets how high the
+// no tilt), so the boat IS the aim: its distance from the dock sets how high the
 // water lands and its heading sets how far left or right. tools/squirt_cal found
-// the range that hits a window by firing at it; this file turns that number into
-// "drive this far, point this way, and fire when you are still".
+// the range that hits a window; this file turns it into "drive this far, point
+// this way, and fire when you are still".
 //
-//   the wall      /crsd/wall_range, filtered: median over a short window, and
-//                 BLANKED while water is in the air (the spray returns LiDAR
-//                 points short of the wall).
-//   the aim       heading so the stream's line passes through the window, from
-//                 the boat's offset in the slip (LiDAR fingers), the window's
-//                 bearing (camera), or an assumed centreline.
-//   the keep      signed speed toward the firing range, square to the wall
-//                 until close, then on the aim heading. A BANDED law, not a
-//                 smooth one: ArduRover's speed loop is untuned below ~0.2 m/s,
-//                 so a small command either does nothing or overshoots. Inside
-//                 the band: zero. Outside: at least v_min.
-//   steady        the hull's roll and pitch, and no thrust recently: a degree of
-//                 pitch moves the hit ~2-3 cm.
+//   the wall      /crsd/wall_range, median-filtered and BLANKED while water is in
+//                 the air (spray returns LiDAR points short of the wall).
+//   the aim       heading so the stream's line passes through the window.
+//   the keep      signed speed toward the firing range. A BANDED law: ArduRover's
+//                 speed loop is untuned below ~0.2 m/s, so a small command does
+//                 nothing or overshoots; zero inside the band, at least v_min outside.
+//   steady        the hull's roll and pitch, and no thrust recently (a degree of
+//                 pitch moves the hit ~2-3 cm).
 //   the gate      all of the above held for hold_s, then one burst.
 //
-// TWO WAYS TO HOLD THE SPOT. The first (solveAim / stationKeep) is for GUIDED
-// heading + speed, which cannot strafe: left/right aim is by TURNING. The
-// second (the strafe keep, below) is for MANUAL on this OmniX hull, which can:
-// the bow stays square to the face, the boat SLIDES until the window is on the
-// nozzle's line, and range is the LiDAR's. Its left/right and its square-up
-// both come from the CAMERA (DockObservation window x,y,z and the face plane),
-// not from the LiDAR's wall angle: the camera sees the window itself, the
-// LiDAR only a wall that may not be flat.
+// TWO WAYS TO HOLD THE SPOT. solveAim / stationKeep is for GUIDED heading + speed,
+// which cannot strafe: left/right aim is by TURNING. The strafe keep (below) is for
+// MANUAL on this OmniX hull: the bow stays square to the face and the boat SLIDES
+// until the window is on the nozzle's line, with left/right and square-up from the
+// CAMERA (it sees the window itself, the LiDAR only a wall that may not be flat)
+// and range from the LiDAR.
 //
 // CONVENTIONS (the same as dock_math):
 //
@@ -98,11 +91,10 @@ struct WallSample
   double heading_deg = kNaN;  // the boat's compass heading when it was taken
 };
 
-// The wall as the shot sees it: medians over the last window_s of VALID
-// samples that arrived outside the blanking interval. A burst blanks the
-// filter from its start until the water has landed (BurstBook sets it), because
-// the stream returns LiDAR points short of the wall and a median of those would
-// walk the boat forward into its own spray.
+// The wall as the shot sees it: medians over the last window_s of VALID samples
+// outside the blanking interval. A burst blanks the filter from its start until the
+// water has landed (BurstBook sets it): the stream returns LiDAR points short of the
+// wall and would walk the boat forward into its own spray.
 class WallFilter
 {
 public:
@@ -130,10 +122,9 @@ public:
   double range(double now) const {return pick(now, [](const WallSample & s) {return s.range_m;});}
   double lat(double now) const {return pick(now, [](const WallSample & s) {return s.lat_m;});}
 
-  // Compass bearing of the wall's inward normal, from each sample's own heading
-  // (heading - angle), so a turn in progress does not smear it. Median of the
-  // wrapped offsets from the newest, then re-anchored: a circular median good
-  // for the few degrees a wall normal wanders.
+  // Compass bearing of the wall's inward normal from each sample's own heading
+  // (heading - angle), so a turn in progress does not smear it: a circular median
+  // (offsets from the newest, re-anchored).
   double inward_deg(double now) const
   {
     std::vector<double> v;
@@ -224,14 +215,12 @@ struct Aim
 
 // Where to point and how far to stand off.
 //
-// The nozzle is on the boat's centreline, so the stream follows the centreline.
-// Turned LEFT of the wall normal by psi, that line meets the wall r*tan(psi)
-// left of the body origin's foot. To put it on a window `ahead_left` metres
-// left of the foot: psi = atan(ahead_left / r).
-//
-// And the range: the calibration was shot roughly square on, so the stream's
-// horizontal run was ~r_cal. Turned by psi the run is r/cos(psi); keeping it
-// the same means standing at r_cal*cos(psi). Millimetres at 4 deg, but free.
+// The nozzle is on the boat's centreline, so the stream follows it. Turned LEFT of
+// the wall normal by psi, that line meets the wall r*tan(psi) left of the body
+// origin's foot; to put it on a window `ahead_left` metres left of the foot,
+// psi = atan(ahead_left / r). The calibration was shot roughly square on (horizontal
+// run ~r_cal); turned by psi the run is r/cos(psi), so keep it by standing at
+// r_cal*cos(psi).
 //
 //   fingers      ahead_left = window_lat - lat_now   (the LiDAR's offset in
 //                the slip: the same number the calibration logged)
@@ -287,13 +276,11 @@ inline double planeDistance(double be, double bn, double pe, double pn, double o
   return (be - pe) * oe + (bn - pn) * on;
 }
 
-// Do the LiDAR and the camera agree on how far the dock is? The wall fit's
-// likeliest mistake at a real dock is to lock onto the slip FINGER TIPS - four
-// collinear 0.5 m faces, nearer and denser than the deck edge behind them -
-// and read ~finger_len (2 m) short; the keep would then stand 2 m too far
-// out, or, locked on something behind the dock, drive into it. The camera's
-// dock book places the faces independently. No camera range (the pool, a
-// dead detector) = no check: NaN agrees. tol <= 0 turns it off.
+// Do the LiDAR and the camera agree on how far the dock is? The wall fit's likeliest
+// mistake is to lock onto the slip FINGER TIPS (nearer and denser than the deck edge)
+// and read ~finger_len (2 m) short, or onto something behind the dock; the camera's
+// dock book places the faces independently. No camera range = no check (NaN agrees).
+// tol <= 0 turns it off.
 inline bool rangesAgree(double lidar_m, double camera_m, double tol_m)
 {
   if (!(tol_m > 0.0) || !std::isfinite(camera_m)) {return true;}
@@ -321,13 +308,10 @@ struct KeepCmd
   std::string why;
 };
 
-// Which heading the keep holds. SQUARE to the wall (its inward normal) while
-// more than square_m from the firing range, the aim heading inside that.
-// Driving the whole approach on the aim heading walks the boat sideways - 4 m
-// at 2-4 degrees is 15-25 cm, more than half a window - which breaks the
-// centreline assumption and, from far out, the fingers are not in view to
-// aim with at all. Square first keeps the boat on the line it started on.
-// NaN = nothing to hold (no wall bearing, or in close with no aim).
+// Which heading the keep holds: SQUARE to the wall (its inward normal) while more
+// than square_m from the firing range, the aim heading inside that. Driving the whole
+// approach on the aim heading walks the boat sideways (4 m at 2-4 degrees is 15-25 cm,
+// over half a window) and, from far out, the fingers are not in view to aim with.
 inline double keepHeading(
   const Aim & a, double inward_deg, double range_m, double fire_range_m, double square_m)
 {
@@ -580,9 +564,9 @@ struct StrafeParams
   double deadband_range_m = 0.05;
   double deadband_lat_m = 0.04;
   // Square matters little once the aim is by strafing: the window's y in the
-  // BODY frame is where the stream lands whatever the heading, and 3 deg off
-  // square changes the stream's run by ~4 mm. A tight yaw band only makes the
-  // camera's noise into thrust, and thrust into rocking.
+  // BODY frame is where the stream lands whatever the heading (3 deg off square
+  // changes the run by ~4 mm). A tight yaw band only turns camera noise into
+  // thrust, and thrust into rocking.
   double deadband_yaw_deg = 3.0;
   // dp_hold's tune on this hull: 90 us/m forward and lateral, 4 us/deg yaw with
   // 3 us per deg/s of damping, 120 us cap. The D terms on range and lateral are
@@ -590,10 +574,9 @@ struct StrafeParams
   double kp_fwd = 90.0, kd_fwd = 60.0;     // us per m, us per m/s
   double kp_lat = 90.0, kd_lat = 30.0;
   double kp_yaw = 4.0, kd_yaw = 3.0;       // us per deg, us per deg/s
-  // I on range and lateral: a steady current or wind needs a steady push, and
-  // P alone only gives one at an error - 0.65 m of it for 12 cm/s (the sim).
-  // Integrated only when STALLED - within i_zone_m and nearly still: held off,
-  // not arriving - so the approach does not wind it up into an overshoot.
+  // I on range and lateral: a steady current needs a steady push, and P alone
+  // only gives one at an error. Integrated only when STALLED (within i_zone_m
+  // and nearly still) so the approach does not wind it up into an overshoot.
   // Capped.
   double ki_fwd = 20.0, ki_lat = 30.0;     // us per m.s
   double i_max_us = 80.0;
@@ -634,13 +617,12 @@ struct StrafeState
   double i_fwd = 0.0, i_lat = 0.0;    // us; i_lat in the lateral stick's sense (+ starboard)
 };
 
-// One axis: nothing inside the band; outside it P + D, with the thruster
-// deadband COMPENSATED - min_us is ADDED to every non-zero command, not used as
-// a floor. Blue Robotics ESCs do nothing within +-25 us of neutral, so as a
-// floor a 0.5 m error still asked for next to no thrust, and 5 cm/s of current
-// held the boat there (the sim's fire_current). Capped at max_us. COASTING:
-// already moving toward the target fast enough to arrive within coast_s, it
-// pushes no more - a kick there is what makes it hunt - unless D says brake.
+// One axis: nothing inside the band; outside it P + D, with the thruster deadband
+// COMPENSATED: min_us is ADDED to every non-zero command, not used as a floor (Blue
+// Robotics ESCs do nothing within +-25 us of neutral, so a floor left a 0.5 m error
+// with next to no thrust). Capped at max_us. COASTING: already moving toward the
+// target fast enough to arrive within coast_s, it pushes no more (a kick there makes
+// it hunt) unless D says brake.
 inline double axisLaw(double err, double derr, double kp, double kd, double db,
   double min_us, double max_us, double coast_s = 1.5)
 {
@@ -703,9 +685,9 @@ inline StrafeCmd strafeKeep(
       else {c.why = "moving in";}
     }
   }
-  // Slew-limit only GROWING thrust. Less thrust is always allowed at once -
-  // above all at the minimum range, where a ramp down is thrust toward the
-  // dock after the floor said none.
+  // Slew-limit only GROWING thrust. Less is allowed at once, above all at the
+  // minimum range, where a ramp down is thrust toward the dock after the floor
+  // said none.
   const double step = std::max(0.0, p.slew_us_s * dt);
   auto slew = [step](double w, double pr) {
       double v;

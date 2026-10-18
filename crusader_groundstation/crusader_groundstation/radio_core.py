@@ -3,22 +3,19 @@
 Plain Python, like proximity_core and rxl_codec, so tools/bench/bench_radio.py
 can drive it on a laptop with its own clock.
 
-WHAT IT KEEPS. Every RadioFrame rxl_link_node publishes -- what the boat put on
-the air and what it heard -- in a bounded ring with log_buffer's cursor
-contract, plus two summaries the page cannot work out from a partial
-scroll-back:
+WHAT IT KEEPS. Every RadioFrame rxl_link_node publishes (what the boat put on
+the air and what it heard) in a bounded ring with log_buffer's cursor contract,
+plus two summaries the page cannot work out from a partial scroll-back:
 
   * per system: when it was last heard, and how many frames went each way;
   * per PERIODIC message: how often it is arriving, against the rate its sender
     is meant to send it at.
 
-WHY TWO PERIODIC MESSAGES AND NOT ONE. The aircraft may be speaking either of
-two formats -- Ekko's telemetry_bridge sends LIGHTS (TUNNEL 0x8005, the v3 whole-
-map heartbeat) at 1 Hz, while the RXL design in rxl_codec has it send
-SAFE_PASSAGE at 0.2 Hz. Scoring
-both means the tab distinguishes "the aircraft is quiet" from "the aircraft is
-talking, in the other format", which is a difference that has already cost this
-team an afternoon.
+WHY TWO PERIODIC MESSAGES. The aircraft may speak either of two formats: Ekko's
+telemetry_bridge sends LIGHTS (TUNNEL 0x8005, the v3 whole-map heartbeat) at
+1 Hz, while the RXL design in rxl_codec has it send SAFE_PASSAGE at 0.2 Hz.
+Scoring both lets the tab tell "the aircraft is quiet" from "the aircraft is
+talking, in the other format".
 
 THE RATES ARE ESTIMATES, AND THE TAB SAYS SO. Neither format carries a sequence
 number, so a lost packet cannot be counted; only a rate below the expected one
@@ -56,9 +53,8 @@ def name_of(sysid):
 class RadioLog:
     """A bounded, thread-safe record of the radio.
 
-    Written from a ROS callback and read from HTTP threads, so every access
-    takes the lock. Bounded for the reason LogBuffer is: a chatty system on the
-    mesh must not become the reason the Jetson runs out of memory.
+    Written from a ROS callback and read from HTTP threads, so every access takes
+    the lock. Bounded as LogBuffer is.
     """
 
     def __init__(self, capacity=1000, clock=time.monotonic, wall=time.time):

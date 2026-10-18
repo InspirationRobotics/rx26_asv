@@ -1,38 +1,29 @@
 """param_client — read and write another node's parameters, from the page.
 
-The Tuning tab exists because the knobs that matter are discovered on the
-water, and the alternative is an SSH session on a laptop that is also holding
-the browser the operator is already looking at. `ros2 param set` is the same
-call this makes; the difference is that it can be made from the boat's own
-dashboard, with the range and the description in front of you.
+The Tuning tab exists because the knobs that matter are discovered on the water;
+this is `ros2 param set` made from the boat's own dashboard, with the range and
+description in front of you.
 
 NOTHING HERE KNOWS WHAT ANY PARAMETER IS. It asks the node. Every Crusader node
-declares its parameters through crusader_common.param_utils.declare, which puts
-the description, the read_only posture and the numeric range into the
-ParameterDescriptor — so the descriptor already carries everything the page
-needs to render a control, and a second copy of that table in this package
-would be a copy that goes stale the first time somebody adds a knob. A
-parameter appears in the GUI because the node declares it, or not at all.
+declares parameters through crusader_common.param_utils.declare, which puts the
+description, read_only posture and numeric range into the ParameterDescriptor,
+so a second table here would go stale. A parameter appears in the GUI because
+the node declares it, or not at all.
 
-READ-ONLY PARAMETERS ARE LISTED, NOT HIDDEN. A knob you cannot turn from here
-and cannot see from here are different things: the first is a design decision
-with a reason (the camera extrinsic invalidates every target already on the
-map), the second is an operator concluding the parameter does not exist and
-going looking for it in the wrong file. They are rendered greyed out with the
-posture said out loud.
+READ-ONLY PARAMETERS ARE LISTED, NOT HIDDEN, greyed out with the posture said
+out loud: "cannot turn it from here" is a design decision with a reason (the
+camera extrinsic invalidates every target on the map), while "cannot see it"
+reads as the parameter not existing.
 
 WHAT IT CANNOT DO: persist anything. A set lands in the running node and dies
-with it, because crusader_params.yaml is the source of truth and it is a
-commented document that a browser POST has no business rewriting — the comments
-are most of its value, and a machine-written YAML would lose all of them. So
-the page shows the live value against the YAML default and marks the drift,
-which turns "it worked on the water" into a diff somebody can type into the
-file on purpose.
+with it, because crusader_params.yaml is the commented source of truth that a
+browser POST must not rewrite. The page shows the live value against the YAML
+default and marks the drift.
 
 THREADING. Called from the HTTP thread while the node spins on the main one.
-Every call is `call_async` plus a wait on the future's done-callback — never
-spin_until_future_complete, which would be a second executor spinning the same
-node and is the classic way to wedge a ROS web bridge.
+Every call is `call_async` plus a wait on the future's done-callback, never
+spin_until_future_complete (a second executor spinning the same node wedges a
+ROS web bridge).
 """
 import threading
 
@@ -44,23 +35,20 @@ _DESCRIBE = "describe_parameters"
 _GET = "get_parameters"
 _SET = "set_parameters"
 
-# rcl_interfaces/msg/ParameterType, by value. Named here rather than imported
-# so the pure half of this module can be read and tested off-boat, and because
-# the mapping is a wire constant that is not going to move.
+# rcl_interfaces/msg/ParameterType, by value: named here so the pure half of this
+# module reads and tests off-boat.
 TYPE_NAMES = {
     0: "not_set", 1: "bool", 2: "integer", 3: "double", 4: "string",
     5: "byte_array", 6: "bool_array", 7: "integer_array", 8: "double_array",
     9: "string_array",
 }
-# The types the page renders as an editable control. Everything else is shown
-# read-only: an array editor is a different piece of UI, and guessing a
-# separator for a list of class labels is how you end up with one label called
-# "red_buoy green_buoy".
+# The types the page renders as an editable control. The rest are read-only: an
+# array editor is different UI, and guessing a list separator makes one label
+# called "red_buoy green_buoy".
 SCALAR_TYPES = (1, 2, 3, 4)
 
-# Node names that are never worth offering. The ros2 CLI spawns a daemon and a
-# short-lived node per invocation, and both would flicker in and out of a
-# selector that the operator is trying to choose from.
+# Node names never worth offering: the ros2 CLI's daemon and per-invocation nodes
+# would flicker in and out of the selector.
 _HIDDEN_PREFIXES = ("_", "/_", "/ros2cli", "/launch_ros")
 
 
@@ -81,10 +69,9 @@ def visible_nodes(names):
 def range_of(descriptor):
     """(lo, hi) from a ParameterDescriptor, or (None, None).
 
-    A descriptor carries floating_point_range and integer_range as arrays that
-    are empty when unset, so both are checked rather than assuming which one a
-    numeric parameter used — param_utils picks by the DEFAULT's Python type,
-    and an int-valued knob declared from a float default is a real thing.
+    floating_point_range and integer_range are empty arrays when unset, so both
+    are checked: param_utils picks by the DEFAULT's Python type, and an int-valued
+    knob declared from a float default is real.
     """
     for field in ("floating_point_range", "integer_range"):
         rng = getattr(descriptor, field, None)
@@ -120,12 +107,9 @@ def value_to_python(pv):
 def python_to_value(value, type_id):
     """A Python value -> ParameterValue of the parameter's DECLARED type.
 
-    The type comes from the descriptor, never from the incoming value: JSON has
-    one number type, so a browser sending 5 for a double parameter arrives as
-    an int and would be built as PARAMETER_INTEGER. rcl then rejects the set as
-    a type change, and the operator sees "5 is not valid" for a value that is
-    obviously valid. Coercing to the declared type is what makes the round trip
-    work at all.
+    The type comes from the descriptor, never the incoming value: JSON has one
+    number type, so a browser sending 5 for a double arrives as an int, would be
+    built as PARAMETER_INTEGER, and rcl would reject it as a type change.
 
     Raises:
       ValueError: the value cannot be expressed in the declared type, or the
@@ -165,8 +149,7 @@ class ParamBridge:
     Args:
       node: the ground station's own rclpy Node — clients are created on it.
       timeout_s: how long any one service call may take before it is reported
-        as unreachable. Short on purpose: a browser is waiting on it, and a
-        node that has died mid-call must not hold the request open.
+        as unreachable. Short on purpose: a browser is waiting on it.
     """
 
     def __init__(self, node, timeout_s=3.0):
@@ -180,11 +163,10 @@ class ParamBridge:
     def _client(self, node_name, service, srv_type):
         """Cached client for one node's one service, created on first use.
 
-        Created lazily rather than for every node in the graph at startup: a
-        client per service per node is four graph entities each, and most of
-        them would never be called. The lock is because two browser tabs can
-        open the same node's Tuning panel at the same instant, and two threads
-        creating the same client would leave one of them orphaned on the node.
+        Lazy because a client per service per node is four graph entities each
+        and most would never be called. The lock is because two browser tabs can
+        open the same node's panel at once, and two threads creating the same
+        client would orphan one.
         """
         key = (node_name, service)
         with self._lock:
@@ -230,12 +212,11 @@ class ParamBridge:
             the page renders as "not in the YAML" rather than as agreement.
 
         Returns:
-          list[dict] ready for JSON — see the module docstring for why every
-          field in it comes from the node rather than from this package.
+          list[dict] ready for JSON; every field comes from the node, not this
+          package.
 
-        Three calls, not one: names, then descriptors, then values. The names
-        call is what makes this generic, and the other two are batched over all
-        of them, so a node with thirty parameters still costs three round trips.
+        Three calls, not one: names, then descriptors, then values (the latter two
+        batched over all names), so thirty parameters still cost three round trips.
         """
         from rcl_interfaces.srv import (DescribeParameters, GetParameters,
                                         ListParameters)
@@ -267,9 +248,8 @@ class ParamBridge:
                 "reason": _not_editable_reason(desc),
                 "description": desc.description,
                 "lo": lo, "hi": hi,
-                # Straight off the descriptor, so a node that grows a new mode
-                # offers it in the dropdown the moment it is running — nothing
-                # in this package has to learn the list.
+                # Straight off the descriptor, so a new mode shows in the
+                # dropdown the moment the node runs.
                 "choices": list(param_utils.choices_of(desc)),
             })
         return out
@@ -277,17 +257,12 @@ class ParamBridge:
     def set(self, node_name, values):
         """Apply {name: value} to a running node. Returns [{name, ok, reason}].
 
-        Types come from a fresh describe_parameters rather than from the page:
-        the page holds whatever it last polled, and a node restarted since then
-        may have come back with a different posture. Asking again costs one
-        round trip and removes the whole class of "the GUI thought it was a
-        double" failure.
+        Types come from a fresh describe_parameters, not the page: a node
+        restarted since the last poll may have a different posture.
 
-        The node's own on-set callback still validates the range and still gets
-        to refuse — this does not pre-empt it, and a rejection comes back with
-        the node's reason rather than a generic failure. Two validators
-        disagreeing would be worse than one, so the page's inputs are hints and
-        THIS is not the authority either.
+        The node's own on-set callback still validates the range and may refuse;
+        its reason comes back. The page's inputs are hints and neither is THIS
+        the authority.
         """
         from rcl_interfaces.msg import Parameter
         from rcl_interfaces.srv import DescribeParameters, SetParameters
@@ -326,8 +301,8 @@ class ParamBridge:
 def _not_editable_reason(desc):
     """Why the page will not offer a control for this parameter, or "".
 
-    Phrased as what to do instead. "read only" on its own reads as a bug in the
-    dashboard; naming the file that owns the value does not.
+    Phrased as what to do instead: naming the file that owns the value does not
+    read as a dashboard bug.
     """
     if desc.read_only:
         return ("[RO] structural — change it in crusader_params.yaml and "

@@ -1,34 +1,28 @@
 """mission_spec — the run's behaviour tree, as PLAIN DATA.
 
-Stdlib only. No py_trees, no BehaviorTree.CPP, no rclpy, no ROS. That is the
-whole point of this module and it is a deliberate bet, so it is worth stating
-why rather than leaving it to be discovered:
+Stdlib only: no py_trees, no BehaviorTree.CPP, no rclpy. A deliberate bet.
 
 THE TREE'S SHAPE IS A TEAM DECISION; THE LIBRARY THAT TICKS IT IS AN
 IMPLEMENTATION DETAIL. Which missions run, in what order, and what happens when
-one of them fails is the thing the team argues about at a whiteboard and the
-thing that must be reviewable before anyone installs anything. Written straight
-against a library, that review is gated on a dependency, and switching libraries
-later means retyping the tree and re-reviewing it.
+one fails must be reviewable before anyone installs anything, and switching
+libraries later must not mean retyping the tree.
 
-Written as data, three things fall out:
+Written as data:
 
-  * `print_tree.py --ascii` and `--xml` render it TODAY, on a laptop, with
-    nothing installed;
-  * the BehaviorTree.CPP XML is generated, not hand-maintained, so it cannot
-    drift from what actually runs;
-  * choosing py_trees or BehaviorTree.CPP becomes ~100 lines of renderer, not a
-    rewrite. The decision stays reversible until there is evidence to settle it.
+  * `print_tree.py --ascii` and `--xml` render it on a laptop with nothing
+    installed;
+  * the BehaviorTree.CPP XML is generated, so it cannot drift from what runs;
+  * choosing py_trees or BehaviorTree.CPP is ~100 lines of renderer, not a
+    rewrite.
 
 THE ONE STRUCTURAL RULE, and it is a scoring rule rather than a style one:
 **scoring is per task, so a failed Task 1 must never cost Task 3.** Every mission
-therefore sits under a decorator that turns FAILURE into "carry on". `check()`
-enforces that — it is the difference between a bad run and a lost run.
+sits under a decorator that turns FAILURE into "carry on", and `check()`
+enforces that.
 """
 
-# Node kinds. Deliberately a small set: everything here maps onto BOTH
-# BehaviorTree.CPP and py_trees without a per-library special case. A kind that
-# only one library has is a kind that locks in the choice.
+# Node kinds: a small set that maps onto BOTH BehaviorTree.CPP and py_trees
+# without a per-library special case.
 SEQUENCE = "Sequence"          # all children in order; first FAILURE fails
 FALLBACK = "Fallback"          # first SUCCESS wins (py_trees calls it Selector)
 FORCE_SUCCESS = "ForceSuccess"  # decorator: FAILURE -> SUCCESS, carry on
@@ -105,19 +99,18 @@ def build(missions=None):
       |-- carry_on( retry_x2( SafePassage ) )
       |-- carry_on( retry_x1( CoordinatedLogistics ) )
 
-    The guard is a CONDITION rather than something the missions each check,
-    because a tree that starts ticking missions while the pilot has the boat is
-    a tree that fights the pilot. (Each mission ALSO checks the mode itself —
-    see safe_passage_server — because the pilot can take the boat back
-    mid-mission, which no guard at the top can catch.)
+    The guard is a CONDITION rather than something each mission checks, because a
+    tree that ticks missions while the pilot has the boat fights the pilot. (Each
+    mission ALSO checks the mode itself, see safe_passage_server, since the pilot
+    can take the boat back mid-mission.)
 
     Retry counts differ on purpose: Safe Passage is cheap to re-attempt from the
-    same approach point, Coordinated Logistics has consumed a tin by the time it
-    fails and a blind retry can make things worse.
+    same approach point, while Coordinated Logistics has consumed a tin by the
+    time it fails and a blind retry can make things worse.
 
-    Task 2 is Graey's; the USV's Task 2 role (localize the GREEN indicator for
-    the UUV) is not a mission of its own yet and is deliberately absent rather
-    than present as an empty leaf that would render as capability we do not have.
+    Task 2 is Graey's; the USV's Task 2 role (localize the GREEN indicator for the
+    UUV) is deliberately absent rather than an empty leaf that renders as
+    capability we do not have.
     """
     catalogue = {
         "SafePassage": (
@@ -151,9 +144,8 @@ def walk(node, depth=0, parent=None):
 def check(root):
     """Structural problems, as a list of strings. Empty list = the tree is sane.
 
-    Runs with nothing installed and no boat, which is the point: every one of
-    these is a defect that otherwise shows up as a mission that silently never
-    runs, on the water, once.
+    Runs with nothing installed and no boat: each defect would otherwise show up
+    as a mission that silently never runs, on the water.
     """
     problems = []
     seen_actions = {}
@@ -238,15 +230,14 @@ def simulate(root, leaf_results, trace=None):
     Returns the root's result.
 
     THIS IS NOT A BEHAVIOUR TREE ENGINE, and must not grow into one. It answers
-    exactly one question, which is the one worth answering before a run:
+    one question worth answering before a run:
 
         if SafePassage fails, does the rest of the run still happen?
 
-    Scoring is per task, so the answer has to be yes, and finding out on the
-    water that it was no costs every task after the failure. py_trees and
-    BehaviorTree.CPP both implement these semantics; this reproduces them for
-    the four node kinds the tree actually uses, so the question can be answered
-    now rather than after the library choice is settled.
+    Scoring is per task, so the answer must be yes. py_trees and BehaviorTree.CPP
+    both implement these semantics; this reproduces them for the four node kinds
+    the tree uses, so the question can be answered before the library choice is
+    settled.
     """
     def tick(node, depth):
         if node.kind in LEAVES:

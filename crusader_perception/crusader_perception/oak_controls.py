@@ -1,15 +1,11 @@
 """oak_controls — every tunable OAK-D camera setting, in one table.
 
-WHY A TABLE. These settings reach the device through fifteen different depthai
-setters, and the obvious shape — an if-branch per setting, in the node — puts
-the name of each control in four places: the parameter spec, the YAML, the
-apply path and the log line. Adding a knob then means finding all four, and
-forgetting one is a control that reads back a value it never applied. Here a
-control is one row, and the parameter spec is GENERATED from it, so the four
-cannot disagree.
+WHY A TABLE. These settings reach the device through fifteen different depthai setters; an
+if-branch per setting in the node puts each control's name in four places (parameter spec,
+YAML, apply path, log line), and forgetting one gives a control that reads back a value it
+never applied. Here a control is one row and the parameter spec is GENERATED from it.
 
-RANGES ARE DEPTHAI'S OWN, read off CameraControl's docstrings on the boat
-(depthai 2.32.0.0), not guessed:
+RANGES ARE DEPTHAI'S OWN, read off CameraControl's docstrings on the boat (depthai 2.32.0.0):
 
     brightness/contrast/saturation  -10..10, default 0
     sharpness/luma/chroma denoise     0..4,  default 1
@@ -18,17 +14,14 @@ RANGES ARE DEPTHAI'S OWN, read off CameraControl's docstrings on the boat
     white balance                 1000..12000 K
 
 WHAT IS NOT HERE. Focus: the OAK-D LR's M12 lenses are fixed, so every
-setManualFocus/setAutoFocus* call is a no-op that would read as a knob that
-does nothing. Effect and scene modes: they change pixels in ways a detector was
-not trained on, and "why did the model get worse" should not have a sepia
-filter as a candidate answer.
+setManualFocus/setAutoFocus* call is a no-op that would read as a knob that does nothing.
+Effect and scene modes: they change pixels in ways a detector was not trained on.
 
-THE SETTINGS THAT ARE NOT ONE CALL. Four of them are composites — exposure mode
-(auto vs manual are mutually exclusive and depthai silently ignores the loser),
-the AE metering region (two fractions, one rectangle), and white balance (a mode
-OR a temperature). Those are handled explicitly below the table rather than
-forced into it, because pretending they are simple is how you get a manual
-exposure that silently does nothing because AE is still enabled.
+THE SETTINGS THAT ARE NOT ONE CALL. Exposure mode (auto vs manual are mutually exclusive and
+depthai silently ignores the loser), the AE metering region (two fractions, one rectangle)
+and white balance (a mode OR a temperature) are composites, handled explicitly below the
+table: pretending they are simple gives a manual exposure that silently does nothing because
+AE is still enabled.
 """
 from dataclasses import dataclass, field
 
@@ -170,9 +163,9 @@ def param_spec():
 def validate(values):
     """Error string for the first unacceptable value, or None.
 
-    Enums need this because ROS parameter ranges only describe numbers, so a
-    misspelled mode would otherwise reach depthai as a lookup failure deep in
-    the apply path — after some of the other settings had already been applied.
+    Enums need this because ROS parameter ranges only describe numbers, so a misspelled mode
+    would reach depthai as a lookup failure deep in the apply path, after some other settings
+    had already been applied.
     """
     for name, value in values.items():
         c = BY_NAME.get(name)
@@ -187,13 +180,11 @@ def validate(values):
 def region_rect(top_fraction, height_fraction):
     """The AE metering rectangle as (x, y, w, h) in SENSOR pixels, or None.
 
-    Passing the ISP output size instead puts the band at rows 140-320 of 1200 —
-    the sky — so the meter would brighten for the one part of the frame you
-    were excluding and the picture would get DARKER. It costs nothing to get
-    right and looks like a tuning problem when it is wrong.
+    The ISP output size would put the band at rows 140-320 of 1200 (the sky), so the meter
+    would brighten for the part of the frame being excluded and the picture would get DARKER.
 
-    Full width always: a buoy can be anywhere across the frame, and the thing
-    worth excluding is above the horizon, not beside it.
+    Full width always: a buoy can be anywhere across the frame, and what is worth excluding is
+    above the horizon, not beside it.
     """
     if not height_fraction:
         return None
@@ -211,16 +202,13 @@ def _enum(dai, c, value):
 def apply(dai, control, values):
     """Put `values` onto a depthai CameraControl. Returns what was refused.
 
-    Every setting is applied on every call, not just the ones that changed. A
-    CameraControl carries only what was set on it and the device keeps the
-    rest, so re-sending costs one message and means the camera's state is the
-    whole of what the parameters say — rather than a history of which sliders
-    somebody happened to touch.
+    Every setting is applied on every call: a CameraControl carries only what was set on it and
+    the device keeps the rest, so this makes the camera's state the whole of what the
+    parameters say, not a history of which sliders were touched.
 
-    Each call is guarded separately and failures are COLLECTED, not raised. A
-    setter missing from one depthai build should cost that one control, not the
-    other fourteen, and certainly not the camera: this runs against a device
-    that is already open and producing frames.
+    Each call is guarded separately and failures are COLLECTED, not raised: a setter missing
+    from one depthai build should cost that one control, not the other fourteen or the camera
+    (this runs against a device that is already open and producing frames).
     """
     refused = []
 

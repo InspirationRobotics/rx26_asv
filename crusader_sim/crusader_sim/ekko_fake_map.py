@@ -4,40 +4,36 @@
     python3 -m crusader_sim.ekko_fake_map task1_core --command       # a ros2 topic pub line
     python3 -m crusader_sim.ekko_fake_map task1_core --noise-m 0.5   # each buoy off by < 0.5 m
 
-Runs in: any machine with Python and PyYAML. Plain python -- no ROS, no
-pymavlink -- so the line it prints can be made on the sim PC and pasted on Ekko.
+Runs on any machine with Python and PyYAML (no ROS, no pymavlink), so the line it prints
+can be made on the sim PC and pasted on Ekko.
 
-WHAT IT IS FOR. Closing the radio loop with the REAL aircraft before the lake:
-the sim boat listens on its RFD radio for Ekko's v3 TUNNEL traffic, and Ekko's
-telemetry_bridge puts a map on the air from `/uav/perception/buoy_map`. Publish
-this map there, on Ekko, and Ekko transmits the sim course as if its camera had
-found it -- positions in the SIM's Gazebo world, which is where the sim boat is.
-No camera, no flight, no buoys.
+WHAT IT IS FOR. Closing the radio loop with the REAL aircraft before the lake: the sim boat
+listens on its RFD radio for Ekko's v3 TUNNEL traffic, and Ekko's telemetry_bridge puts a map
+on the air from `/uav/perception/buoy_map`. Publish this map there, on Ekko, and Ekko
+transmits the sim course as if its camera had found it, in the SIM's Gazebo world where the
+sim boat is. No camera, no flight, no buoys.
 
     ros2 topic pub -r 1 /uav/perception/buoy_map uav_msgs/msg/BuoyMap '<yaml>'
 
-(Ekko's `ros2` is in the uav_ekko container; `--command` prints exactly that
-line, single-quoted so bash cannot touch it.)
+(Ekko's `ros2` is in the uav_ekko container; `--command` prints exactly that line,
+single-quoted so bash cannot touch it.)
 
-THE POSITIONS ARE THE WORLD'S. Every buoy goes through course.enu_to_latlon, the
-function gen_world.py puts the buoys in the Gazebo world with and sim_uav
-transmits them with, so a buoy here is where SITL's GPS says that water is.
+POSITIONS ARE THE WORLD'S: every buoy goes through course.enu_to_latlon, the function
+gen_world.py places the Gazebo buoys with and sim_uav transmits them with.
 
-WHAT THE UAV SEES. A course keeps each buoy's TRUE beacon (`beacon:`) and says
-separately which lights are lit (`side_beacon:`, `up_beacon:`, both default on).
-Ekko's camera looks down, so it reads the UP beacon when the course is advanced
-or disruptive tier -- the tiers where only the aircraft can see the route -- and
-the side beacon at core tier. A buoy whose visible light is off reads OFF to the
-aircraft, whatever it means: that is what the camera would decide.
+WHAT THE UAV SEES. A course keeps each buoy's TRUE beacon (`beacon:`) and separately which
+lights are lit (`side_beacon:`, `up_beacon:`, both default on). Ekko's camera looks down, so
+it reads the UP beacon in advanced or disruptive tier (only the aircraft can see the route)
+and the side beacon at core tier. A buoy whose visible light is off reads OFF, whatever it
+means.
 
-HONEST EVIDENCE. The BuoyMap carries the mapper's evidence (samples, lit
-fraction, spread). A fake map has none, so those fields stay at zero rather
-than being filled with plausible-looking measurements. `locked` is true: the
-state is decided, which is what the search and the radio act on.
+HONEST EVIDENCE. The BuoyMap carries the mapper's evidence (samples, lit fraction, spread); a
+fake map has none, so those fields stay at zero rather than plausible-looking measurements.
+`locked` is true: the state is decided, which is what the search and the radio act on.
 
-Labels are the strings buoy_mapper produces and telemetry_bridge sends:
-FLASHING_RED, FLASHING_GREEN, FLASHING_BLUE, SOLID_BLUE, OFF (state + "_" +
-colour; boat_link.STATES maps them to the wire codes).
+Labels are the strings buoy_mapper produces and telemetry_bridge sends: FLASHING_RED,
+FLASHING_GREEN, FLASHING_BLUE, SOLID_BLUE, OFF (state + "_" + colour; boat_link.STATES maps
+them to the wire codes).
 """
 import argparse
 import json

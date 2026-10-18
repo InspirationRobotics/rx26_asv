@@ -5,41 +5,30 @@
 #     bash tools/sitl/start_sitl.sh --stop       # stop
 #     bash tools/sitl/start_sitl.sh --status     # what is running
 #
-# Runs on a laptop, headless, no GPU, no Gazebo. The point is that after this
-# script, `udp:127.0.0.1:14551` is an ArduRover 4.6.3 that telemetry_bridge
-# cannot tell from the Pixhawk — so the whole guided-setpoint path, the mode
-# latch and OBSTACLE_DISTANCE avoidance become testable without the water.
+# Runs on a laptop, headless, no GPU, no Gazebo. Afterwards `udp:127.0.0.1:14551` is an ArduRover
+# 4.6.3 that telemetry_bridge cannot tell from the Pixhawk, so the guided-setpoint path, the mode
+# latch and OBSTACLE_DISTANCE avoidance are testable without the water.
 #
-# WHY THE PORT MAP IS COPIED RATHER THAN SIMPLIFIED. It mirrors
-# scripts/start_mavproxy.sh exactly:
+# The port map mirrors scripts/start_mavproxy.sh exactly, so a script written against SITL runs
+# against the real vehicle unchanged:
 #
 #     14551   telemetry_bridge      NEVER take this port
 #     14550   ad-hoc tooling        preflight, param_guard --live, a scratch QGC
 #
-# A script written against SITL therefore runs against the real vehicle
-# unchanged, and vice versa. Two ports that differ by one digit between the sim
-# and the boat is a debugging session nobody needs.
+# TWO FLAGS THAT ARE NOT STYLE:
 #
-# TWO FLAGS THAT ARE NOT STYLE, both learned on the boat:
-#
-#   --streamrate=-1   without it MAVProxy stomps SR0_* back to 4 Hz on every
-#                     reconnect, and the ROS-side rates quietly halve.
+#   --streamrate=-1   without it MAVProxy stomps SR0_* back to 4 Hz on every reconnect.
 #   SET_MESSAGE_INTERVAL 0 200000
-#                     HEARTBEAT is on a fixed 1 Hz timer that no SRx_* parameter
-#                     controls. 200000 us = 5 Hz, which is what the OCS link
-#                     needs to sample at 2 Hz honestly. It is RUNTIME state and
-#                     does not survive an autopilot reboot -- same as the boat.
+#                     HEARTBEAT is on a fixed 1 Hz timer no SRx_* parameter controls; 200000 us =
+#                     5 Hz, which the OCS link needs to sample at 2 Hz honestly. RUNTIME state: it
+#                     does not survive an autopilot reboot, same as the boat.
 #
-# WHAT SITL IS NOT. The frame is `motorboat`, a skid-steer hull, NOT Crusader's
-# 4xT200 OmniX. Setting FRAME_CLASS=2/FRAME_TYPE=2 here would make ArduRover mix
-# for four thrusters the physics model does not have, and the boat would sit
-# still. So SITL proves the PLUMBING -- modes, GUIDED acceptance, the type mask,
-# avoidance, the behaviour tree -- and says nothing about thruster mixing or
-# lateral movement. Those need the real hull.
-#
-# The yaw source differs too: SITL uses its compass, while the boat runs
-# COMPASS_USE=0 with GPS yaw. Simulating a moving-baseline pair is a rabbit hole
-# and buys nothing for mission logic, so it is deliberately not attempted.
+# WHAT SITL IS NOT. The frame is `motorboat`, a skid-steer hull, NOT Crusader's 4xT200 OmniX;
+# FRAME_CLASS=2/FRAME_TYPE=2 here would mix for four thrusters the physics model lacks and the boat
+# would sit still. So SITL proves the PLUMBING (modes, GUIDED acceptance, the type mask, avoidance,
+# the behaviour tree), not thruster mixing or lateral movement. The yaw source differs too: SITL uses
+# its compass, the boat COMPASS_USE=0 with GPS yaw; simulating a moving-baseline pair buys nothing
+# for mission logic and is deliberately not attempted.
 set -euo pipefail
 
 AP="${ARDUPILOT_DIR:-$HOME/ardupilot}"
@@ -74,11 +63,9 @@ esac
   exit 1
 }
 
-# Version check, loud. A SITL on a different release than the boat is worse than
-# no SITL: it answers questions about a vehicle nobody is flying.
-# From the binary's strings, NOT --help: --help prints usage only and never the
-# version, so grepping it silently yields an empty string and the check below
-# "fails" on every healthy build.
+# Version check, loud: a SITL on a different release than the boat answers questions about a vehicle
+# nobody is flying. Read from the binary's strings, NOT --help, which prints usage only and never the
+# version (the check would "fail" on every healthy build).
 ver="$(strings "$AP/build/sitl/bin/ardurover" 2>/dev/null | grep -oE 'ArduRover V[0-9.]+' | sort -u | head -1 || true)"
 echo "== $ver  (the boat runs ArduRover V4.6.3) =="
 [[ "$ver" == "ArduRover V4.6.3" ]] || echo "   WARNING: version differs from the boat."

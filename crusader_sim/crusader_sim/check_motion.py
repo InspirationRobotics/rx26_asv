@@ -42,10 +42,9 @@ def wait_msg(m, typ, timeout=5.0, cond=None):
 
 
 def state(m):
-    """The NEWEST position and attitude. recv_match hands back the OLDEST queued
-    message, so after a few seconds of not reading, a plain recv returns the
-    state from when we stopped reading — which is how the first run measured
-    every MANUAL pulse as 0.00 m. Drain first, keep the last of each."""
+    """The NEWEST position and attitude. recv_match hands back the OLDEST queued message, so
+    after a few seconds of not reading a plain recv returns the state from when we stopped
+    (every MANUAL pulse measured 0.00 m). Drain first, keep the last of each."""
     gp = att = None
     while True:
         msg = m.recv_match(type=["GLOBAL_POSITION_INT", "ATTITUDE"], blocking=False)
@@ -109,9 +108,8 @@ def pulse(m, label, **ch):
     settle(m)
     s0 = state(m)
     modes, texts, pwm_dev = set(), [], [0, 0, 0, 0]
-    # yaw is INTEGRATED from successive ATTITUDE samples: at ~40 deg/s a 6 s
-    # spin is ~250 deg, and an end-minus-start difference wraps that to -110
-    # and calls a correct right turn a left one (it did, on the first run).
+    # yaw is INTEGRATED from successive ATTITUDE samples: at ~40 deg/s a 6 s spin is ~250 deg, and
+    # an end-minus-start difference wraps that to -110 and calls a correct right turn a left one.
     last_yaw, turned = s0["yaw"], 0.0
     t_end = time.time() + PULSE_S
     while time.time() < t_end:

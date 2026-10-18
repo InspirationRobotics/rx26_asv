@@ -74,7 +74,6 @@ static BaySighting see(
 
 int main()
 {
-  // --------------------------------------------------------------- colours
   std::printf("colours\n");
   chk("CV 2 is RED", colourFromCv(2) == Colour::Red);
   chk("CV 3 is GREEN", colourFromCv(3) == Colour::Green);
@@ -93,7 +92,6 @@ int main()
   chk("proto names", std::string(wireColourName(kWireAny)) == "COLOR_ANY" &&
     std::string(wireColourName(kWireBlue)) == "COLOR_BLUE");
 
-  // --------------------------------------------------------------- placing
   std::printf("placing (hand-worked)\n");
   {
     const Mount m;   // 0.37 forward, centreline, square
@@ -274,7 +272,6 @@ int main()
     chk("beyond max_range_m places nothing", far.tracks.empty());
   }
 
-  // --------------------------------------------------------------- layout
   std::printf("layout: numbering left to right FACING the bays\n");
   {
     DockBook b;
@@ -351,10 +348,9 @@ int main()
 
   std::printf("merging one bay seen twice\n");
   {
-    // A biased early sighting lands 1.0 m from the bay: outside the 0.7 m
-    // gate, so it starts its own track - and inside merge_m (1.2 m), so the
-    // book folds it straight back in. Without this the layout refused to number the dock
-    // for 70 s in the sim.
+    // A biased early sighting lands 1.0 m from the bay: outside the 0.7 m gate, so
+    // it starts its own track, and inside merge_m (1.2 m), so the book folds it
+    // straight back in (else layout cannot number the dock).
     DockBook b;
     Frame good;
     good.bays = {see({0, 8}, 0.0, m, W, south, Colour::Red)};
@@ -379,7 +375,6 @@ int main()
     chk("bays 2 m apart stay two", two.tracks.size() == 2);
   }
 
-  // --------------------------------------------------------------- choice
   std::printf("choosing the safe bay\n");
   {
     auto dockWith = [&](int wr, int wg, int cr, int cg, int er, int eg) {
@@ -444,7 +439,6 @@ int main()
     }
   }
 
-  // --------------------------------------------------------------- vantage
   std::printf("where to look from\n");
   {
     DockBook none;
@@ -483,7 +477,6 @@ int main()
     chk_near("the least-read bay changes: head on to the west one", v2.p.x, -2.0, 1e-6);
   }
 
-  // --------------------------------------------------------------- berthing
   std::printf("berthing\n");
   {
     BayTrack t;
@@ -533,7 +526,6 @@ int main()
     chk("already inside the line-up point: not", !linedUp(b, {0, 17.5}, 0.0, 2.7, 0.4, 20.0));
   }
 
-  // --------------------------------------------------------------- the code
   std::printf("the resource request\n");
   {
     Request r = requestFrom("code", {Colour::Red, Colour::Blue});
@@ -584,7 +576,6 @@ int main()
     chk("0.45 s of GREEN after RED, across an abstention: hit", w.hit);
   }
 
-  // --------------------------------------------------------------- reports
   std::printf("reports\n");
   {
     chk("docking report", dockingReportJson(2) == "{\"bay_id\":2}");

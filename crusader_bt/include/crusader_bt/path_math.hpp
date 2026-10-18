@@ -1,26 +1,23 @@
 // path_math.hpp — the geometry the planned legs and the costmap share, and nothing else.
 //
-// Header-only, stdlib + nav_math.hpp + dock_math.hpp. No ROS, no Nav2, no
-// BehaviorTree.CPP. Same contract as nav_math.hpp, for the same reason: this is
-// where a sign error or an off-by-one MIRRORS THE WORLD and shows up first on the
-// water, and it is the part that compiles and runs on a laptop in a second:
+// Header-only, stdlib + nav_math.hpp + dock_math.hpp; no ROS, no Nav2, no
+// BehaviorTree.CPP. Same contract as nav_math.hpp: a sign error here MIRRORS THE
+// WORLD, and this compiles and runs on a laptop in a second:
 //
 //     g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -I include test/test_path_math.cpp
 //
-// Spec: docs/nav2_avoidance_spec.md section 5.2 (this API is exact; WP2 codes
-// against it). planned_leg.hpp is the state machine built on top.
+// Spec: docs/nav2_avoidance_spec.md section 5.2. planned_leg.hpp is the state
+// machine built on top.
 //
-// THE FRAME. Vec2 is the BT's local ENU plane (x east, y north). The TF frame
-// `map`, ctx->origin and every HazardArray coordinate are THE SAME plane (spec
-// section 2), so a hazard here is drawn by the costmap's HazardLayer at the same
-// metres with no conversion. Nothing in this file projects lat/lon.
+// THE FRAME. Vec2 is the BT's local ENU plane (x east, y north), the same plane as
+// TF `map`, ctx->origin and every HazardArray coordinate (spec section 2): no
+// conversion, and nothing here projects lat/lon.
 //
 // THE ONE IDEA. A hazard is a shape with a signed distance (clearance()) to its
-// LETHAL boundary. "Hard" (0.8 m) and "soft" (2.0 m) clearance are not baked
-// into the shapes: hazards are drawn at PHYSICAL size (+ an optional keepout) and
-// every check asks "is the clearance at least X". That is what lets the BT's
-// local checks and Nav2's inflated costmap agree about the same field while the
-// costmap does the inflation and this file does the arithmetic.
+// LETHAL boundary. "Hard" (0.8 m) and "soft" (2.0 m) clearance are not baked into
+// the shapes: hazards are drawn at PHYSICAL size (+ an optional keepout) and every
+// check asks "is the clearance at least X", so the BT's local checks and Nav2's
+// inflated costmap agree.
 #ifndef CRUSADER_BT__PATH_MATH_HPP_
 #define CRUSADER_BT__PATH_MATH_HPP_
 
@@ -44,10 +41,9 @@ namespace path
 using nav::Vec2;
 
 enum class HazardKind {Circle = 0, Polygon = 1};                              // == Hazard.msg kind
-// Fence = 4 has no SRC_* constant in Hazard.msg (the .msg is shared and stays as it is): the
-// message's `source` is a plain uint8 that the layer ignores, so 4 reaches the ground station
-// as "something else" and a reader of the published array can still tell a fence circle from a
-// buoy.
+// Fence = 4 has no SRC_* constant in Hazard.msg (shared, unchanged): `source` is a
+// plain uint8 the layer ignores, so 4 reaches the ground station as "something
+// else" and a reader can still tell a fence circle from a buoy.
 enum class HazardSource {PlanBuoy = 0, Track = 1, Dock = 2, Keepout = 3, Fence = 4};
 
 /// One known hazard. A circle uses c and r; a polygon uses poly (convex, vertices
@@ -89,7 +85,7 @@ struct NavParams
   double gate_step_m = 0.25;         ///< search pitch, along the crossing and along the gate
   double gate_tight_clear_m = 1.0;   ///< second try when nothing fits: hard_m + 0.2 ...
   double gate_tight_margin_m = 1.1;  ///< ... and hard_m + buoy_radius_m from the gate buoys
-  // Sizes the Task 1 tree used to hard-code (an XML attribute still wins where one is given).
+  // Task 1 tree size defaults (an XML attribute still wins where one is given).
   double orbit_radius_m = 6.0;       ///< CircleBuoy radius
   int orbit_points = 8;              ///< CircleBuoy ring points (more for a small radius)
   double orbit_tolerance_m = 2.0;    ///< CircleBuoy hop arrival radius (< the ring's chord)
@@ -135,11 +131,10 @@ inline double polygonSignedDistance(const std::vector<Vec2> & poly, Vec2 p)
   return (n >= 3 && (all_left || all_right)) ? -d : d;
 }
 
-/// f(point) at a, then every step_m along a->b, then b: n equal steps of length
-/// <= step_m, so b itself is always sampled. Stops and returns false at the first
-/// f that returns false. The one place the sampling loop lives: segmentClear and
-/// escapeStart both walk a segment the same way, and a step that skipped b would
-/// miss exactly the hazard sitting at the goal.
+/// f(point) at a, then every step_m along a->b, then b (n equal steps <= step_m, so
+/// b is always sampled: a step that skipped b would miss the hazard at the goal).
+/// Stops and returns false at the first f that returns false. The one place the
+/// sampling loop lives.
 template<typename F>
 bool walkSegment(Vec2 a, Vec2 b, double step_m, F f)
 {
@@ -230,7 +225,7 @@ inline double minClearance(const std::vector<Hazard> & hz, Vec2 p)
 // ------------------------------------------------------------------ the dock
 
 /// A bay track whose outward direction was actually measured. outward() falls
-/// back to unit(view_sum), and unit() of nothing is NORTH (nav_math.hpp:75-79):
+/// back to unit(view_sum), and unit() of nothing is NORTH (nav_math.hpp unit()):
 /// a dock drawn facing north because nobody knew is a guess wearing a
 /// measurement's clothes, so such a track draws nothing.
 inline bool outwardUsable(const dock::BayTrack & t)
@@ -242,10 +237,9 @@ inline bool outwardUsable(const dock::BayTrack & t)
 /// (lateral +/-(slip/2 + finger_w/2) along right = starboardOf(-out), 0..finger_len out from
 /// the face) and one deck rectangle (-deck_depth..0 along out, lateral +/-(slip/2 + finger_w)).
 ///
-/// `right` is dock::layout()'s own (dock_math.hpp:615), so the fingers sit where the
-/// numbered bays do. Adjacent bays share a finger and both draw it: the layer
-/// rasterises a duplicate for free, and deduplicating would need an association
-/// rule that can only be wrong.
+/// `right` is dock::layout()'s own, so the fingers sit where the numbered bays do.
+/// Adjacent bays share a finger and both draw it (the layer rasterises a duplicate
+/// for free; deduplicating would need an association rule that can only be wrong).
 inline std::vector<Hazard> dockHazards(const dock::DockBook & b, int min_obs, const NavParams & p)
 {
   std::vector<Hazard> out;
@@ -268,13 +262,12 @@ inline std::vector<Hazard> dockHazards(const dock::DockBook & b, int min_obs, co
 }
 
 /// Plan buoys (radius buoy_radius_m), unmatched confirmed tracks (track_radius_m), and the
-/// dock (dockHazards). Consumed buoys are NOT dropped - a buoy dealt with is still there.
+/// dock (dockHazards). Consumed buoys are NOT dropped: a buoy dealt with is still there.
 ///
-/// A hazard with no finite position is left out, not drawn at (0,0): "a hazard
-/// nobody can place is left out, not drawn somewhere plausible" (Hazard.msg).
-/// This is the ONE function the hazard publisher and the leaves both call
-/// (via context.hpp knownHazards), so the costmap and the BT's local checks can
-/// never disagree about the known field.
+/// A hazard with no finite position is left out, not drawn at (0,0) (Hazard.msg). The
+/// ONE function the hazard publisher and the leaves both call (via context.hpp
+/// knownHazards), so the costmap and the BT's local checks cannot disagree about the
+/// known field.
 inline std::vector<Hazard> buildHazards(
   const std::vector<nav::Buoy> & buoys, const std::vector<nav::Buoy> & tracks,
   const dock::DockBook & dock_book, int dock_min_obs, const NavParams & p)
@@ -295,36 +288,32 @@ inline std::vector<Hazard> buildHazards(
   return out;
 }
 
-/// SIDE FENCES: the handbook's "RED to starboard, GREEN to port" turned into geometry the
-/// planner already understands.
+/// SIDE FENCES: the handbook's "RED to starboard, GREEN to port" as geometry the
+/// planner understands.
 ///
-/// handbook 3.3.2 puts a side on EVERY red and green buoy, paired or not. The planner knows
-/// nothing about sides, only about hazards, so a buoy that is not half of a gate is just an
-/// obstacle it may go round either way. A fence closes the wrong way: a row of small hazard
-/// circles running OUTWARD from the buoy, so the cheapest way past is the side the rule wants.
+/// Handbook 3.3.2 puts a side on EVERY red and green buoy, paired or not, but the
+/// planner only knows hazards, so a buoy that is not half of a gate is an obstacle it
+/// may go round either way. A fence closes the wrong way: a row of small hazard
+/// circles running OUTWARD from the buoy.
 ///
 ///   PAIRED buoy  the row runs along the gate line, away from its partner (red: unit(red -
 ///                green), green: unit(green - red)). The gate is walled in on both outer sides.
 ///   SINGLE buoy  the row runs perpendicular to the entry -> exit axis: red to the RIGHT of the
 ///                axis (the boat passes on the red's left, red to starboard), green to the LEFT.
 ///
-/// The row starts just outside the buoy's own hazard circle (touching it, so there is no gap
-/// to squeeze through) and spans fence_len_m at fence_spacing_m, each circle fence_radius_m:
-/// spacing < 2 r, so it is a wall. A wall is not a promise: it is `fence_len_m` long, and a
-/// route round its far end is still a route. Keep the field's singles within a leg's reach of
-/// the course and that route is never the short one.
+/// The row starts just outside the buoy's own hazard circle (touching it) and spans
+/// fence_len_m at fence_spacing_m, each circle fence_radius_m: spacing < 2 r, so it
+/// is a wall. A wall is not a promise (a route round its far end is still a route),
+/// so keep the field's singles within a leg's reach of the course.
 ///
-/// WHAT STAYS OUT, and why each is safe:
-///   * circles within fence_clear_m of the ENTRY or EXIT buoy. The orbit ring (radius 6) is
-///     checked by adjustRing() for orbit_clear_m (1.4) from every hazard; a circle edge
-///     (fence_radius_m) at that distance would push or drop ring points. 6 + 1.4 + 0.3 = 7.7,
-///     so the default 8.0 leaves the ring untouched (a unit test builds the worst case).
-///   * a gate's own crossing line. It runs through the middle of the pair, perpendicular to
-///     the gate line, and its own rows start beyond the buoys on that same line: the nearest
-///     circle edge is half the gate's width + 0.3 m from it, further than the buoy it is
-///     attached to, which the leg exempts.
-/// Source Fence, id = the buoy the circle belongs to. `passage` supplies the pairing, so the
-/// fences and the tree's gates can never disagree about which buoy has a partner.
+/// WHAT STAYS OUT:
+///   * circles within fence_clear_m of the ENTRY or EXIT buoy: adjustRing() keeps the
+///     orbit ring (radius 6) orbit_clear_m (1.4) from every hazard, and
+///     6 + 1.4 + 0.3 = 7.7, so the default 8.0 leaves the ring untouched.
+///   * a gate's own crossing line: its nearest circle edge is half the gate's width
+///     + 0.3 m away, further than the buoy it is attached to, which the leg exempts.
+/// Source Fence, id = the buoy the circle belongs to. `passage` supplies the pairing,
+/// so fences and gates cannot disagree about which buoy has a partner.
 inline std::vector<Hazard> sideFences(
   const std::vector<nav::Buoy> & buoys, const nav::Passage & passage, Vec2 entry, Vec2 exitp,
   const NavParams & p)
@@ -367,12 +356,11 @@ inline std::vector<Hazard> sideFences(
 /// Removes PlanBuoy hazards whose id is listed, Track hazards within exempt_radius of a
 /// listed buoy, and every Dock hazard when exempt_dock.
 ///
-/// WHY TRACKS TOO. The LiDAR sees the exempt buoy itself and, unless the plan's
-/// position and the track agree to within the association radius, the track is
-/// "unmatched" and becomes a second hazard on top of the one we just exempted -
-/// which would block the gate crossing it was exempted for. A track is tied to the
-/// buoy by distance to the buoy's PLAN position, taken from the hazard list
-/// itself, so a buoy that is not in the list exempts nothing around it.
+/// WHY TRACKS TOO. The LiDAR sees the exempt buoy itself and, unless plan and track
+/// agree within the association radius, the track becomes a second hazard that
+/// blocks the gate crossing. A track is tied to the buoy by distance to its PLAN
+/// position taken from the hazard list, so a buoy not in the list exempts nothing
+/// around it.
 inline std::vector<Hazard> exempt(
   const std::vector<Hazard> & hz, const std::vector<int> & buoy_ids, bool exempt_dock,
   double exempt_radius_m)
@@ -463,9 +451,8 @@ inline nav::Gate gateSearch(
       }
       return false;
     };
-  // shifts 0, +1, -1, +2, -2 ... steps, then the edge of the room itself: a gap whose room is
-  // not a whole number of steps would otherwise never try its widest line (2026-10-02: the
-  // clear line was at +1.25 of a 1.40 m room searched in 0.5 m steps)
+  // shifts 0, +1, -1, +2, -2 ... steps, then the edge of the room itself, so a gap
+  // whose room is not a whole number of steps still tries its widest line
   const double room = 0.5 * nav::norm(red - green) - margin_m;
   std::vector<double> shifts{0.0};
   for (double s = p.gate_step_m; room > 0.0 && s <= room + 1e-9; s += p.gate_step_m) {
@@ -493,23 +480,20 @@ inline nav::Gate gateSearch(
 
 /// nav::gateWaypoints(), moved only as far as it takes to keep the STRAIGHT crossing clear.
 ///
-/// The crossing (approach -> through) is driven straight with only the gate's own pair exempt,
-/// so a buoy, a fence or a track on that line holds the boat for good. A gate is a gap, not a
-/// point: the boat may cross it anywhere between the pair. So: the centre line first, then
-/// lines shifted along the gate, gate_step_m at a time, alternating sides, never closer than
-/// the gate margin to either buoy. On each line the through point backs off from standoff_m
-/// toward the gate (down to gate_min_standoff_m) and the approach point from approach_m (down
-/// to gate_min_approach_m) until each half of the crossing keeps the clearance from every
-/// hazard in `hz`. The first line where both halves fit wins.
+/// The crossing (approach -> through) is driven straight with only the gate's own pair
+/// exempt, so a buoy, fence or track on that line holds the boat for good. A gate is a
+/// gap, so: the centre line first, then lines shifted along the gate, gate_step_m at a
+/// time, alternating sides, never closer than the gate margin to either buoy. On each
+/// line the through point backs off from standoff_m (down to gate_min_standoff_m) and
+/// the approach point from approach_m (down to gate_min_approach_m) until each half
+/// keeps the clearance from every hazard in `hz`. The first line where both fit wins.
 ///
-/// TWO TRIES. The comfortable numbers first (gate_clear_m, gate_margin_m); if no line fits, the
-/// same search with the tight ones (gate_tight_clear_m, gate_tight_margin_m), which still keep
-/// the guard's own hard_m - local_check_tol_m with room. A crowded gate (a black buoy a few
-/// metres in front of it and another behind, 2026-10-02) is driven tight rather than not at
-/// all. Neither fits: the plain centre-line points, and the leg's own guard holds the boat as
-/// before. `hz` must already exempt the gate's pair. *shift_out (optional): the shift, + toward
-/// the red; *tight_out (optional): the tight try won. All numbers are NavParams' gate_*
-/// (nav_gate_* in crusader_params.yaml).
+/// TWO TRIES: the comfortable numbers (gate_clear_m, gate_margin_m), then the tight
+/// ones (gate_tight_clear_m, gate_tight_margin_m), which still keep the guard's own
+/// hard_m - local_check_tol_m with room. Neither fits: the plain centre-line points,
+/// and the leg's own guard holds the boat. `hz` must already exempt the gate's pair.
+/// *shift_out (optional): the shift, + toward the red; *tight_out (optional): the
+/// tight try won. All numbers are NavParams' gate_* (nav_gate_* in crusader_params.yaml).
 inline nav::Gate clearGateWaypoints(
   Vec2 red, Vec2 green, double standoff_m, double approach_m, const std::vector<Hazard> & hz,
   const NavParams & p, double * shift_out = nullptr, bool * tight_out = nullptr)
@@ -553,11 +537,10 @@ inline double pathLength(const std::vector<Vec2> & path, std::size_t from_i = 0)
   return len;
 }
 
-/// Closest vertex, searching forward from `hint` (never backwards by more than 2 m of arc).
-///
-/// Forward-only on purpose: a path that doubles back near itself must not make the
-/// boat "jump" to the later pass and skip the stretch in between. The 2 m of slack
-/// lets a boat that was pushed back by the sea re-find itself without that jump.
+/// Closest vertex, searching forward from `hint` (never backwards by more than 2 m of
+/// arc). Forward-only on purpose: a path that doubles back near itself must not make
+/// the boat jump to the later pass and skip the stretch between; the 2 m of slack lets
+/// a boat pushed back by the sea re-find itself.
 inline std::size_t closestIndex(const std::vector<Vec2> & path, Vec2 p, std::size_t hint)
 {
   if (path.empty()) {return 0;}
@@ -582,10 +565,9 @@ namespace detail
 {
 
 /// Where the boat sits on the path: the foot of its projection on segment
-/// [seg, seg+1], at fraction t. Taken from the two segments around the closest
-/// VERTEX, which is enough for a path whose vertices are dense (Smac, 0.1 m) and is
-/// the only thing that works for a sparse one (the straight stub is two vertices,
-/// and "the closest vertex" of a boat half-way along it is a coin toss).
+/// [seg, seg+1], at fraction t. Taken from the two segments around the closest VERTEX,
+/// which works for dense paths (Smac, 0.1 m) and for a sparse one (the straight stub is
+/// two vertices, where "the closest vertex" of a boat half-way along is a coin toss).
 struct Foot
 {
   std::size_t seg = 0;
@@ -625,9 +607,9 @@ inline std::vector<Vec2> remainingPath(const std::vector<Vec2> & path, Vec2 boat
 }
 
 /// firstConflict() for a path whose vertices may be far apart: also samples every
-/// segment longer than 0.25 m. Smac's vertices are 0.1 m apart so for them this IS
-/// firstConflict; the straight stub's two vertices are not, and a vertex-only check
-/// would wave a line straight through the dock.
+/// segment longer than 0.25 m. For Smac's 0.1 m vertices this IS firstConflict; the
+/// straight stub's two vertices are not, and a vertex-only check would wave a line
+/// straight through the dock.
 inline bool pathBlocked(
   const std::vector<Vec2> & path, const std::vector<Hazard> & hz, double clearance_m)
 {
@@ -656,10 +638,9 @@ struct Moved
 /// If goal is within hard + goal_margin of any hazard, walk it toward `from` in 0.1 m steps
 /// until clear; ok=false if the whole segment is blocked (goal returned unchanged).
 ///
-/// WHY. SmacPlanner2D refuses a goal in lethal space and a goal a waypoint sits on
-/// top of is exactly what CircleBuoy and a buoy-side waypoint produce. The leg
-/// still judges ARRIVAL on the true goal (planned_leg.hpp), so pushing the
-/// planner's goal out costs nothing but a metre of standoff.
+/// WHY. SmacPlanner2D refuses a goal in lethal space, which CircleBuoy and a buoy-side
+/// waypoint produce. The leg still judges ARRIVAL on the true goal (planned_leg.hpp),
+/// so pushing the planner's goal out costs a metre of standoff.
 inline Moved pushGoalOut(
   Vec2 goal, Vec2 from, const std::vector<Hazard> & hz, double hard, double margin)
 {
@@ -704,13 +685,12 @@ struct Escape
 /// no hazard gets closer than min(its clearance at boat, hard) - 0.05. Pick min
 /// |cand - goal| + 0.5 |cand - boat|. ok=false if none.
 ///
-/// WHY. Smac THROWS when its start is inside the inscribed zone (spec 3.4), so a
-/// boat that has drifted into the hard band cannot plan at all. This finds a point
-/// to drive to FIRST. The radii start at wp_radius + 0.5 so ArduRover (WP_RADIUS
-/// 2.0) does not count the escape point as reached the moment it is sent. The
-/// per-hazard floor stops the straight run out from brushing a SECOND hazard (a boat
-/// in a gate escapes along the gate axis, not through a buoy), while a hazard the
-/// boat is already inside the band of may only get no closer than it is now.
+/// WHY. Smac THROWS when its start is inside the inscribed zone (spec 3.4), so a boat
+/// that drifted into the hard band cannot plan. This finds a point to drive to FIRST.
+/// The radii start at wp_radius + 0.5 so ArduRover (WP_RADIUS 2.0) does not count the
+/// escape point as reached when it is sent. The per-hazard floor stops the run out
+/// brushing a SECOND hazard (a boat in a gate escapes along the gate axis, not through
+/// a buoy).
 inline Escape escapeStart(
   Vec2 boat, Vec2 goal, const std::vector<Hazard> & hz, const NavParams & p)
 {
@@ -755,17 +735,14 @@ struct Carrot
 /// boat->p is segmentClear at hard - local_check_tol. Falls back to lookahead_min. The end
 /// of the path when less than lookahead_min remains (is_end = true).
 ///
-/// WHY A CARROT. ArduRover flies a straight line to each position setpoint, so the
-/// whole path cannot be sent: the boat would cut every corner the planner took
-/// around a buoy. A point a few metres ahead on the path is far enough to be
-/// smooth and near enough that its chord stays on the path. The chord test is what
-/// makes "a few metres" shorter around a bend.
+/// WHY A CARROT. ArduRover flies a straight line to each position setpoint, so
+/// sending the whole path would cut every corner the planner took around a buoy. A
+/// point a few metres ahead is far enough to be smooth and near enough that its chord
+/// stays on the path; the chord test shortens it around a bend.
 ///
-/// is_end is also true when the chosen point IS the path's last vertex (remaining
-/// arc between lookahead_min and lookahead): the leg must not keep re-sending the
-/// end of the path as the boat closes on it.
-///
-/// An empty path returns a carrot ON THE BOAT (a hold), never the origin.
+/// is_end is also true when the chosen point IS the path's last vertex, so the leg
+/// does not keep re-sending the end of the path as the boat closes on it. An empty
+/// path returns a carrot ON THE BOAT (a hold), never the origin.
 inline Carrot carrot(
   const std::vector<Vec2> & path, Vec2 boat, std::size_t hint, const std::vector<Hazard> & hz,
   const NavParams & p)
@@ -823,9 +800,9 @@ inline Carrot carrot(
 /// BOTH >= frac AND >= abs_m. Lengths are path length + |path end - true goal|.
 ///
 /// Hysteresis, because two near-equal routes round a buoy differ by a hair every
-/// 0.5 s replan and a boat that follows whichever is momentarily shorter zig-zags.
-/// "Both" so a long path needs a worthwhile saving in metres and a short one a
-/// worthwhile saving in proportion.
+/// 0.5 s replan and a boat following whichever is momentarily shorter zig-zags.
+/// "Both" so a long path needs a saving worth the metres and a short one a saving
+/// worth the proportion.
 inline bool preferNew(bool cur_valid, double cur_len, double new_len, double frac, double abs_m)
 {
   if (!cur_valid) {return true;}
@@ -839,21 +816,18 @@ inline bool preferNew(bool cur_valid, double cur_len, double new_len, double fra
 /// ring[k] = a0 + k*step, step = 360/n, ring[n] == ring[0] (the 360 point).
 /// cw = decreasing ENU angle (as nav::orbit).
 ///
-/// nav::orbit starts at k = 1 from the boat's own bearing, so its first waypoint is
-/// already a step round the circle and a boat that starts far out sweeps only
-/// ~313 degrees (task1-panel-build memory). Here the ring starts ON the bearing
-/// at the orbit radius: hop 0 is the approach, and ring[0..n] is a full turn from
-/// wherever the boat began. ring[n] is a copy of ring[0], not a recomputed
-/// cos(a0 + 2 pi), so that hop is EXACTLY the first.
+/// nav::orbit starts at k = 1 from the boat's own bearing, so a boat that starts far
+/// out sweeps only ~313 degrees. Here the ring starts ON the bearing at the orbit
+/// radius (hop 0 is the approach) and ring[0..n] is a full turn from wherever the boat
+/// began; ring[n] is a copy of ring[0] so that hop is EXACTLY the first.
 ///
-/// `overshoot_deg` runs the ring PAST that full turn, the same way round: n + 1
-/// points up to a sweep of exactly 360 + overshoot_deg, the last step shorter when the
-/// overshoot is not a whole number of steps. Why: a hop counts as arrived within the
-/// leg tolerance (2 m at a 6 m ring is ~19 degrees), so a ring that ends at exactly 360
-/// closes the circle ~19 degrees short, and an approach that enters off ring[0] loses
-/// more; the referee's 330 degrees was missed at 328 (task1_blocked_exit, 2026-10-01).
-/// 0 gives the n + 1 point ring above, bit for bit. Clamped to [0, 360]: a negative or
-/// NaN value is no overshoot, and the ring never goes more than one extra lap.
+/// `overshoot_deg` runs the ring PAST that full turn, the same way round: n + 1 points
+/// up to a sweep of exactly 360 + overshoot_deg, the last step shorter when it is not
+/// a whole number of steps. A hop counts as arrived within the leg tolerance (2 m at a
+/// 6 m ring is ~19 degrees), so a ring ending at exactly 360 closes the circle ~19
+/// degrees short, which can miss the referee's 330 degrees. 0 gives the n + 1 point
+/// ring above, bit for bit. Clamped to [0, 360]: a negative or NaN value is no
+/// overshoot, and the ring never goes more than one extra lap.
 inline std::vector<Vec2> orbitRing(
   Vec2 anchor, Vec2 from, double radius, int n, bool cw, double overshoot_deg = 0.0)
 {
@@ -880,12 +854,10 @@ inline std::vector<Vec2> orbitRing(
 /// Each ring point with minClearance < orbit_clear_m: push radially out in 0.25 m steps
 /// up to orbit_max_push_m; still short -> drop it (logged by the caller).
 ///
-/// ring[0] is never touched: it is the explicit hop the leg promised. Neither is a copy
-/// of it (the 360 point, which closes the circle on it): the orbit is meant to end
-/// where it began. EVERY OTHER point is fair game, including the last one when the ring
-/// overshoots (orbitRing's overshoot_deg): that one is just another point round the
-/// circle. `dropped` counts the points given up on so the caller can say so rather than
-/// silently orbiting a polygon with a side missing.
+/// ring[0] (the explicit hop the leg promised) and its copy, the 360 point, are never
+/// touched: the orbit ends where it began. EVERY OTHER point is fair game, including
+/// the last when the ring overshoots. `dropped` counts the points given up on so the
+/// caller can say so rather than silently orbit a polygon with a side missing.
 inline std::vector<Vec2> adjustRing(
   const std::vector<Vec2> & ring, Vec2 anchor, const std::vector<Hazard> & hz,
   const NavParams & p, int * dropped = nullptr)

@@ -1,70 +1,58 @@
 #!/usr/bin/env python3
 """batt_watchdog — power the Jetson down before a low pack is damaged.
 
-Runs on the JETSON HOST, under systemd, as the `crusader` user. Reads the
-battery voltage out of MAVProxy's rebroadcast and, if it stays below a
-threshold long enough to be real, asks crsd-power to poweroff cleanly.
+Runs on the JETSON HOST, under systemd, as the `crusader` user. Reads the battery voltage out of
+MAVProxy's rebroadcast and, if it stays below a threshold long enough to be real, asks crsd-power
+to poweroff cleanly.
 
     systemctl status crsd-battwatch
     journalctl -u crsd-battwatch -f
 
-WHAT THIS PROTECTS, AND WHAT IT DOES NOT. The Jetson is a ~15 W load; four T200s
-are hundreds. Shutting the Jetson down does not meaningfully extend a run. What
-it does protect is the boat sitting powered-up on the cart with nobody watching,
-slowly pulling a LiPo down past the point where it comes back — which is the way
-packs actually get killed around here. Treat it as bench insurance, not as a
-mission-time energy policy.
+WHAT THIS PROTECTS, AND WHAT IT DOES NOT. The Jetson is a ~15 W load; four T200s are hundreds, so
+shutting the Jetson down does not meaningfully extend a run. It protects the boat sitting powered-up
+on the cart with nobody watching, slowly pulling a LiPo down past the point where it comes back.
+Bench insurance, not a mission-time energy policy.
 
-WHY IT IS NOT ROOT. crsd_power_helper.py already runs as root on the host and
-offers exactly two verbs on a Unix socket (0660 root:crusader). This program
-connects to it as an ordinary member of the `crusader` group and sends
-{"verb": "shutdown"}. That keeps the number of privileged pieces on this boat at
-one. Do not "simplify" this into a sudo call — read that helper's docstring.
+WHY IT IS NOT ROOT. crsd_power_helper.py already runs as root on the host and offers exactly two
+verbs on a Unix socket (0660 root:crusader). This program connects as an ordinary member of the
+`crusader` group and sends {"verb": "shutdown"}, keeping the number of privileged pieces on this boat
+at one. Do not "simplify" this into a sudo call; read that helper's docstring.
 
-WHY ITS OWN PORT. Every consumer of the Pixhawk gets its own MAVProxy --out,
-because a udpin bind STEALS datagrams: two processes on one port do not both get
-the stream, the loser silently gets nothing. 14551 is telemetry_bridge's and is
-never taken. 14550 stays free for ad-hoc tooling — preflight.py and
-param_guard.py --live both default to it, and a permanent service squatting
-there would make them fail with an empty stream rather than an error that names
-the cause. So this one owns 14552, added to scripts/start_mavproxy.sh.
+WHY ITS OWN PORT. Every consumer of the Pixhawk gets its own MAVProxy --out, because a udpin bind
+STEALS datagrams: of two processes on one port the loser silently gets nothing. 14551 is
+telemetry_bridge's, and 14550 stays free for ad-hoc tooling (preflight.py and param_guard.py --live
+default to it), so this one owns 14552, added to scripts/start_mavproxy.sh.
 
-  A NEW PORT DOES NOTHING UNTIL MAVPROXY IS RESTARTED. The --out list is built
-  at process start. If this service logs "no voltage yet" forever, check that
-  the running mavproxy actually has the 14552 out:
+  A NEW PORT DOES NOTHING UNTIL MAVPROXY IS RESTARTED (the --out list is built at process start). If
+  this service logs "no voltage yet" forever, check that the running mavproxy has the 14552 out:
       ps -eo cmd | grep [m]avproxy
 
-BLANKS OVER GUESSES — the rule this file is built around. Every path that does
-not have a fresh, plausible voltage in hand DOES NOTHING and says so. It never
-carries the last-known reading forward, because a stale number that looks fresh
-is exactly what would poweroff a healthy boat. Specifically:
+BLANKS OVER GUESSES — the rule this file is built around. Every path without a fresh, plausible
+voltage DOES NOTHING and says so; it never carries the last-known reading forward (a stale number
+that looks fresh would poweroff a healthy boat):
 
-  - MAVLink reports "no battery sensor" as voltage 0 and current -1. 0 V is not
-    a low battery, it is an absent measurement, and it must never trigger.
-  - A reading outside PLAUSIBLE_V is a broken divider or a mis-set
-    BATT_VOLT_MULT, not a discharged pack.
-  - If no sample arrives for stale_s, the trigger timer is CLEARED, not paused.
-    A link that dies mid-discharge must not resume its countdown from a
-    measurement made minutes ago.
+  - MAVLink reports "no battery sensor" as voltage 0 and current -1. 0 V is an absent measurement,
+    not a low battery, and must never trigger.
+  - A reading outside PLAUSIBLE_V is a broken divider or a mis-set BATT_VOLT_MULT, not a discharged
+    pack.
+  - If no sample arrives for stale_s, the trigger timer is CLEARED, not paused: a link that dies
+    mid-discharge must not resume its countdown from a measurement made minutes ago.
 
-SUSTAINED, NOT INSTANTANEOUS. Four T200s pull the pack down hard on a step
-input; a momentary sag through the threshold is normal and must not power the
-boat off. The voltage has to stay below it continuously for hold_s. Any single
-sample above the threshold resets the clock.
+SUSTAINED, NOT INSTANTANEOUS. Four T200s pull the pack down hard on a step input and a momentary
+sag through the threshold is normal, so the voltage must stay below it continuously for hold_s. Any
+single sample above the threshold resets the clock.
 
-CONFIGURATION lives in /etc/default/crusader with the other CRSD_* settings, so
-changing a threshold needs no unit edit and no rebuild:
+CONFIGURATION lives in /etc/default/crusader with the other CRSD_* settings, so changing a threshold
+needs no unit edit and no rebuild:
 
     CRSD_BATT_SHUTDOWN_V=13.2      # 4S LiPo @ 3.30 V/cell
     CRSD_BATT_WARN_V=14.0          # 4S LiPo @ 3.50 V/cell — logs only
     CRSD_BATT_HOLD_S=30
     CRSD_BATT_ENDPOINT=udp:127.0.0.1:14552
 
-Run it by hand to watch without ever acting — this is how to verify a threshold
-against a real discharge before trusting it. STOP THE SERVICE FIRST: two readers
-on one UDP port split the datagrams between them, so a dry-run alongside the
-live service blinds the live one. It refuses to start rather than let you do
-that by accident.
+Run it by hand to watch without ever acting (how to verify a threshold against a real discharge).
+STOP THE SERVICE FIRST: two readers on one UDP port split the datagrams, so a dry-run beside the
+live service blinds it. It refuses to start rather than let you do that by accident.
 
     sudo systemctl stop crsd-battwatch
     python3 tools/scripts/batt_watchdog.py --dry-run
@@ -152,17 +140,12 @@ def as_listener(endpoint):
 def port_already_bound(port):
     """True if any process already holds a UDP socket on this port.
 
-    Reads /proc/net/udp directly rather than shelling out, and deliberately does
-    not care WHICH process it is — a second copy of this script, a stray
-    mavproxy, a forgotten `ros2 topic` bridge all cause the same damage.
-
-    They damage rather than merely conflict because pymavlink sets SO_REUSEADDR,
-    so the second bind SUCCEEDS and the kernel then hands each datagram to only
-    one of the sockets. Measured on the boat 2026-09-03: running
-    `--dry-run` beside the live service made the SERVICE log
-    "no usable voltage (last good reading: 10s ago); not acting" for the whole
-    40s the second process was up. It failed safe, but for those 40 seconds the
-    boat had no low-voltage protection at all.
+    Reads /proc/net/udp directly rather than shelling out, and does not care WHICH process: a
+    second copy of this script, a stray mavproxy or a forgotten `ros2 topic` bridge cause the same
+    damage. They damage rather than merely conflict because pymavlink sets SO_REUSEADDR, so the
+    second bind SUCCEEDS and the kernel hands each datagram to only one socket: a `--dry-run`
+    beside the live service blinded the SERVICE to the voltage for as long as it ran (it failed
+    safe, but the boat had no low-voltage protection meanwhile).
     """
     for path in ("/proc/net/udp", "/proc/net/udp6"):
         try:
@@ -232,11 +215,9 @@ def request_shutdown(sock_path, volts, hold_s):
 class Throttle:
     """Rate-limit each KIND of periodic line on its own clock.
 
-    Three cadences share this loop — "ok" once a minute, the countdown every
-    five seconds, "no voltage" every thirty — and an earlier version tracked
-    them with ONE timestamp. That let a routine "ok" line suppress the first
-    countdown line for several seconds, which is precisely the stretch of
-    journal someone reads after an unexplained poweroff. Keyed per kind, so
+    Three cadences share this loop ("ok" once a minute, the countdown every five seconds, "no
+    voltage" every thirty). One shared timestamp let a routine "ok" line suppress the first
+    countdown line, the stretch of journal read after an unexplained poweroff; keyed per kind
     they cannot silence each other.
     """
 
@@ -246,14 +227,10 @@ class Throttle:
     def due(self, kind, now, every_s):
         """True if this kind is due. The FIRST call for a kind is always due.
 
-        Defaulting the missing entry to 0.0 instead looks equivalent and is not:
-        `now` is time.monotonic(), which on Linux counts from BOOT, so a service
-        started by systemd sees now ~= 20s and `20 - 0 < 60` suppresses the very
-        first line. Observed on the boat 2026-09-03 — the watchdog started and
-        then said nothing at all about the battery for the rest of the first
-        minute, which is precisely when someone is watching to see whether it
-        works. A watchdog's first observation is the one that must not be
-        throttled.
+        Defaulting the missing entry to 0.0 looks equivalent and is not: `now` is time.monotonic(),
+        which on Linux counts from BOOT, so a service started by systemd sees now ~= 20 s and
+        `20 - 0 < 60` suppresses the very first line (the watchdog said nothing about the battery
+        for its first minute, when someone is watching to see whether it works).
         """
         last = self._last.get(kind)
         if last is not None and now - last < every_s:

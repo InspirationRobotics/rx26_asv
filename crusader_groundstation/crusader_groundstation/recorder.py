@@ -9,26 +9,20 @@ Three streams into one timestamped directory:
   camera/*.jpg      frames pulled from whichever MJPEG viewer is running
   lidar/*.jpg       the same, from the LiDAR viewer
 
-FRAMES ARE PULLED FROM THE VIEWERS, not captured again. buoy_detector and
-lidar_view already encode JPEG for the browser, and tools/mjpeg_server.py
-already counts clients so a producer can skip work nobody is watching. A
-recorder that subscribed to the image topics and encoded its own JPEGs would
-double the encode cost on a Jetson already running inference, and would produce
-frames that do not match what the operator was looking at. Attaching as one
-more MJPEG client costs the producer nothing it was not already doing — and it
-means recording only works while a viewer is up, which is honest: there is
-nothing to record from a camera nobody has turned on.
+FRAMES ARE PULLED FROM THE VIEWERS, not captured again: buoy_detector and
+lidar_view already encode JPEG for the browser, so attaching as one more MJPEG
+client costs the producer nothing, where a recorder encoding its own JPEGs would
+double the encode cost on a Jetson already running inference. Recording
+therefore only works while a viewer is up.
 
 RECORDING HAPPENS ON THE BOAT; THE DOWNLOAD IS SEPARATE AND EXPLICIT. Writing
-frames straight across the WiFi link would put the camera's ~18 Mbps on the air
-for the whole run and lose the recording whenever the link dropped — which is
-when you most want to know what the boat saw. Local disk is the only medium
-that survives the link going away.
+frames across the WiFi link would put the camera's ~18 Mbps on the air for the
+whole run and lose the recording whenever the link dropped.
 
 THE DISK GUARD IS NOT OPTIONAL. Frames at even 2 Hz fill a Jetson faster than
-anyone expects, and a full root filesystem takes down the whole stack, not just
-the recording. Recording refuses to start below the floor and stops itself if
-it crosses it mid-run, loudly.
+anyone expects, and a full root filesystem takes down the whole stack. Recording
+refuses to start below the floor and stops itself, loudly, if it crosses it
+mid-run.
 """
 import io
 import json
@@ -50,12 +44,9 @@ JPEG_BOUNDARY_HINT = b"\xff\xd8"        # SOI; used to resync a mangled stream
 def safe_session_dir(root, name):
     """Absolute path for `name` under `root`, or None if it is not legitimate.
 
-    Two independent checks, because this is user input becoming a path:
-    the name must match SAFE_NAME (so "..", "/" and NUL cannot appear at all),
-    AND the resolved path must still sit inside root (which catches anything
-    the first check did not anticipate, including symlink games). Either alone
-    would probably do; both is the correct amount of paranoia for a function
-    that decides which directory an HTTP request may read or delete.
+    Two checks, because this is user input becoming a path: the name must match
+    SAFE_NAME (so "..", "/" and NUL cannot appear), AND the resolved path must
+    still sit inside root (which catches symlink games).
     """
     if not name or not SAFE_NAME.match(name):
         return None
@@ -66,9 +57,8 @@ def safe_session_dir(root, name):
     return target
 
 
-# Only reached when a caller hands start() a mapping that does not name one of
-# its own sources, which is a caller bug rather than operator input. Named so
-# the fallback is a stated decision and not a bare literal inside the loop.
+# Used only when a caller's mapping omits one of its own sources (a caller bug,
+# not operator input).
 FALLBACK_FRAME_HZ = 1.0
 
 
@@ -80,9 +70,7 @@ RATE_WINDOW_S = 20.0
 def hours_left(free_bytes, rate_bytes_s):
     """How long the disk lasts at the measured rate, or None.
 
-    None when the rate is not yet measurable — which is a blank, and a blank is
-    a fact. Returning a large number for "we have not measured anything yet"
-    would read as reassurance the data has not earned.
+    None while the rate is not measurable: a blank, not a reassuring large number.
     """
     if not rate_bytes_s or rate_bytes_s <= 0 or free_bytes is None:
         return None
@@ -92,11 +80,8 @@ def hours_left(free_bytes, rate_bytes_s):
 class GrowthMeter:
     """Bytes-per-second of a directory, MEASURED, with its own lock.
 
-    Shared by every child process that writes into a session, because the
-    question is identical for all of them and the answer must not depend on
-    which one is asking. An estimate from a table of typical message sizes
-    would be a guess wearing a measurement's clothes; the tree has a rule
-    about those.
+    Shared by every child process that writes into a session, so the answer cannot
+    depend on which one is asking.
     """
 
     def __init__(self):
@@ -162,12 +147,9 @@ def frame_rates(requested, keys, default, lo=None, hi=None):
         one this then quietly rewrites.
 
     Returns:
-      (rates, notes). A bad value costs you the OVERRIDE, not the recording:
-      refusing a session because one field was mistyped loses the thing you
-      were about to record, and that is rarely repeatable. But it is never
-      silent - whatever was ignored or clamped comes back in `notes` and is
-      shown beside the "recording" message, because a capture quietly running
-      at a rate you did not choose is worse than one that refused outright.
+      (rates, notes). A bad value costs you the OVERRIDE, not the recording, but
+      is never silent: whatever was ignored or clamped comes back in `notes` and
+      is shown beside the "recording" message.
     """
     notes = []
     if requested is None:
@@ -207,9 +189,8 @@ def free_gb(path):
 def dir_size_bytes(path):
     """Total size of everything under `path`, skipping what it cannot stat.
 
-    Skipping rather than raising: a file being written while this walks is the
-    normal case here — that is what a live recording IS — and a size readout
-    that throws mid-session would take the whole snapshot down with it.
+    A file being written mid-walk is the normal case here, and a size readout that
+    throws would take the whole snapshot down with it.
     """
     total = 0
     for base, _dirs, files in os.walk(path):
@@ -229,10 +210,8 @@ class MjpegPuller(threading.Thread):
     """Saves frames from one MJPEG endpoint at a bounded rate.
 
     Parses multipart/x-mixed-replace by finding JPEG start-of-image and
-    end-of-image markers rather than trusting the boundary string: the boundary
-    is whatever the producer chose, and the two markers are in the format
-    itself. It also lets the reader resynchronise after a partial frame instead
-    of desynchronising for the rest of the run.
+    end-of-image markers rather than trusting the boundary string, which also lets
+    the reader resynchronise after a partial frame.
     """
 
     def __init__(self, url, out_dir, rate_hz, on_error=None, quality_note=""):
@@ -258,21 +237,17 @@ class MjpegPuller(threading.Thread):
                 self.last_error = str(e)
                 if self.on_error:
                     self.on_error(f"{self.url}: {e}")
-                # A viewer that is not up yet, or has been restarted, is a
-                # normal condition during a session. Retry slowly rather than
-                # spinning on connection refused.
+                # A viewer that is not up yet, or was restarted, is normal during a session:
+                # retry slowly rather than spinning on connection refused.
                 self._stop.wait(3.0)
 
     def _pull(self):
         req = urllib.request.Request(self.url)
         with urllib.request.urlopen(req, timeout=10) as stream:
-            # read1(), NOT read(). HTTPResponse.read(n) blocks until it has all
-            # n bytes, so on a stream of small JPEGs it buffers for a second
-            # before handing over anything — and every frame in that second
-            # then arrives with the same timestamp, so the rate gate keeps one
-            # and discards the rest. Measured: 1 frame saved where 10 were
-            # asked for. read1() returns what has arrived, which is what a
-            # live stream means.
+            # read1(), NOT read(): HTTPResponse.read(n) blocks until it has all n bytes, so
+            # a stream of small JPEGs buffers for a second and every frame in it gets the
+            # same timestamp, and the rate gate keeps one frame of the ten asked for.
+            # read1() returns what has arrived.
             read = getattr(stream, "read1", None) or stream.read
             buf = b""
             next_save = 0.0
@@ -336,9 +311,8 @@ class Session:
             if self.stopped:
                 return
             self._tel.write(json.dumps(sample, separators=(",", ":")) + "\n")
-            # Flushed every sample on purpose. A session that ends with the
-            # boat losing power — the case a recording exists for — keeps
-            # everything up to the last second instead of losing a buffer.
+            # Flushed every sample on purpose: a session that ends in power loss keeps
+            # everything up to the last second.
             self._tel.flush()
             self.samples += 1
 
@@ -384,11 +358,8 @@ class Session:
     def puller_stats(self):
         """(saved frame counts, capture rates) per viewer, in one walk.
 
-        Read back OFF the pullers rather than echoed from what was asked for,
-        so the number on screen and in meta.json is the rate frames are
-        actually being saved at. Both status() and write_meta() need the pair,
-        and two copies of the comprehension is how they end up disagreeing
-        after one of them is changed.
+        Read back OFF the pullers, not echoed from the request, so the number on screen
+        and in meta.json is the rate frames are actually saved at.
         """
         return ({k: p.count for k, p in self.pullers.items()},
                 {k: round(1.0 / p.period, 2) for k, p in self.pullers.items()})
@@ -401,10 +372,8 @@ class Session:
             "stopped": self.stopped,
             "samples": self.samples,
             "frames": counts,
-            # Recorded into the archive, not just shown live: "why is this
-            # session twenty times the size of the last one" is a question
-            # asked weeks later, off the laptop, with nothing else left to
-            # answer it.
+            # Recorded into the archive: "why is this session 20x the size of the last"
+            # gets asked weeks later, off the laptop.
             "frame_hz": rates,
             "error": self.error,
         }
@@ -446,14 +415,12 @@ class Recorder:
         """Begin a session. `sources` is {key: url} for MJPEG endpoints.
 
         `frame_hz` is one rate for every source, or a {key: hz} mapping from
-        frame_rates(). PER SOURCE because the camera and the LiDAR are not the
-        same recording problem: 30 fps of annotated camera is the whole point
-        of asking for 30 fps, while 30 fps of a plan view redrawn from a 10 Hz
-        sensor is three copies of every frame and a third of the disk.
+        frame_rates(): per source because 30 fps of annotated camera is wanted while
+        30 fps of a plan view redrawn from a 10 Hz sensor is three copies of every
+        frame.
 
-        Returns (ok, message). Refuses when a session is already live rather
-        than silently starting a second one — two recorders writing one
-        directory is a corrupted session that looks fine until it is read.
+        Returns (ok, message). Refuses when a session is already live: two recorders
+        in one directory corrupt it in a way that looks fine until it is read.
         """
         if self.session and self.session.stopped is None:
             return False, f"already recording {self.session.name}"
@@ -471,9 +438,7 @@ class Recorder:
         for key, url in sources.items():
             self.session.add_puller(key, url, rates[key])
         if self.log:
-            # The RATE is in the log line, not just the source name: "why is
-            # this session 20x the size of the last one" is the question this
-            # answers, and the answer is not otherwise written down anywhere.
+            # The RATE is logged, not just the source name.
             self.log(f"recording {name} (sources: "
                      + (", ".join(f"{k} @ {rates[k]:g} fps"
                                   for k in sorted(sources))
@@ -540,10 +505,8 @@ class Recorder:
     def archive_into(self, name, fileobj):
         """Stream one session as a .tar.gz into `fileobj`. Returns ok.
 
-        Streamed rather than built in memory: a session with a few thousand
-        frames is hundreds of megabytes, and building that in RAM on a Jetson
-        that is also running inference is how the recorder becomes the reason
-        a run ended.
+        Streamed, not built in memory: a session of thousands of frames is hundreds of
+        megabytes on a Jetson that is also running inference.
         """
         path = safe_session_dir(self.root, name)
         if path is None or not os.path.isdir(path):

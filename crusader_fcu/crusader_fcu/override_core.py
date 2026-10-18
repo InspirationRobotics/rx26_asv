@@ -1,9 +1,9 @@
 """override_core — the rules for RC overrides (software on the sticks), no ROS, no MAVLink.
 
 The fixed-nozzle shot needs to STRAFE, and on this OmniX hull only MANUAL mode
-strafes: GUIDED turns and drives, it does not slide. So in MANUAL the tree moves
-the boat the way the team's dp_hold did - RC_CHANNELS_OVERRIDE on the steering,
-throttle and lateral sticks - and telemetry_bridge is still the only thing that
+strafes (GUIDED turns and drives, it does not slide). So in MANUAL the tree moves
+the boat the way the team's dp_hold did, RC_CHANNELS_OVERRIDE on the steering,
+throttle and lateral sticks, and telemetry_bridge is still the only thing that
 sends it. These are its rules for /crsd/rc_override:
 
   * MODE: forwarded only in one of `modes` (MANUAL). The pilot's SC switch is

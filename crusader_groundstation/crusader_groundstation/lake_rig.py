@@ -1,28 +1,27 @@
 """lake_rig — start and stop the Task 1 lake rig from the ground station's Task 1 tab.
 
-Until 2026-10-03 the rig (crusader_sim/scripts/lake_rig_up.sh) was started by hand: ssh,
-docker exec into asv, LAKE_DATUM=<lat,lon> bash lake_rig_up.sh. The tab now runs the SAME
-script, in this same container (the ground station runs inside asv too), with the datum
-filled in from the boat instead of typed:
+The tab runs crusader_sim/scripts/lake_rig_up.sh in this same container (the
+ground station runs inside asv too), with the datum filled in from the boat
+instead of typed:
 
-  * THE FIELD IN PROGRESS WINS when the boat is within REUSE_M of it. The panel keeps the
-    field being built in <lake dir>/layouts/autosave.yaml and restores it on a restart ONLY
-    for the same datum (crusader_sim lake_panel.py, _init_layout). The lake day restarts the
-    rig between capturing the field (setpoints off) and the runs (PUBLISH=1), and the boat
-    has moved by then: a fresh datum at that restart would silently drop every buoy pinned
-    by driving. Same site, same datum, so the field comes back.
-  * Otherwise the boat's position now, from the caller's own fresh pose. A stale pose is a
-    refusal in the caller, never a remembered position.
-  * "new datum here" forces the boat's position, for a new site that happens to be close.
+  * THE FIELD IN PROGRESS WINS when the boat is within REUSE_M of it. The panel
+    keeps the field being built in <lake dir>/layouts/autosave.yaml and restores
+    it on a restart ONLY for the same datum (crusader_sim lake_panel.py,
+    _init_layout). The lake day restarts the rig between capturing the field and
+    the runs (PUBLISH=1), and the boat has moved by then: a fresh datum would
+    silently drop every buoy pinned by driving.
+  * Otherwise the boat's position now, from the caller's own fresh pose. A stale
+    pose is a refusal in the caller, never a remembered position.
+  * "new datum here" forces the boat's position, for a new site that happens to
+    be close.
 
-What this does NOT do: arm, change mode, or send any MAVLink. START in the panel stays the
-only way a mission begins, and the RC SB switch stays the only e-stop.
+What this does NOT do: arm, change mode, or send any MAVLink. START in the panel
+stays the only way a mission begins, and the RC SB switch stays the only e-stop.
 
-The script runs in a thread with a timeout. Its exit code and the tail of its output are
-what the tab shows, because the script's own banner is the one place that says what the
-rig chose and why (tree, nav_mode, POOL, tuning). Whether the rig is UP is read from the
-rig's own pid file each time it is asked, not remembered here: a rig started by hand, or
-one that outlived a restart of this node, reads the same.
+The script runs in a thread with a timeout. Its exit code and output tail are
+what the tab shows (its banner says what the rig chose and why). Whether the rig
+is UP is read from the rig's own pid file each time, not remembered: a rig
+started by hand, or one that outlived a restart of this node, reads the same.
 """
 import math
 import os

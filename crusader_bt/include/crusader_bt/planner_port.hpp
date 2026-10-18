@@ -51,8 +51,7 @@ struct CheckReply
   bool valid = false;
 };
 
-/// Non-blocking. Called from the tick thread; implementations lock their OWN mutex and
-/// never ctx->mu. A new request supersedes any in flight (its reply is dropped by seq).
+/// What a planner provides; the contract is at the top of this file.
 class PlannerPort
 {
 public:

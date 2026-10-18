@@ -4,7 +4,7 @@
 //
 //   * Every calculation is in fire_math.hpp, tested off-ROS
 //     (test/test_fire_math.cpp). A formula growing here belongs there.
-//   * The leaves never subscribe. The runner folds /crsd/wall_range,
+//   * The leaves never subscribe: the runner folds /crsd/wall_range,
 //     /crsd/attitude and /crsd/pump_state into the Context.
 //   * Outputs (heading+speed, the pump, avoidance) are called OUTSIDE
 //     ctx_->mu: the runner's publish callbacks may take it.

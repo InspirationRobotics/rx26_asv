@@ -1,22 +1,20 @@
 """StreamCache — a last-known value that knows how old it is.
 
-The bug this exists to prevent: telemetry_bridge cached the last frame from
-each MAVLink stream and republished it at 20 Hz with `header.stamp = now`,
-with no check that MAVProxy was still delivering. When the gateway died the
-last frame was rebroadcast forever, timestamped as if it had just arrived.
+The bug this exists to prevent: telemetry_bridge cached the last frame from each
+MAVLink stream and republished it at 20 Hz with `header.stamp = now`, with no
+check that MAVProxy was still delivering. When the gateway died the last frame
+was rebroadcast forever, stamped as if it had just arrived.
 
-That is worse than publishing nothing, because it defeats the consumers built
-to notice silence. rc_heartbeat_watchdog judges the RC link by the PWM on
-/crsd/rc_channels and the gateway by the arrival of ANY bridge topic; both
-timers were held fresh by the very staleness they exist to detect, so its
-force-disarm and its `gateway_down_in_loss` branch became unreachable. And
-because the header stamp lied, nothing downstream could tell either:
+That is worse than publishing nothing: it defeats the consumers built to notice
+silence. rc_heartbeat_watchdog's RC-link and gateway timers were held fresh by
+the very staleness they exist to detect, so its force-disarm and its
+`gateway_down_in_loss` branch became unreachable; and because the stamp lied,
 frame_transform kept rotating body detections against a frozen pose, writing
-obstacles into the world grid at coordinates the boat had long since left.
+obstacles into the world grid where the boat no longer was.
 
-So: a cached value is only ever handed out with an explicit freshness check,
-and going stale is a loud, one-shot event rather than silence. `now` is a
-caller-supplied monotonic seconds value so tests drive time deterministically.
+So: a cached value is only handed out with an explicit freshness check, and going
+stale is a loud one-shot event rather than silence. `now` is a caller-supplied
+monotonic seconds value so tests drive time deterministically.
 
 No ROS imports; unit-tested.
 """
@@ -26,9 +24,8 @@ class StreamCache:
     """Holds the newest value seen on one stream plus its receipt time.
 
     Deliberately has no "just give me the value" accessor: every read passes a
-    timestamp and gets None when the data is too old. Making the stale case
-    unrepresentable is the point — the original defect was a plain attribute
-    that read the same whether it was 20 ms or 20 minutes old.
+    timestamp and gets None when the data is too old, which makes the stale case
+    unrepresentable.
     """
 
     __slots__ = ("timeout_s", "value", "stamp", "recv_t", "_was_stale")
@@ -73,10 +70,9 @@ class StreamCache:
         """One-shot rising edge of staleness, for logging.
 
         True exactly once per fresh -> stale transition, so a dead stream
-        produces one loud line rather than a throttled stream of them or, worse,
-        nothing at all. Never fires for a stream that has not yet had a first
-        value: startup silence is not a dropout (the same distinction
-        rc_heartbeat_core draws by seeding last_bridge_msg "down").
+        produces one loud line, not a throttled stream or nothing. Never fires for
+        a stream that has not had a first value: startup silence is not a dropout
+        (as rc_heartbeat_core seeds last_bridge_msg "down").
         """
         if self.recv_t is None or self.fresh(now):
             return False

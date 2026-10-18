@@ -1,35 +1,25 @@
 """camera_profiles — named OAK-D camera settings, in two layers.
 
 WHY TWO FILES. camera_profiles.yaml is hand-written and carries the reasoning
-for every number in it. A machine write destroys that: PyYAML's dumper emits
-values, not comments, so the first Save from the browser would silently replace
-a documented file with a bare mapping. So the stock file is READ ONLY here, and
-everything the operator saves goes to camera_profiles.local.yaml beside it,
-which no human is expected to read. Documentation and state stop fighting over
-one file, and a profile saved on the water can never eat the explanation of why
-the shipped one looks the way it does.
+for every number in it, and PyYAML's dumper emits values, not comments, so a
+browser Save would replace a documented file with a bare mapping. The stock file
+is READ ONLY here; everything the operator saves goes to
+camera_profiles.local.yaml beside it.
 
 HOW THEY LAYER. Local wins by name. Saving over a stock name makes an override
-and leaves the stock block untouched underneath, so `delete` on an override is
-"revert to stock" rather than a loss — which is the operation you actually want
-at 3pm when the light has moved and the profile you just saved is worse than the
-one you started from. Deleting a stock profile is refused, because the file it
-lives in is in git and the UI would be promising something it cannot do.
+and leaves the stock block untouched, so `delete` on an override is "revert to
+stock". Deleting a stock profile is refused: the file is in git and the UI would
+promise something it cannot do.
 
-WHERE THE LOCAL FILE GOES. Beside the SOURCE config, not the installed one.
-crusader_params.yaml is symlinked into the install space, but a new file is
-COPIED there by the build — so a profile written to the install copy survives
-until the next colcon build and then vanishes, which is the worst failure shape
-available: it works all afternoon and is gone tomorrow. Resolution prefers the
-source tree for exactly that reason, and `status()` reports the path it settled
-on so the tab can show it rather than leaving the operator to guess.
+WHERE THE LOCAL FILE GOES. Beside the SOURCE config, not the installed one:
+crusader_params.yaml is symlinked into the install space but a new file is
+COPIED there by the build, so a profile written to the install copy vanishes at
+the next colcon build. `status()` reports the path it settled on.
 
 THIS MODULE DOES NOT VALIDATE CAMERA VALUES, deliberately. oak_detector owns
-every range and refuses in its own words through /params/set, and a second copy
-of the bounds here is a copy that goes stale the first time oak_controls grows a
-knob. A profile is stored as whatever it was given; what is unacceptable is
-found out by trying to apply it, and the node's own sentence is what the
-operator reads.
+every range and refuses in its own words through /params/set; a second copy of
+the bounds here would go stale. A profile is stored as given and found
+unacceptable by trying to apply it.
 """
 import io
 import os
@@ -54,9 +44,9 @@ OVERRIDE = "override"    # a local block shadowing a stock name of the same name
 def _config_dir():
     """The directory both files live in.
 
-    ENV_OVERRIDE names a DIRECTORY, not a file, because the two layers have to
-    stay together — pointing at one of them and inferring the other is how you
-    get stock profiles from the repo and saved ones from a test fixture.
+    ENV_OVERRIDE names a DIRECTORY, not a file, so the two layers stay together
+    (pointing at one and inferring the other mixes repo stock with test-fixture
+    saved profiles).
     """
     override = os.environ.get(ENV_OVERRIDE)
     if override:
@@ -83,11 +73,9 @@ def local_path():
 def _read(path):
     """One file's `profiles:` mapping, or {} when it is absent or unusable.
 
-    A missing local file is the normal state on a fresh checkout, not an error.
-    A malformed one is an error, but not one worth taking the tab down for: the
-    stock layer still loads, and `status()` carries the reason so the operator
-    is told which file to look at instead of being shown a short list that looks
-    complete.
+    A missing local file is the normal state on a fresh checkout. A malformed one
+    is not worth taking the tab down for: the stock layer still loads and
+    `status()` carries the reason.
     """
     try:
         raw = yaml.safe_load(io.open(path, encoding="utf-8")) or {}
@@ -126,14 +114,13 @@ def get(name):
 def _write_local(profiles):
     """Replace the local file atomically.
 
-    Atomic because the alternative is a truncated YAML file: a crash or a full
-    disk partway through an in-place write leaves a file that parses as nothing,
-    and every saved profile is gone at once. Written to a temp name in the SAME
-    directory so os.replace is a rename rather than a cross-device copy.
+    A crash or full disk partway through an in-place write would leave a file
+    that parses as nothing and lose every saved profile. Written to a temp name
+    in the SAME directory so os.replace is a rename, not a cross-device copy.
 
-    safe_dump is what quotes 'off' — verified, not assumed, because YAML 1.1
-    resolves a bare `off` back as the boolean False, and awb_mode: off is a real
-    value here. Do not replace this with a dumper that emits unquoted scalars.
+    safe_dump is what quotes 'off' (verified): YAML 1.1 resolves a bare `off` as
+    the boolean False, and awb_mode: off is a real value here. Do not replace it
+    with a dumper that emits unquoted scalars.
     """
     path = local_path()
     body = yaml.safe_dump({"profiles": profiles}, default_flow_style=False,
@@ -154,9 +141,8 @@ def save(name, values):
     name = (name or "").strip()
     if not name:
         return False, "a profile needs a name"
-    # The name becomes a YAML key and a button label. Restricting it here keeps
-    # both honest rather than discovering on reload that "a: b" was parsed as
-    # something else entirely.
+    # The name becomes a YAML key and a button label; restrict it so "a: b" is
+    # not parsed as something else on reload.
     if not all(c.isalnum() or c in "_-" for c in name):
         return False, f"{name!r}: use letters, digits, underscore or hyphen"
     if not isinstance(values, dict) or not values:
@@ -204,9 +190,8 @@ def status():
     stock, stock_err = _read(stock_path())
     local, local_err = _read(local_path())
     directory = _config_dir()
-    # Probed rather than inferred from the path: an installed share dir owned by
-    # root and a source tree on a read-only mount look identical from here, and
-    # the difference only shows up as a failed save after a tuning session.
+    # Probed, not inferred from the path: a root-owned share dir and a read-only
+    # source mount look identical from here.
     writable = os.access(directory, os.W_OK) and (
         not local_path().exists() or os.access(local_path(), os.W_OK))
     return {

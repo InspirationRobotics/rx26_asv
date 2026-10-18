@@ -99,16 +99,11 @@ sensors:
     # Mounted upside down (roll 180) — the pose comes from lidar_* params, and
     # the raw frame this produces is x fwd, y STARBOARD, z DOWN, like the real one.
     #
-    # FRONT 180 DEG ONLY. The user says the rear half of the real scan sees only
-    # the boat's own hull; Resources.md:116-118 ("the hull blocks most of the view
-    # aft of the beam ... Everything downstream works on the forward 180 deg
-    # only") and lidar_cluster_node's fov_deg 180 (crusader_params.yaml:321) say
-    # the same. So the sim does not scan there at all, rather than scan it and feed
-    # the cluster node hull it would throw away. The window is -90..+90 deg about
-    # the sensor's forward axis x — which the 180 deg roll about x leaves pointing
-    # at the bow, so it is the bow half. The real angular step is kept (600
-    # samples per 360 deg = 0.6 deg -> 300 per 180), so points per degree are
-    # unchanged: ~10.2k pts/scan, ~102k pts/s = the front half of the real 200k/s.
+    # FRONT 180 DEG ONLY: the rear half of the real scan sees only the boat's own hull
+    # (Resources.md:116-118; lidar_cluster_node's fov_deg 180, crusader_params.yaml:321), so the
+    # sim does not scan there. The window is -90..+90 deg about the sensor's forward axis x,
+    # which the 180 deg roll leaves pointing at the bow. The real angular step is kept (0.6 deg
+    # -> 300 samples per 180), so points per degree are unchanged: ~10.2k pts/scan, ~102k pts/s.
     rate_hz: 10.0            # SPEC   10 Hz typical
     h_fov_deg: 180.0         # TEAM   user + Resources.md above; SPEC is 360
     h_samples: 300           # SPEC   0.6 deg/sample, as the old 600 over 360 deg
@@ -123,40 +118,34 @@ sensors:
     range_max_m: 40.0
     noise_sd_m: 0.02         # SPEC   sigma <=2 cm @10 m; <=3 cm @0.2 m not modelled
   oak_d_lr:
-    # What the boat runs today (crusader_params.yaml): oak_detector takes COLOUR at
-    # full sensor res (rgb_isp_denominator: 1 -> 1920x1200) and DEPTH at 1/3
-    # (isp_denominator: 3 -> 640x400, the stereo engine's native width). Two gz
-    # sensors at one pose, because gz's rgbd_camera forces one resolution on both.
-    # If WSL rendering can't hold 15 fps at 1920x1200, drop rgb_* here for a run —
-    # but every pixel-space threshold in oak_detector scales with it.
-    # SPEC Luxonis OAK-D LR (docs.luxonis.com/hardware/products/OAK-D%20LR; the
-    # DFOV/HFOV/VFOV and resolution figures from the product spec sheet as copied
-    # by robosavvy.co.uk/luxonis-oak-d-lr.html, read 2026-09-30): THREE identical
-    # AR0234 2.3 MP global-shutter colour sensors, 1920x1200, M12 lenses whose
-    # default is DFOV/HFOV/VFOV 100/82/56 deg; stereo baselines 5/10/15 cm.
-    # gz derives the VFOV from aspect, 1920x1200 at HFOV 82 -> 57 deg (spec 56,
-    # rounding and lens distortion).
-    # HFOV 82 is the DEFAULT lens — VERIFY against the device's calibration
-    # (depthai readCalibration) and put the measured value here; a swapped lens
-    # changes it (and sim_camera.py's fx, which reads it from here).
+    # What the boat runs today (crusader_params.yaml): COLOUR at full sensor res
+    # (rgb_isp_denominator: 1 -> 1920x1200) and DEPTH at 1/3 (isp_denominator: 3 -> 640x400, the
+    # stereo engine's native width). Two gz sensors at one pose, because gz's rgbd_camera forces
+    # one resolution on both. If WSL can't hold 15 fps at 1920x1200, drop rgb_* for a run, but
+    # every pixel-space threshold in oak_detector scales with it.
+    # SPEC Luxonis OAK-D LR (docs.luxonis.com/hardware/products/OAK-D%20LR; figures as copied by
+    # robosavvy.co.uk/luxonis-oak-d-lr.html, read 2026-09-30): THREE identical AR0234 2.3 MP
+    # global-shutter colour sensors, 1920x1200, M12 lenses defaulting to DFOV/HFOV/VFOV 100/82/56
+    # deg; stereo baselines 5/10/15 cm. gz derives VFOV from aspect (57 deg).
+    # HFOV 82 is the DEFAULT lens: VERIFY against the device's calibration (depthai
+    # readCalibration); a swapped lens changes it (and sim_camera.py's fx, read from here).
     #
-    # ONE HFOV for colour, depth and both previews, because the depth is ALIGNED
-    # TO THE COLOUR CAMERA: oak_pipeline.py:170 stereo.setDepthAlign(CAM_A) and
-    # oakd_publisher.py:21-24 emit it in CAM_A's field of view at 1/3 the pixels,
-    # which is why oak_detector rescales an RGB box into depth pixels by a plain
-    # ratio (oak_detector.py:839-844). The stereo pair (CAM_B/CAM_C, 15 cm apart,
-    # the same 82 deg lenses) only decides where depth is VALID — a strip down
-    # one edge loses its match at close range — which gz cannot render.
+    # ONE HFOV for colour, depth and both previews: depth is ALIGNED TO THE COLOUR CAMERA
+    # (oak_pipeline.build_rgbd's stereo.setDepthAlign(CAM_A); oakd_publisher) in CAM_A's field of
+    # view at 1/3 the pixels, which is why oak_detector rescales an RGB box into depth pixels by a
+    # plain ratio (oak_detector._position). The stereo pair (CAM_B/CAM_C, 15 cm apart) only
+    # decides where depth is VALID (an edge strip loses its match at close range), which gz
+    # cannot render.
     rate_hz: 15.0            # = oakd_publisher.fps / oak_detector fps (sensor: 60)
     rgb_width: 1920
     rgb_height: 1200
     depth_width: 640
     depth_height: 400
     hfov_deg: 82.0           # SPEC   default lens
-    # MinZ = f*B / 95 px of disparity search, f = 320 px / tan(41 deg) = 368 px at
-    # 640 wide, B = 0.15 m (the outer pair), extended disparity off (DEFAULT
-    # preset, oak_pipeline.py:167) = 0.58 m. Luxonis's MinZ of 20 cm is for the
-    # 5 cm baseline with extended disparity at 800P — not what the boat runs.
+    # MinZ = f*B / 95 px of disparity search, f = 320 px / tan(41 deg) = 368 px at 640 wide,
+    # B = 0.15 m (the outer pair), extended disparity off (DEFAULT preset, oak_pipeline.build_rgbd)
+    # = 0.58 m. Luxonis's MinZ of 20 cm is for the 5 cm baseline with extended disparity at 800P,
+    # not what the boat runs.
     depth_min_m: 0.58        # TEAM   derived as above; was 0.5
     # Luxonis: "precise depth readings up to ~30 m" on the 15 cm baseline (product
     # page). Its accuracy table (82 deg, theoretical, 800P): <2 % to 5.5 m, <4 %

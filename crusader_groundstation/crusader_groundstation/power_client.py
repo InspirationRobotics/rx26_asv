@@ -1,31 +1,24 @@
 """power_client — ask the HOST to power down, from inside the container.
 
 WHY THIS IS NOT `subprocess.run(["sudo", "shutdown"])`. The ground station runs
-inside `asv`. A container shares the host's kernel but has no init of its own to
-talk to, so `shutdown` and `systemctl poweroff` inside it either fail outright
-or, if the container is privileged enough, do something worse than nothing. The
-container genuinely cannot power off the machine, and no amount of sudo changes
-that.
+inside `asv`; a container shares the host's kernel but has no init to talk to,
+so `shutdown` and `systemctl poweroff` inside it fail or do something worse,
+whatever the sudo. Running the container --privileged with the host PID
+namespace would work, by handing every process in it (inference stack and
+MAVLink bridge included) root on the Jetson: a large permanent grant to buy one
+button.
 
-The alternative usually reached for is running the container --privileged with
-the host PID namespace, which does work — by handing every process in the
-container root on the Jetson. That is a large permanent grant to buy one
-button, and it applies to the inference stack and the MAVLink bridge too.
-
-So instead there is a HOST-SIDE HELPER with exactly two verbs. It runs as a
-systemd unit outside every container, listens on a Unix socket, accepts the
-words "shutdown" and "reboot" and nothing else, and refuses anything it does
-not recognise. The socket is bind-mounted into `asv`. The privileged surface is
-one file, two verbs, and no arguments — the helper never interpolates anything
-a client sent into a command.
+So there is a HOST-SIDE HELPER with exactly two verbs. It runs as a systemd unit
+outside every container, listens on a Unix socket (bind-mounted into `asv`),
+accepts "shutdown" and "reboot" and nothing else, and never interpolates
+anything a client sent into a command.
 
   tools/scripts/crsd_power_helper.py     the helper
   tools/systemd/crsd-power.service       the unit that runs it
 
 If the socket is not there, this client says so plainly and the page disables
-the buttons with that reason attached. A power control that silently does
-nothing is worse than one that is visibly absent — someone will press it twice,
-conclude the boat is wedged, and go pull the battery.
+the buttons with that reason: a power control that silently does nothing gets
+pressed twice and the battery pulled.
 """
 import json
 import os
@@ -54,10 +47,9 @@ def available(socket_path=DEFAULT_SOCKET):
 def request(verb, socket_path=DEFAULT_SOCKET, reason=""):
     """Ask the helper to run `verb`. Returns its reply string.
 
-    The verb is validated HERE as well as in the helper. Both ends checking the
-    same short list is not redundant: this end gives a clear error before
-    anything crosses a privilege boundary, and that end is the one that must
-    not be talked into running something else no matter what reaches it.
+    The verb is validated HERE as well as in the helper: this end gives a clear
+    error before anything crosses a privilege boundary, and that end must not be
+    talked into running something else.
     """
     if verb not in VERBS:
         raise ValueError(f"refusing unknown power verb {verb!r}; "
@@ -72,9 +64,9 @@ def request(verb, socket_path=DEFAULT_SOCKET, reason=""):
             s.settimeout(TIMEOUT_S)
             s.connect(socket_path)
             s.sendall(payload.encode())
-            # The helper acknowledges BEFORE it acts, because after it acts
-            # there is no socket left to answer on. An empty reply means it
-            # died mid-handshake, which is a different failure from a refusal.
+            # The helper acknowledges BEFORE it acts (afterwards there is no
+            # socket to answer on); an empty reply means it died mid-handshake,
+            # not a refusal.
             reply = s.recv(4096).decode(errors="replace").strip()
     except socket.timeout as e:
         raise PowerUnavailable(

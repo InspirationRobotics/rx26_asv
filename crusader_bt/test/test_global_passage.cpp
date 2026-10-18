@@ -77,7 +77,7 @@ static Field field(const std::string & name, std::vector<B> bs, Vec2 boat = {0.0
 static std::vector<Field> fields()
 {
   std::vector<Field> fs;
-  // The user's crowded field (panel layouts user_crowded_1002 / packed_field, 2026-10-02):
+  // The user's crowded field (panel layouts user_crowded_1002 / packed_field):
   // 4-5 m between buoys, the passage zig-zags west then back east.
   fs.push_back(field("user_crowded", {
     {6.8, 7.2, "flash_blue"}, {13.3, 14.6, "flash_red"}, {8.1, 14.8, "flash_green"},

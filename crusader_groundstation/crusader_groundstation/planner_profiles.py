@@ -14,24 +14,23 @@ sim's Task 1 panel writes (crusader_sim/config/tuning_profiles/*.yaml, `gz_sim_u
       ros__parameters:
         GridBased: {tolerance: 0.3}
 
-WHAT THE GROUND STATION DOES WITH ONE. Loading applies ONLY the bt_runner_node nav_* keys
-(the planner knobs bt_runner re-reads at the next START), through the Tuning tab's ordinary
-/params/set path, so the node's own set-callback judges every value. Everything else in
-the file is LISTED as skipped and why, never applied silently: Nav2's planner_server and
-global_costmap are configured when the rig launches and cannot be changed live, and a
-bt_runner_node key that is not a nav_* planner knob (publish_setpoints!) has no business
-arriving from a file picker.
+WHAT THE GROUND STATION DOES WITH ONE. Loading applies ONLY the bt_runner_node
+nav_* keys (the planner knobs bt_runner re-reads at the next START) through the
+Tuning tab's ordinary /params/set path, so the node's own set-callback judges
+every value. Everything else is LISTED as skipped and why, never applied
+silently: Nav2's planner_server and global_costmap are configured at rig launch,
+and a bt_runner_node key that is not a nav_* planner knob (publish_setpoints!)
+has no business arriving from a file picker.
 
 WHERE THEY LIVE. Two directories, listed together:
   shipped  the repo's crusader_sim/config/tuning_profiles (a parameter; read-only here)
-  saved    ~/.cache/crusader_lake/tuning, where "Save as profile" writes -- the lake rig's
-           own log directory, so `LAKE_TUNING=<that file>` finds it on the same disk.
+  saved    ~/.cache/crusader_lake/tuning, where "Save as profile" writes -- the
+           lake rig's own log directory, so `LAKE_TUNING=<that file>` finds it.
 
-BLANKS OVER GUESSES. A directory that is missing is a listing with no profiles and the
-reason, not an empty list that looks like "none were ever made"; a file that does not
-parse is listed with its error, not dropped.
+BLANKS OVER GUESSES. A missing directory is a listing with no profiles and the
+reason; a file that does not parse is listed with its error, not dropped.
 
-Pure apart from the filesystem: no ROS, so the whole of it is tested off-boat.
+Pure apart from the filesystem: no ROS, so it is tested off-boat.
 """
 import os
 import re
@@ -176,11 +175,10 @@ def _differs(row):
 def drifted_planner_values(rows):
     """({name: value}, note) -- the planner knobs whose live value differs from the YAML's.
 
-    `rows` is ParamBridge.list's output for bt_runner_node. The comparison is against
-    crusader_params.yaml (the same drift the Tuning tab marks), so what is saved is the set of
-    lines a person would otherwise have to write back by hand. A knob with no YAML default has
-    nothing to differ FROM and is not saved; if none of them has one, say so rather than
-    returning an empty set that reads as "nothing changed".
+    `rows` is ParamBridge.list's output for bt_runner_node. The comparison is
+    against crusader_params.yaml (the drift the Tuning tab marks). A knob with no
+    YAML default has nothing to differ FROM and is not saved; if none has one,
+    say so rather than returning an empty set that reads as "nothing changed".
     """
     planner = [r for r in rows if is_planner_row(r)]
     if not planner:

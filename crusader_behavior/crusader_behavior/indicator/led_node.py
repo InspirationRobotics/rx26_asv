@@ -1,10 +1,8 @@
 """led_node — forwards /crsd/led_state (Int32 0..3) to the LED Arduino over serial.
 
-Ported from the operational Crusader stack into this repo's conventions:
-  * run_node lifecycle (deterministic teardown: strip OFF + serial close on exit);
-  * declare_from_config against config/crusader_params.yaml (no drifting code
-    defaults) — port is [RO] (a udev symlink, structural) and baud is [RO];
-  * /crsd/ topic namespace like every other node here.
+Repo conventions: run_node lifecycle (deterministic teardown: strip OFF + serial
+close on exit), declare_from_config against config/crusader_params.yaml (port and
+baud are [RO]), /crsd/ topic namespace.
 
 State contract (matches firmware/LED.ino):
   0 = off, 1 = RED (disarmed / e-stop), 2 = YELLOW (armed/manual), 3 = GREEN (auto).

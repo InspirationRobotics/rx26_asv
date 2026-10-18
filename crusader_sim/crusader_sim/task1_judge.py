@@ -49,11 +49,10 @@ import time
 from crusader_sim import course as C
 
 # Contact = a buoy's collision box (0.43 m square, gen_world) reaching the hull's
-# 1.0 x 0.6 m footprint (crusader_hull.yaml hull length_m/beam_m). Given the
-# boat's yaw that is tested against the hull rectangle; without it, a circle of
-# half-beam + half-width, which is right abeam but blind ahead: a bow pressed
-# against a buoy sits 0.70 m centre to centre, and a 0.55 m circle missed
-# exactly that (Task 1 panel, real sim, 2026-09-30).
+# 1.0 x 0.6 m footprint (crusader_hull.yaml hull length_m/beam_m). With the boat's yaw
+# it is tested against the hull rectangle; without it, a circle of half-beam + half-width,
+# right abeam but blind ahead: a bow pressed on a buoy sits 0.70 m centre to centre,
+# which a 0.55 m circle missed.
 HULL_HALF_L, HULL_HALF_B = 0.5, 0.3
 BUOY_HALF_M = 0.22
 CONTACT_SLACK_M = 0.03
@@ -66,9 +65,8 @@ GATE_PAIR_M = 15.0
 PASS_CHORD_M = 0.3
 PASS_STEP_M = 0.01
 # Every pass is scored, but only one within PASS_LOG_M is announced as it happens: an orbit
-# sweeps its direction of travel through the whole circle, so 40 m-away buoys flip "ahead" to
-# "behind" (and back) on the way round, and a live "WRONG SIDE" line for each would be a false
-# alarm that the buoy's real, closer pass overrides a minute later.
+# sweeps its direction of travel round the whole circle, so buoys 40 m away flip "ahead" to
+# "behind" on the way, and a live "WRONG SIDE" line for each would be a false alarm.
 PASS_LOG_M = 12.0
 SIDE_CONSTRAINED = ("flash_red", "flash_green")
 # clearance: the planner's 0.8 m contract less 0.1 m for quantisation (spec 7), and

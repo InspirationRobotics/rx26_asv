@@ -32,12 +32,9 @@ for dev in /dev/ttyACM* /dev/ttyUSB*; do
   echo "  $dev  ${info:-(no usb attributes readable)}"
 done
 
-# Purge installed rules that no longer exist in the repo. `install` only ever
-# ADDS files, so deleting a rules file from the repo left the old copy live in
-# /etc/udev/rules.d forever — and re-running this script looked like it had
-# resolved the problem. That is how 99-crusader-devpath.rules kept mapping
-# crsd-ball-launcher onto the Pixhawk's tty after the repo dropped it: a stale
-# port-chain rule outliving the cabling it described. Rules removed here, not
+# Purge installed rules that no longer exist in the repo: `install` only ever ADDS files, so a rules
+# file deleted from the repo stayed live in /etc/udev/rules.d (99-crusader-devpath.rules kept mapping
+# crsd-ball-launcher onto the Pixhawk's tty after the repo dropped it). Rules are removed here, not
 # just overwritten, so the collision guard below reflects the repo's intent.
 for installed in /etc/udev/rules.d/99-crusader*.rules; do
   name="$(basename "$installed")"
@@ -76,13 +73,11 @@ else
 fi
 
 # --- Collision guard -------------------------------------------------------
-# Two rules claiming one device is silent and dangerous. A stale generated
-# port-chain rule once pointed crsd-ball-launcher at the SAME tty as
-# crsd-pixhawk, so a node opening that name would have opened the autopilot's
-# serial link at 9600 baud while MAVProxy owned it — a second Pixhawk owner, on
-# a boat with live thrusters. It was only caught by eyeballing an `ls`. The
-# port-chain generator that produced that rule is gone, but the guard stays:
-# the failure mode belongs to udev, not to that one script.
+# Two rules claiming one device is silent and dangerous: a stale generated port-chain rule once
+# pointed crsd-ball-launcher at the SAME tty as crsd-pixhawk, so a node opening that name would have
+# opened the autopilot's serial link at 9600 baud while MAVProxy owned it, a second Pixhawk owner on
+# a boat with live thrusters. The generator is gone, but the failure mode belongs to udev, so the
+# guard stays.
 declare -A crsd_seen=()
 collision=0
 for link in "${crsd_links[@]}"; do

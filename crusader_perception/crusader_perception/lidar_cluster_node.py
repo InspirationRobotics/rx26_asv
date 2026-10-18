@@ -10,42 +10,33 @@ Publishes:
   /crsd/nav/obstacle_cloud  sensor_msgs/PointCloud2       (base_footprint, every
                             window) — the Nav2 costmap's LiDAR input, see below
 
-All the geometry lives in lidar_cluster_core, which has no ROS imports and is
-exercised against invented clouds. This file is I/O and parameter plumbing only,
-mirroring buoy_detector.py.
+All the geometry lives in lidar_cluster_core (no ROS imports, exercised against invented
+clouds). This file is I/O and parameter plumbing only, mirroring buoy_detector.py.
 
-WHY IT ACCUMULATES. The MID360 returns ~200k points/s over 360x59 degrees, so a
-0.3 m buoy gives roughly 37 points per sweep at 5 m, 9 at 10 m and 2 at 20 m.
-Measured against this clustering core, a single sweep reaches about 10 m and
-five sweeps reach about 20 m. Livox's non-repetitive scan pattern means each
-sweep adds genuinely new coverage rather than resampling the same lines, so
-accumulation buys real range — but only if the boat's own motion is removed
-first, or a 2 m/s drift smears every cluster over half a metre.
+WHY IT ACCUMULATES. The MID360 returns ~200k points/s over 360x59 degrees, so a 0.3 m buoy
+gives ~37 points per sweep at 5 m, 9 at 10 m and 2 at 20 m. Against this clustering core a
+single sweep reaches about 10 m and five reach about 20 m: Livox's non-repetitive scan adds
+genuinely new coverage each sweep, but only if the boat's own motion is removed first (a
+2 m/s drift smears every cluster over half a metre).
 
-MOTION COMPENSATION, and what happens without it. Each retained sweep is stored
-with the pose it was taken at, and rotated/translated into the CURRENT body
-frame before the window is clustered. If pose goes stale the node falls back to
-a SINGLE sweep and says so on the health topic: a sparser cloud that is correct
-beats a denser one that is smeared, and silently accumulating uncompensated
-would make every cluster drift with speed in a way that looks like bad
-calibration.
+MOTION COMPENSATION. Each retained sweep is stored with the pose it was taken at and
+rotated/translated into the CURRENT body frame before the window is clustered. If pose goes
+stale the node falls back to a SINGLE sweep and says so on the health topic: a sparser
+correct cloud beats a denser smeared one.
 
-THE NAVIGATION CLOUD (docs/nav2_avoidance_spec.md section 6). The same window that
-is clustered also yields /crsd/nav/obstacle_cloud: every point that landed in a
-dense-enough cluster, LEVELLED, voxel-downsampled, in `base_footprint` (REP-103
-axes, no roll or pitch, origin at the hull-bottom datum). It is deliberately not
-the cluster list. max_extent_m throws away docks, platforms and shorelines as
-OBJECTS, and those are exactly what a hull must not hit. It is published
-whenever a window is processed, EMPTY when `nav_cloud_enable` is false (the pool
-switch: an empty cloud keeps the costmap current and marks nothing), and
-WITHHELD while /crsd/attitude is stale, because an unlevelled water gate is a
-guess and a costmap that goes non-current makes planned legs hold. Stamped with
-RECEIPT time, not the driver's: TF is stamped on the host clock and the Livox
-driver's clock is not proven to be it.
+THE NAVIGATION CLOUD (docs/nav2_avoidance_spec.md section 6). The same window also yields
+/crsd/nav/obstacle_cloud: every point in a dense-enough cluster, LEVELLED, voxel-downsampled,
+in `base_footprint` (REP-103 axes, no roll or pitch, origin at the hull-bottom datum). It is
+deliberately not the cluster list: max_extent_m throws away docks, platforms and shorelines
+as OBJECTS, and those are what a hull must not hit. Published whenever a window is
+processed, EMPTY when `nav_cloud_enable` is false (the pool switch: an empty cloud keeps the
+costmap current and marks nothing), and WITHHELD while /crsd/attitude is stale (an
+unlevelled water gate is a guess, and a costmap that goes non-current makes planned legs
+hold). Stamped with RECEIPT time: TF is on the host clock and the Livox driver's clock is
+not proven to be it.
 
-WHY NOT IN core.launch.py. Nothing here has run on the boat yet. It also has no
-device of its own — it consumes the livox container's topic — so it is safe to
-start by hand alongside the core stack.
+NOT IN core.launch.py: nothing here has run on the boat yet. It has no device of its own (it
+consumes the livox container's topic), so it is safe to start by hand beside the core stack.
 """
 import json
 import math
@@ -123,12 +114,11 @@ DYNAMIC_RANGES = {k: (v["lo"], v["hi"]) for k, v in PARAM_SPEC.items()
 
 
 def pointcloud2_to_xyz(msg: PointCloud2) -> np.ndarray:
-    """Extract (N,3) xyz from a PointCloud2, tolerant of extra fields (Livox
-    adds intensity/tag/line). Assumes little-endian float32 x/y/z.
+    """Extract (N,3) xyz from a PointCloud2, tolerant of extra fields (Livox adds
+    intensity/tag/line). Assumes little-endian float32 x/y/z.
 
-    A stride view, not sensor_msgs_py.point_cloud2.read_points: that helper
-    builds a structured array per call, and this runs at 10 Hz on 20k points
-    beside a TensorRT engine.
+    A stride view, not sensor_msgs_py.point_cloud2.read_points, which builds a structured
+    array per call; this runs at 10 Hz on 20k points beside a TensorRT engine.
     """
     offs = {f.name: f.offset for f in msg.fields}
     if not all(k in offs for k in ("x", "y", "z")):
@@ -317,11 +307,10 @@ class LidarClusterNode(Node):
     def _publish_nav(self, nav_pts, levelled, t_rx):
         """Publish the navigation cloud; returns what was done, for the health JSON.
 
-        Withheld, not empty, when attitude is stale: an empty cloud would keep
-        the costmap current and say "all clear" about a water gate that could
-        not be levelled. Silence is what makes it go non-current, and that is
-        what makes planned legs hold. The pool profile is the opposite case on
-        purpose: `nav_pts` is empty there, and an EMPTY cloud keeps the costmap
+        Withheld, not empty, when attitude is stale: an empty cloud would keep the costmap
+        current and say "all clear" about a water gate that could not be levelled; silence
+        makes it go non-current, and planned legs then hold. The pool profile is the opposite
+        case on purpose: `nav_pts` is empty there, and an EMPTY cloud keeps the costmap
         current while marking nothing.
         """
         if not levelled:

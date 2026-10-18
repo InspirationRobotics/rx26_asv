@@ -5,9 +5,8 @@ stdlib only, no ROS:   python crusader_world_model/test/test_target_tracker_core
 The scenario this pins is Task 1 Disruptive. A RoboBuoy's side beacon is OFF
 (only the top beacon, which the UAV sees, is lit) and in lower tiers the beacon
 flashes 1 s on / 1 s off. The detector names the beacon STATE, so one buoy is
-red_buoy on one frame and black_buoy on the next. Before colour voting that was
-two tracks a metre apart, and the duplicate became a phantom obstacle beside a
-real gate buoy.
+red_buoy on one frame and black_buoy on the next, which without colour voting is
+two tracks a metre apart (a phantom obstacle beside a real gate buoy).
 
 The expected values are worked out from the rule (a lit colour needs
 colour_min_votes votes AND colour_min_ratio of the LIT votes, dark votes

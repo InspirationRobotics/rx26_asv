@@ -1,25 +1,18 @@
 // nav_math.hpp — every piece of geometry Task 1 needs, and nothing else.
 //
-// Header-only, <cmath> and <vector> only. No ROS, no BehaviorTree.CPP, no
-// rclcpp. That is the whole point: this is the one file in the behaviour-tree
-// package where a sign error MIRRORS THE WORLD, and it is the one file that can
-// be compiled and tested on a laptop in a second:
+// Header-only, <cmath> and <vector> only: no ROS, no BehaviorTree.CPP, no
+// rclcpp. A sign error here MIRRORS THE WORLD, and this compiles and runs on a
+// laptop in a second:
 //
 //     g++ -std=c++17 -O2 -o t test/test_nav_math.cpp && ./t
 //
-// Same split as crusader_perception's proximity_core.py: the leaves that use
-// this are thin wrappers that read ports, call in here, publish and poll. All
-// the arithmetic that can be wrong in an invisible way lives on this side.
-//
 // THE CONVENTIONS, in the order they bite:
 //
-//   Vec2 is a LOCAL TANGENT PLANE in metres: x EAST, y NORTH. That is ENU
-//   without the up, which makes a positive rotation counter-clockwise and lets
-//   the port/starboard maths read like plane geometry rather than navigation.
+//   Vec2 is a LOCAL TANGENT PLANE in metres: x EAST, y NORTH (ENU without the
+//   up), so a positive rotation is counter-clockwise.
 //
-//   Bearings, where they appear, are degrees CLOCKWISE FROM NORTH, because that
-//   is what the autopilot and every chart use. bearingDeg() is the only place
-//   the two conventions meet.
+//   Bearings are degrees CLOCKWISE FROM NORTH (autopilot and chart convention).
+//   bearingDeg() is the only place the two conventions meet.
 //
 //   THE SIDE RULE IS INVERTED FROM WHAT A SAILOR EXPECTS, and the handbook is
 //   the authority (3.3.2):
@@ -80,14 +73,9 @@ inline Vec2 unit(Vec2 a)
 
 // ---------------------------------------------------------------- projection
 //
-// Equirectangular about an origin. Good to well under a centimetre over the
-// couple of hundred metres a task course spans, and it has the property that
-// matters here: it is EXACTLY invertible, so a waypoint computed in metres and
-// converted back to lat/lon lands where the maths put it.
-//
-// The origin must be held fixed for the whole mission. Re-deriving it from the
-// boat's current position each tick would make every stored position drift as
-// the boat moves — the classic moving-frame bug.
+// Equirectangular about an origin: good to well under a centimetre over a task
+// course and EXACTLY invertible. Hold the origin fixed for the whole mission;
+// re-deriving it from the boat's position each tick makes every stored position drift.
 
 inline Vec2 toLocal(LatLon p, LatLon origin)
 {
@@ -106,10 +94,9 @@ inline LatLon toLatLon(Vec2 v, LatLon origin)
 /// Unit vector for a compass heading in degrees clockwise from north.
 ///
 /// Returns north for a non-finite heading rather than NaN, but callers must
-/// check isfinite() FIRST and refuse to act — on this boat heading comes from
-/// GPS yaw with the compass disabled, so NaN is a real and current state, not a
-/// theoretical one, and steering north because the heading was unknown is
-/// exactly the guess this codebase forbids.
+/// check isfinite() FIRST and refuse to act: heading comes from GPS yaw with the
+/// compass disabled, so NaN is a real state, and steering north because the
+/// heading was unknown is a guess.
 inline Vec2 headingVec(double heading_deg)
 {
   if (!std::isfinite(heading_deg)) {return {0.0, 1.0};}
@@ -140,10 +127,7 @@ inline Vec2 starboardOf(Vec2 travel)
 }
 
 /// >0 when `p` lies to PORT of the track a->b, <0 to STARBOARD, 0 on the line.
-///
-/// This is the POST-HOC scoring check: run it over the logged track at the end
-/// of a mission to find out which side each buoy was ACTUALLY passed on. The
-/// plan says what we meant to do; this says what we did.
+/// Post-hoc scoring check on the logged track.
 inline double crossTrack(Vec2 a, Vec2 b, Vec2 p)
 {
   return cross(b - a, p - a);
@@ -180,11 +164,10 @@ struct Buoy
 /// handbook 3.3.2: "A FLASHING RED light must be passed on the surface system's
 /// starboard side. A FLASHING GREEN light must be passed on the port side."
 ///
-/// Read that carefully before touching the signs. For the buoy to end up on OUR
-/// starboard, WE must pass down ITS port side — so a RED buoy's waypoint is
-/// offset to PORT of the direction of travel, not to starboard. The two are
-/// opposite and swapping them inverts the task while still looking plausible on
-/// a plot.
+/// For the buoy to end up on OUR starboard, WE must pass down ITS port side, so a
+/// RED buoy's waypoint is offset to PORT of the direction of travel, not to
+/// starboard. Swapping them inverts the task while still looking plausible on a
+/// plot.
 inline Vec2 sideWaypoint(Vec2 buoy, Vec2 travel, Beacon state, double offset_m)
 {
   if (state == Beacon::FlashingRed) {
@@ -211,10 +194,9 @@ inline bool passedCorrectly(Vec2 a, Vec2 b, const Buoy & buoy)
 /// `n` waypoints once around `anchor` at `radius`, starting from the bearing
 /// the boat already sits on so the first leg is short.
 ///
-/// Core Tier wants a FULL circle, so the last waypoint returns to the starting
-/// bearing: k runs 1..n, and k == n is a complete revolution. Direction is a
-/// world-frame sense — clockwise means clockwise on a north-up chart, which in
-/// this ENU frame is DECREASING angle.
+/// Core Tier wants a FULL circle: k runs 1..n and k == n is a complete revolution.
+/// Direction is a world-frame sense: clockwise on a north-up chart is DECREASING
+/// angle in this ENU frame.
 inline std::vector<Vec2> orbit(
   Vec2 anchor, Vec2 from, double radius, int n, bool clockwise)
 {
@@ -233,9 +215,8 @@ inline std::vector<Vec2> orbit(
 
 /// Signed total turn of a closed waypoint ring, in degrees.
 ///
-/// -360 for one clockwise revolution, +360 counter-clockwise. Used to assert a
-/// generated orbit really goes all the way round the right way — a skipped or
-/// mis-signed waypoint shows up here and nowhere else.
+/// -360 for one clockwise revolution, +360 counter-clockwise. Asserts a generated
+/// orbit really goes all the way round the right way.
 inline double sweepDeg(Vec2 anchor, const std::vector<Vec2> & ring, Vec2 from)
 {
   if (ring.empty()) {return 0.0;}
@@ -263,35 +244,26 @@ struct NextWaypoint
 ///
 /// Rules, in order:
 ///   1. Direction of travel is toward the EXIT when it is known, else the
-///      boat's own HEADING. Never the bearing of a candidate buoy — that would
-///      make every candidate "ahead" and defeat rule 2 entirely.
-///   2. Only buoys AHEAD of us count — dot(buoy - boat, travel) > 0. A buoy
-///      already abeam or astern has been dealt with, and steering back to it
-///      is how a boat ends up circling in the middle of the field.
+///      boat's own HEADING. Never the bearing of a candidate buoy: that makes
+///      every candidate "ahead" and defeats rule 2.
+///   2. Only buoys AHEAD of us count: dot(buoy - boat, travel) > 0. A buoy
+///      already abeam or astern has been dealt with.
 ///   3. Among those, take the NEAREST, and offset it to the required side.
 ///   4. Nothing ahead but the exit is known -> steer at the exit. NearExit in
 ///      the tree is what ends the transit; this function never decides that.
-///   5. Nothing ahead and no exit -> ok = false, which is the loop's secondary
-///      way out. Same result when the heading is NaN and there is no exit:
-///      with no notion of "ahead" the honest answer is to steer nowhere.
+///   5. Nothing ahead and no exit -> ok = false, the loop's secondary way out.
+///      Same when the heading is NaN and there is no exit.
 ///
-/// Note what is NOT here: pairing buoys into gates. The handbook constrains
-/// each RED/GREEN buoy individually and says nothing about pairs, so pairing is
-/// an inference we do not need and that fails badly when one of a pair is
-/// missed. That reasoning still holds for anything the BOAT infers on its own.
-///
-/// Above Core tier it is not an inference: the UAV can see the whole passage
-/// from above and NAMES the pair, so the boat is told (red_id, green_id) rather
-/// than guessing it. gateWaypoints() below is for that case only.
+/// No pairing of buoys into gates here (the handbook constrains each RED/GREEN buoy
+/// individually); above Core tier the UAV names the pair and gateWaypoints() below
+/// is for that case.
 inline NextWaypoint nextWaypoint(
   const std::vector<Buoy> & buoys, Vec2 boat, double heading_deg, bool has_exit,
   Vec2 exit_p, double offset_m)
 {
-  // Where "ahead" points. It MUST NOT be derived from the candidate buoys:
-  // taking the bearing of the nearest one makes that buoy ahead by
-  // construction, the astern filter below stops filtering anything, and the
-  // boat turns round to re-approach a buoy it has already passed. Caught by
-  // test_nav_math on 2026-09-06, when this function did exactly that.
+  // Where "ahead" points. It MUST NOT be derived from the candidate buoys: that
+  // makes the nearest one ahead by construction, the astern filter below stops
+  // filtering, and the boat turns round to re-approach a buoy it has passed.
   Vec2 travel;
   if (has_exit) {
     travel = unit(exit_p - boat);
@@ -346,24 +318,17 @@ inline Vec2 crossingDir(Vec2 red_minus_green) {return portOf(red_minus_green);}
 ///
 ///     heading = bearingDeg(green -> red) - 90
 ///
-/// RED must end up to starboard and GREEN to port, so the vector from green to
-/// red points along the boat's starboard beam, and starboard is 90 deg clockwise
-/// of the course. Subtracting 90 recovers the course.
+/// RED must end up to starboard and GREEN to port, so the vector from green to red
+/// points along the boat's starboard beam, which is 90 deg clockwise of the course.
 ///
-/// Note what this does NOT read: the boat's own heading. That independence is
-/// the point. `nextWaypoint` has to fall back on the live heading when the exit
-/// is unknown, and in SITL on 2026-09-09 that lost the whole transit — a 360 deg
-/// entry orbit ended the boat pointing at 207 deg, both gate buoys 25 m north
-/// scored dot(rel, travel) < 0, and every one of them was discarded as astern.
-/// A gate cannot be mis-ordered that way: the pair says which way through.
+/// It deliberately does not read the boat's own heading: nextWaypoint() falls back on
+/// it when the exit is unknown, and a heading 180 deg off there discards both gate
+/// buoys as astern.
 ///
-/// `approach` sits short of the middle and `through` past it, so the boat lines
-/// up and then CROSSES rather than stopping between the buoys and turning.
-///
-/// Invalid when the two are closer than `min_width_m`: below that the bearing
-/// between them is dominated by position noise, and a wrong bearing here puts
-/// the boat through the gate sideways or backwards. Refusing is the honest
-/// answer; the caller can still fall back on sideWaypoint() for a lone buoy.
+/// `approach` sits short of the middle and `through` past it, so the boat lines up
+/// and then CROSSES. Invalid when the two are closer than `min_width_m` (the bearing
+/// between them is then noise): refusing is the honest answer, and the caller can
+/// fall back on sideWaypoint() for a lone buoy.
 inline Gate gateWaypoints(
   Vec2 red, Vec2 green, double standoff_m, double approach_m,
   double min_width_m = 2.0)
@@ -391,12 +356,9 @@ inline const Buoy * findById(const std::vector<Buoy> & buoys, int id)
   return nullptr;
 }
 
-/// gateWaypoints() for a pair the UAV named by id.
-///
-/// Every way this can fail says so in `why` rather than steering somewhere
-/// plausible: an unfilled id (255), an id for a buoy we have never seen, and
-/// the same id twice — which would otherwise give a zero-width gate and a
-/// meaningless bearing.
+/// gateWaypoints() for a pair the UAV named by id. Every way this can fail says so
+/// in `why` rather than steering somewhere plausible: an unfilled id (255), an id for
+/// a buoy we have never seen, or the same id twice (a zero-width gate).
 inline Gate gateFromIds(
   const std::vector<Buoy> & buoys, int red_id, int green_id,
   double standoff_m, double approach_m, double min_width_m = 2.0)
@@ -432,34 +394,21 @@ struct Fused
 };
 
 /// Merge what the aircraft says with what the boat can see.
+/// THE UAV WINS, narrowly:
 ///
-/// THE RULE IS "THE UAV WINS", and it is narrower than it sounds:
+///   * BEACON STATE always comes from the plan (above Core tier the passage is only
+///     detectable from the air; the boat's own colour guess is noise).
+///   * POSITION comes from the TRACKER when a contact was associated, else the plan:
+///     LiDAR is best close in, where metre accuracy at a gate matters.
+///   * THE ID stays the UAV's, the key RXL_NEXT_BUOY_SET names a gate pair with (the
+///     tracker's ids are another number space).
 ///
-///   * BEACON STATE always comes from the plan. Above Core tier the handbook
-///     says the passage is only detectable from the air, so the boat's own
-///     guess at a colour is not evidence, it is noise with an opinion.
-///   * POSITION comes from the TRACKER when a contact was associated, and from
-///     the plan otherwise. That is not a contradiction of the rule above: LiDAR
-///     range is excellent close in, which is exactly when metre accuracy at a
-///     gate decides whether the boat clears it. The UAV's position is better
-///     far out, when it does not matter yet.
-///   * THE ID stays the UAV's, because that is the key RXL_NEXT_BUOY_SET names
-///     a gate pair with. The tracker's own id is a different number space and
-///     the two must never be compared.
-///
-/// A tracked contact that matches nothing in the plan is NOT a passage buoy. It
-/// goes to `obstacles` with Beacon::Unknown so it can never be chosen as one
-/// half of a gate. It is still an obstacle: obstacles become hazards for the
-/// planned legs (path::buildHazards) and the costmap.
-///
-/// Association is GLOBAL greedy nearest-pair, not per-buoy nearest. Per-buoy
-/// lets one contact be claimed twice, which puts two gate buoys on the same
-/// point and makes the gate bearing meaningless. The field is at most ten
-/// buoys, so the cost of doing it properly is nothing.
-///
-/// `consumed` is NOT carried here. The caller owns it -- bt_runner_node keeps a
-/// set of consumed ids and re-applies it after every rebuild -- because this
-/// function is pure and gets called fresh on every tick.
+/// A tracked contact matching nothing in the plan is NOT a passage buoy: it goes to
+/// `obstacles` with Beacon::Unknown (never half a gate) but still becomes a hazard
+/// (path::buildHazards). Association is GLOBAL greedy nearest-pair, since per-buoy
+/// lets one contact be claimed twice. `consumed` is NOT carried here: this function
+/// is pure and called fresh every tick, so the caller (bt_runner_node) re-applies it
+/// after every rebuild.
 inline Fused fusePassage(
   const std::vector<PlanBuoy> & plan, const std::vector<Buoy> & tracked,
   double assoc_radius_m)
@@ -525,47 +474,32 @@ struct Passage
   std::string why;
 };
 
-/// Pair the red and green buoys into gates and order them entry -> exit.
+/// Pair the red and green buoys into gates and order them entry -> exit. THE BOAT
+/// DOES THIS, NOT THE AIRCRAFT (which sends ten buoys with beacon states).
 ///
-/// THE BOAT DOES THIS, NOT THE AIRCRAFT. The aircraft transmits ten buoys with
-/// their beacon states and nothing else; everything about which pair is a gate
-/// and what order to drive them in is decided here, from that field plus the
-/// entry and exit. That is the whole difference from the earlier protocol, in
-/// which the aircraft assigned one pair at a time.
+/// PAIRING IS GLOBAL GREEDY NEAREST, as in fusePassage: repeatedly take the closest
+/// red-green pair still unclaimed (per-red nearest lets two reds share a green and
+/// leaves the other paired across the channel).
 ///
-/// PAIRING IS GLOBAL GREEDY NEAREST, the same shape as fusePassage: repeatedly
-/// take the closest red-green pair still unclaimed. Nearest-neighbour from each
-/// red independently is NOT the same thing and is wrong on a skewed field --
-/// two reds can both consider the same green their nearest, and whichever is
-/// processed first steals it, leaving the other paired across the channel.
-/// Global greedy cannot double-claim, and on a ten-buoy field the cost is
-/// nothing.
+/// ORDERING IS BY PROJECTION ONTO entry -> exit, not distance from the entry, which
+/// orders a curved channel wrongly.
 ///
-/// ORDERING IS BY PROJECTION ONTO entry -> exit, not by distance from the
-/// entry. Distance from the entry orders a curved channel wrongly: a gate set
-/// wide off the axis can be nearer the entry than one further down the course.
-/// The projection asks "how far down the passage is this", which is the
-/// question that matters.
-///
-/// WIDTH IS A FILTER, NOT A WARNING. A pair further apart than `max_width_m` is
-/// not a gate -- it is a red from one gate and a green from another, and
-/// driving between them crosses the channel diagonally. Those buoys go to
-/// `unpaired` so a caller can say so.
+/// WIDTH IS A FILTER: a pair further apart than `max_width_m` is a red from one gate
+/// and a green from another; those buoys go to `unpaired`.
 ///
 /// ORIENTATION IS A FILTER TOO. A pair is a gate only if the boat can drive it
-/// FORWARDS with the red to starboard. The crossing direction of a pair is
+/// FORWARDS with the red to starboard: the crossing direction
 ///
 ///     d = rot90ccw(unit(red - green))        (red lies to the right of d)
 ///
-/// and the pair is accepted only when d is within `max_cross_deg` of the
-/// entry -> exit axis. A red on the LEFT of its green, facing down the course, has
-/// d pointing back at the entry: the only way through is backwards. Such a pair is
-/// not a candidate at all (it does not claim either buoy, so each can still pair
-/// with a better-placed partner) and, failing that, both stay unpaired -- singles,
-/// which the side fences (path::sideFences) then hold to their correct sides.
+/// must be within `max_cross_deg` of the entry -> exit axis. A red on the LEFT of its
+/// green, facing down the course, has d pointing back at the entry. Such a pair
+/// claims neither buoy (each can still pair with a better partner) and, failing that,
+/// both stay unpaired singles, which the side fences (path::sideFences) hold to their
+/// correct sides.
 ///
-/// An empty `gates` with valid=true is a real answer: a field with an entry and
-/// an exit and no red-green pairs means drive straight to the exit.
+/// An empty `gates` with valid=true is a real answer: entry and exit with no
+/// red-green pairs means drive straight to the exit.
 inline Passage planPassage(
   const std::vector<Buoy> & buoys, Vec2 entry, Vec2 exitp,
   double max_width_m = 20.0, double min_width_m = 2.0, double max_cross_deg = 60.0)
@@ -637,10 +571,9 @@ inline Passage planPassage(
 
 /// Is this pair already in `cleared`? Order-insensitive on purpose.
 ///
-/// A gate is remembered by the IDS OF ITS TWO BUOYS, not by its position in the
-/// sequence. A confirmation can bring new colours, planPassage re-runs, and the
-/// order can change underneath the boat -- counting "I have done three, start
-/// at index three" then skips a gate that was never driven.
+/// A gate is remembered by the IDS OF ITS TWO BUOYS, not its index: a
+/// confirmation can bring new colours and planPassage re-runs with a changed
+/// order, so "I have done three" would skip a gate that was never driven.
 inline bool gateCleared(
   const std::vector<std::pair<int, int>> & cleared, int red_id, int green_id)
 {

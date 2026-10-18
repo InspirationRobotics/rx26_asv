@@ -10,23 +10,18 @@
 # ---------------------------------------------------------------------------
 # THE rviz TRAP — read this before changing CRSD_LIVOX_LAUNCH.
 #
-# livox_ros_driver2's `rviz_MID360_launch.py` starts rviz2 alongside the driver.
-# Where the STOCK launch file registers an OnProcessExit handler that SHUTS DOWN
-# THE WHOLE LAUNCH when rviz exits, a headless boot kills rviz2 immediately and
-# takes the driver with it — systemd restarts, rviz dies again, and you get a
-# crash loop whose journal looks like an orderly shutdown rather than an error.
+# livox_ros_driver2's `rviz_MID360_launch.py` starts rviz2 beside the driver. A STOCK launch file
+# registers an OnProcessExit handler that SHUTS DOWN THE WHOLE LAUNCH when rviz exits, so a headless
+# boot would kill rviz2 and the driver with it, in a crash loop that reads like an orderly shutdown.
 #
-# MEASURED ON THIS BOAT 2026-09-03: it does NOT happen here. rviz2 died at boot
-# (exit code -6) and the driver stayed up, publishing /livox/lidar at 10.0 Hz
-# hours later. The launch file inside crusader_legacy evidently lacks that
-# handler. So the rviz2 ERROR in the journal is not evidence the LiDAR is down —
-# check `ros2 topic hz /livox/lidar` from inside asv before chasing it. The
-# headless copy is still worth doing, as housekeeping rather than as a repair.
+# MEASURED ON THIS BOAT 2026-09-03: that does NOT happen here. rviz2 died at boot (exit -6) and the
+# driver stayed up at 10.0 Hz for hours (the launch file inside crusader_legacy evidently lacks the
+# handler). So the rviz2 ERROR in the journal is not evidence the LiDAR is down: check
+# `ros2 topic hz /livox/lidar` from inside asv first. A headless copy is still housekeeping.
 #
-# It is still the default here because it is what publishes PointCloud2
-# (xfer_format 0); `msg_MID360_launch.py` publishes CustomMsg, which the ROS 2
-# type system will not connect to a PointCloud2 subscriber at all. The right fix
-# is a headless launch — see the WARN this script prints, and §13.
+# It is the default because it publishes PointCloud2 (xfer_format 0); `msg_MID360_launch.py`
+# publishes CustomMsg, which a PointCloud2 subscriber cannot connect to. The right fix is a
+# headless launch: see the WARN this script prints, and §13.
 # ---------------------------------------------------------------------------
 #
 # Usage: ./start_livox.sh              (env: CRSD_LIVOX_CONTAINER, CRSD_LIVOX_LAUNCH)
@@ -34,27 +29,23 @@ set -euo pipefail
 
 CONTAINER="${CRSD_LIVOX_CONTAINER:-crusader_legacy}"
 LAUNCH="${CRSD_LIVOX_LAUNCH:-ros2 launch livox_ros_driver2 rviz_MID360_launch.py}"
-# ROS environment INSIDE the container, sourced explicitly. `docker exec bash -lc`
-# is not enough: a login shell reads /etc/profile and ~/.bash_profile, while ROS
-# setup conventionally lands in ~/.bashrc, which a NON-INTERACTIVE login shell
-# never reads. The symptom is `ros2: command not found` from a container where
-# `docker exec -it ... bash` then `ros2` works perfectly by hand.
+# ROS environment INSIDE the container, sourced explicitly. `docker exec bash -lc` is not enough: a
+# login shell reads /etc/profile and ~/.bash_profile, while ROS setup conventionally lands in
+# ~/.bashrc, which a NON-INTERACTIVE login shell never reads (`ros2: command not found` where
+# `docker exec -it ... bash` then `ros2` works by hand).
 # Space-separated; missing entries are skipped, so one list covers several
 # layouts. Overlays must come AFTER the base distro.
 #
-# /root/livox_ws is THIS boat's (confirmed 2026-08-14). ws_livox is Livox's own
-# convention and the two are easy to transpose — which is exactly the guess that
-# cost a round trip, so both are listed and the autodiscovery below is the real
-# safety net.
+# /root/livox_ws is THIS boat's (confirmed 2026-08-14); ws_livox is Livox's own convention and the
+# two are easy to transpose, so both are listed and the autodiscovery below is the real safety net.
 SETUPS="${CRSD_LIVOX_SETUP:-/opt/ros/humble/setup.bash /root/livox_ws/install/setup.bash /root/ws_livox/install/setup.bash /root/robotx_ws/install/setup.bash}"
 # The MID360 is an ETHERNET device: the driver binds the host address in
 # MID360_config.json (192.168.1.5) and talks to the sensor at 192.168.1.166.
 HOST_IP="${CRSD_LIVOX_HOST_IP:-192.168.1.5}"
 WAIT_S="${CRSD_LIVOX_WAIT_S:-30}"
 
-# Name, never the 12-hex ID. An ID changes every time the container is recreated
-# — `docker rm` + `docker run` and the unit silently points at nothing. Same
-# reason the udev rules match VID/PID instead of chasing ttyACM numbering.
+# Name, never the 12-hex ID: an ID changes every time the container is recreated (`docker rm` +
+# `docker run`) and the unit silently points at nothing.
 if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
   echo "ERROR: no container named '$CONTAINER'." >&2
   echo "  docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}'" >&2
@@ -62,10 +53,9 @@ if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
   exit 1
 fi
 
-# network-online.target does NOT mean "this interface has this address". At boot
-# the wired link often comes up seconds after the target fires, and the driver
-# fails to bind with an error that reads like a LiDAR fault rather than a
-# timing one. Wait for the address, bounded, and say which it is.
+# network-online.target does NOT mean "this interface has this address": the wired link often comes
+# up seconds after the target fires, and the driver then fails to bind with an error that reads like
+# a LiDAR fault. Wait for the address, bounded, and say which it is.
 deadline=$(( SECONDS + WAIT_S ))
 until ip -4 addr show | grep -q "inet ${HOST_IP}/"; do
   if (( SECONDS >= deadline )); then
@@ -94,9 +84,8 @@ esac
 
 echo "starting MID360 driver in '$CONTAINER': $LAUNCH"
 
-# Source explicitly, then check. `ros2: command not found` from inside a
-# container where it plainly works by hand is confusing enough to be worth a
-# real diagnostic rather than one line from bash.
+# Source explicitly, then check: `ros2: command not found` from a container where it works by hand
+# is confusing enough to deserve a real diagnostic.
 read -r -d '' INNER <<INNER_EOF || true
 ROOTS="/opt /root /home /ws_livox /workspace"
 have_pkg() { ros2 pkg prefix livox_ros_driver2 >/dev/null 2>&1; }
@@ -111,10 +100,8 @@ if ! command -v ros2 >/dev/null 2>&1; then
   done
 fi
 
-# 3. overlays, until one actually provides livox_ros_driver2. Guessing a
-#    workspace path is what cost a round trip here: the layout differs per
-#    container and the only reliable test is asking ros2 whether the package
-#    resolves.
+# 3. overlays, until one actually provides livox_ros_driver2: the layout differs per container and
+#    the only reliable test is asking ros2 whether the package resolves.
 if command -v ros2 >/dev/null 2>&1 && ! have_pkg; then
   for s in \$(find \$ROOTS -maxdepth 5 -name setup.bash -path "*install*" 2>/dev/null); do
     . "\$s" 2>/dev/null || true

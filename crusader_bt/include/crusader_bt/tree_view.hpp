@@ -1,15 +1,8 @@
 // tree_view.hpp — the whole tree, with every node's status, whenever it changes.
 //
-// BehaviorTree.CPP ships StdCoutLogger, which prints one line per TRANSITION:
-//
-//     NavigateTo   IDLE -> RUNNING
-//     NavigateTo   RUNNING -> SUCCESS
-//
-// That is enough to debug a single leaf and useless for answering the question
-// people actually ask, which is "where is it now, and what has it already
-// done?". Reconstructing that from a scrolling transition log means holding the
-// tree's shape in your head and replaying it. So this renders the SHAPE with the
-// STATE on it, and reprints only when something changed:
+// BehaviorTree.CPP's StdCoutLogger prints one line per TRANSITION, which is
+// useless for "where is it now, and what has it already done?". This renders the
+// SHAPE with the STATE on it, and reprints only when something changed:
 //
 //     [ ok ] guard_band            ReactiveSequence
 //     [ ok ]   IsAutonomous
@@ -20,9 +13,8 @@
 //     [    ]     CircleBuoy        anchor=fix
 //     [    ]     NavigateTo        target=home
 //
-// Groot2 draws exactly this, live and prettier, but only in the PRO build. This
-// needs nothing, works over ssh, and goes in the log so a run can be read back
-// afterwards.
+// Groot2 draws this live but only in the PRO build; this needs nothing, works
+// over ssh, and goes in the log so a run can be read back afterwards.
 #ifndef CRUSADER_BT__TREE_VIEW_HPP_
 #define CRUSADER_BT__TREE_VIEW_HPP_
 
@@ -61,13 +53,9 @@ public:
   /// Same picture with no ANSI escapes, for a log file.
   std::string plain() {return render(false);}
 
-  /// The tree as JSON, for a GUI to draw.
-  ///
-  /// Structured rather than the rendered text on purpose: a viewer that parses
-  /// indentation back into a tree breaks the first time a node is renamed, and
-  /// cannot style a node by its KIND because that information was thrown away
-  /// in the rendering. `kind` is the BT.CPP family — control, decorator or
-  /// leaf — which is what a drawing needs to pick a shape.
+  /// The tree as JSON, for a GUI to draw. Structured rather than rendered text: a
+  /// viewer that parses indentation breaks when a node is renamed and cannot style
+  /// a node by its KIND. `kind` is the BT.CPP family (control, decorator or leaf).
   std::string json(double elapsed_s)
   {
     std::string out = "{\"elapsed_s\":" + fmt(elapsed_s) + ",\"nodes\":[";
@@ -136,9 +124,8 @@ private:
   static void jsonWalk(BT::TreeNode * node, int depth, std::string & out, bool & first)
   {
     if (node == nullptr) {return;}
-    // Four kinds, because a viewer should show what a node IS. BT.CPP reports
-    // CONDITION separately from ACTION, and the difference is real: a condition
-    // only answers a question, an action changes something.
+    // BT.CPP reports CONDITION separately from ACTION: a condition only answers a
+    // question, an action changes something, and a viewer should show which.
     const char * kind = "action";
     auto * ctrl = dynamic_cast<BT::ControlNode *>(node);
     auto * dec = dynamic_cast<BT::DecoratorNode *>(node);

@@ -1,45 +1,38 @@
 """wall_fit_core — the vertical wall ahead, and the slip fingers beside the boat.
 
-For Task 3's fixed nozzle the boat's position IS the aim, so the boat needs its
-distance to the dock face to a couple of centimetres, relative, right now. GPS
-cannot do that; the LiDAR can, from a single sweep: at 1-3 m there are hundreds
-of returns on a wall.
+For Task 3's fixed nozzle the boat's position IS the aim, so the boat needs its distance to the
+dock face to a couple of centimetres, relative, right now. GPS cannot do that; the LiDAR can,
+from a single sweep (hundreds of returns on a wall at 1-3 m).
 
-THE WALL IS FITTED AS A VERTICAL PLANE after levelling, i.e. a line in the
-horizontal plane. Its perpendicular distance from the boat does not depend on
-roll or pitch (rocking moves the points, not the plane), which is the property
-squirt_cal needs from a range it calibrates against. Attitude only matters for
-picking the height band, and a stale one costs a little band, not the range.
+THE WALL IS FITTED AS A VERTICAL PLANE after levelling, i.e. a line in the horizontal plane. Its
+perpendicular distance does not depend on roll or pitch (rocking moves the points, not the
+plane), which squirt_cal needs from a range it calibrates against. Attitude only picks the
+height band, and a stale one costs a little band, not the range.
 
-WHAT IT RANGES. The MID360 sits ~0.28 m above the water, upside down, seeing from
-~7 deg above horizontal downwards. On a raised dock that is the dock's EDGE below
-the target panel, not the panel. Calibration against this number absorbs the
-offset, as long as the tree later positions by the same number (face_setback in
-squirt_cal is only for the starting guess).
+WHAT IT RANGES. The MID360 sits ~0.28 m above the water, upside down, seeing from ~7 deg above
+horizontal downwards. On a raised dock that is the dock's EDGE below the target panel.
+Calibration absorbs the offset as long as the tree later positions by the same number
+(face_setback in squirt_cal is only the starting guess).
 
-A WALL YOU CAN SEE THROUGH IS NOT THE WALL. From OUTSIDE a slip (the nozzle
-fires from ~3.2 m, 1.2 m beyond the 2 m fingers) the four fingers' tip faces are
-collinear, 2 m nearer than the dock edge, and - the LiDAR sampling by angle -
-often carry more points than it. RANSAC takes them. But the slip opening is a
-1.5 m GAP in that line with the dock edge visible through it, which a real
-wall never has. So a line with at least min_inliers points seen THROUGH gaps
-in it is skipped and the fit repeated on what lies beyond
-(test_wall_fit_core.TestOutsideTheSlip, ray-cast from the build guide's dock).
-Points seen OVER a line (a panel set back on the deck, above its edge) cross it
-where it has points, so they do not count. Off the centreline only ONE tip may
-be in the sector - no gap to see through - so a line shorter than a finger
-is wide (SHORT_M) with a wall behind it is skipped too: it is something in
-front of the wall.
+A WALL YOU CAN SEE THROUGH IS NOT THE WALL. From OUTSIDE a slip (the nozzle fires from ~3.2 m,
+1.2 m beyond the 2 m fingers) the four fingers' tip faces are collinear, 2 m nearer than the
+dock edge, and often carry more points than it (the LiDAR samples by angle), so RANSAC takes
+them. But the 1.5 m slip opening is a GAP in that line with the dock edge visible through it,
+which a real wall never has. So a line with at least min_inliers points seen THROUGH gaps in it
+is skipped and the fit repeated on what lies beyond (test_wall_fit_core.TestOutsideTheSlip,
+ray-cast from the build guide's dock). Points seen OVER a line (a panel set back on the deck)
+cross it where it has points, so they do not count. Off the centreline only ONE tip may be in
+the sector (no gap to see through), so a line shorter than a finger is wide (SHORT_M) with a
+wall behind it is skipped too: it is something in front of the wall.
 
-AND THE NEAREST SOLID LINE WINS. A panel set back on the deck, seen over the
-edge, can carry more points than the edge; by count alone the answer would
-flip between the two as the range changes, and a calibrated range is only
-worth anything if the same surface is ranged at every distance. So after the
-best-scoring line, a nearer parallel one with a wall's inliers and span that is
-not itself see-through replaces it: the dock EDGE, always.
+AND THE NEAREST SOLID LINE WINS. A panel set back on the deck can carry more points than the
+edge, and by count alone the answer would flip between the two as range changes; a calibrated
+range is only worth anything if the same surface is ranged at every distance. So after the
+best-scoring line, a nearer parallel one with a wall's inliers and span that is not itself
+see-through replaces it: the dock EDGE, always.
 
-Frames: body REP-103 (x forward, y LEFT, z up; z datum = the hull bottom, so the
-waterline is ClusterParams.water_z). No ROS; numpy only; unit-tested.
+Frames: body REP-103 (x forward, y LEFT, z up; z datum = the hull bottom, so the waterline is
+ClusterParams.water_z). No ROS; numpy only; unit-tested.
 """
 import math
 from dataclasses import dataclass

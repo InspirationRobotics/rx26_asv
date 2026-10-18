@@ -59,14 +59,11 @@ World-model nodes are NOT here: that package is scaffolded and empty (see its
 README). Add a node to this launch once it has run on the boat, not when it
 compiles.
 
-`crusader_perception`'s CAMERA nodes (`oakd_publisher`, `buoy_detector`,
-`oak_detector`) run in `asv` like everything else here, but are still NOT in this
-launch: they contend for the same OAK-D and the device admits exactly one client.
-Which one runs is an operator choice per session — frames for a human, or
-detections for the stack — so it cannot be a constant in a launch file. Start the
-one you want by hand. Its LiDAR nodes are different: nothing else competes for
-the MID360, so they can be constants, and the paragraph above is why they must
-be.
+`crusader_perception`'s CAMERA nodes (`oakd_publisher`, `buoy_detector`, `oak_detector`) run in
+`asv` but are NOT in this launch: they contend for the one OAK-D (the device admits one client), and
+which one runs is an operator choice per session. Start the one you want by hand. Its LiDAR nodes
+are different: nothing else competes for the MID360, so they can be constants, and the paragraph
+above is why they must be.
 
 MAVProxy itself (the sole Pixhawk owner) is started outside ROS by systemd — see
 scripts/start_mavproxy.sh — before this launch.

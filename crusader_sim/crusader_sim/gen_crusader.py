@@ -51,8 +51,8 @@ def _hull_links(h, n_thrusters):
     """Visuals + collisions + inertial of base_link.
 
     mass_kg is the WHOLE boat; the thruster links carry their own share, so
-    base_link gets the rest — and the buoyant width is sized on the whole, or
-    the boat floats a centimetre deep (it did, on the first run)."""
+    base_link gets the rest -- and the buoyant width is sized on the whole, or
+    the boat floats a centimetre deep."""
     L, B, D = h["length_m"], h["beam_m"], h["depth_m"]
     draft, total = h["draft_m"], h["mass_kg"]
     mass = total - n_thrusters * T200_MASS_KG
@@ -63,12 +63,11 @@ def _hull_links(h, n_thrusters):
         raise ValueError(f"mass {mass} kg cannot float at draft {draft} m inside a "
                          f"{L}x{B} m hull (needs pontoons {w_buoy:.3f} m wide)")
     out = []
-    # Each pontoon is SEGMENTED along its length. gz's graded buoyancy gets a
-    # box's submerged VOLUME right but not how its centre of buoyancy slides
-    # along a tilted box, so one long box per pontoon has no pitch restoring
-    # moment: roll was stable (two pontoons, two volumes) and pitch capsized in
-    # ~8 s with the CG at 0.22 m (2026-09-29). Segments restore pitch the same
-    # way the two pontoons restore roll — the VRX Surface plugin's trick.
+    # Each pontoon is SEGMENTED along its length: gz's graded buoyancy gets a box's
+    # submerged VOLUME right but not how its centre of buoyancy slides along a tilted
+    # box, so one long box per pontoon has no pitch restoring moment (roll was stable,
+    # pitch capsized in ~8 s). Segments restore pitch the way two pontoons restore
+    # roll -- the VRX Surface plugin's trick.
     nseg = int(h.get("buoyancy_segments", 8))
     seg = L / nseg
     for side, y in (("port", yc), ("stbd", -yc)):
@@ -247,12 +246,11 @@ def _sensors(s, mounts):
     depth = _oak_camera(
         "oak_depth", "depth_camera", "/crusader/oak/depth/image", cam_pose, oak["rate_hz"],
         hfov, (oak["depth_width"], oak["depth_height"]), "R_FLOAT32", depth_clip)
-    # The operator panel's view: the same pose, HFOV and clip at a fraction of
-    # the pixels, and no noise (it is for eyes, not a detector). Its two topics
-    # DO share a parent, so the RGB one moves its camera_info to
-    # /crusader/preview/rgb/camera_info. The depth one cannot: gz-sensors 8's
-    # depth_camera ignores <camera_info_topic> (checked 2026-09-29), so it keeps
-    # /crusader/preview/camera_info — alone there, once the RGB has moved.
+    # The operator panel's view: the same pose, HFOV and clip at a fraction of the
+    # pixels, no noise (it is for eyes). Its two topics share a parent, so the RGB
+    # one moves its camera_info to /crusader/preview/rgb/camera_info; the depth one
+    # cannot (gz-sensors 8's depth_camera ignores <camera_info_topic>), so it keeps
+    # /crusader/preview/camera_info, alone there once the RGB has moved.
     pv = oak["preview"]
     preview_rgb = _oak_camera(
         "oak_preview_rgb", "camera", "/crusader/preview/rgb", cam_pose, pv["rate_hz"], hfov,
@@ -266,12 +264,10 @@ def _sensors(s, mounts):
         '<pose degrees="true">0 0 0 180 0 0</pose>'
         f"<always_on>1</always_on><update_rate>{s['imu']['rate_hz']}</update_rate>"
         "</sensor>")
-    # The sensor's own housing (and the camera mast, 5 cm from it) are hidden
-    # from the LiDAR with the water's visibility bit: rays start INSIDE the
-    # housing visual, and with it visible 10006 of ~10200 points a scan were
-    # "near" returns off the sensor itself. The hull, deck and thrusters stay
-    # visible — the real self-returns lidar_cluster_node's near/FOV gates exist
-    # for.
+    # The sensor's own housing (and the camera mast, 5 cm from it) are hidden from the
+    # LiDAR with the water's visibility bit: rays start INSIDE the housing visual and
+    # would return it as nearly every point. The hull, deck and thrusters stay visible
+    # -- the real self-returns lidar_cluster_node's near/FOV gates exist for.
     visuals = (
         S.visual("mid360_v", S.cylinder(0.0325, 0.06), "black", S.pose(lx, ly, lz),
                  flags=LIDAR_HIDDEN)

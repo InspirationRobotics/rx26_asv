@@ -5,39 +5,23 @@ box against the aligned depth image, and publishes positions in `camera_link`:
 
   * `oak/detections`  crusader_msgs/Detection3DArray  — EVERY frame, empty or not
 
-WHY THIS NODE OWNS THE CAMERA
------------------------------
-`oakd_publisher` puts 1.28 MB of raw RGB+depth on the wire per frame — ~38 MB/s
-at 30fps — so that a consumer in another process can look at pixels. But the
-consumers that matter (fusion, the world model) do not want pixels. They want
-"red buoy, 12.4 m, 8 degrees to port, at this instant". That is a few hundred
-bytes. Detection here, beside the device, is what makes the transport question
-disappear rather than get tuned: nothing large ever leaves this process.
+WHY THIS NODE OWNS THE CAMERA. `oakd_publisher` puts 1.28 MB of raw RGB+depth on the
+wire per frame (~38 MB/s at 30fps) so another process can look at pixels, but the
+consumers that matter (fusion, the world model) want "red buoy, 12.4 m, 8 degrees to
+port, at this instant": a few hundred bytes. Detecting beside the device means nothing
+large ever leaves this process.
 
-The two nodes are ALTERNATIVES, not a pipeline. The OAK-D admits exactly one
-client, so whichever starts first gets the camera and the other fails to open
-it. Run `oakd_publisher` when a human needs to see frames; run this when the
-boat needs to see buoys. `publish_frames` exists for the case where you want
-both during bring-up, and it costs exactly the bandwidth it says it does.
+The two nodes are ALTERNATIVES, not a pipeline: the OAK-D admits one client, so
+whichever starts first gets the camera. Run `oakd_publisher` when a human needs to see
+frames; run this when the boat needs to see buoys. `publish_frames` serves both during
+bring-up and costs the bandwidth it says it does.
 
-WHERE THIS RUNS
----------------
-`asv`, which is the only image with both of the things this node needs: depthai
-(the camera) and ultralytics/TensorRT (the engine). It used to be neither —
-`asv` asserted depthai was absent, under an older plan where a separate container
-owned the OAK-D and published raw frames for detection to consume. This node is
-what retired that plan: 1.28 MB frames at ~38 MB/s across a container boundary,
-to produce a few hundred bytes of Detection3DArray, is the wrong trade. depthai
-is now installed by the Dockerfile and the absence guard is gone.
+WHERE THIS RUNS: `asv`, the only image with both depthai (the camera) and
+ultralytics/TensorRT (the engine); the Dockerfile installs depthai.
 
-It CONTENDS with `oakd_publisher` for the one OAK-D — only one may run.
-
-FRAME CONVENTION
-----------------
-Positions are REP-103 body axes in `camera_link`: x forward, y left, z up. The
-camera's own optical frame is z forward, x right, y down; the conversion happens
-here, once, so no consumer ever has to remember which convention it is holding.
-If your URDF puts camera_link somewhere other than the RGB sensor's optical
+FRAME CONVENTION: positions are REP-103 body axes in `camera_link` (x forward, y left,
+z up). The camera's optical frame is z forward, x right, y down; the conversion happens
+here, once. If your URDF puts camera_link somewhere other than the RGB sensor's optical
 centre, that offset belongs in TF, not in this node.
 """
 import threading
@@ -209,10 +193,9 @@ class BuoyDetector(Node):
     def _drain(self):
         """Detect on up to MAX_GROUPS_PER_TICK frames.
 
-        Bounded on purpose: inference is far slower than the camera, so an
-        unbounded drain would never return and starve the executor — no health
-        log, no parameter services, no clean shutdown, while the node still
-        looked alive. Bounded, a backlog costs latency instead of control.
+        Bounded on purpose: inference is far slower than the camera, so an unbounded drain
+        would starve the executor (no health log, parameter services or clean shutdown) while
+        the node looked alive. Bounded, a backlog costs latency instead of control.
         """
         for _ in range(MAX_GROUPS_PER_TICK):
             group = self.queue.tryGet()
@@ -295,12 +278,11 @@ class BuoyDetector(Node):
             self.buffer.put(self._annotate(rgb_frame, drawn))
 
     def _position(self, box, depth_frame):
-        """((x, y, z) or None, sample) — position in camera_link metres, plus
-        where the depth was read so the viewer can show it.
+        """((x, y, z) or None, sample) — position in camera_link metres, plus where the depth
+        was read so the viewer can show it.
 
-        Median over a small patch rather than the centre pixel: one pixel of
-        stereo noise on a buoy edge is metres of range error, and the median
-        rejects the background pixels that inevitably fall inside a box.
+        Median over a small patch, not the centre pixel: one pixel of stereo noise on a buoy
+        edge is metres of range error, and the median rejects background pixels in the box.
         """
         x1, y1, x2, y2 = box
         height, width = depth_frame.shape[:2]
@@ -336,9 +318,8 @@ class BuoyDetector(Node):
     def _annotate(self, rgb_frame, drawn):
         """A copy of the frame with boxes, ranges and depth sample points.
 
-        Copies rather than drawing in place: the caller may still be publishing
-        that array's source frame, and a viewer must never be able to alter what
-        the detector saw.
+        Copies rather than drawing in place: the caller may still be publishing that array's
+        source frame, and a viewer must never alter what the detector saw.
         """
         cv2 = self.cv2
         image = rgb_frame.copy()

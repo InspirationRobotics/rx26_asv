@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# ============================================================================
 # setup/install_container.sh — CONTAINER-SIDE setup (inside `asv`)
 #
 # Run once after the repo lands in the container mount, and re-run whenever
@@ -16,7 +15,6 @@
 #     docker exec -it asv bash /root/robotx_ws/src/rx26_asv/setup/install_container.sh
 # Or inside the container:
 #     bash /root/robotx_ws/src/rx26_asv/setup/install_container.sh
-# ============================================================================
 set -euo pipefail
 
 # This repo is ONE package source inside a colcon workspace — it is not the

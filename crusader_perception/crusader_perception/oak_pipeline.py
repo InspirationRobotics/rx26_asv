@@ -1,44 +1,33 @@
 """oak_pipeline — the one OAK-D RGB+depth pipeline, built in one place.
 
-Two nodes in this package need the identical device configuration, and they need
-it identical for a reason that is easy to miss: depth is aligned to the RGB
-camera and emitted at the same size, which is the only thing that makes the RGB
-intrinsics valid on the depth image and `depth[v, u]` legal for a (u, v) taken
-off an RGB detection box. Two copies of this builder would drift — a different
-ISP scale, a different setOutputSize — and the result is not a crash but ranges
-that are quietly wrong.
+Two nodes in this package need the identical device configuration: depth is aligned to the
+RGB camera and emitted at the same size, which is what makes the RGB intrinsics valid on the
+depth image and `depth[v, u]` legal for a (u, v) taken off an RGB detection box. Two copies of
+this builder would drift (a different ISP scale, a different setOutputSize), and the result is
+not a crash but quietly wrong ranges.
 
-Geometry ported from the prequal-proven gate_navigator in
-InspirationRobotics/robotx_2026.
+Geometry ported from the prequal-proven gate_navigator in InspirationRobotics/robotx_2026.
 
-SAFE TO IMPORT ANYWHERE. Every `import depthai` is inside a function, so this
-module — and any node that imports it at module scope — still imports in a
-container with no device SDK: the `asv` build, the import smoke, unit tests off
-the boat. Only calling a function here needs the hardware SDK present.
+SAFE TO IMPORT ANYWHERE: every `import depthai` is inside a function, so this module still
+imports in a container with no device SDK (the `asv` build, the import smoke, unit tests off
+the boat).
 """
 from crusader_perception import oak_controls
 
-# The OAK-D's stereo engine refuses an input wider than this. Measured on the
-# boat 2026-09-20: at isp_denominator=1 the camera opens and reports 1920x1200,
-# then StereoDepth logs "Maximum supported input image width for stereo is
-# 1280. Skipping frame!" once per frame, forever. Depth never arrives, the Sync
-# node never matches a pair, and the detector receives NOTHING — a camera that
-# is plainly running and produces no detections at all. Checked up front here so
-# that failure is one sentence at startup instead of a per-frame device log
-# nobody reads.
+# The OAK-D's stereo engine refuses an input wider than this (measured on the boat): at
+# isp_denominator=1 the camera opens at 1920x1200, then StereoDepth logs "Maximum supported
+# input image width for stereo is 1280. Skipping frame!" every frame, depth never arrives, and
+# the detector receives NOTHING from a camera that is plainly running. Checked up front so that
+# is one sentence at startup instead of a per-frame device log nobody reads.
 STEREO_MAX_WIDTH = 1280
 
 SENSOR_WIDTH = 1920
 SENSOR_HEIGHT = 1200
 
-# Stereo settings. CONSTANTS, not parameters, and that is a simplification with
-# teeth: all three OAK-D nodes have to configure the device identically or a
-# range measured under one does not mean the same thing under another. As
-# parameters they were three values duplicated across three sections of
-# crusader_params.yaml, kept equal by a check in check_config.py. Here they are
-# equal by construction and there is nothing left to check.
-#
-# Nobody has ever tuned them. If you need to, change them here — once.
+# Stereo settings. CONSTANTS, not parameters: all three OAK-D nodes must configure the device
+# identically or a range under one does not mean the same under another; as parameters they
+# were three values duplicated across crusader_params.yaml sections, kept equal by a
+# check_config.py check. Nobody has tuned them; if you need to, change them here, once.
 SUBPIXEL = True             # finer far-range depth
 LR_CHECK = True             # left/right check; rejects occlusions
 SYNC_THRESHOLD_MS = 50      # max RGB/depth gap the device Sync will pair
@@ -57,53 +46,40 @@ def output_size(isp_denominator):
 
 
 def build_rgbd(isp_denominator, fps, controls=None, rgb_isp_denominator=None):
-    """RGB + depth, aligned and paired on-device. Returns (pipeline, w, h)
-    where w, h are the RGB frame's size.
+    """RGB + depth, aligned and paired on-device. Returns (pipeline, w, h) where w, h are the
+    RGB frame's size.
 
-    The Sync node is the point of the whole arrangement: RGB and depth leave the
-    device already matched to within sync_threshold_ms, so no consumer has to
-    guess which depth frame belongs to which image. A pair that cannot be
-    matched never leaves the device.
+    The Sync node is the point: RGB and depth leave the device already matched to within
+    sync_threshold_ms, so no consumer guesses which depth frame belongs to which image; an
+    unmatched pair never leaves the device.
 
-    controls is the camera profile as {parameter: value} — see oak_controls,
-    which owns the table of what exists and how each one reaches depthai. It is
-    applied to CAM_A's initialControl here, and the same dict re-applied through
-    the control queue every time one of them changes, so the picture at startup
-    and the picture after tuning are produced by the same code.
+    controls is the camera profile as {parameter: value} — see oak_controls, which owns the
+    table of what exists and how each reaches depthai. It is applied to CAM_A's initialControl
+    here and re-applied through the control queue on every change, so the picture at startup
+    and after tuning come from the same code. None leaves depthai's defaults, which
+    buoy_detector and oakd_publisher want (frames for a human; a classifier-tuned profile is a
+    poor view).
 
-    APPLIED TO CAM_A ONLY, deliberately. The stereo pair's exposure is a depth
-    quality decision, not a colour one, and darkening them to fix a colour
-    problem would spend range on the water for nothing. What stereo needs is for
-    left and right to match EACH OTHER, which they do by being left alone
-    together.
+    APPLIED TO CAM_A ONLY, deliberately: the stereo pair's exposure is a depth-quality
+    decision, and darkening it to fix a colour problem would spend range on the water. Stereo
+    needs left and right to match EACH OTHER, which they do by being left alone together.
 
-    None leaves depthai's defaults untouched, which is what buoy_detector and
-    oakd_publisher want: they hand out frames for a human to look at, and a
-    profile tuned for a classifier is not a good view.
+    rgb_isp_denominator SCALES THE COLOUR CAMERA SEPARATELY FROM THE STEREO PAIR (default
+    isp_denominator, so existing callers are unchanged), because the two paths want opposite
+    things:
 
-    rgb_isp_denominator SCALES THE COLOUR CAMERA SEPARATELY FROM THE STEREO
-    PAIR, and defaults to isp_denominator so every existing caller is byte-for-
-    byte unchanged. It exists because the two paths want opposite things and
-    were being charged the same price:
+      * Moving both from 1/3 to 1/2 (640x400 -> 960x600) HALVED the frame rate on the boat
+        (27.8 -> 13.6 fps) while inference barely moved (det 20-25 -> 24-32 ms); the rest is
+        stereo and USB.
+      * Depth gains nothing from that resolution, but the LED classifier cuts a 64x64 crop from
+        the raw frame, so every pixel the sensor keeps is one the crop need not invent.
+      * Beyond 1280 the stereo engine refuses (STEREO_MAX_WIDTH), so a full-resolution COLOUR
+        frame is unreachable while the two share one scale.
 
-      * Measured on the boat, moving both from 1/3 to 1/2 (640x400 -> 960x600)
-        HALVED the frame rate, 27.8 -> 13.6 fps, while inference barely moved
-        (det 20-25ms -> 24-32ms). At 13.6 fps a frame takes 73 ms and only ~31
-        of those are the two engines. The rest is stereo and USB.
-      * So the resolution was expensive because of DEPTH — and depth gains
-        nothing useful from it. The buoy pixels do: the LED classifier cuts a
-        64x64 crop out of the raw frame, so every pixel the sensor keeps is a
-        pixel that crop does not have to invent.
-      * And beyond 1280 the stereo engine simply refuses (STEREO_MAX_WIDTH), so
-        a full-resolution COLOUR frame is not reachable at all while the two
-        share one scale.
-
-    The cost is that `depth[v, u]` stops being legal, which is the invariant
-    this module's header is written to protect. It is paid in the caller:
-    oak_detector scales detection boxes into depth space and keeps the bearing
-    maths on RGB coordinates with RGB intrinsics. Depth is still ALIGNED to
-    CAM_A, so both cover the same field of view and a plain ratio is the whole
-    of the correction.
+    The cost is that `depth[v, u]` stops being legal, which this module's header exists to
+    protect. The caller pays it: oak_detector scales detection boxes into depth space and keeps
+    the bearing maths on RGB coordinates with RGB intrinsics. Depth is still ALIGNED to CAM_A
+    (same field of view), so a plain ratio is the whole correction.
     """
     from datetime import timedelta
 

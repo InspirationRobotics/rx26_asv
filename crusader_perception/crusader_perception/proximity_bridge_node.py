@@ -5,29 +5,22 @@
   out: crsd/obstacle_distance   (ObstacleDistance) -> telemetry_bridge -> MAVLink
        crsd/proximity_health    (String, JSON)
 
-WHY THIS EXISTS. `AVOID_ENABLE=3` and `AVOID_MARGIN=2.0` have been set on this
-boat for months while `PRX1_TYPE=0` — avoidance switched on with no sensor
-feeding it. param_guard even lists AVOID_ENABLE as PROTECTED ("avoidance on"),
-so the stated policy and the actual configuration disagreed. This node is the
-missing half.
+WHY THIS EXISTS. `AVOID_ENABLE=3` and `AVOID_MARGIN=2.0` were set while `PRX1_TYPE=0`:
+avoidance switched on with no sensor feeding it, and param_guard even lists AVOID_ENABLE as
+PROTECTED ("avoidance on"), so policy and configuration disagreed. This node is the missing
+half. It is also the LiDAR's functional check: if the proximity view in Mission Planner tracks
+an object you walk around the boat, the MID360, driver, extrinsic signs, levelling and
+clustering all work.
 
-It also earns its place as the LiDAR's functional check: if the proximity view in
-Mission Planner tracks an object you walk around the boat, then the MID360, the
-driver, the extrinsic signs, the levelling and the clustering are all working. No
-other single test covers that chain.
+DISABLING IT IS A FIRST-CLASS OPERATION: Task 3 approaches a dock deliberately, and an
+avoidance layer that refuses to let the boat near anything makes that impossible. Publishing
+false on crsd/avoidance_enable stops emission; ArduPilot's proximity data then ages out on its
+own and avoidance goes inert. No runtime parameter writes, nothing to restore, nothing left
+half-applied if the mission aborts.
 
-DISABLING IT IS A FIRST-CLASS OPERATION, not an afterthought. Task 3 wants the
-boat to approach a dock deliberately, and an avoidance layer that refuses to let
-it near anything makes that impossible. Publishing false on crsd/avoidance_enable
-stops emission; ArduPilot's proximity data then ages out on its own and avoidance
-goes inert. No runtime parameter writes, nothing to restore afterwards, and
-nothing that can be left half-applied if the mission aborts.
-
-WHAT IT DELIBERATELY DOES NOT DO. It does not filter water. That is
-lidar_cluster_node's job via water_z, and duplicating the judgement here would
-mean two places to fix when it is wrong. If waves are reaching the autopilot as
-obstacles, the fix is water_z (measured 0.24 m on 2026-09-05), not a second
-filter here.
+WHAT IT DELIBERATELY DOES NOT DO: filter water. That is lidar_cluster_node's job via water_z
+(measured 0.24 m on 2026-09-05); duplicating it here would mean two places to fix. If waves
+reach the autopilot as obstacles, fix water_z.
 """
 import json
 import math

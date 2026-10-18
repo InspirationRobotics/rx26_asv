@@ -1,8 +1,7 @@
 """lifecycle_core - what to do about a lifecycle node, as pure decisions. No rclpy.
 
-docs/nav2_avoidance_spec.md section 3.6 (note of 2026-10-01). nav_lifecycle.py is
-the node; this file is every decision it makes, so the decisions can be tested
-without ROS.
+docs/nav2_avoidance_spec.md section 3.6. nav_lifecycle.py is the node; this file
+is every decision it makes, so they can be tested without ROS.
 
 The state ids are lifecycle_msgs/State: 1 unconfigured, 2 inactive, 3 active,
 4 finalized, 10..15 the transitional states, and 0 here for "no answer" (the
@@ -11,12 +10,11 @@ lifecycle_msgs/Transition: 1 configure, 3 activate.
 
 WHY NOT NAV2'S LIFECYCLE MANAGER. Humble's lifecycle_manager calls change_state
 with no timeout. When Fast DDS has not yet matched the server's response writer
-with the brand-new client's response reader (rmw_fastrtps answers "failed to
-send response ... client will not receive response" after 100 ms), the reply is
-dropped and the manager waits for it forever; planner_server then stays
-`inactive` and every planned leg holds and FAILs. Nothing there retries. This
-policy times out every call, asks again, and after a few timeouts in a row
-builds new clients (fresh discovery).
+with the brand-new client's response reader (rmw_fastrtps: "failed to send
+response ... client will not receive response" after 100 ms), the reply is
+dropped and the manager waits forever; planner_server stays `inactive` and every
+planned leg holds and FAILs. This policy times out every call, asks again, and
+after a few timeouts in a row builds new clients (fresh discovery).
 """
 
 # lifecycle_msgs/State primary and transitional ids

@@ -1,32 +1,29 @@
 #!/usr/bin/env python3
 """dump_params — pull every live ArduRover parameter in QGroundControl format.
 
-Run on the JETSON HOST. Writes to stdout so the caller names the file, and
-prints the completeness check to stderr so a redirect cannot hide it:
+Run on the JETSON HOST. Writes to stdout so the caller names the file, and prints the completeness
+check to stderr so a redirect cannot hide it:
 
     python3 tools/scripts/dump_params.py > 2026-09-03_crusader_ardurover463.params
 
-Output is byte-compatible with a QGC "Save to file" dump, which is what
-param_guard.py and the baseline in params/ are written against.
+Output is byte-compatible with a QGC "Save to file" dump, which is what param_guard.py and the
+baseline in params/ are written against.
 
 TWO THINGS THAT MAKE A DUMP LIE.
 
-1. A PARTIAL PULL LOOKS COMPLETE. Nothing in the file says how many parameters
-   the vehicle has, so a dump cut short by a dropped packet is a valid-looking
-   file that quietly omits rows — and param_guard reports "missing" rather than
-   "drifted" for every one of them. This prints `got N of M` to stderr; if
-   N < M, throw the file away and run it again.
+1. A PARTIAL PULL LOOKS COMPLETE. Nothing in the file says how many parameters the vehicle has, so
+   a dump cut short by a dropped packet is a valid-looking file that omits rows (param_guard then
+   reports "missing" rather than "drifted"). This prints `got N of M` to stderr; if N < M, throw
+   the file away and run it again.
 
-2. A FULL PARAM DOWNLOAD STARVES THE TELEMETRY STREAMS. It saturates the USB
-   link, and telemetry_bridge logs "MAVLink stream '<x>' stale (> 1.0s) — NOT
-   republishing" for as long as it runs (confirmed 2026-09-03). That is the
-   bridge refusing to replay a dead stream, exactly as designed. Do not pull
-   params while anything depends on fresh telemetry.
+2. A FULL PARAM DOWNLOAD STARVES THE TELEMETRY STREAMS. It saturates the USB link, and
+   telemetry_bridge logs "MAVLink stream '<x>' stale (> 1.0s) — NOT republishing" for as long as it
+   runs (the bridge refusing to replay a dead stream, as designed). Do not pull params while
+   anything depends on fresh telemetry.
 
-Uses 14550, MAVProxy's spare local --out, which is kept free for tooling like
-this. It BINDS that port for the duration, so preflight.py and
-param_guard.py --live cannot run at the same time — one of them would sit in
-silence rather than fail. Run them one at a time.
+Uses 14550, MAVProxy's spare local --out kept free for tooling like this. It BINDS that port for
+the duration, so preflight.py and param_guard.py --live cannot run at the same time (one would sit
+in silence rather than fail). Run them one at a time.
 """
 import sys
 import time

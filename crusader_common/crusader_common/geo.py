@@ -21,11 +21,10 @@ M_PER_DEG = 111_139.0
 def ground_speed_mps(vx_cms: float, vy_cms: float) -> float:
     """Horizontal ground speed [m/s] from GLOBAL_POSITION_INT's vx/vy.
 
-    MAVLink reports those as int16 cm/s in the NED frame; the unit conversion
-    lives here rather than inline in telemetry_bridge so it is unit-tested and
-    cannot be silently re-derived (wrongly) by a second consumer later.
-    Vertical velocity is deliberately excluded — this is a surface vessel and
-    objective-2's speed floor is a horizontal-progress threshold.
+    MAVLink reports those as int16 cm/s in NED; the conversion lives here so it
+    is unit-tested and cannot be re-derived (wrongly) by a second consumer.
+    Vertical velocity is excluded: this is a surface vessel and the speed floor is
+    a horizontal-progress threshold.
     """
     return math.hypot(vx_cms, vy_cms) / 100.0
 
@@ -57,15 +56,13 @@ def body_to_world(bx: float, by: float, boat_x: float, boat_y: float,
     """Rotate a BODY-frame offset into WORLD and translate by boat position.
     (The diagram's 'Coordinate Transform Node (rotation matrix)'.)
 
-    Yaw only — assumes the boat is level. For a camera or LiDAR detection use
-    body_to_world_ypr instead: on a surface vessel in chop, roll and pitch move
-    a 20 m bearing by metres, and this function has no way to know about them.
+    Yaw only: assumes the boat is level. For a camera or LiDAR detection use
+    body_to_world_ypr: in chop, roll and pitch move a 20 m bearing by metres.
 
     NOTE the axis convention here is the legacy RX24 one (bx = starboard,
-    by = forward), which is NOT the REP-103 convention Detection3D uses. That
-    mismatch is the reason body_to_world_ypr takes its input in REP-103 and
-    converts internally — so a mapping node never has to remember which is
-    which.
+    by = forward), NOT the REP-103 one Detection3D uses; body_to_world_ypr takes
+    REP-103 and converts internally so a mapping node never has to remember which
+    is which.
     """
     ch, sh = math.cos(heading_rad), math.sin(heading_rad)
     wx = bx * ch + by * sh
@@ -78,9 +75,9 @@ def body_to_world_ypr(x_fwd: float, y_left: float, z_up: float,
                       boat_x: float = 0.0, boat_y: float = 0.0) -> tuple:
     """Place a REP-103 body-frame detection in the WORLD frame using full YPR.
 
-    This is the transform that mission-element mapping runs on every detection:
-    a Detection3D arrives in body axes relative to a boat that is rolling and
-    pitching, and the map needs it in fixed world axes.
+    The transform mission-element mapping runs on every detection: a Detection3D
+    arrives in body axes relative to a boat that is rolling and pitching, and the
+    map needs fixed world axes.
 
     Args:
       x_fwd, y_left, z_up: offset from the boat in REP-103 BODY axes [m] —
@@ -92,15 +89,14 @@ def body_to_world_ypr(x_fwd: float, y_left: float, z_up: float,
         Default 0 gives the world-frame OFFSET rather than an absolute point.
 
     Returns:
-      (world_x, world_y, world_z) — east+ [m], north+ [m], up+ [m]. The third
-      element is returned rather than discarded because it is the cheapest
-      sanity check available: a buoy that maps to +4 m of altitude means the
-      attitude and the detection disagree, and silently dropping z hides that.
+      (world_x, world_y, world_z) — east+ [m], north+ [m], up+ [m]. z is
+      returned because it is the cheapest sanity check: a buoy that maps to +4 m
+      of altitude means the attitude and the detection disagree.
 
-    Rotation is the standard aerospace 3-2-1 (yaw, then pitch, then roll)
-    applied to the FRD form of the input, matching how ArduPilot's EKF defines
-    the angles. Composing them in any other order is wrong by degrees once the
-    boat is doing two of the three at the same time.
+    Rotation is the standard aerospace 3-2-1 (yaw, then pitch, then roll) applied
+    to the FRD form of the input, matching how ArduPilot's EKF defines the
+    angles; any other order is wrong by degrees once the boat does two of the
+    three at once.
     """
     # REP-103 (x fwd, y left, z up) -> NED body / FRD (x fwd, y right, z down),
     # which is the frame the EKF's roll/pitch/yaw are defined against.
@@ -123,9 +119,8 @@ def world_to_body_ypr(world_x: float, world_y: float, world_z: float,
                       boat_x: float = 0.0, boat_y: float = 0.0) -> tuple:
     """The exact inverse of body_to_world_ypr — world point to REP-103 BODY.
 
-    Answers "where is that, from here": a known world position (a waypoint, a
-    stored target, a simulated buoy) expressed as the offset a sensor bolted to
-    this boat would report for it.
+    Answers "where is that, from here": a known world position (waypoint, stored
+    target, simulated buoy) as the offset a sensor on this boat would report.
 
     Args:
       world_x, world_y, world_z: the point in WORLD axes — east+ [m], north+
@@ -136,20 +131,16 @@ def world_to_body_ypr(world_x: float, world_y: float, world_z: float,
         as an offset from the boat rather than an absolute point.
 
     Returns:
-      (x_fwd, y_left, z_up) [m] — REP-103 body axes, the same triple
-      Detection3D and Cluster3D carry.
+      (x_fwd, y_left, z_up) [m] — REP-103 body axes, the triple Detection3D and
+      Cluster3D carry.
 
-    Implemented as the TRANSPOSE of the forward rotation, which is what the
-    inverse of an orthonormal rotation is. Re-deriving it by negating the three
-    angles and reversing the order gives the same matrix and one more place to
-    get a sign wrong; the transpose cannot disagree with the forward transform
-    because it is read off it.
+    Implemented as the TRANSPOSE of the forward rotation: re-deriving it by
+    negating the angles and reversing the order gives the same matrix and one more
+    place to get a sign wrong.
 
-    NOTE this is the same rotation the forward function uses. Round-tripping a
-    point through both proves the pair is CONSISTENT, not that the convention
-    is right — a shared sign error cancels perfectly. Proving the convention is
-    a bench exercise against a real sensor, the way docs/G2 did it for the
-    LiDAR.
+    NOTE round-tripping through both proves the pair is CONSISTENT, not that the
+    convention is right (a shared sign error cancels). Proving the convention is a
+    bench exercise against a real sensor, as docs/G2 did for the LiDAR.
     """
     # WORLD (east, north, up) -> NED (north, east, down), relative to the boat.
     north = world_y - boat_y

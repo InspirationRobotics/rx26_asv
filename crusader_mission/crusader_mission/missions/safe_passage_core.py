@@ -2,22 +2,18 @@
 
 Right now every phase is a DWELL: the mission walks
 IDLE -> APPROACH -> OBSERVE -> ORBIT_ENTRY -> TRANSIT -> ORBIT_EXIT -> COMPLETE
-on a timer and does nothing else. That is deliberate and it is not a stub for
-its own sake — an empty mission still exercises the whole workflow that has to
-work before any of the real logic is worth writing:
-
-  goal accepted -> feedback streams -> cancel returns promptly -> result lands
-  -> the tree moves on
-
-and it exercises the terminating behaviour (mode loss, timeout, cancel) through
-exactly the same code path the real mission will use, because the decision to
-stop lives in phase_sequencer, not here.
+on a timer and does nothing else. That is deliberate: an empty mission exercises
+the workflow that must work before any real logic is worth writing (goal
+accepted -> feedback streams -> cancel returns promptly -> result lands -> the
+tree moves on) and the terminating behaviour (mode loss, timeout, cancel) through
+the same code path the real mission will use, because the decision to stop lives
+in phase_sequencer, not here.
 
 FILLING IT IN. Each phase becomes real by giving its PhaseSpec a `done`
 predicate. `done(world, phase_elapsed_s)` receives whatever the node passes as
-`world` — a snapshot object, never live handles, so the predicate stays
-testable. Nothing else about this file changes: the phase order, the weights,
-the deadlines and the outcome-on-deadline are already the mission's shape.
+`world`: a snapshot object, never live handles, so the predicate stays testable.
+The phase order, weights, deadlines and outcome-on-deadline are already the
+mission's shape.
 
   APPROACH     done when within approach_radius_m of the goal point OR the
                entry gate resolves — whichever comes first. The team-provided

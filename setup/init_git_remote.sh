@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# ============================================================================
 # setup/init_git_remote.sh — one-time git init + remote wiring for this repo
 #
 # Idempotent: safe to re-run; it only creates what is missing.
@@ -14,7 +13,6 @@
 # tree. On the Jetson it is cloned to `~/robotx_ws/src/rx26_asv` — one package
 # source inside a colcon workspace, NOT the workspace root. This script is only
 # for bootstrapping a fresh checkout that has no git yet.
-# ============================================================================
 set -euo pipefail
 cd "$(dirname "$0")/.."   # repo root
 

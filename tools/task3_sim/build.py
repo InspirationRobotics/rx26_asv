@@ -6,25 +6,21 @@
     python tools/task3_sim/build.py runner     # the off-ROS runner the sim drives
     python tools/task3_sim/build.py --clean    # forget every object file
 
-WHY THIS EXISTS. The Task 1 rig is WSL2 -> Docker -> ArduRover SITL + ROS 2,
-and a laptop without hardware virtualisation cannot start WSL2 at all. The tree
-itself does not need any of that: every leaf reads the Context and calls a
-function the runner wired up. So this builds the SAME leaves.cpp, the SAME
-task3_leaves.cpp and the SAME XML the boat runs, against BehaviorTree.CPP
-compiled from source, and swaps bt_runner_node's ROS plumbing for JSON lines on
-stdin/stdout (crusader_bt/offros/offros_runner.cpp).
+WHY THIS EXISTS. The Task 1 rig is WSL2 -> Docker -> ArduRover SITL + ROS 2, and a laptop without
+hardware virtualisation cannot start WSL2. The tree itself needs none of that: every leaf reads the
+Context and calls a function the runner wired up. So this builds the SAME leaves.cpp, the SAME
+task3_leaves.cpp and the SAME XML the boat runs, against BehaviorTree.CPP compiled from source,
+swapping bt_runner_node's ROS plumbing for JSON lines on stdin/stdout
+(crusader_bt/offros/offros_runner.cpp).
 
-WHY NOT CMAKE. It is not installed on the dev laptops, and BT.CPP's own
-CMakeLists pulls in ZeroMQ and SQLite for Groot and its SQLite logger, neither
-of which the runner uses. The source list below is BT_SOURCE from BT.CPP 4.9.0's
-CMakeLists.txt minus exactly those two.
+WHY NOT CMAKE. It is not installed on the dev laptops, and BT.CPP's own CMakeLists pulls in ZeroMQ
+and SQLite for Groot and its SQLite logger, neither of which the runner uses. The source list below
+is BT_SOURCE from BT.CPP 4.9.0's CMakeLists.txt minus exactly those two.
 
-BehaviorTree.CPP 4.9.0 is the version crusader_bt was verified against
-(context.hpp, 2026-09-07). It is fetched into .deps/, which is gitignored:
-nothing third-party is committed and nothing is installed system-wide.
-
-Objects are cached in .build/ and rebuilt only when the source is newer, so the
-library costs about two minutes once and nothing after that.
+BehaviorTree.CPP 4.9.0 is the version crusader_bt was verified against (context.hpp). It is fetched
+into .deps/, which is gitignored: nothing third-party is committed or installed system-wide. Objects
+are cached in .build/ and rebuilt only when the source is newer, so the library costs about two
+minutes once and nothing after that.
 """
 import argparse
 import os

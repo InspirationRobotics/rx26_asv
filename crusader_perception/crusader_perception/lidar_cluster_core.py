@@ -1,43 +1,35 @@
 """lidar_cluster_core — MID360 point cloud to 3D object clusters.
 
-Pure numpy: no rclpy, no ROS messages, no device. Every decision in here can be
-exercised with an invented cloud on a laptop, which is the only reason the
-geometry below is trustworthy — none of it is verifiable by staring at a live
-sensor. `lidar_cluster_node.py` is the thin ROS wrapper.
+Pure numpy: no rclpy, no ROS messages, no device, so every decision here is exercisable
+with an invented cloud on a laptop (none of it is verifiable by staring at a live sensor).
+`lidar_cluster_node.py` is the thin ROS wrapper.
 
-`tools/lidar_view.py` imports the transform and the filters FROM HERE. The bench
-view and the node must apply identical geometry or the orientation check
-(docs/G2) proves nothing about what the node actually does.
+`tools/lidar_view.py` imports the transform and the filters FROM HERE: the bench view and
+the node must apply identical geometry or the orientation check (docs/G2) proves nothing.
 
 THE PIPELINE, in order, and the order matters:
 
-  1. sensor-frame filters (near_mask, fov_mask) — the origin here IS the sensor,
-     which is what "0.5 m around the LiDAR" means, and both describe what the
-     sensor can physically see.
+  1. sensor-frame filters (near_mask, fov_mask) — the origin here IS the sensor, which is
+     what "0.5 m around the LiDAR" means, and both describe what the sensor can see.
   2. to_body — sign flips then translation, into REP-103 (x fwd, y left, z up).
   3. level — de-rotate roll and pitch out, keeping yaw. Now z is true vertical.
-  4. height/range gates — water and sky. These MUST come after levelling: under
-     power the boat pitches bow-up, and a z gate applied in the tilted body
-     frame slices the water surface at a different height on every wave.
-  5. cluster — voxel-grid DBSCAN, in the levelled frame so the distance metric
-     is isotropic and "0.4 m apart" means the same thing at any attitude.
+  4. height/range gates — water and sky. MUST come after levelling: under power the boat
+     pitches bow-up, and a z gate in the tilted body frame slices the water at a different
+     height on every wave.
+  5. cluster — voxel-grid DBSCAN, in the levelled frame so "0.4 m apart" means the same at
+     any attitude.
+  6. nav cloud (process_body_nav) — the levelled points of every cluster of at least
+     min_points, extent or not, voxel-thinned: the costmap's input. A dock wall is not a
+     trackable object (max_extent_m) but it is an obstacle.
 
-  6. nav cloud (process_body_nav) — the levelled points of every cluster of at
-     least min_points, extent or not, voxel-thinned: the costmap's input. A
-     dock wall is not a trackable object (max_extent_m) but it is an obstacle.
+Cluster centroids are reported in BODY frame, not levelled: the camera is bolted to the same
+hull, so `oak/detections` are body-frame too and fusion compares the two directly. Whoever
+projects into the world applies attitude once, there (crusader_common.geo.body_to_world_ypr);
+publishing levelled positions would make it apply twice.
 
-Cluster centroids are reported back in BODY frame, not levelled: the camera is
-bolted to the same hull, so `oak/detections` are body-frame too, and fusion
-compares the two directly. Whoever projects into the world applies attitude
-once, at that point (crusader_common.geo.body_to_world_ypr). Publishing levelled
-positions would make it apply twice.
-
-FRAME, bench-confirmed 2026-08-14 (docs/G2_lidar_orientation.md): the raw Livox
-frame is x forward, y STARBOARD, z down — the plain 180-degree roll about the
-forward axis, which is what mounting it upside down does. Resources.md first
-described it as "y left, z down", which is left-handed and cannot describe a
-rigid sensor. Both y and z therefore negate into REP-103, and both signs are
-parameters rather than constants so a remount is a config change.
+FRAME (docs/G2_lidar_orientation.md): the raw Livox frame is x forward, y STARBOARD, z down
+(a 180-degree roll about the forward axis: the upside-down mount). Both y and z negate into
+REP-103, and both signs are parameters, not constants, so a remount is a config change.
 """
 import math
 from dataclasses import dataclass, field
@@ -69,13 +61,11 @@ class ClusterParams:
     z_ceiling: float = 4.0          # reject sky/rain returns above this [m]
     r_max: float = 40.0             # horizontal range ceiling [m]
     # --- voxel-grid DBSCAN ---
-    # eps stays SMALL and grows only gently with range. The instinct is to open
-    # it up for distant objects, but that is backwards: a buoy is 0.3 m wide at
-    # every range, so its returns are always within ~0.3 m of each other, while
-    # the neighbourhood VOLUME grows as eps^3 and sweeps in proportionally more
-    # scattered noise. Widening eps therefore helps the noise more than the
-    # buoy. What actually changes with range is the SPACING between returns on
-    # one object, which is what the gentle growth covers.
+    # eps stays SMALL and grows only gently with range. A buoy is 0.3 m wide at every range,
+    # so its returns stay within ~0.3 m of each other, while the neighbourhood VOLUME grows as
+    # eps^3 and sweeps in proportionally more noise: widening eps helps the noise more than
+    # the buoy. What changes with range is the SPACING between returns on one object, which
+    # the gentle growth covers.
     leaf_size: float = 0.15         # voxel edge [m]
     eps_0: float = 0.30             # neighbourhood radius at eps_r_ref [m]
     eps_r_ref: float = 15.0         # range at which eps_0 applies [m]
@@ -126,13 +116,9 @@ class ClusterStats:
 def near_mask(pts: np.ndarray, r_min: float) -> np.ndarray:
     """Drop returns inside a sphere of `r_min` around the SENSOR.
 
-    Run in the RAW sensor frame, where the origin is the sensor itself — the
-    mount, the cabling and the deck directly beneath it return on every sweep.
-    They are not the world, and left in they form a permanent cluster at arm's
-    length that no downstream gate removes.
-
-    3D range, not horizontal: the strongest self-returns from an upside-down
-    sensor point straight down, and a horizontal-only test keeps every one.
+    Run in the RAW sensor frame, where the origin is the sensor: the mount, cabling and deck
+    beneath it return on every sweep and would form a permanent cluster at arm's length. 3D
+    range, not horizontal: an upside-down sensor's strongest self-returns point straight down.
     """
     if pts.shape[0] == 0 or r_min <= 0.0:
         return np.ones(pts.shape[0], dtype=bool)
@@ -142,12 +128,9 @@ def near_mask(pts: np.ndarray, r_min: float) -> np.ndarray:
 def fov_mask(pts: np.ndarray, fov_deg: float) -> np.ndarray:
     """Keep points within +/- fov/2 of dead ahead.
 
-    The MID360 sees 360 degrees, but it is mounted at the bow and the hull
-    blocks most of the aft view, so returns behind the beam are the boat's own
-    structure rather than the world.
-
-    Symmetric about the x axis, so it does not care which way y points: valid in
-    the raw frame and the body frame alike.
+    The MID360 sees 360 degrees but is mounted at the bow, and the hull blocks most of the aft
+    view, so returns behind the beam are the boat's own structure. Symmetric about the x axis,
+    so valid in the raw and body frames alike.
     """
     if pts.shape[0] == 0 or fov_deg >= 360.0:
         return np.ones(pts.shape[0], dtype=bool)
@@ -158,10 +141,8 @@ def fov_mask(pts: np.ndarray, fov_deg: float) -> np.ndarray:
 def to_body(pts: np.ndarray, p: ClusterParams) -> np.ndarray:
     """Sensor frame -> REP-103 body (x fwd, y left, z up).
 
-    Sign flips FIRST, then translation. The offsets are measured in body
-    directions, so translating before the flip would move the sensor the wrong
-    way along every flipped axis — a 10 cm error that looks like calibration
-    drift rather than an ordering bug.
+    Sign flips FIRST, then translation: the offsets are measured in body directions, so
+    translating first would move the sensor the wrong way along every flipped axis.
     """
     if pts.shape[0] == 0:
         return pts.reshape(0, 3)
@@ -175,14 +156,11 @@ def to_body(pts: np.ndarray, p: ClusterParams) -> np.ndarray:
 def level(pts: np.ndarray, roll: float, pitch: float) -> np.ndarray:
     """Rotate roll and pitch out of a REP-103 body cloud, keeping yaw.
 
-    The result is gravity-aligned and still boat-centred and boat-headed, which
-    is what the water gate and the clustering metric want.
-
-    This is `crusader_common.geo.body_to_world_ypr` with yaw=0, vectorised and
-    re-expressed in REP-103 axes (that function returns ENU). Written out rather
-    than imported because crusader_common carries no numpy dependency and a
-    per-point Python call over 20k points a sweep is not affordable. The
-    equivalence is pinned by a test rather than asserted here.
+    The result is gravity-aligned and still boat-centred and boat-headed, which the water gate
+    and clustering metric want. This is `crusader_common.geo.body_to_world_ypr` with yaw=0,
+    vectorised in REP-103 axes (that function returns ENU), written out because crusader_common
+    has no numpy dependency and a per-point Python call over 20k points a sweep is unaffordable.
+    A test pins the equivalence.
     """
     if pts.shape[0] == 0:
         return pts.reshape(0, 3)
@@ -201,14 +179,9 @@ def compensate(pts_body: np.ndarray, pose_then, pose_now) -> np.ndarray:
 
     pose_*: (world_east, world_north, heading_rad), heading clockwise from north.
 
-    This is what makes multi-sweep accumulation legal. Without it a 2 m/s drift
-    smears every cluster over half a metre across a 0.5 s window, and the error
-    grows with speed — which reads as a calibration problem rather than a
-    missing transform.
-
-    Yaw and translation only. Roll and pitch are removed separately by `level`,
-    and across a half-second window their change moves a 20 m return far less
-    than the metre-scale translation corrected here.
+    What makes multi-sweep accumulation legal: without it a 2 m/s drift smears every cluster
+    over half a metre across a 0.5 s window. Yaw and translation only; roll and pitch are
+    removed separately by `level` and change far less over half a second.
     """
     if pts_body.shape[0] == 0:
         return pts_body.reshape(0, 3)
@@ -279,26 +252,20 @@ def _offsets(max_rings: int):
 def dbscan_voxel(pts: np.ndarray, p: ClusterParams):
     """Voxel-grid DBSCAN. Returns an int label per point; -1 is noise.
 
-    Why DBSCAN rather than plain Euclidean cluster extraction: connectivity
-    alone lets a thin trail of spray or rain CHAIN a buoy to the shoreline
-    behind it, producing one cluster centred on neither, and it turns every
-    isolated glint return into its own tiny cluster. Requiring a density before
-    a point may seed a cluster kills both, and labels the leftovers noise.
+    Why DBSCAN, not plain Euclidean extraction: connectivity alone lets a trail of spray CHAIN
+    a buoy to the shoreline behind it, and turns every isolated glint into its own tiny
+    cluster. A density requirement before a point may seed a cluster kills both.
 
-    Why the voxel grid rather than a KD-tree: it makes the neighbour query O(1)
-    integer arithmetic with no scipy dependency, and it caps the work per sweep
-    regardless of how many points land on one surface.
+    Why a voxel grid, not a KD-tree: O(1) integer neighbour queries with no scipy dependency,
+    and capped work per sweep however many points land on one surface.
 
-    Why eps grows with range: LiDAR density falls as 1/r^2 (a 0.3 m buoy returns
-    ~37 points at 5 m and ~2 at 20 m). A single global eps tuned to reject water
-    noise up close silently becomes a range cutoff further out, and the failure
-    looks like "the LiDAR cannot see that buoy" rather than "the parameter is
-    wrong". eps(r) = eps_0 * max(1, r / eps_r_ref) holds the density test
-    roughly range-invariant instead.
+    Why eps grows with range: LiDAR density falls as 1/r^2 (a 0.3 m buoy returns ~37 points at
+    5 m, ~2 at 20 m), so a single eps tuned to reject water noise up close becomes a silent
+    range cutoff further out. eps(r) = eps_0 * max(1, r / eps_r_ref) keeps the density test
+    roughly range-invariant.
 
-    Density is measured in RAW POINTS, not occupied voxels: voxelising throws
-    away exactly the quantity the core test needs, so each voxel carries its
-    point count as a weight.
+    Density is measured in RAW POINTS, not occupied voxels, so each voxel carries its point
+    count as a weight.
     """
     n = pts.shape[0]
     if n == 0:
@@ -388,10 +355,9 @@ def clusters_from_labels(pts_body: np.ndarray, labels: np.ndarray,
 def dense_label_mask(labels: np.ndarray, min_points: int) -> np.ndarray:
     """True for every point whose DBSCAN label has at least `min_points` members.
 
-    The size half of `clusters_from_labels`'s gate WITHOUT its extent half: this
-    is what a navigation cloud keeps. A dock wall, a platform or a shoreline is
-    too big to be a trackable object (max_extent_m) and every bit as solid as a
-    buoy to a hull that has to go around it.
+    The size half of `clusters_from_labels`'s gate WITHOUT its extent half, which is what a
+    navigation cloud keeps: a dock wall or shoreline is too big to track (max_extent_m) but as
+    solid as a buoy to a hull that must go around it.
     """
     keep = np.zeros(labels.shape[0], dtype=bool)
     got = labels >= 0
@@ -406,13 +372,9 @@ def dense_label_mask(labels: np.ndarray, min_points: int) -> np.ndarray:
 def voxel_downsample(pts: np.ndarray, leaf: float) -> np.ndarray:
     """One point per occupied voxel of edge `leaf`: the centroid, as (M, 3) float32.
 
-    Bounds what a consumer is handed. A 20 m wall is thousands of returns on the
-    same square metre, and a costmap marks cells, not points, so everything past
-    one point per voxel is cost with no information.
-
-    Points beyond the packed key space (+/-1638 m at a 0.05 m leaf, far outside
-    any gate this node applies) are dropped rather than allowed to collide into
-    another voxel's key.
+    Bounds what a consumer is handed: a costmap marks cells, not points. Points beyond the
+    packed key space (+/-1638 m at a 0.05 m leaf, far outside any gate here) are dropped
+    rather than allowed to collide into another voxel's key.
     """
     if pts.shape[0] == 0:
         return np.empty((0, 3), dtype=np.float32)
@@ -452,31 +414,25 @@ def process_body_nav(pts_body: np.ndarray, p: ClusterParams, roll: float = 0.0,
                      nav_leaf=None):
     """BODY-frame cloud -> (clusters, ClusterStats, nav_pts): level, gate, cluster.
 
-    Split out from `process` because the node applies the sensor-frame filters
-    and the body transform ONCE PER SWEEP, then accumulates several sweeps and
-    clusters the merged window. Re-running those per window would redo the same
-    work on the same points N times, and — worse — the sensor-frame filters are
-    only meaningful on a sweep still in its own sensor frame, before motion
-    compensation moved it.
+    Split out from `process` because the node applies the sensor-frame filters and the body
+    transform ONCE PER SWEEP, then accumulates several sweeps and clusters the merged window;
+    the sensor-frame filters are only meaningful on a sweep still in its own sensor frame,
+    before motion compensation.
 
-    `levelled=False` skips the roll/pitch de-rotation, for when attitude is
-    stale. Clustering still runs — a stale attitude must not blind the boat —
-    but the water gate is then only as good as the boat is flat, and the stat
-    says so rather than leaving it to be inferred.
+    `levelled=False` skips the roll/pitch de-rotation, for when attitude is stale. Clustering
+    still runs (a stale attitude must not blind the boat) but the water gate is then only as
+    good as the boat is flat, and the stat says so.
 
-    `nav_pts` is the navigation obstacle cloud, (M, 3) float32, in the LEVELLED
-    frame (REP-103 axes, no roll or pitch, origin at the body origin): not the
-    body frame the clusters are reported in, because the consumer is a costmap
-    that wants true vertical. It holds every point that landed in a cluster of at
-    least `min_points`, WHATEVER ITS EXTENT. `max_extent_m` decides what is
-    worth TRACKING; it has no say in what is worth NOT HITTING, so docks,
-    platforms and shorelines are in here although they are not in `clusters`.
-    Points are voxel-downsampled to one centroid per `nav_leaf` voxel.
+    `nav_pts` is the navigation obstacle cloud, (M, 3) float32, in the LEVELLED frame (REP-103
+    axes, no roll or pitch, body origin): a costmap wants true vertical. It holds every point
+    in a cluster of at least `min_points`, WHATEVER ITS EXTENT: `max_extent_m` decides what is
+    worth TRACKING, not what is worth NOT HITTING, so docks, platforms and shorelines are in
+    here but not in `clusters`. Points are voxel-downsampled to one centroid per `nav_leaf`
+    voxel.
 
-    `nav_leaf=None` skips all of it and returns an empty (0, 3) cloud: the work
-    is not done for a caller that will not publish it. With `levelled=False` the
-    points are still produced, in the unlevelled frame — whether to publish an
-    unlevelled water gate is the caller's call, and the node's answer is no.
+    `nav_leaf=None` skips all of it and returns an empty (0, 3) cloud. With `levelled=False`
+    the points are still produced, unlevelled; whether to publish an unlevelled water gate is
+    the caller's call, and the node's answer is no.
     """
     st = st or ClusterStats(n_in=int(pts_body.shape[0]))
     st.levelled = levelled
@@ -527,13 +483,12 @@ def process(pts_sensor: np.ndarray, p: ClusterParams, roll: float = 0.0,
 
 
 def params_from(d: dict) -> ClusterParams:
-    """Build ClusterParams from a flat {name: value} dict — the node's live ROS
-    params, or a crusader_params.yaml section.
+    """Build ClusterParams from a flat {name: value} dict — the node's live ROS params, or a
+    crusader_params.yaml section.
 
-    Raises KeyError on a missing key rather than falling back to a code default:
-    a parameter the config forgot must fail at startup, loudly, not drift
-    silently away from the file that is supposed to be the single source of
-    truth.
+    Raises KeyError on a missing key rather than falling back to a code default: a parameter
+    the config forgot must fail loudly at startup, not drift from the file that is the single
+    source of truth.
     """
     return ClusterParams(
         sign_y=d["lidar_sign_y"], sign_z=d["lidar_sign_z"],

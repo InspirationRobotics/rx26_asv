@@ -406,7 +406,7 @@ and `colour ... unresolved` as the flash tracker's, not the model's, verdict.
 
 **OAK-D LR camera:**
 - HFOV 82°. Colour 1920x1200 and depth 640x400, both at 15 Hz.
-- Depth is aligned to the colour camera (`oak_pipeline.py:170`), so one HFOV
+- Depth is aligned to the colour camera (`oak_pipeline.build_rgbd`), so one HFOV
   serves colour, depth and the preview cameras.
 - Depth range 0.58–30 m. The 0.58 m is derived from the 15 cm baseline and
   95 px of disparity.

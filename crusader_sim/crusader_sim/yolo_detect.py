@@ -251,9 +251,7 @@ class AsyncRunner:
                 self.busy = False
 
 
-# ======================================================================
-# the score
-# ======================================================================
+# ---------------------------------------------------------------- the score
 # One truth buoy as the Scoreboard needs it. label = what a perfect detector
 # would call it (course.LABEL_OF); scored = big enough that the oracle detector
 # would box it (min_bbox_px), so a buoy the model finds but the oracle would not

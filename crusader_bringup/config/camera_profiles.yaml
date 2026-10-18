@@ -1,33 +1,27 @@
 # camera_profiles.yaml — named OAK-D camera settings, one block per condition.
 #
-# WHY A SECOND FILE. crusader_params.yaml is the source of truth for how a node
-# STARTS, and the ground station deliberately cannot write it (see gcs_node's
-# header). A camera profile is the opposite kind of value: it changes several
-# times in an afternoon as the light moves, by an operator at a browser, and
-# losing one costs a re-tune rather than a rebuild. So profiles live here, the
-# ground station owns this file, and nothing in the launch path reads it.
+# WHY A SECOND FILE. crusader_params.yaml is the source of truth for how a node STARTS, and the
+# ground station deliberately cannot write it (see gcs_node's header). A camera profile changes
+# several times in an afternoon as the light moves, by an operator at a browser, and losing one
+# costs a re-tune rather than a rebuild. So profiles live here, the ground station owns this file,
+# and nothing in the launch path reads it.
 #
-# WHAT A PROFILE IS. Every one of oak_controls' knobs, with no gaps. A partial
-# profile is the trap oak_controls' own docstring warns about: recall it and the
-# settings it does not mention keep whatever the last profile left behind, so
-# "bright_noon" means something different depending on what you loaded before
-# it. Complete blocks are reproducible; partial ones are a guess.
+# WHAT A PROFILE IS. Every one of oak_controls' knobs, with no gaps: a partial profile leaves the
+# settings it omits at whatever the last profile left behind (see oak_controls' docstring), so the
+# same name would mean different things depending on what was loaded before it.
 #
-# THESE NUMBERS ARE STARTING POINTS, NOT MEASUREMENTS. Only `as_shipped` is
-# real — it is copied from crusader_params.yaml, which is what the boat has
-# actually run. The other four are reasoned from the ranges and from what the
-# classifier reads, and have never been shot on the water. Tune one, save over
-# it from the Camera tab, and it stops being a guess.
+# THESE NUMBERS ARE STARTING POINTS, NOT MEASUREMENTS. Only `as_shipped` is real (copied from
+# crusader_params.yaml, what the boat has run). The other four are reasoned from the ranges and from
+# what the classifier reads, and have never been shot on the water. Tune one, save over it from the
+# Camera tab, and it stops being a guess.
 #
 # THE STANDING RULES, which every block below follows:
-#   ae_mode: manual        outdoors, because auto re-meters as the hull turns
-#                          into the sun and the beacon hues move with it
-#   awb_mode: off          for the same reason: auto white balance corrects the
-#                          blue of sky and water away, and takes the buoys'
-#                          colour with it
-#   saturation: 0          the LED classifier separates a lit buoy from its hull
-#                          on saturation, so this is the one knob that changes
-#                          the quantity the model reads. Left alone on purpose.
+#   ae_mode: manual        outdoors, because auto re-meters as the hull turns into the sun and the
+#                          beacon hues move with it
+#   awb_mode: off          for the same reason: auto white balance corrects the blue of sky and
+#                          water away, and takes the buoys' colour with it
+#   saturation: 0          the LED classifier separates a lit buoy from its hull on saturation, so
+#                          this is the one knob that changes the quantity the model reads. Left alone.
 #   anti_banding: off      outdoors. Only the shed profile sets it.
 
 profiles:

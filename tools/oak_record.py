@@ -58,9 +58,7 @@ from pathlib import Path
 import cv2
 import depthai as dai
 
-# ---------------------------------------------------------------------------
 # OAK-D LR camera layout. Baselines: B<->A 5 cm, A<->C 10 cm, B<->C 15 cm.
-# ---------------------------------------------------------------------------
 SOCKETS = {
     "CAM_A": (dai.CameraBoardSocket.CAM_A, "center"),
     "CAM_B": (dai.CameraBoardSocket.CAM_B, "left"),
@@ -103,9 +101,7 @@ def frame_ts(pkt) -> float:
     return float(ts)
 
 
-# ---------------------------------------------------------------------------
 # Pipeline
-# ---------------------------------------------------------------------------
 def build_pipeline(args, cam_names):
     pipeline = dai.Pipeline()
     for name in cam_names:
@@ -129,24 +125,19 @@ def build_pipeline(args, cam_names):
                 print(f"[record] warn: --ae-compensation unsupported here ({e})")
 
         if args.ae_region_height:
-            # WHERE the meter looks. The deployed pipeline meters a band across
-            # the horizon rather than the whole frame, because a bright sky
-            # averages out to a number that looks correct and puts the buoys on
-            # the floor -- measured on the boat at dusk, the bottom third of the
-            # frame had a median of 4/255 with only 0.10% of the frame clipped.
-            # A DATASET SHOT WITH DIFFERENT METERING THAN INFERENCE IS THE
-            # TRAINING CONTRACT BROKEN IN THE OTHER DIRECTION, so these default
-            # to the same fractions as crusader_params.yaml.
+            # WHERE the meter looks. The deployed pipeline meters a band across the horizon rather than
+            # the whole frame, because a bright sky averages out to a number that looks correct and puts
+            # the buoys on the floor (measured at dusk: the bottom third of the frame had a median of
+            # 4/255 with 0.10% clipped). A DATASET SHOT WITH DIFFERENT METERING THAN INFERENCE IS THE
+            # TRAINING CONTRACT BROKEN IN THE OTHER DIRECTION, so these default to the same fractions as
+            # crusader_params.yaml.
             #
-            # SENSOR pixels, before ISP scaling. Using the scaled size here
-            # would put the band in the sky and darken the very frames this run
-            # exists to collect.
+            # SENSOR pixels, before ISP scaling: the scaled size would put the band in the sky.
             #
             # The rectangle maths is deliberately duplicated from
-            # crusader_perception.oak_pipeline.ae_region_rect, which is the
-            # definition of record: this script is standalone on purpose -- it
-            # is meant to be copied to a laptop next to the camera -- and an
-            # import of the ROS package would end that. Keep the two in step.
+            # crusader_perception.oak_pipeline.ae_region_rect (the definition of record): this script is
+            # standalone on purpose, meant to be copied to a laptop next to the camera, and importing the
+            # ROS package would end that. Keep the two in step.
             w, h = SENSOR_SIZE[args.resolution]
             y = int(round(min(max(args.ae_region_top, 0.0), 1.0) * h))
             rh = int(round(min(max(args.ae_region_height, 0.0), 1.0) * h))
@@ -192,9 +183,7 @@ def make_writer(path: Path, codec: str, fps: float, size, quality: int):
     return writer
 
 
-# ---------------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
 def main() -> int:
     args = parse_args()
 

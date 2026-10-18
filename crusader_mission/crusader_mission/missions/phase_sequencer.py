@@ -1,27 +1,25 @@
 """phase_sequencer — the part of a mission that decides WHEN to stop.
 
-Pure Python. No rclpy, no ROS types, no clock of its own: every method takes
-`now` in monotonic seconds. That is what lets the mission's termination logic —
-the half that decides whether the boat is still allowed to be driving — be
-tested at a desk against a fake clock, in milliseconds, with no boat.
+Pure Python: no rclpy, no ROS types, no clock of its own (every method takes
+`now` in monotonic seconds), so the termination logic, the half that decides
+whether the boat is still allowed to be driving, is tested at a desk against a
+fake clock.
 
-WHY THIS IS A SEPARATE THING FROM THE MISSION
----------------------------------------------
+WHY THIS IS SEPARATE FROM THE MISSION
 Every mission on this vehicle has the same three ways to end badly and one way
-to end well, and they are all more dangerous than the mission logic itself:
+to end well:
 
   * the pilot takes the mode away          -> stop, do not fight for it
   * the operator cancels                   -> stop promptly, from ANY phase
   * the clock runs out                     -> stop, report what we got
 
 Written per-mission, one of those gets forgotten and the boat sits there with
-the behaviour tree blocked behind it. Written once, "every action terminates" is
-a property of this file, and a new mission gets it by construction.
+the tree blocked behind it; written once, "every action terminates" is a
+property of this file.
 
-THE ONE RULE THIS FILE ENFORCES: there is no path through poll() that returns
-"still running" forever. Either a phase advances, or a deadline fires. A goal
-with no timeout is not representable — timeout_s has no sentinel meaning
-"never".
+THE ONE RULE THIS FILE ENFORCES: no path through poll() returns "still running"
+forever. Either a phase advances or a deadline fires; a goal with no timeout is
+not representable (timeout_s has no "never" sentinel).
 """
 
 # Outcome codes. These MUST match crusader_msgs/action/SafePassage.action; the
@@ -49,20 +47,17 @@ ADVANCE = "advance"      # a phase deadline that just moves on, not a failure
 class PhaseSpec:
     """One phase: what it is called, how long it may take, how it ends.
 
-    deadline_s is a MAXIMUM, never a target. A phase with a `done` predicate
-    ends the moment the predicate is true; deadline_s is only what happens when
-    it never becomes true.
+    deadline_s is a MAXIMUM, never a target: a phase with a `done` predicate ends
+    the moment it is true.
 
-    on_deadline is either ADVANCE (the phase was a dwell, or its timeout is not
-    fatal — carry on) or an outcome code (running out of time HERE ends the
-    mission, e.g. OBSERVE -> OUTCOME_NO_ENTRY). Making that an explicit field is
-    the point: a silent "advance anyway" on a phase that genuinely failed is how
-    a mission comes to report SUCCESS for a run that did nothing.
+    on_deadline is either ADVANCE (a dwell, or a non-fatal timeout) or an outcome
+    code (running out of time HERE ends the mission, e.g. OBSERVE ->
+    OUTCOME_NO_ENTRY). Explicit because a silent "advance anyway" on a phase that
+    genuinely failed is how a mission reports SUCCESS for a run that did nothing.
 
     done(world, phase_elapsed_s) returns True when the phase's real work is
-    finished. None means "this phase is a dwell" — which is exactly the empty
-    mission, and is why the empty mission exercises the same code path the real
-    one will.
+    finished. None means "this phase is a dwell", which is why the empty mission
+    exercises the same code path the real one will.
     """
 
     __slots__ = ("name", "weight", "deadline_s", "on_deadline", "done")
@@ -121,12 +116,12 @@ class PhaseSequencer:
                 break
 
     `autonomous` is tri-state on purpose: True in an autonomous mode, False in a
-    manual one, and **None when we do not know** — no HEARTBEAT, or none yet.
+    manual one, and **None when we do not know** (no HEARTBEAT, or none yet).
     None is not False: at goal start it means the precondition has not arrived
-    yet (FAULT after a grace period), and mid-mission it means the link died,
-    which is also not a reason to claim the pilot took over. A boolean here
-    would collapse "the pilot has the boat" and "we cannot see the boat" into
-    one report, and those need different words in the log.
+    (FAULT after a grace period), and mid-mission it means the link died, which is
+    not a reason to claim the pilot took over. A boolean would collapse "the
+    pilot has the boat" and "we cannot see the boat", which need different words
+    in the log.
     """
 
     def __init__(self, phases, *, timeout_s, mode_grace_s=3.0):
@@ -165,10 +160,9 @@ class PhaseSequencer:
         if self._t0 is None:
             raise RuntimeError("poll() before start()")
 
-        # Order matters, and it is the safety posture. Cancel outranks
-        # everything, because a cancel that waits for a phase boundary is a
-        # cancel that does not work. The mode check outranks the clock because
-        # "the pilot has the boat" is the more useful sentence in the log.
+        # Order is the safety posture: cancel outranks everything (a cancel that
+        # waits for a phase boundary does not work); the mode check outranks the
+        # clock because "the pilot has the boat" is the more useful log sentence.
         if cancel_requested:
             return self._stop(now, OUTCOME_CANCELLED,
                               "cancelled during " + self.phase)
@@ -228,11 +222,9 @@ class PhaseSequencer:
         return v
 
     def _progress(self, now):
-        """Weighted, and MONOTONIC — it never goes backwards.
-
-        A progress bar that retreats reads as a bug to whoever is watching, and
-        the one place it would retreat (a phase advancing before its deadline)
-        is exactly when they most need to trust the display.
+        """Weighted, and MONOTONIC — it never goes backwards (a retreating
+        progress bar reads as a bug, most damagingly when a phase advances before
+        its deadline).
         """
         done_w = sum(p.weight for p in self.phases[:self._i])
         spec = self.phases[self._i]

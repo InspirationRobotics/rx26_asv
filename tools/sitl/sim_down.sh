@@ -1,26 +1,20 @@
 #!/usr/bin/env bash
 # sim_down.sh -- stop the Task 1 simulator in the order that leaves nothing behind.
 #
-# Runs INSIDE WSL. On Windows double-click SIM_DOWN.cmd, which is this plus
-# closing QGroundControl.
+# Runs INSIDE WSL. On Windows double-click SIM_DOWN.cmd, which is this plus closing QGroundControl.
 #
 #   bash sim_down.sh [/mnt/c/... path to the Windows checkout]
 #
-# ORDER MATTERS, AND IT IS ROS NODES FIRST, WHILE SITL STILL ANSWERS. A
-# telemetry_bridge that loses its autopilot mid-shutdown spends its last seconds
-# retrying a dead socket and writes a page of connection errors into
-# /tmp/tb.log. The next run's first `tail` reads that as a fault on startup,
-# which it is not, and the hunt starts at the wrong end of the stack.
+# ORDER MATTERS: ROS NODES FIRST, WHILE SITL STILL ANSWERS. A telemetry_bridge that loses its
+# autopilot mid-shutdown retries a dead socket and writes a page of connection errors into
+# /tmp/tb.log, which the next run's first `tail` reads as a startup fault.
 #
-# IT STAGES ITS OWN TOOLS FIRST. Shutting down must work on a machine that has
-# never brought the rig up -- a fresh clone, or a WSL workspace that predates
-# these scripts -- so the three files this needs are copied in rather than
-# assumed. The first run of this hit exactly that: nodes_down.sh did not exist
-# in the container yet and every ROS node survived a "clean" shutdown.
+# IT STAGES ITS OWN TOOLS FIRST: shutting down must work on a machine that has never brought the rig
+# up (a fresh clone, or a WSL workspace predating these scripts), so the three files it needs are
+# copied in rather than assumed.
 #
-# THE WSL VM IS LEFT RUNNING on purpose -- docker and anything else you keep in
-# there is not this script's to kill. To get the memory back as well, from
-# Windows:  wsl --shutdown
+# THE WSL VM IS LEFT RUNNING on purpose: docker and anything else in there is not this script's to
+# kill. To get the memory back, from Windows:  wsl --shutdown
 set -uo pipefail
 
 DEFAULT_WIN=/mnt/c/Users/chase/OneDrive/Documents/GitHub/RobotX_2026/Boat/rx26_asv

@@ -11,7 +11,7 @@ numpy and cv2 (apt python3-numpy / python3-opencv); task1_panel runs without
 this module, with the views reporting why.
 
 LAZY, BECAUSE A CAMERA NOBODY SUBSCRIBES TO IS NOT RENDERED. The preview
-cameras (gen_crusader.py:256-263, crusader_hull.yaml `preview`) are gz sensors,
+cameras (gen_crusader.py's preview block, crusader_hull.yaml `preview`) are gz sensors,
 and gz-sensors renders a camera only while its topic has a subscriber; every
 render is GPU time the sim spends out of real time. So a view subscribes on its
 first request and unsubscribes IDLE_S after its last one: a closed tab, a
@@ -29,12 +29,12 @@ arrives instead of showing a picture that looks live and is minutes old. Every
 JPEG is served with its age.
 
 THE LIDAR FRAME. The MID360 is mounted upside down at the bow, and the sim
-mounts it the same way from the same params (gen_crusader.py:195-220: roll pi
+mounts it the same way from the same params (gen_crusader.py's lidar mount: roll pi
 from lidar_sign_y = lidar_sign_z = -1), so its raw frame is x FORWARD, y
 STARBOARD, z DOWN. The bird's-eye view is drawn in the BOAT frame (REP-103:
 x forward, y port, z up) — bow up, port left, starboard right — using the
 transform lidar_cluster_core.to_body applies on the boat
-(lidar_cluster_core.py:163-166: signs first, then the offsets), with the numbers
+(lidar_cluster_core.to_body: signs first, then the offsets), with the numbers
 read from crusader_params.yaml through gen_crusader's own reader, so the view
 un-mounts the sensor with exactly the numbers the sim mounted it with.
 
@@ -55,9 +55,8 @@ from gz.msgs10.pointcloud_packed_pb2 import PointCloudPacked
 IDLE_S = 5.0                    # unsubscribe this long after the last request
 TICK_S = 0.5                    # worker cadence when no request wakes it
 JPEG_QUALITY = 80
-# Every age here is a difference of two readings, so the MONOTONIC clock: WSL
-# steps its wall clock (-0.78 s seen mid-run, 2026-09-30), and a frame then came
-# out with a negative age.
+# Every age here is a difference of two readings, so the MONOTONIC clock: WSL steps
+# its wall clock, which once gave a frame a negative age.
 _now = time.monotonic
 
 DEPTH_NEAR_M, DEPTH_FAR_M = 0.58, 30.0     # = crusader_hull.yaml oak_d_lr depth_min/max_m
@@ -219,7 +218,7 @@ def lidar_mount():
 
 
 def to_body(xyz, mount):
-    """Sensor -> body, as lidar_cluster_core.to_body (lidar_cluster_core.py:163-166):
+    """Sensor -> body, as lidar_cluster_core.to_body:
     sign flips FIRST, then the offsets, which are measured in body axes."""
     (tx, ty, tz), (sy, sz) = mount["t"], mount["sign"]
     return np.column_stack([xyz[:, 0] + tx, xyz[:, 1] * sy + ty, xyz[:, 2] * sz + tz])

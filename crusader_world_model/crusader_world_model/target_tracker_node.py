@@ -2,11 +2,10 @@
 
 NOTE: unverified on the boat. Exercised only against
 tools/bench/bench_world_model.py's invented detections. It is deliberately NOT
-in core.launch.py, and it commands nothing directly — but it is no longer
-publishing into the void: crusader_bt's bt_runner_node subscribes
-/crsd/world_targets and fills the behaviour tree's buoy field from it, taking
-CONFIRMED tracks only. That is why a confirmed phantom here is a mission
-problem and not just an untidy map.
+in core.launch.py and commands nothing directly, but crusader_bt's
+bt_runner_node subscribes /crsd/world_targets and fills the behaviour tree's
+buoy field from CONFIRMED tracks only, so a confirmed phantom here is a mission
+problem, not just an untidy map.
 
 Subscribes:
   oak/detections       crusader_msgs/Detection3DArray  — camera_link
@@ -23,49 +22,32 @@ ROS imports and runs on a laptop. This file is I/O, parameters and freshness,
 mirroring lidar_cluster_node.py.
 
 CAMERA-ONLY BY DEFAULT. `use_lidar` is False, so a cluster reaches the health
-counters and nothing else, and every track on the map came from a camera
-detection. This is not a statement about which sensor is better — it is about
-what an unlabelled cluster MEANS in the water you are in. On open water the
-nearest hard surface is the object you wanted; in a pool or alongside a dock it
-is the wall, which clusters perfectly, arrives with no label, survives
-track_unlabeled, reaches confirm_hits in three sightings and then — with
-track_timeout_s at 0 — never leaves the map. crusader_params.yaml records the
-measurement: at r_max 40 m that was 100+ permanent tracks at 15-28 m.
+counters and nothing else and every track came from a camera detection (see
+target_tracker_core: near walls the LiDAR makes permanent phantom tracks). The
+switch is [DYN] (Tuning tab, no restart); on, ranges go from stereo (a few per cent
+of the distance) back to time-of-flight (centimetres).
 
-The switch is [DYN], so it flips from the ground station's Tuning tab without a
-restart. Turn it on for open water and the ranges go from stereo (a few per
-cent of the distance) back to time-of-flight (centimetres).
-
-WHY A TIMER AND NOT A CALLBACK PER DETECTION. The four inputs run at four
-different rates — camera detections at ~30 Hz, LiDAR clusters at ~2 Hz windows,
-pose at 20 Hz, attitude at 30 Hz — and fusing needs one of each. Driving the
-cycle off the camera would run fusion 15 times against the same LiDAR window,
-counting one cluster as fifteen sightings and making every LiDAR-only track
-look confirmed within a second. So the node ticks at a fixed rate and takes the
-newest of each input, and each sensor message is CONSUMED AT MOST ONCE: a
-message whose header stamp has not changed since the last tick contributes
-nothing. Dropping two camera frames in three is not a loss — a track needs
-sightings from different vantage points, and three frames 33 ms apart are the
-same vantage point.
+WHY A TIMER AND NOT A CALLBACK PER DETECTION. The inputs run at different rates
+(camera ~30 Hz, LiDAR clusters ~2 Hz, pose 20 Hz, attitude 30 Hz) and fusing needs
+one of each; driving the cycle off the camera would run fusion 15 times against the
+same LiDAR window and count one cluster as fifteen sightings. So the node ticks at a
+fixed rate on the newest of each input, and each sensor message is CONSUMED AT MOST
+ONCE (an unchanged header stamp contributes nothing).
 
 WHAT HAPPENS WHEN AN INPUT GOES STALE, and why the answers differ:
 
   pose or attitude stale  -> NO OBSERVATIONS ARE INGESTED. There is no honest
         place to put a detection when the boat's own position or orientation is
-        unknown, and guessing writes targets into the map at coordinates the
-        boat has already left. The existing tracks still age and still expire.
-        This is the frozen-pose failure StreamCache exists to prevent, and it
-        is the one case where doing nothing is the correct action.
-  detections stale        -> with use_lidar, the cycle runs on LiDAR alone:
-        anonymous tracks, which is what the LiDAR can honestly support. WITHOUT
-        it the camera is the only input, so the cycle ingests nothing and only
-        ages the tracks — and the log says so rather than claiming another
-        sensor is carrying it.
-  clusters stale          -> the cycle runs on the camera alone. Coarse stereo
-        ranges, which is what the camera can honestly support, and exactly the
-        case the package's never-drop invariant is written for. Without
-        use_lidar this is not an event at all and is not logged: an input that
-        is ignored by configuration cannot go stale in any sense that matters.
+        unknown; guessing writes targets at coordinates the boat has left.
+        Existing tracks still age and expire (the frozen-pose failure
+        StreamCache exists to prevent).
+  detections stale        -> with use_lidar, the cycle runs on LiDAR alone
+        (anonymous tracks). WITHOUT it the camera is the only input, so the cycle
+        only ages the tracks, and the log says so.
+  clusters stale          -> the cycle runs on the camera alone (coarse stereo
+        ranges: the case the package's never-drop invariant is written for).
+        Without use_lidar this is not an event and is not logged: an input
+        ignored by configuration cannot go stale.
 
 The array is published on EVERY tick regardless, empty or not — silence means
 this node is dead, not that the water is clear.
@@ -89,12 +71,10 @@ from crusader_common.stream_cache import StreamCache
 
 from crusader_world_model import target_tracker_core as core
 
-# [RO] = structural: topic names, the camera extrinsic and the freshness
-# budgets. The extrinsic is [RO] for the same reason the LiDAR's is — a
-# live-tunable mounting geometry silently invalidates every target already on
-# the map, and there is no way to tell afterwards which positions came from
-# which numbers. [DYN] = the fusion and tracking gates, which are exactly what
-# a bench session needs to sweep.
+# [RO] = structural: topic names, the camera extrinsic and the freshness budgets.
+# The extrinsic is [RO] because live-tunable mounting geometry silently
+# invalidates every target already on the map. [DYN] = the fusion and tracking
+# gates, which a bench session needs to sweep.
 PARAM_SPEC = {
     "detections_topic": dict(read_only=True, description="Detection3DArray in"),
     "clusters_topic": dict(read_only=True, description="Cluster3DArray in"),
@@ -122,10 +102,8 @@ PARAM_SPEC = {
                           description="mount tilt, + = aimed DOWN"),
     # --- fusion gates [DYN] ---
     # use_lidar leads the group because the five below it are inert while it is
-    # False. [DYN] rather than [RO] on purpose: unlike the extrinsic, flipping
-    # it does not invalidate the targets already on the map — the camera-derived
-    # ones stay exactly as true as they were, and the LiDAR simply starts or
-    # stops contributing range to new sightings.
+    # False. [DYN], unlike the extrinsic: flipping it does not invalidate targets
+    # already on the map.
     "use_lidar": dict(read_only=False,
                       description="fuse LiDAR clusters. False (default) = "
                                   "camera-only: clusters are counted and "
@@ -160,9 +138,9 @@ PARAM_SPEC = {
                        description="hard cap; runaway guard, not a normal path"),
     # --- colour voting [DYN] / label sets [RO] ---
     # The three label settings are [RO]: they define what the tracker thinks a
-    # RoboBuoy IS, and rclpy has no range check for a string list to refuse a
-    # typo with. The vote thresholds and the master switch are safe to sweep
-    # live — votes are kept complete, so the whole history re-resolves.
+    # RoboBuoy IS, and rclpy cannot range-check a string list. The vote thresholds
+    # and master switch are safe to sweep live: votes are kept complete, so the
+    # history re-resolves.
     "colour_vote_enable": dict(read_only=False,
                                description="True: family labels associate "
                                            "and the colour is voted. False: "
@@ -193,8 +171,8 @@ PARAM_SPEC = {
 }
 
 # Params that map straight onto a TrackerParams field of the same name. Listed
-# rather than inferred so that adding a node-level parameter which is NOT a
-# core parameter does not silently end up inside the core.
+# rather than inferred so a node-level parameter that is not a core parameter
+# cannot end up inside the core.
 _CORE_PARAMS = (
     "cam_x", "cam_y", "cam_z", "cam_yaw_deg", "cam_pitch_deg", "use_lidar",
     "fuse_bearing_deg", "fuse_range_m", "fuse_range_frac", "min_confidence",
@@ -208,10 +186,8 @@ _CORE_PARAMS = (
 def stamp_key(header):
     """A hashable identity for a message's header stamp.
 
-    Used to decide whether a cached sensor message has already been fed to the
-    tracker. The pair of integers is compared rather than a float conversion
-    because two stamps 20 ns apart are different messages and must not collapse
-    into one value at float precision.
+    Decides whether a cached sensor message was already fed to the tracker (an
+    integer pair, not a float: stamps 20 ns apart are different messages).
     """
     return (header.stamp.sec, header.stamp.nanosec)
 
@@ -234,23 +210,20 @@ class TargetTrackerNode(Node):
         self.add_on_set_parameters_callback(
             make_set_callback(self, ranges, self._apply))
 
-        # Every input gets a freshness budget; nothing here is ever read
-        # without one. See the module docstring for what each staleness does.
+        # Every input gets a freshness budget; nothing is read without one (the
+        # module docstring says what each staleness does).
         self._pose = StreamCache(p["pose_timeout_s"])
         self._att = StreamCache(p["attitude_timeout_s"])
         self._det = StreamCache(p["detection_timeout_s"])
         self._clu = StreamCache(p["cluster_timeout_s"])
 
-        # The world frame's anchor: the first valid fix after startup, held for
-        # the life of the process. Re-anchoring mid-run would move every track
-        # already on the map, so it is set once and never updated.
+        # The world frame's anchor: the first valid fix, held for the life of the
+        # process (re-anchoring would move every track already on the map).
         self._origin = None
-        # Last boat state built from a FRESH pose+attitude pair. Kept here
-        # rather than read back out of the StreamCaches because those
-        # deliberately refuse to hand out a stale value — reaching past that to
-        # `.value` is the exact habit the class was written to break. This is
-        # an explicit, named "last place we knew we were", used only to keep
-        # range/bearing from jumping to the origin during an outage.
+        # Last boat state built from a FRESH pose+attitude pair: an explicit "last
+        # place we knew we were", kept because the StreamCaches refuse to hand out
+        # stale values. Used only to stop range/bearing jumping to the origin
+        # during an outage.
         self._last_boat = None
         self._last_det_key = None
         self._last_clu_key = None
@@ -271,10 +244,9 @@ class TargetTrackerNode(Node):
 
         self.create_timer(1.0 / p["update_rate_hz"], self._tick)
         self.create_timer(p["health_period_s"], self._health)
-        # Which sensors are actually feeding it, in the first line of the log.
-        # "subscribed and discarded" rather than silence: someone reading this
-        # after wondering where the LiDAR went should not have to find the
-        # parameter to learn that it is being received and thrown away.
+        # Which sensors feed it, in the first line of the log: "subscribed and
+        # discarded", not silence, so nobody has to find the parameter to learn the
+        # LiDAR is received and thrown away.
         sources = (f"'{p['detections_topic']}' + '{p['clusters_topic']}'"
                    if p["use_lidar"] else
                    f"'{p['detections_topic']}' ONLY — use_lidar is FALSE, so "
@@ -287,11 +259,10 @@ class TargetTrackerNode(Node):
     def _apply(self, changes):
         """Apply a validated `ros2 param set` to the live core.
 
-        TrackerParams is a plain dataclass the core reads on every cycle, so
-        assigning the attribute IS applying the change — there is no cached
-        derivative to invalidate. health_period_s is the exception: it is a
-        node-level timer period, and rclpy timers cannot be repriced, so it is
-        stored and takes effect at the next restart rather than pretending.
+        TrackerParams is a plain dataclass the core reads every cycle, so
+        assigning the attribute IS applying the change. health_period_s is the
+        exception: rclpy timers cannot be repriced, so it takes effect at the next
+        restart rather than pretending.
         """
         for name, value in changes.items():
             if name in _CORE_PARAMS:
@@ -303,9 +274,9 @@ class TargetTrackerNode(Node):
     def _on_pose(self, msg: LatLonHead):
         """Cache position + heading, anchoring the world frame on the first fix.
 
-        A NaN heading is GPS yaw unresolved (LatLonHead.msg) — a position with
-        no orientation cannot place a bearing, so it is not a usable pose here
-        and is dropped rather than cached with a substituted heading.
+        A NaN heading is GPS yaw unresolved (LatLonHead.msg): a position with no
+        orientation cannot place a bearing, so the pose is dropped rather than
+        cached with a substituted heading.
         """
         if math.isnan(msg.heading):
             return
@@ -333,13 +304,10 @@ class TargetTrackerNode(Node):
     def _stale_consequence(self, name):
         """What a stale input costs, or None when it costs nothing.
 
-        The wording is the whole value of the line this feeds. "continuing on
-        the other sensor" is only true when there IS another sensor: with
-        use_lidar False the camera is the only one, so a stale detections topic
-        means the world model has stopped seeing entirely, and a stale clusters
-        topic means nothing at all. Reporting that second case as an error
-        teaches an operator to ignore the error, which is the expensive way to
-        lose the one that mattered.
+        The wording is the value of the line this feeds: "continuing on the other
+        sensor" is only true when there IS another. With use_lidar False a stale
+        clusters topic means nothing at all, and reporting it as an error teaches
+        operators to ignore errors.
         """
         if name in ("pose", "attitude"):
             return "NOT ingesting observations until it returns"
@@ -366,8 +334,8 @@ class TargetTrackerNode(Node):
         pose = self._pose.get(now)
         att = self._att.get(now)
         if pose is None or att is None:
-            # No boat state: nothing can be placed. Tracks still age out
-            # through an empty update, so a dead pose does not freeze the map.
+            # No boat state: nothing can be placed. Tracks still age out through
+            # an empty update.
             self._cycle_without_pose(now)
             return
 
@@ -381,22 +349,19 @@ class TargetTrackerNode(Node):
         self._ingested += len(cameras) + len(lidars)
 
         tracks = self.tracker.update(cameras, lidars, boat, now)
-        # The picture is current as of the NEWEST sensor stamp that fed it —
-        # not publish time, which would claim freshness the data does not have.
-        # With neither sensor contributing, the pose stamp is the honest answer:
-        # all this cycle did was age the tracks.
+        # The picture is current as of the NEWEST sensor stamp that fed it, not
+        # publish time, which would claim freshness the data lacks. With no sensor
+        # contributing, the pose stamp is the honest answer.
         self._last_stamp = self._newest(stamp_cam, stamp_lid, self._pose.stamp)
         self._publish(tracks)
 
     def _cycle_without_pose(self, now: float):
         """Age the tracks and publish, with no boat state to place anything.
 
-        Called when pose or attitude is stale. The tracker is stepped with an
-        empty observation set against the last known boat position so tracks
-        still expire on schedule; their world positions are untouched, because
-        a track's position is a property of the earth and not of whether the
-        boat currently knows where it is. range/bearing go stale with it, which
-        is why they are documented as snapshots.
+        Called when pose or attitude is stale. The tracker is stepped with an empty
+        observation set against the last known boat position so tracks still expire
+        on schedule; their world positions are untouched (they belong to the earth),
+        while range/bearing go stale as the snapshots they are documented to be.
         """
         boat = self._last_boat or core.BoatState(0.0, 0.0, 0.0, 0.0, 0.0)
         self.tracker.update([], [], boat, now)
@@ -405,9 +370,8 @@ class TargetTrackerNode(Node):
     def _take_detections(self, now):
         """Newest unconsumed Detection3DArray as core objects, or empty.
 
-        Returns ([], None) when the topic is stale OR when this exact message
-        was already fed to the tracker last tick — see the module docstring on
-        why one message must count as one sighting.
+        Returns ([], None) when the topic is stale OR this exact message was
+        already fed last tick (one message counts as one sighting).
         """
         msg = self._det.get(now)
         if msg is None:
@@ -445,11 +409,10 @@ class TargetTrackerNode(Node):
 
     def _publish(self, tracks):
         out = TrackedTargetArray()
-        # `_last_stamp` deliberately STOPS ADVANCING while no sensor data is
-        # being ingested, so a consumer watching header.stamp sees the picture
-        # stop being current — the freshness lie this repo keeps having to
-        # design out. The clock fallback only ever applies before the first
-        # sensor message has arrived, when there is no data to misdate.
+        # `_last_stamp` STOPS ADVANCING while no sensor data is ingested, so a
+        # consumer watching header.stamp sees the picture stop being current. The
+        # clock fallback applies only before the first sensor message, when there
+        # is no data to misdate.
         out.header.stamp = self._last_stamp or self.get_clock().now().to_msg()
         out.header.frame_id = "world"
         lat0, lon0 = self._origin if self._origin else (0.0, 0.0)
@@ -485,11 +448,9 @@ class TargetTrackerNode(Node):
     def _health(self):
         """Publish where the sightings went, and say the quiet failures aloud.
 
-        The two warnings below are the ones that look identical to a healthy
-        world model from outside: a node happily publishing an empty array
-        because it never receives anything, and a node fusing nothing because
-        the extrinsic is wrong. Both need to be visible in the log, not
-        inferred from a topic that is technically alive.
+        The two warnings below look identical to a healthy world model from
+        outside: an empty array published because nothing is received, and nothing
+        fused because the extrinsic is wrong. Both must be visible in the log.
         """
         now = time.monotonic()
         payload = dict(self.tracker.stats)
@@ -524,9 +485,9 @@ class TargetTrackerNode(Node):
         stats = self.tracker.stats
         if stats.get("lidar_ignored"):
             # INFO, not WARN: this is the configured state, and a warning that
-            # fires forever on a correct configuration is one nobody reads. It
-            # is said out loud at all because "the LiDAR is connected, healthy,
-            # and contributing nothing" is otherwise invisible from the outside.
+            # fires forever on a correct configuration is one nobody reads. Said at
+            # all because "the LiDAR is connected and contributing nothing" is
+            # otherwise invisible.
             self.get_logger().info(
                 f"use_lidar is FALSE: {stats['lidar_ignored']} LiDAR clusters "
                 "received and discarded in the last cycle. Every track on the "

@@ -1,24 +1,18 @@
 #!/bin/bash
 # Sync the Windows checkout into the WSL sim workspace, stripping CR.
 #
-# Runs INSIDE WSL. The WSL clone at ~/robotx_ws/src/rx26_asv is a separate
-# checkout whose git HEAD lags the Windows one (content has historically been
-# copied in as working-tree changes rather than fetched), so do NOT trust
-# `git log` there to tell you whether it is current. Compare content.
+# Runs INSIDE WSL. The WSL clone at ~/robotx_ws/src/rx26_asv is a separate checkout whose git HEAD
+# lags the Windows one (content is copied in as working-tree changes), so do NOT trust `git log`
+# there to say whether it is current. Compare content.
 #
-# WHY WHOLE-TREE. Syncing a list of files somebody remembered to write down kept
-# missing things -- crusader_params.yaml among them, which crashed target_tracker
-# with KeyError: 'use_lidar' and looked like a code bug. This walks everything.
+# WHY WHOLE-TREE. A hand-kept file list kept missing things (crusader_params.yaml, which crashed
+# target_tracker with KeyError: 'use_lidar' and looked like a code bug).
 #
-# THE EXTENSION LIST BELOW IS THE SAME TRAP ONE LEVEL DOWN, and *.txt is what
-# went missing next: tools/sitl/rig_processes.txt holds the kill list the sim
-# rig reads, it never reached WSL, and nodes_down.sh cheerfully reported
-# "0 stopped, none left" with every node still running. '*.txt' now covers
-# CMakeLists.txt too. Before adding a file type here, check it is not bulk --
-# this copies whatever it matches on every bring-up.
-#
-#   bash sync_to_wsl.sh          # report differences, change nothing
-#   bash sync_to_wsl.sh sync     # copy Windows -> WSL
+# THE EXTENSION LIST BELOW IS THE SAME TRAP ONE LEVEL DOWN: *.txt was missing, so
+# tools/sitl/rig_processes.txt (the sim rig's kill list) never reached WSL and nodes_down.sh
+# reported "0 stopped, none left" with every node still running. '*.txt' now covers CMakeLists.txt
+# too. Before adding a file type, check it is not bulk: this copies whatever it matches on every
+# bring-up.
 MODE="${1:-report}"
 SRC="${RX26_WIN_SRC:-/mnt/c/Users/chase/OneDrive/Documents/GitHub/RobotX_2026/Boat/rx26_asv}"
 DST="${RX26_WSL_SRC:-$HOME/robotx_ws/src/rx26_asv}"

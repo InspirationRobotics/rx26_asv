@@ -21,8 +21,8 @@
 # Pass: referee PASS and no obstacle touched.
 #
 # RXL_SAFE_PASSAGE carries at most 10 buoys (robotx dialect, array length 10): ENTRY, 2 gates,
-# EXIT and the 4 obstacles make exactly 10. With 11 the UAV stand-in cannot send the field and
-# the tree fails at once (found 2026-10-01).
+# EXIT and the 4 obstacles make exactly 10. With 11 the UAV stand-in cannot send the field
+# and the tree fails at once.
 
 name: task1_avoid
 origin: {lat: 1.28060, lon: 103.85570}   # = tools/sitl/start_sitl.sh SITL_HOME

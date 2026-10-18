@@ -1,34 +1,25 @@
 """node_registry — what the boat can run, and what the page may do about it.
 
-No ROS, no subprocess, no I/O: this is the catalogue and the rules, so both can
-be read in one place and exercised on a laptop. Starting things is
-process_manager's job; deciding what is startable is this file's.
+No ROS, no subprocess, no I/O: the catalogue and the rules, exercised on a
+laptop. Starting things is process_manager's job; deciding what is startable is
+this file's.
 
-THE PROTECTION RULE, which is the reason this file exists at all. The repo's
-second standing safety constraint says the RC e-stop is the only safety path
-and that WiFi is a convenience, never a safety mechanism. A web page with a
-"stop" button next to rc_watchdog inverts that: anyone who can reach the Jetson
-over WiFi could switch off the RC-loss force-disarm, from a laptop, silently.
-
-So the core stack is PROTECTED. The page shows whether it is up, and may start
-it if it is down, but nothing served over HTTP can take it down. Stopping those
-is a decision for someone at a terminal who has thought about it, which is
-exactly the friction that should exist. Note the asymmetry is deliberate:
-starting a safety node can only ever move the boat toward safe, so it needs no
-such guard.
+THE PROTECTION RULE. The RC e-stop is the only safety path and WiFi is a
+convenience, never a safety mechanism, so the core stack is PROTECTED: the page
+shows whether it is up and may start it, but nothing served over HTTP can take
+it down (a "stop" button next to rc_watchdog would let anyone on the WiFi switch
+off the RC-loss force-disarm). Starting a safety node can only move the boat
+toward safe, so it needs no such guard.
 
 THE EXCLUSION RULE. The OAK-D admits exactly one client, so oakd_publisher,
-buoy_detector and oak_detector cannot co-run — the second to start fails on a
-device already open, which surfaces as an obscure depthai error rather than
-"the camera is busy". Nodes that contend for one device share an `exclusive`
-tag, and the page offers to stop the incumbent instead of letting the operator
-discover the conflict from a traceback.
+buoy_detector and oak_detector cannot co-run (the second fails with an obscure
+depthai error). Nodes contending for one device share an `exclusive` tag, and
+the page offers to stop the incumbent.
 """
 from dataclasses import dataclass, field
 
-# Groups, in the order the page lists them. Ordering is not cosmetic: the stack
-# reads top-down the way it is brought up, so a group above another is one you
-# want running first.
+# Groups, in the order the page lists them: top-down, the way the stack is
+# brought up.
 GROUPS = (
     ("core", "Core", "Safety and telemetry. Protected: startable here, not stoppable."),
     ("perception", "Perception", "Sensors. The three OAK-D nodes contend for one camera."),
@@ -59,20 +50,17 @@ class NodeSpec:
     protected: bool = False        # startable here, never stoppable here
     exclusive: str = ""            # tag; two nodes sharing one cannot co-run
     port: int = 0                  # serves a browser view on this port, if any
-    # Path of the raw MJPEG stream on that port, for the RECORDER only. The
-    # page embeds `/` and never needs this, but a recorder pulling frames has
-    # to name the stream itself — and the two servers disagree. buoy_detector
-    # streams from ANY non-root path; mjpeg_server routes /stream/<view> and
-    # 404s on a name it does not have. lidar_view's views are plan/elev/both,
-    # so the obvious guess of /stream/view records nothing from it, silently.
+    # Path of the raw MJPEG stream on that port, for the RECORDER only (the page
+    # embeds `/`). The two servers disagree: buoy_detector streams from ANY
+    # non-root path, mjpeg_server routes /stream/<view>, and lidar_view's views
+    # are plan/elev/both.
     stream_path: str = ""
     # Views this producer offers, as (name, label). Empty means one unnamed
     # view, which is every viewer that is not the detector.
     views: tuple = ()
-    # What a RECORDING pulls, when that is not what the tab shows. The tab
-    # shows the annotated frame because that is what tells you the detector
-    # agreed with you; a recording wants the raw one, because a training set
-    # made of frames with boxes burned into them is a training set of boxes.
+    # What a RECORDING pulls, when that is not what the tab shows: the tab shows
+    # the annotated frame, a recording wants the raw one (a training set of
+    # frames with boxes burned in is a training set of boxes).
     record_stream_path: str = ""
     note: str = ""
 
@@ -107,12 +95,9 @@ REGISTRY = (
     NodeSpec("lidar_cluster_node", "lidar_cluster_node", "crusader_perception",
              "lidar_cluster_node", "perception",
              note="consumes the livox container's cloud"),
-    # In core.launch.py since "Put the proximity chain in core.launch.py", but
-    # it was never listed here — so the Nodes tab could not say whether the
-    # autopilot was being fed obstacles at all. The map's proximity layer draws
-    # what this node publishes, and a layer that is empty because the producer
-    # is down must be distinguishable from one that is empty because the water
-    # is clear.
+    # Listed so the Nodes tab can say whether the autopilot is being fed
+    # obstacles: the map's proximity layer is empty either because this producer
+    # is down or because the water is clear.
     NodeSpec("proximity_bridge", "proximity_bridge", "crusader_perception",
              "proximity_bridge", "perception",
              note="clusters -> OBSTACLE_DISTANCE for the autopilot (PRX1)"),
@@ -163,12 +148,8 @@ PROFILES = {
                    "proximity_bridge", "lidar_view")),
 }
 
-# All three serve the camera tab on ONE port (8080). buoy_detector and
-# oak_detector are alternative detectors that each own the device; oak_view
-# re-serves a topic without touching it. Any of them can fill the tab, and none
-# can start while another holds the socket — which is fine, because the two
-# detectors already cannot co-run for the device itself. Order matters: the
-# first one found running wins the tab.
+# All serve the camera tab on ONE port (8080), so none can start while another
+# holds the socket. The first one found running wins the tab.
 CAMERA_TAB_SOURCES = ("buoy_detector", "oak_detector", "dock_view", "oak_view")
 LIDAR_TAB_SOURCES = ("lidar_view",)
 
@@ -176,10 +157,9 @@ LIDAR_TAB_SOURCES = ("lidar_view",)
 def conflicts(name: str, running) -> list:
     """Names that must stop before `name` may start.
 
-    `running` is any iterable of currently-running node names. Returns the
-    subset that shares an `exclusive` tag with the requested node — the page
-    turns that into "stop buoy_detector and start oakd_publisher?" instead of
-    letting the operator meet a device-busy traceback.
+    `running` is any iterable of running node names. Returns those sharing an
+    `exclusive` tag with the requested node, so the page can offer "stop
+    buoy_detector and start oakd_publisher?".
     """
     spec = BY_NAME.get(name)
     if spec is None or not spec.exclusive:
@@ -193,9 +173,7 @@ def conflicts(name: str, running) -> list:
 def may_stop(name: str) -> tuple:
     """(allowed, reason). The single gate every stop request passes through.
 
-    Returning a reason rather than a bare False is what lets the page say why a
-    button is absent instead of just not having one — an unexplained missing
-    control reads as a bug and invites someone to go around it.
+    A reason, not a bare False, so the page can say why a button is absent.
     """
     spec = BY_NAME.get(name)
     if spec is None:
@@ -217,13 +195,11 @@ def tab_source(sources, running, serving=None):
     skip that distinction.
 
     THE DISTINCTION IS THE WHOLE POINT. buoy_detector appears in the process
-    table within a second of being started and then spends ten to thirty more
-    loading a TensorRT engine and opening the OAK-D before its stream server
-    binds. A tab that trusted "running" alone pointed an iframe at a port
-    nothing was listening on yet, got connection-refused, and — because the
-    page will not reload a stream it thinks is already correct — stayed on that
-    error page permanently, while opening the same URL by hand worked fine
-    because that load happened after the port came up.
+    table within a second but spends 10-30 s loading a TensorRT engine and
+    opening the OAK-D before its stream server binds. A tab that trusted
+    "running" alone pointed an iframe at a port nothing was listening on, got
+    connection-refused, and (the page does not reload a stream it thinks is
+    correct) stayed on that error page.
 
     Returns:
       (name, False)  a viewer is up and serving; show it.

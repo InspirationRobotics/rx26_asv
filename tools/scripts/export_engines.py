@@ -11,36 +11,31 @@ Runs INSIDE the asv container, where oak_detector loads them:
 Copy the two .pt files to the host's ~/robotx_ws/models/ first (that folder is
 /root/robotx_ws/models/ inside asv). Expect several minutes per engine.
 
-WHY ON THE JETSON. A .engine is built for one GPU and one TensorRT version. One
-built on the laptop, or in a different container, fails to load or loads wrong.
-Build it in the same container that will run it.
+WHY ON THE JETSON. A .engine is built for one GPU and one TensorRT version; one built on the
+laptop, or in a different container, fails to load or loads wrong.
 
 WHAT IT DOES, in order. It stops at the first thing that is wrong.
-  1. Prints the versions it can read (L4T, torch, CUDA, TensorRT, ultralytics,
-     onnx, protobuf).
-  2. Loads each .pt and checks its task and its class ORDER against
-     crusader_params.yaml's det_labels / cls_labels. oak_detector maps class index
-     to name by that list, so a different order paints every buoy the wrong
-     colour, and nothing downstream can tell.
-  3. Exports. The detector is a static batch of 1 at 640, matching
-     oak_detector's predict(imgsz=(640, 640)). The classifier is FP16 with a
-     DYNAMIC batch of up to 8 at cls_imgsz. With a static batch of 8, ultralytics
-     refuses a call with 1-7 crops, and the node's one-crop fallback would fail
-     the same way.
-  4. Smoke-tests each new engine: one blank frame for the detector, then 3 crops
-     and 1 crop for the classifier.
-  5. Installs them at det_engine / cls_engine from the YAML. An engine already
-     there is RENAMED to <name>.bak-<stamp>, never overwritten.
+  1. Prints the versions it can read (L4T, torch, CUDA, TensorRT, ultralytics, onnx, protobuf).
+  2. Loads each .pt and checks its task and its class ORDER against crusader_params.yaml's
+     det_labels / cls_labels. oak_detector maps class index to name by that list, so a different
+     order paints every buoy the wrong colour, and nothing downstream can tell.
+  3. Exports. The detector is a static batch of 1 at 640, matching oak_detector's
+     predict(imgsz=(640, 640)). The classifier is FP16 with a DYNAMIC batch of up to 8 at
+     cls_imgsz (with a static batch of 8, ultralytics refuses a call with 1-7 crops, and the
+     node's one-crop fallback would fail the same way).
+  4. Smoke-tests each new engine: one blank frame for the detector, then 3 crops and 1 crop for
+     the classifier.
+  5. Installs them at det_engine / cls_engine from the YAML. An engine already there is RENAMED to
+     <name>.bak-<stamp>, never overwritten.
 
-It never restarts anything. Restart oak_detector from the GCS Nodes tab, then
-read its "engines ready" log line.
+It never restarts anything. Restart oak_detector from the GCS Nodes tab, then read its "engines
+ready" log line.
 
-PROTOBUF. The asv image pins protobuf 5.29.x (Dockerfile, "Nothing here may move
-protobuf"). ultralytics pip-installs a missing export dependency (onnx,
-onnxslim) by itself, and that can move protobuf in a running container where no
-build guard is watching. So this script turns auto-install OFF. A missing
-package then fails loudly. It also compares protobuf before and after the
-export and says so if the version moved.
+PROTOBUF. The asv image pins protobuf 5.29.x (Dockerfile, "Nothing here may move protobuf"), and
+ultralytics pip-installs a missing export dependency (onnx, onnxslim) by itself, which can move
+protobuf in a running container with no build guard watching. So auto-install is turned OFF here (a
+missing package fails loudly), and protobuf is compared before and after the export, with a note if
+it moved.
 """
 import argparse
 import datetime

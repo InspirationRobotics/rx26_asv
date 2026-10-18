@@ -1,35 +1,28 @@
 """rxl_codec — the RXL wire format, with no ROS in it.
 
-Deliberately ROS-free, like proximity_core and safe_passage_core: the byte
-layer is the half of the link that can be got wrong silently, so it has to be
-exercisable on a laptop with nothing installed.
+ROS-free so the byte layer, which can be got wrong silently, is exercisable on
+a laptop with nothing installed.
 
     python3 -m crusader_link.rxl_codec --selftest
 
-WHAT THE BOAT SPEAKS. Three native messages:
+Native messages the boat speaks:
 
     RXL_SAFE_PASSAGE    42011  UAV -> USV   the whole passage, 0.2 Hz
     RXL_NEXT_BUOY_SET   42019  UAV -> USV   the next gate pair
     RXL_USV_REACHED_GATE 42018 USV -> UAV   the boat's checkpoint request
 
-...and Ekko's own format, which is what the real aircraft actually transmits:
-MAVLink TUNNEL frames (POSITIONS, LIGHTS, GNSS, TEST) packed by tunnel_link, a
-copy of Ekko's boat_link.py. `decode` hands every TUNNEL on to the node as it
-is; rxl_link_node acts on the ones from the aircraft's system id and ekko_map
-turns them into a plan, and it answers with a BOAT TUNNEL (send_tunnel below).
+Ekko's real format is MAVLink TUNNEL frames (POSITIONS, LIGHTS, GNSS, TEST)
+packed by tunnel_link, a copy of Ekko's boat_link.py. `decode` hands every
+TUNNEL on as it is; rxl_link_node acts on the aircraft's, ekko_map turns them
+into a plan, and the boat answers with a BOAT TUNNEL (send_tunnel).
 
-Everything else on the air is someone else's traffic and is ignored here --
-`decode` returns None for it and the boat acts on none of it. It is still
-DESCRIBED, by `describe` below, because the Radio tab has to show what is on the
-air whether or not this boat speaks it; the tab lists anything it cannot name by
-its number.
+Anything else on the air is someone else's traffic: `decode` returns None and
+the boat acts on none of it, but `describe` still names it for the Radio tab.
 
 DECODE THROUGH THE GENERATED DIALECT, NEVER struct.unpack. MAVLink orders
-fields on the wire by descending type width, not by declaration order, and
-pymavlink's `fieldtypes` and `array_lengths` are returned in DIFFERENT orders
-again. Both mistakes produce byte offsets that look plausible and decode to
-numbers that look like coordinates. The generated module is the only thing that
-knows the real layout.
+fields on the wire by descending type width, not declaration order, and
+pymavlink's `fieldtypes` and `array_lengths` come back in DIFFERENT orders
+again; both mistakes give plausible-looking wrong offsets.
 """
 import os
 import sys
@@ -37,14 +30,13 @@ import time
 
 from crusader_link import tunnel_link
 
-# The vendored dialect. Added to sys.path rather than imported as a submodule
-# because pymavlink's generated modules import each other by bare name.
+# The vendored dialect goes on sys.path, not imported as a submodule: pymavlink's
+# generated modules import each other by bare name.
 _DIALECT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dialect")
 if _DIALECT_DIR not in sys.path:
     sys.path.insert(0, _DIALECT_DIR)
 
-# Catalogue ids from Boat/RXL_byte_budget.py, kept so a reader can trace the
-# MAVLink id and the catalogue id back to one agreed number.
+# Catalogue ids from Boat/RXL_byte_budget.py.
 RXL_SAFE_PASSAGE = 0x11
 RXL_USV_REACHED_GATE = 0x18
 RXL_NEXT_BUOY_SET = 0x19
@@ -52,10 +44,8 @@ RXL_NEXT_BUOY_SET = 0x19
 NO_BUOY = 255          # "id not known" -- matches GatePair.NO_BUOY
 MAX_BUOYS = 10         # handbook 3.3.2
 
-# RXL_BEACON_STATE. Same numbering as RoboCommand's BeaconState, nav::Beacon
-# and crusader_msgs/PassageBuoy. Listed here so a reader of THIS file can check
-# it without opening the dialect, and asserted against the dialect in selftest()
-# so the two cannot drift apart quietly.
+# RXL_BEACON_STATE: same numbering as RoboCommand's BeaconState, nav::Beacon and
+# crusader_msgs/PassageBuoy; asserted against the dialect in selftest().
 BEACON_UNKNOWN = 0
 BEACON_OFF = 1
 BEACON_FLASHING_RED = 2
@@ -79,32 +69,27 @@ def connect(spec, source_system, source_component=191, baud=None):
     """A mavlink connection speaking the RobotX dialect.
 
     source_component 191 is MAV_COMP_ID_ONBOARD_COMPUTER: this traffic comes
-    from the companion, not the autopilot, and reusing the autopilot's id would
-    bury it inside the flight controller's own message list in an inspector.
+    from the companion, and the autopilot's id would bury it in the flight
+    controller's message list in an inspector.
 
-    TWO TRAPS, both load-bearing, both learned on the bench (Mesh/rxl.py):
+    Two load-bearing traps (Mesh/rxl.py):
 
-    1. NOT mavutil.set_dialect("robotx"). That resolves a dialect by name
-       inside the installed pymavlink package and, failing, tries to regenerate
-       it into site-packages/message_definitions -- which does not exist, so it
-       dies with a FileNotFoundError about a path nobody wrote. Swapping
-       conn.mav for the generated MAVLink object is the supported way to use an
-       out-of-tree dialect, and it covers both directions, because mavutil
-       parses received bytes with conn.mav too.
+    1. NOT mavutil.set_dialect("robotx"): it looks the dialect up inside the
+       installed pymavlink and tries to regenerate it into site-packages, which
+       dies with a FileNotFoundError. Swapping conn.mav for the generated
+       MAVLink object is the supported route and covers both directions.
 
-    2. AND THEN DEFEND THE SWAP. mavfile.recv_msg calls auto_mavlink_version()
-       on the first byte received and -- on seeing MAVLink 2's 0xFD magic --
-       rebuilds self.mav from mavutil's MODULE-LEVEL dialect. That silently
-       undoes step 1 the moment the first packet arrives, so sending works and
-       receiving decodes RXL_SAFE_PASSAGE as UNKNOWN_42011. Declaring 2.0 up
-       front makes that branch a no-op.
+    2. Defend the swap: mavfile.recv_msg calls auto_mavlink_version() on the
+       first byte and, on MAVLink 2's 0xFD magic, rebuilds self.mav from the
+       module-level dialect -- undoing step 1, so sending works but receiving
+       decodes RXL_SAFE_PASSAGE as UNKNOWN_42011. Declaring 2.0 up front makes
+       that branch a no-op.
     """
     from pymavlink import mavutil
     import robotx as rxlink
 
-    # baud matters only for a serial device (the FTDI cable to the RFD900);
-    # mavutil ignores it for a udp endpoint, but passing None would override its
-    # default with nothing, so it is only passed when set.
+    # baud matters only for a serial device (the RFD900 cable); passing None would
+    # override mavutil's default, so it is only passed when set.
     extra = {} if baud is None else {"baud": int(baud)}
     conn = mavutil.mavlink_connection(
         spec, source_system=source_system, source_component=source_component,
@@ -120,11 +105,8 @@ def connect(spec, source_system, source_component=191, baud=None):
 def decode(msg):
     """One received MAVLink message -> a plain dict, or None if not ours.
 
-    Returns dicts rather than ROS messages so this file stays ROS-free. The
-    node turns them into crusader_msgs; nothing here knows that ROS exists.
-
-    Values are validated at this edge, because a radio delivers corruption as
-    confidently as it delivers data:
+    Returns dicts, not ROS messages, to stay ROS-free. Values are validated at
+    this edge, because a radio delivers corruption as confidently as data:
       * buoy_count above MAX_BUOYS is clamped, never trusted to size a loop
       * a beacon value outside the enum becomes UNKNOWN rather than indexing
         off the end of anything
@@ -151,9 +133,7 @@ def decode(msg):
         }
 
     if t == "RXL_NEXT_BUOY_SET":
-        # buoy_id[0] is RED, [1] is GREEN. The order is the whole meaning of
-        # the message; naming them here is what stops a later reader treating
-        # it as an unordered pair.
+        # buoy_id[0] is RED, [1] is GREEN: the order is the whole meaning.
         return {
             "msg": "NEXT_BUOY_SET",
             "gate_seq": int(msg.gate_seq),
@@ -162,13 +142,12 @@ def decode(msg):
         }
 
     if t == "RXL_USV_REACHED_GATE":
-        # Our own transmission, heard back. Decoded for completeness so a log
-        # of the link reads symmetrically; the node ignores it.
+        # Our own transmission, heard back; the node ignores it.
         return {"msg": "USV_REACHED_GATE", "gate_seq": int(msg.gate_seq)}
 
     if t == "TUNNEL":
-        # NOT interpreted here: which system sent it decides whether it means
-        # anything (the node checks), and what it means is tunnel_link's.
+        # Not interpreted here: the node checks the sender, tunnel_link owns the
+        # meaning.
         return {
             "msg": "TUNNEL",
             "src": int(msg.get_srcSystem()),
@@ -182,14 +161,11 @@ def decode(msg):
 def send_usv_reached_gate(conn, gate_seq):
     """USV -> UAV: gate cleared, send the next pair. Returns the sent message.
 
-    The only MISSION message the boat transmits on this link. gate_seq is what
-    makes a retransmission distinguishable from the next request: without it, a
-    repeat on a lossy radio and a genuine advance look identical, and the boat
-    would drive the wrong gate with nothing in any log looking wrong.
+    The only MISSION message the boat transmits on this link. gate_seq tells a
+    retransmission on a lossy radio from a genuine advance; without it the boat
+    could drive the wrong gate with nothing in any log looking wrong.
 
-    Encode-then-send rather than the one-call _send form so the caller still has
-    the packed message, which is what the Radio tab records: a frame that was
-    put on the air with no record of its size is a frame you cannot budget for.
+    Encode-then-send so the caller keeps the packed message the Radio tab records.
     """
     m = conn.mav.rxl_usv_reached_gate_encode(
         int(time.time() * 1e3) & 0xFFFFFFFF, int(gate_seq) & 0xFF)
@@ -200,19 +176,14 @@ def send_usv_reached_gate(conn, gate_seq):
 def has_peer(conn):
     """Is there anywhere to send on this connection yet?
 
-    THREE CASES, and the third is the one that cost an evening on 2026-09-17,
-    the first time the link node owned a real radio:
+    Three cases:
 
-    * udpin -> pymavlink builds a mavudp with udp_server True, whose write()
-      fans out to `clients`, the set of addresses it has HEARD from.
-      `last_address` is never set on a server socket, so testing that alone
-      means the boat silently refuses to transmit for a whole mission.
+    * udpin -> a mavudp with udp_server True, whose write() fans out to
+      `clients`, the addresses it has HEARD from. `last_address` is never set on
+      a server socket, so testing only that silently blocks every transmission.
     * udpout -> `last_address` or a `destination_addr` fixed at construction.
-    * A SERIAL RADIO (mavserial) has NEITHER attribute. The earlier check fell
-      through to False and refused every transmission with "nothing has been
-      received on this link yet" -- on a cable where there is always somewhere
-      to send. A serial port IS the peer: the radio is on the other end of it
-      whether or not anything has come back yet.
+    * A serial radio (mavserial) has neither attribute, but the port IS the
+      peer: there is always somewhere to send.
     """
     from pymavlink import mavutil
     if getattr(conn, "udp_server", False):
@@ -226,10 +197,8 @@ def has_peer(conn):
 def send_tunnel(conn, target_system, payload_type, payload):
     """Send one TUNNEL, and return the sent message.
 
-    Here rather than in tunnel_link because tunnel_link is pure bytes and knows
-    nothing about MAVLink. The boat sends TUNNEL only for the Radio tab's test
-    frame today; if the team settles on the aircraft's format, this is the call
-    the mission side would use too.
+    Here rather than in tunnel_link, which is pure bytes with no MAVLink. Used
+    for the BOAT packet and the Radio tab's test frame.
     """
     m = conn.mav.tunnel_encode(int(target_system), 0, int(payload_type),
                                len(payload), tunnel_link.pad(payload))
@@ -240,8 +209,7 @@ def send_tunnel(conn, target_system, payload_type, payload):
 def describe(msg):
     """(name, payload_type, one line) for ANY frame on the mesh, for the tab.
 
-    NEVER RAISES, for the reason tunnel_link.describe does not: a frame that
-    cannot be decoded is exactly the frame worth seeing.
+    NEVER RAISES: a frame that cannot be decoded is exactly the one worth seeing.
     """
     t = msg.get_type()
     try:
@@ -282,9 +250,8 @@ def _heartbeat_type(msg):
 def selftest():
     """Round-trip every message through the real dialect, in memory.
 
-    Encodes with the generated dialect and decodes the resulting BYTES -- not
-    the object that was encoded -- so a field-order mistake has somewhere to
-    show up. Asserting on a struct you just built in memory proves nothing.
+    Decodes the encoded BYTES, not the object that was encoded, so a field-order
+    mistake has somewhere to show up.
     """
     import robotx as rxlink
 
@@ -295,7 +262,7 @@ def selftest():
         if not ok:
             fails.append(name)
 
-    # The enum this file states must equal the enum the dialect generated.
+    # This file's enum must equal the generated dialect's.
     chk("beacon enum matches the dialect",
         rxlink.RXL_BEACON_STATE_UNKNOWN == BEACON_UNKNOWN and
         rxlink.RXL_BEACON_STATE_OFF == BEACON_OFF and
@@ -307,14 +274,12 @@ def selftest():
     mav = rxlink.MAVLink(None, srcSystem=1, srcComponent=191)
 
     def roundtrip(m):
-        """Encode to bytes, parse the bytes back, return the parsed message."""
         raw = m.pack(mav)
         parsed = rxlink.MAVLink(None).decode(bytearray(raw))
         return parsed
 
-    # --- SAFE_PASSAGE, with a deliberately ASYMMETRIC field ------------------
-    # Symmetric test data is how a field-order bug passes: entry and exit differ
-    # in every digit, and the three buoys have distinct colours and positions.
+    # --- SAFE_PASSAGE: deliberately ASYMMETRIC data, since symmetric data lets a
+    # field-order bug pass (entry/exit differ in every digit; buoys all distinct).
     lat = [e7(1.2814), e7(1.2816), e7(1.2818)] + [0] * 7
     lon = [e7(103.8557), e7(103.8556), e7(103.8558)] + [0] * 7
     col = [BEACON_FLASHING_BLUE, BEACON_FLASHING_RED, BEACON_FLASHING_GREEN] + [0] * 7
@@ -335,13 +300,11 @@ def selftest():
         abs(d["buoys"][1]["lat"] - 1.2816) < 1e-7 and
         abs(d["buoys"][1]["lon"] - 103.8556) < 1e-7)
 
-    # An over-long count must be clamped, not used to size a loop.
     m = rxlink.MAVLink_rxl_safe_passage_message(
         1, 0, 0, 0, 0, 99, [0] * 10, [0] * 10, [0] * 10)
     d = decode(roundtrip(m))
     chk("a count above 10 is clamped", len(d["buoys"]) == MAX_BUOYS and d["truncated"])
 
-    # A beacon value outside the enum must not pass through.
     m = rxlink.MAVLink_rxl_safe_passage_message(
         1, 0, 0, 0, 0, 1, [0] * 10, [0] * 10, [200] + [0] * 9)
     d = decode(roundtrip(m))

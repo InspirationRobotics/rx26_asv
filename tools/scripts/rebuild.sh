@@ -15,27 +15,19 @@ if ! docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q t
 fi
 
 echo "== colcon build inside $CONTAINER =="
-# --packages-up-to crusader_bringup, not a bare build: the workspace may hold
-# other package sources (the robotx_2026 boat repo, the livox container's
-# sources) whose build state is not ours to change and whose build failure must
-# not block ours. crusader_bringup exec_depends on every package we ship, so
-# "up-to" is the whole stack — and it stays correct when a package is added,
-# which an explicit --packages-select list does not.
+# --packages-up-to crusader_bringup, not a bare build: the workspace may hold other package sources
+# (the robotx_2026 boat repo, the livox container's sources) whose build state is not ours to change
+# and whose failure must not block ours. crusader_bringup exec_depends on every package we ship, so
+# "up-to" is the whole stack and stays correct when a package is added (a --packages-select list
+# does not).
 #
-# ROS IS SOURCED EXPLICITLY, not left to `bash -lc`. A non-interactive login
-# shell reads /etc/profile and ~/.bash_profile; ROS setup conventionally lands
-# in ~/.bashrc, which such a shell never reads. scripts/start_livox.sh carries
-# the same comment because the same assumption cost a debugging session there
-# ("ros2: command not found" from a container where `docker exec -it ... bash`
-# then `ros2` works perfectly by hand).
-#
-# It bites differently here and worse. colcon is usually still on PATH, so the
-# build STARTS — and then ament_cmake's own cmake scripts invoke /usr/bin/python3
-# directly, that interpreter has no ROS site-packages on its path, and the
-# failure surfaces as:
+# ROS IS SOURCED EXPLICITLY, not left to `bash -lc`: a non-interactive login shell never reads
+# ~/.bashrc, where ROS setup conventionally lands (see scripts/start_livox.sh). It bites worse here:
+# colcon is usually still on PATH, so the build STARTS, then ament_cmake's scripts invoke
+# /usr/bin/python3 with no ROS site-packages and it fails as
 #     ModuleNotFoundError: No module named 'ament_package'
-# from a template script nobody has heard of, in a package that did not change.
-# It reads like a broken toolchain rather than an unsourced shell.
+# from a template script nobody has heard of, in a package that did not change: it reads like a
+# broken toolchain rather than an unsourced shell.
 SETUPS="${CRSD_SETUP:-/opt/ros/humble/setup.bash $WS/install/setup.bash}"
 SOURCE_CMD=""
 for s in $SETUPS; do

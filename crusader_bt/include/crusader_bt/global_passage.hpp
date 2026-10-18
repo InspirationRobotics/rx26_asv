@@ -1,52 +1,49 @@
 // global_passage.hpp — Task 1 planned end to end, over the whole known field, in one search.
 //
-// Header-only, stdlib + nav_math.hpp + path_math.hpp. No ROS, no Nav2, no BehaviorTree.CPP.
-// Same contract as path_math.hpp, and for the same reason: a sign error here MIRRORS THE
-// COURSE, and this is the part that compiles and runs on a laptop in a second:
+// Header-only, stdlib + nav_math.hpp + path_math.hpp; no ROS, no Nav2, no
+// BehaviorTree.CPP. Same contract as path_math.hpp: a sign error here MIRRORS
+// THE COURSE, and this compiles and runs on a laptop in a second:
 //
 //     g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -I include test/test_global_passage.cpp
 //
-// WHY THIS EXISTS. Above Core tier the aircraft hands the boat EVERY buoy, its colour and the
-// ENTRY and EXIT before the boat moves. The per-gate tree (task1_disruptive.xml) still drives
-// the field one gate at a time: an approach point, a straight crossing, side fences for the
-// planner, an orbit ring with fixed radius. In a field with 3-5 m between buoys those pieces
-// land on top of each other - the approach point sits beside a black buoy, a fence closes the
-// next gap, the 6 m orbit ring runs through the first gate - and no leg finds a path. Here the
-// whole passage is ONE problem: from the boat, round the ENTRY clockwise, through the field
-// with every red to starboard and every green to port, round the EXIT counter-clockwise.
+// WHY. Above Core tier the aircraft hands the boat EVERY buoy, its colour and the
+// ENTRY and EXIT before the boat moves. The per-gate tree (task1_disruptive.xml)
+// drives one gate at a time, and with 3-5 m between buoys its approach points,
+// fences and fixed 6 m orbit ring land on top of each other and no leg finds a
+// path. Here the whole passage is ONE problem: round the ENTRY clockwise, through
+// the field with every red to starboard and green to port, round the EXIT
+// counter-clockwise.
 //
-// THE ONE IDEA: A SIDE IS TOPOLOGY, NOT GEOMETRY. Every red buoy casts a RAY to starboard of the
-// entry -> exit axis, every green a ray to port. Close the transit with a ray running back
-// from where it starts and one running on from where it ends, both along the axis: the closed
-// curve splits the plane in two, and a red is on the boat's starboard hand exactly when the
-// curve crosses its ray an EVEN number of times (zero for the plain case of driving past it).
-// So the search is A* over (grid cell, parity of crossings per ray), and a goal is reached
-// only with every parity even. That is:
+// THE ONE IDEA: A SIDE IS TOPOLOGY, NOT GEOMETRY. Every red buoy casts a RAY to
+// starboard of the entry -> exit axis, every green a ray to port. Close the
+// transit with a ray running back from where it starts and one running on from
+// where it ends, both along the axis: the closed curve splits the plane in two,
+// and a red is on the boat's starboard hand exactly when the curve crosses its
+// ray an EVEN number of times. So the search is A* over (grid cell, parity of
+// crossings per ray), and a goal is reached only with every parity even:
 //
-//   * COMPLETE. If any path keeps every side and the clearance, it is found: a passage that
-//     winds back across a fence is just a path that crosses that ray twice.
-//   * OPTIMAL on the grid for length plus a clearance cost, which is what centres the boat in
-//     a 3 m gap instead of shaving the nearer buoy.
-//   * UNIFORM. Paired gates, single reds and greens, black buoys and LiDAR tracks are all the
-//     same thing to it: obstacles, some of which carry a parity bit. Nothing pairs buoys,
-//     nothing places gate points, nothing draws fences.
+//   * COMPLETE. If any path keeps every side and the clearance, it is found
+//     (winding back across a fence is just crossing that ray twice).
+//   * OPTIMAL on the grid for length plus a clearance cost, which centres the
+//     boat in a 3 m gap instead of shaving the nearer buoy.
+//   * UNIFORM. Gates, single reds and greens, black buoys and LiDAR tracks are
+//     all obstacles, some carrying a parity bit. Nothing pairs buoys, places gate
+//     points or draws fences.
 //
-// Rays are perpendicular to the axis, and a red or green buoy is held to its side only when it
-// lies (along the axis) between the far edge of the ENTRY orbit and the near edge of the EXIT
-// orbit: such a ray can never meet the two closing rays, so the transit's start and goal
-// parities are all zero. A red or green beside or behind an orbit is passed DURING the orbit,
-// has no sensible side, and is kept clear of as a plain obstacle (the plan says so in `notes`).
+// A red or green is held to its side only when it lies (along the axis) between
+// the far edge of the ENTRY orbit and the near edge of the EXIT orbit, so its ray
+// can never meet the two closing rays and the start and goal parities are zero.
+// One beside or behind an orbit is passed DURING the orbit, has no sensible side,
+// and is kept clear of as a plain obstacle (the plan says so in `notes`).
 //
-// THE ORBITS are circles round the buoy's own fused position, as large as nav_orbit_radius_m
-// allows and shrunk until every other hazard keeps orbit_clear_m of water; a red, green or
-// blue buoy is never inside one. The point where the ENTRY orbit is left and the EXIT orbit is
-// joined are chosen BY THE SEARCH (the transit starts from every point of the entry ring, each
-// charged the extra orbit it costs, and ends on any point of the exit ring), so the orbit and
-// the transit are one optimisation, not two guesses.
+// THE ORBITS are circles round the buoy's own fused position, as large as
+// nav_orbit_radius_m allows and shrunk until every other hazard keeps orbit_clear_m
+// of water; a red, green or blue buoy is never inside one. Where the ENTRY orbit is
+// left and the EXIT orbit joined are chosen BY THE SEARCH.
 //
-// NOTHING HERE DRIVES. plan() returns four legs (approach, entry orbit, transit, exit orbit) as
-// dense polylines, plus the checkpoints the Disruptive tree stops at. path_follower.hpp drives
-// a leg; src/global_leaves.cpp is the glue.
+// NOTHING HERE DRIVES. plan() returns four legs (approach, entry orbit, transit,
+// exit orbit) as dense polylines, plus the checkpoints the Disruptive tree stops
+// at. path_follower.hpp drives a leg; src/global_leaves.cpp is the glue.
 #ifndef CRUSADER_BT__GLOBAL_PASSAGE_HPP_
 #define CRUSADER_BT__GLOBAL_PASSAGE_HPP_
 
@@ -420,7 +417,6 @@ inline Found search(
     if (ga != goal_at.end()) {
       for (const auto & need : ga->second) {
         if (need.first != m) {continue;}
-        // walk back
         std::vector<Vec2> rev;
         rev.push_back(goals[static_cast<std::size_t>(need.second)].p);
         std::int64_t node = it.second;
@@ -549,12 +545,12 @@ inline double polylineClearance(
   return best;
 }
 
-/// String pulling that changes nothing that matters: a shortcut i -> j replaces the vertices
-/// between only if it crosses every ray the same number of times mod 2 as they did (so no
-/// red or green changes side; a black buoy may) and keeps, ALL ALONG, the clearance the
-/// replaced stretch had at the same place (within 0.1 m, capped at soft, never below
-/// `floor_m`). Locally, not just at the stretch's narrowest point: a shortcut allowed down to
-/// a gate's 1.2 m everywhere would shave every buoy it passed on the way to that gate.
+/// String pulling that changes nothing that matters: a shortcut i -> j replaces the
+/// vertices between only if it crosses every ray the same number of times mod 2 (so
+/// no red or green changes side; a black buoy may) and keeps, ALL ALONG, the
+/// clearance the replaced stretch had at the same place (within 0.1 m, capped at
+/// soft, never below `floor_m`). Locally, not just at the narrowest point, or a
+/// shortcut allowed down to a gate's 1.2 m would shave every buoy on the way.
 inline std::vector<Vec2> smooth(
   const std::vector<Vec2> & pts, const std::vector<Ray> & rays, const std::vector<Hazard> & hz,
   double soft_m, double floor_m)
@@ -775,11 +771,11 @@ inline const char * beaconWord(nav::Beacon b)
   return "UNKNOWN";
 }
 
-/// "" when `now` is the same field as `was` for planning purposes; otherwise the first thing
-/// that changed, for the log. A change is a buoy's colour, a buoy appearing or vanishing, or a
-/// buoy, the ENTRY or the EXIT moving further than move_m. Scatter below that is not one: the
-/// aircraft's re-reports of a field nobody touched differ by its own fix error every time, and
-/// re-planning on each of them re-shaped the orbits every 5 s (SITL, 2026-10-02).
+/// "" when `now` is the same field as `was` for planning purposes; otherwise the
+/// first thing that changed, for the log: a buoy's colour, a buoy appearing or
+/// vanishing, or a buoy, the ENTRY or the EXIT moving further than move_m (below
+/// that is the aircraft's own fix error, and re-planning on it would re-shape the
+/// orbits on every re-report).
 inline std::string fieldChange(const FieldSig & was, const FieldSig & now, double move_m)
 {
   const auto moved = [move_m](Vec2 a, Vec2 b) {
@@ -1005,7 +1001,6 @@ inline Plan planAt(const Request & rq, const Params & p, const Grid & grid, doub
   out.axis = axis;
   const double L = nav::norm(rq.exitp - rq.entry);
 
-  // Anchors and their rings.
   const auto ea = anchorOf(rq.buoys, rq.entry, nav::Beacon::FlashingBlue, p.anchor_snap_m);
   const auto xa = anchorOf(rq.buoys, rq.exitp, nav::Beacon::SteadyBlue, p.anchor_snap_m);
   out.entry_c = ea.first;
@@ -1062,7 +1057,6 @@ inline Plan planAt(const Request & rq, const Params & p, const Grid & grid, doub
         return "";
       }, &out.excluded, &out.notes);
 
-  // Transit sources.
   std::vector<Source> tsrc;
   int approach_goal = -1;
   std::vector<Vec2> approach;

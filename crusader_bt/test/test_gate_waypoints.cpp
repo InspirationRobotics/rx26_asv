@@ -2,11 +2,12 @@
 //
 //     g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -I include -o /tmp/t test/test_gate_waypoints.cpp && /tmp/t
 //
-// The gate crossing is driven STRAIGHT with only the gate's own pair exempt, so a gate point
-// put on top of another buoy, or a crossing line through one, holds the boat for good. The
-// field below is the one that did it in the sim on 2026-10-02 (a compact custom layout, ENTRY
-// south, EXIT north): gate (b1, b2)'s through point, 6 m past the middle, landed 1.4 m from
-// green b4 with b4 ON the crossing line, and gate (b8, b4)'s approach point landed 1 m from red b1.
+// The gate crossing is driven STRAIGHT with only the gate's own pair exempt, so a
+// gate point put on top of another buoy, or a crossing line through one, holds
+// the boat for good. The field below is a compact custom layout (ENTRY south,
+// EXIT north) that did it in the sim: gate (b1, b2)'s through point, 6 m past the
+// middle, landed 1.4 m from green b4 with b4 ON the crossing line, and gate
+// (b8, b4)'s approach point landed 1 m from red b1.
 #include <cmath>
 #include <cstdio>
 #include <string>

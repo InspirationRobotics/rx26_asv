@@ -26,11 +26,9 @@ def check_range(name, value, ranges):
     return None
 
 
-# How an enum's accepted values are written into ParameterDescriptor's
-# additional_constraints, and read back out by the dashboard. A prefix rather
-# than a bare list because additional_constraints is free text that anything
-# may write, and a reader has to be able to tell "these are the only values"
-# from a sentence of prose that happens to contain commas.
+# How an enum's accepted values are written into additional_constraints and read
+# back by the dashboard: a prefix, because that field is free text and a reader
+# must tell "the only values" from prose that happens to contain commas.
 CHOICES_PREFIX = "one of: "
 
 
@@ -49,14 +47,11 @@ def declare(node, name, default, *, read_only=False, lo=None, hi=None,
     (YAML/launch override wins over `default`).
 
     `choices` names the only acceptable values for a string parameter. It goes
-    into additional_constraints, which is the field ROS provides for exactly
-    this and which every parameter client already receives — so the dashboard
-    can offer a dropdown without a second channel carrying the same list, and
-    `ros2 param describe` prints it for someone working from a terminal.
+    into additional_constraints, which every parameter client receives, so the
+    dashboard can offer a dropdown and `ros2 param describe` prints it.
 
-    It is NOT enforced here. rcl has no enum constraint, so the node's own
-    on-set callback is the thing that refuses a bad value; advertising the list
-    is what stops most of them being typed in the first place.
+    It is NOT enforced here (rcl has no enum constraint): the node's own on-set
+    callback refuses a bad value; advertising the list stops most being typed.
     """
     from rcl_interfaces.msg import (FloatingPointRange, IntegerRange,
                                     ParameterDescriptor)
@@ -73,11 +68,10 @@ def declare(node, name, default, *, read_only=False, lo=None, hi=None,
     try:
         node.declare_parameter(name, default, d)
     except Exception as e:
-        # rcl reports "out of range Min: 1.0, Max: 3600.0, value: 0.0" and
-        # stops there. That is true and nearly useless: the VALUE came from the
-        # YAML and the RANGE came from this node's code, so the two disagreeing
-        # is not a bad parameter, it is two halves of the build that are not
-        # the same age. Same treatment config.py gives a missing params file.
+        # rcl reports "out of range Min: 1.0, Max: 3600.0, value: 0.0" and stops.
+        # The VALUE came from the YAML and the RANGE from this node's code, so the
+        # disagreement is two halves of the build not being the same age, not a
+        # bad parameter. Same treatment config.py gives a missing params file.
         raise ValueError(range_conflict_message(name, default, lo, hi, e)) from e
     return node.get_parameter(name).value
 
@@ -85,15 +79,13 @@ def declare(node, name, default, *, read_only=False, lo=None, hi=None,
 def range_conflict_message(name, value, lo, hi, error) -> str:
     """Explain a declaration failure in terms of what a person can act on.
 
-    Pure and importable without ROS so the wording can be checked off-boat —
-    the whole point is that this text is read exactly once, on a boat, by
-    someone who wants to know what to type next.
+    Pure and importable without ROS so the wording can be checked off-boat; it is
+    read once, on a boat, by someone who wants to know what to type next.
     """
     lines = [f"could not declare parameter {name!r} = {value!r}", f"  {error}"]
-    # Only a NUMERIC value that is genuinely outside the declared range points
-    # at a version skew. check_range also rejects wrong types, and a string
-    # where a float was expected is a different mistake that a rebuild will
-    # not fix — telling someone to rebuild for it wastes the trip.
+    # Only a NUMERIC value genuinely outside the declared range points at version
+    # skew; a string where a float was expected is a mistake a rebuild will not
+    # fix.
     numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
     if (lo is not None and hi is not None and numeric
             and check_range(name, value, {name: (lo, hi)})):

@@ -8,41 +8,30 @@
     crsd/radio/traffic   crusader_msgs/RadioFrame    every frame, either way
     crsd/radio/send_test std_srvs/Trigger (IN)  -> one text TUNNEL on the air
 
-TWO WAYS A PLAN ARRIVES, ONE PLAN OUT. The native RXL_SAFE_PASSAGE (the Fleet ICD
-design, what sim_uav and the bench transmit) and Ekko's own TUNNEL format (what
-the real aircraft transmits: POSITIONS + LIGHTS, decoded by ekko_map through
-tunnel_link). Both become the same PassagePlan on the same topic through
-_publish_plan, whichever arrived last wins, and the log says when the source
-changes. Against Ekko the boat also (a) sends its BOAT packet once a second --
-its position and the map it holds, which is the acknowledgement Ekko waits for --
-only while the pose is fresh, and (b) answers its OWN gate checkpoints while
-Ekko's LIGHTS are fresh, because Ekko never answers RXL_USV_REACHED_GATE.
+Two ways a plan arrives, one plan out: the native RXL_SAFE_PASSAGE (Fleet ICD;
+what sim_uav and the bench send) and Ekko's own TUNNEL format (POSITIONS +
+LIGHTS, decoded by ekko_map via tunnel_link). Both become the same PassagePlan
+through _publish_plan; the latest wins and the log says when the source changes.
+Against Ekko the boat also (a) sends its BOAT packet once a second, only while
+the pose is fresh -- the acknowledgement Ekko waits for -- and (b) answers its
+own gate checkpoints while Ekko's LIGHTS are fresh, since Ekko never answers
+RXL_USV_REACHED_GATE.
 
-THE RADIO RECORD IS A RECORD. /crsd/radio/traffic carries every frame this node
-sent or heard, published after the fact for the ground station's Radio tab.
-Nothing subscribes to it to make a decision, and nothing may: it exists so an
-operator can see the link, including frames in formats this boat does not speak.
-The test frame is the same idea pointed the other way -- one known thing on the
-air, which neither vehicle acts on, to prove the path end to end.
+/crsd/radio/traffic is a record for the ground station's Radio tab (every frame
+sent or heard, including formats this boat does not speak). Nothing may decide
+anything from it.
 
-THIS IS NOT A SECOND AUTOPILOT GATEWAY. It speaks MAVLink, but to the RADIO,
-never to the Pixhawk: a different endpoint, a different dialect, and a message
-set with no command in it. It cannot arm, set a mode, or move the boat, and it
-must never gain the ability -- crusader_fcu/telemetry_bridge stays the single
-path to the autopilot. The two never share a socket.
+NOT A SECOND AUTOPILOT GATEWAY. It speaks MAVLink to the RADIO, never to the
+Pixhawk, with a message set that has no command in it: it cannot arm, set a
+mode or move the boat, and must never gain the ability. crusader_fcu/
+telemetry_bridge stays the single path to the autopilot; the two never share a
+socket.
 
-WHAT IT DOES NOT DO. It does not act on anything it receives, and it does not
-interpret the passage. A plan arrives, it becomes a ROS message, and that is
-the end of this node's opinion. Deciding what to do about a gate is the
-behaviour tree's job; putting any of that here would put mission logic on the
-far side of a lossy radio from the thing that ticks it.
+It does not interpret the passage; gate decisions are the behaviour tree's job.
 
-SILENCE IS THE FAILURE MODE, ON PURPOSE. When the link dies this node publishes
-NOTHING -- it never repeats the last plan to keep a topic alive. Downstream ages
-what it last heard and stops the boat; a republished stale plan would defeat
-that completely, and the boat would keep driving a passage nobody can still
-confirm. Same rule as the StreamCaches in telemetry_bridge: a blank is a fact, a
-stale number wearing a fresh timestamp is a guess.
+SILENCE IS THE FAILURE MODE. When the link dies this node publishes NOTHING --
+it never repeats the last plan to keep a topic alive. Downstream ages what it
+last heard and stops the boat; a republished stale plan would defeat that.
 """
 import threading
 import time
@@ -62,22 +51,19 @@ from crusader_link import ekko_map
 from crusader_link import rxl_codec
 from crusader_link import tunnel_link
 
-#: Not in crusader_params.yaml on purpose: the Ekko link's tuning is code, so a
-#: params file written before it existed still starts this node.
+#: Ekko-link tuning is code, not YAML, so an older params file still starts this node.
 POSE_TOPIC = "/crsd/pose"
 BOAT_PERIOD_S = 1.0              # Ekko's own cadence for the packets it sends
 POSE_TIMEOUT_FALLBACK_S = 1.0    # = shared.pose_timeout_s, if the YAML is unreadable
 NO_PEER = ("nothing has been received on this link yet, so there is no address "
            "to send to")
 
-#: Where a plan came from, for the log line when it changes.
+#: Where a plan came from (logged when it changes).
 SRC_NATIVE = "native RXL_SAFE_PASSAGE"
 SRC_EKKO = "Ekko's TUNNEL format (POSITIONS + LIGHTS)"
 
-#: Fallbacks, used ONLY when crusader_params.yaml cannot be read at all (a
-#: workspace with crusader_link built but no crusader_bringup installed -- a
-#: bench, a test rig). The file is the source of truth everywhere else; these
-#: exist so the node still starts and says why, rather than dying on import.
+#: Used ONLY when crusader_params.yaml cannot be read (a bench with no
+#: crusader_bringup); the YAML is the source of truth everywhere else.
 FALLBACKS = {
     "rxl_endpoint": "udpin:127.0.0.1:14555",
     "radio_traffic_topic": "crsd/radio/traffic",
@@ -96,17 +82,10 @@ class RxlLinkNode(Node):
     def __init__(self):
         super().__init__("rxl_link_node")
 
-        # DEFAULTS COME FROM crusader_params.yaml, not from this file. The
-        # endpoint and the boat's port map are explained there, at the value.
-        #
-        # The ground station starts a node with a plain `ros2 run`, with no
-        # --params-file (see process_manager.command_for), so a value that lives
-        # only in the YAML never reaches a node started from the page -- it
-        # silently runs on its code defaults instead. Every other node avoids
-        # that by reading the same file for its declaration defaults; this one
-        # did not, which is how it could be pointed at a UDP socket in the YAML
-        # and still come up on 14555 when the page started it. A launch file
-        # passing parameters= still wins over these, as it should.
+        # Defaults come from crusader_params.yaml: the ground station starts nodes
+        # with a plain `ros2 run` (no --params-file; process_manager.command_for),
+        # so a YAML-only value would never reach them. A launch file's
+        # parameters= still wins.
         defaults = self._defaults()
         for name, fallback in FALLBACKS.items():
             self.declare_parameter(name, defaults.get(name, fallback))
@@ -123,17 +102,15 @@ class RxlLinkNode(Node):
         self.create_service(Trigger, "crsd/radio/send_test", self._send_test_cb)
         self._test_n = 0
 
-        # Ekko's side: what it has said (ekko_map), and where the boat is. The
-        # pose is a StreamCache so a stale position cannot be read back as a
-        # fresh one; the BOAT packet is simply not sent without one.
+        # Ekko's side: what it has said (ekko_map) and where the boat is. The pose
+        # is a StreamCache so a stale position is never read back as fresh.
         self._ekko = ekko_map.EkkoMap()
         self._pose = StreamCache(self._pose_timeout())
         self.create_subscription(LatLonHead, POSE_TOPIC, self._on_pose, 10)
         self._seen = {}                  # what _changed has last been told, for the log
 
-        # pymavlink connections are NOT thread-safe and this one is used from
-        # two threads: the RX loop below, and the gate_reached callback on the
-        # executor thread. One lock around every use of it.
+        # pymavlink connections are not thread-safe; the RX loop and the
+        # gate_reached callback share this one, so every use takes the lock.
         self._conn_lock = threading.Lock()
         self._stop = threading.Event()
         self._plan_version = 0
@@ -156,7 +133,7 @@ class RxlLinkNode(Node):
 
     def _pose_timeout(self):
         """shared.pose_timeout_s: the age at which a /crsd/pose stops being usable
-        -- the same number telemetry_bridge uses, as that key's comment asks."""
+        (the same number telemetry_bridge uses)."""
         try:
             return float(crsd_config.shared_params()["pose_timeout_s"])
         except Exception:                                # noqa: BLE001
@@ -168,20 +145,16 @@ class RxlLinkNode(Node):
     def _changed(self, key, value):
         """Remember `value` under `key`. -> (what it was, whether it differs).
 
-        For lines that must be logged when something CHANGES -- the plan's
-        source, Ekko's map number, the BOAT packet starting or stopping -- and
-        never once a second while it stays the same.
+        For log lines that fire on a change, not every second.
         """
         was = self._seen.get(key)
         self._seen[key] = value
         return was, was != value
 
     def _defaults(self):
-        """crusader_params.yaml's values for this node, or {} with a loud say-so.
+        """crusader_params.yaml's values for this node, or {} with a loud warning.
 
-        Not fatal: a bench workspace legitimately has no crusader_bringup, and a
-        link node that refuses to start there would take the bench with it. What
-        is NOT acceptable is running on unexplained defaults silently.
+        Not fatal (a bench has no crusader_bringup), but never silent.
         """
         try:
             return dict(crsd_config.node_params("rxl_link_node"))
@@ -197,10 +170,8 @@ class RxlLinkNode(Node):
     def _rx_loop(self):
         """Read the radio forever. One wire frame in, at most one ROS message out.
 
-        Published straight from this thread rather than cached for a timer: a
-        plan is an EVENT at 0.2 Hz, not a stream to resample, and a timer that
-        republished the last one would be exactly the stale-republish this node
-        exists to avoid. rclpy publishers are safe to call from here.
+        Published from this thread, not from a timer: a plan is an event, and a
+        timer would republish stale plans. rclpy publishers are safe to call here.
         """
         while not self._stop.is_set() and rclpy.ok():
             try:
@@ -212,8 +183,8 @@ class RxlLinkNode(Node):
                 self._record(RadioFrame.DIR_RX, msg)
                 decoded = rxl_codec.decode(msg)
             except Exception as exc:                     # noqa: BLE001
-                # A radio delivers corruption as confidently as data. One bad
-                # frame must not take the link down with it.
+                # A radio delivers corruption as confidently as data; one bad
+                # frame must not take the link down.
                 self.get_logger().warn("dropped a frame: %s" % exc)
                 continue
 
@@ -237,11 +208,10 @@ class RxlLinkNode(Node):
     def _on_ekko(self, d):
         """One TUNNEL from Ekko. Every LIGHTS frame (1 Hz) re-publishes the plan.
 
-        Re-published on LIGHTS and not on POSITIONS because LIGHTS is the
-        whole-map heartbeat Ekko sends every second, which is exactly what the
-        tree's 15 s PassagePlanFresh guard wants; the plan VERSION still moves
-        only when the content does (_publish_plan). A map with no usable buoy
-        publishes nothing -- see ekko_map.
+        LIGHTS is Ekko's 1 Hz whole-map heartbeat, which the tree's 15 s
+        PassagePlanFresh guard wants; the plan VERSION still moves only when the
+        content does (_publish_plan). A map with no usable buoy publishes
+        nothing -- see ekko_map.
         """
         kind = self._ekko.hear(d["payload_type"], d["payload"], time.monotonic())
         if kind != "lights":
@@ -264,21 +234,15 @@ class RxlLinkNode(Node):
 
     def _publish_plan(self, d, source):
         m = PassagePlan()
-        # RECEIPT time, not the aircraft's clock: the two vehicles share no
-        # time base, so a UAV stamp cannot be aged against the boat's clock.
+        # RECEIPT time: the vehicles share no time base, so a UAV stamp cannot be
+        # aged against the boat's clock.
         m.header.stamp = self.get_clock().now().to_msg()
         m.entry_latitude, m.entry_longitude = d["entry"]
         m.exit_latitude, m.exit_longitude = d["exit"]
 
-        # The version is counted HERE, because RXL_SAFE_PASSAGE carries no
-        # version field of its own -- but it counts CHANGES, not arrivals.
-        #
-        # The aircraft retransmits the whole passage on a timer (0.2 Hz) so a
-        # boat that missed one still gets it. Bumping on arrival made every one
-        # of those look like a re-tasking: PlanChanged fired every 5 s, halted
-        # the leg, and the boat re-requested a gate it already had. Seen in
-        # SITL on 2026-09-13 as "gate 3 asked again" on a run where nothing
-        # about the passage had changed.
+        # The version is counted here (RXL_SAFE_PASSAGE has no version field) and
+        # counts CHANGES, not arrivals: the aircraft retransmits the whole passage
+        # at 0.2 Hz, and bumping on each would fire PlanChanged every 5 s.
         sig = self._signature(d)
         changed = sig != self._last_sig
         if changed:
@@ -286,9 +250,8 @@ class RxlLinkNode(Node):
             self._plan_version += 1
         m.plan_version = self._plan_version
 
-        # Whichever source spoke last is the plan; say when that changes, so a
-        # second transmitter on the air is visible rather than a version that
-        # bumps for no reason anyone can see.
+        # The latest source wins; log when it changes so a second transmitter on
+        # the air is visible.
         was, new = self._changed("plan_source", source)
         if new:
             self.get_logger().info(
@@ -306,8 +269,7 @@ class RxlLinkNode(Node):
             self.get_logger().warn(
                 "a plan claimed more than %d buoys; took the first %d"
                 % (rxl_codec.MAX_BUOYS, rxl_codec.MAX_BUOYS))
-        # Only on CHANGE. The same line every 5 s reads as a stream of new
-        # plans; the retransmissions are the link working, not news.
+        # Only on change: retransmissions are the link working, not news.
         if changed:
             self.get_logger().info(
                 "plan v%d: %d buoys, entry %.7f %.7f, exit %.7f %.7f"
@@ -318,9 +280,8 @@ class RxlLinkNode(Node):
     def _signature(d):
         """What makes two plans the SAME passage.
 
-        Positions are rounded to 1e-7 deg (~1 cm) before comparing: they arrive
-        as degE7 integers so an unchanged plan is bit-identical, and rounding
-        here only guards a future sender that recomputes them in floating point.
+        Positions are rounded to 1e-7 deg (~1 cm) before comparing; they arrive
+        as degE7 integers, so this only guards a sender that recomputes them.
         """
         def ll(t):
             return (round(t[0], 7), round(t[1], 7))
@@ -336,11 +297,8 @@ class RxlLinkNode(Node):
         m.green_id = d["green_id"]
         self.gate_pub.publish(m)
 
-        # 255/255 is the NORMAL ack now. It used to mean "passage complete",
-        # back when the aircraft assigned gates and the boat waited to be told
-        # it was finished; the boat pairs its own buoys and counts its own gates
-        # today, so these two fields carry nothing and are sent as NO_BUOY.
-        # A pair that IS filled in means an aircraft on older software.
+        # 255/255 (NO_BUOY) is the normal ack: the boat pairs its own buoys. A
+        # filled-in pair means an aircraft on older software.
         stale = (d["red_id"] != rxl_codec.NO_BUOY or
                  d["green_id"] != rxl_codec.NO_BUOY)
         if stale:
@@ -356,12 +314,8 @@ class RxlLinkNode(Node):
     def _have_peer(self):
         """Is there anywhere to send to yet? See rxl_codec.has_peer.
 
-        On a udpin socket, before anything has arrived, there is genuinely
-        nowhere to reply, and that is worth saying out loud rather than letting
-        pymavlink swallow the socket error -- at that point the boat has not
-        heard a plan either, so the tree should not have been transiting in the
-        first place. On a serial radio there is always somewhere to send, which
-        the old check here got wrong.
+        A udpin socket has no peer until a frame arrives (said out loud rather
+        than letting pymavlink swallow the error); a serial radio always has one.
         """
         return rxl_codec.has_peer(self.conn)
 
@@ -370,8 +324,7 @@ class RxlLinkNode(Node):
         and returns the sent message. -> None when sent, else why not: NO_PEER, or
         the exception's text. Never raises.
 
-        The one place the boat transmits, so the has-anyone-been-heard rule, the
-        connection lock and the Radio-tab record are never written three ways.
+        The one place the boat transmits: peer check, lock and Radio-tab record.
         """
         with self._conn_lock:
             if not self._have_peer():
@@ -395,14 +348,12 @@ class RxlLinkNode(Node):
         """Once a second, tell Ekko where the boat is and which map it holds.
 
         That packet is the acknowledgement Ekko re-sends positions until it
-        gets. Three things stop it, each a fact and not a guess:
-          * Ekko has not been heard yet -- nobody to tell, and the boat does not
-            talk first (the same rule as the test frame);
-          * no fresh pose -- a position is never back-filled from the last one
-            seen, the packet is just not sent;
+        gets. It is not sent when:
+          * Ekko has not been heard yet (the boat does not talk first);
+          * there is no fresh pose (never back-filled from the last one);
           * the link has no peer address yet (_send_tunnel).
-        Addressed to everyone (system 0), like Ekko's own packets: a frame to a
-        system id the aircraft's autopilot has never heard is not forwarded.
+        Addressed to system 0 like Ekko's own packets: a frame to a system id the
+        aircraft's autopilot has never heard is not forwarded.
         """
         pose = self._pose.get(time.monotonic())
         if not self._ekko.heard():
@@ -433,10 +384,9 @@ class RxlLinkNode(Node):
     def _on_gate_reached(self, msg: UInt8):
         """The boat cleared a gate. Tell the aircraft and ask for the next pair.
 
-        Ekko never answers RXL_USV_REACHED_GATE -- it has no such message -- so
-        while its LIGHTS are fresh the boat answers its own checkpoint, as if
-        NEXT_BUOY_SET(seq, 255, 255) had arrived. The native request is still
-        sent: an aircraft that does speak RXL answers it as before.
+        Ekko has no RXL_USV_REACHED_GATE reply, so while its LIGHTS are fresh the
+        boat answers its own checkpoint as if NEXT_BUOY_SET(seq, 255, 255) had
+        arrived. The native request is still sent for aircraft that speak RXL.
         """
         why = self._transmit(self._uav_sysid(), lambda conn:
                              rxl_codec.send_usv_reached_gate(conn, msg.data))
@@ -462,13 +412,11 @@ class RxlLinkNode(Node):
     def _record(self, direction, msg, dst=None):
         """Publish one RadioFrame for a frame that crossed the radio.
 
-        NEVER RAISES ON THE RX PATH. This is called from the receive loop, where
-        an exception would be reported as "dropped a frame" and blame the radio
-        for a bug in the record of it.
+        NEVER RAISES ON THE RX PATH: the receive loop would report it as "dropped
+        a frame" and blame the radio.
 
-        Our own frames are recorded as sent, not heard: on a mesh that echoes,
-        a transmission arriving back would otherwise show up twice and inflate
-        every count the tab draws.
+        Our own frames are recorded as sent, not heard, so a mesh echo does not
+        count twice.
         """
         try:
             src = msg.get_srcSystem()
@@ -494,11 +442,9 @@ class RxlLinkNode(Node):
     def _send_test_cb(self, request, response):
         """Put one text TUNNEL on the air, addressed to the aircraft.
 
-        For the Radio tab's button. Neither vehicle acts on it: the point is a
-        known frame an operator can watch arrive, on Ekko's Radio tab, in QGC's
-        MAVLink Inspector, or with tools/rfd-tests/check_mesh.py on a laptop
-        radio. It is refused rather than faked when there is nowhere to send --
-        see _have_peer.
+        For the Radio tab's button. Neither vehicle acts on it; it is a known
+        frame to watch arrive (Ekko's Radio tab, QGC's MAVLink Inspector,
+        tools/rfd-tests/check_mesh.py). Refused when there is nowhere to send.
         """
         target = self._uav_sysid()
         text = "test %d from crusader" % (self._test_n + 1)

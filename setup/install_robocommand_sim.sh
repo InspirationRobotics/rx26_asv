@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# ============================================================================
 # setup/install_robocommand_sim.sh — the SIMULATED RoboNation server
 #
 # Builds the third machine in the Gate G3 bench: a Linux box that pretends to
@@ -28,7 +27,6 @@
 #   bash setup/install_robocommand_sim.sh --iface enp3s0 --check   # verify only
 #
 # Idempotent: safe to re-run; it only writes what is missing or wrong.
-# ============================================================================
 set -euo pipefail
 
 SUBNET="192.168.65"
@@ -59,9 +57,7 @@ bad()  { printf '  FAIL  %s\n' "$*"; }
 
 [ "$(uname -s)" = "Linux" ] || { echo "Linux only." >&2; exit 1; }
 
-# ---------------------------------------------------------------------------
 # --list
-# ---------------------------------------------------------------------------
 default_iface="$(ip route show default 2>/dev/null | awk '{print $5; exit}')"
 
 if [ "$mode" = "list" ] || [ -z "$iface" ]; then
@@ -93,9 +89,7 @@ if [ "$iface" = "$default_iface" ]; then
     exit 1
 fi
 
-# ---------------------------------------------------------------------------
 # --check
-# ---------------------------------------------------------------------------
 if [ "$mode" = "check" ]; then
     rc=0
     say "address"
@@ -140,9 +134,7 @@ if [ "$mode" = "check" ]; then
     exit $rc
 fi
 
-# ---------------------------------------------------------------------------
 # install
-# ---------------------------------------------------------------------------
 say "plan"
 cat <<PLAN
   interface   $iface

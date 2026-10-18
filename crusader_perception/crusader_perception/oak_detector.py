@@ -1,7 +1,7 @@
 """oak_detector — buoys, their marking shape, their LED colour and light state.
 
 NOTE: unverified on the boat. Bench-run only, and deliberately NOT in
-core.launch.py — it contends for the one OAK-D with oakd_publisher and
+core.launch.py: it contends for the one OAK-D with oakd_publisher and
 buoy_detector, so which one runs is an operator choice.
 
   stage 1  det_engine     where the buoys are
@@ -13,58 +13,42 @@ buoy_detector, so which one runs is an operator choice.
 Publishes `oak/detections` (Detection3DArray, every frame) and
 `crsd/oak_detector_health` (JSON, per-track detail).
 
-Stage 2 has no model in it, which is what lets stage 1 be a SINGLE-CLASS buoy
-detector: at 15 m a marking spans a couple of feature-map cells and the detector
-head is guessing, while the full-resolution crop is 60-200 px and the outline is
-right there. Stage 3 runs before stage 4 on purpose — a crop that fails to cut
-must not cost a track its history.
+Stage 2 has no model, which lets stage 1 be a SINGLE-CLASS buoy detector: at 15 m
+a marking spans a couple of feature-map cells and the detector head is guessing,
+while the full-resolution crop is 60-200 px. Stage 3 runs before stage 4 on
+purpose: a crop that fails to cut must not cost a track its history.
 
-THE LABEL IS THE CONTRACT
--------------------------
+THE LABEL IS THE CONTRACT (mission logic branches on these words):
     flashing   flash_red_diamond
     solid      red_diamond
     off        off_diamond
     no colour  diamond
 
-Mission logic branches on these words, so they are the one thing here that other
-packages depend on.
+FLASHING IS THE MARKED CASE; steady is the plain object. Task 1's ENTRY buoy stays
+distinguishable from its EXIT buoy (`flash_blue_circle` against `blue_circle`), the
+one place the distinction decides where the boat goes. An undecided state publishes
+as solid; see FlashState.label for why that is a trade, and what not to do with a
+young track.
 
-FLASHING IS THE MARKED CASE and steady is the plain object, because steady is
-what a light does unless something is being signalled by it. Task 1's ENTRY buoy
-is still distinguishable from its EXIT buoy — `flash_blue_circle` against
-`blue_circle` — which is the one place the distinction decides where the boat
-goes.
+FLASHING IS NOT A CLASSIFIER CLASS: the off-phase of a flashing buoy is
+pixel-identical to an unlit one, so it is a property of a track over time, computed
+by FlashTracker (oak_detector_core).
 
-An undecided state publishes as solid; see FlashState.label for why that is a
-trade rather than an oversight, and what not to do with a young track.
-
-WHY FLASHING IS NOT A CLASSIFIER CLASS
---------------------------------------
-The off-phase of a flashing buoy is pixel-identical to an unlit one, so no
-single frame can tell them apart. It is a property of a track over time, and
-FlashTracker computes it from one — see oak_detector_core.
-
-TURNING THE TEMPORAL LAYERS OFF
--------------------------------
-To see what the classifier actually says, frame by frame, with nothing smoothing
-it:
+TURNING THE TEMPORAL LAYERS OFF, to see what the classifier says frame by frame:
 
     flash_enable: false     # stop FlashTracker owning the answer
     vote_decay:   0.0       # LabelVoter keeps only this frame
     vote_min:     0.0       # ...and publishes it however weak
 
-All three matter. flash_enable true bypasses the voter entirely, so leaving it
-on keeps the smoothing whatever the vote params say.
+All three matter: flash_enable true bypasses the voter entirely.
 
-WHERE IT RUNS
--------------
-`asv`, the only image with both depthai and ultralytics/TensorRT. Both imports
-are function-local, so colcon build and CI's import check still pass on a
+WHERE IT RUNS: `asv`, the only image with both depthai and ultralytics/TensorRT.
+Both imports are function-local, so colcon build and CI's import check pass on a
 machine with no SDK and no camera.
 
 Positions are REP-103 body axes in `camera_link` (x forward, y left, z up),
-converted from the camera's optical frame here so no consumer ever holds an
-optical convention.
+converted from the camera's optical frame here so no consumer holds an optical
+convention.
 """
 import json
 import threading
@@ -237,15 +221,10 @@ PARAM_SPEC = {
                                             "buoy without paying for depth at "
                                             "the same resolution"),
     # -- camera profile: exposure, white balance, image --
-    # GENERATED, not written out here. oak_controls owns the table of what
-    # exists, what it accepts and what it does; spelling the same sixteen
-    # entries out a second time in this file is how a range in the Tuning tab
-    # ends up disagreeing with the range the device enforces.
-    #
-    # Every one is [DYN], by definition: a camera setting you cannot change
-    # while looking at the picture is a setting nobody ever tunes, which is how
-    # the boat ended up metering the whole frame at dusk and sitting four stops
-    # under with its entire gain range unused.
+    # GENERATED from oak_controls, which owns the table of what exists and what it accepts;
+    # spelling it out again here is how a Tuning-tab range ends up disagreeing with the
+    # device's. Every one is [DYN]: a camera setting you cannot change while looking at the
+    # picture is one nobody tunes.
     **oak_controls.param_spec(),
     "poll_period_s": dict(read_only=True, lo=0.001, hi=1.0,
                           description="output-queue poll period [s]"),
@@ -343,11 +322,9 @@ class OakDetector(Node):
         self.device = None
         self.control = None          # set by _open_device; _apply tolerates None
         self.server = None
-        # TWO VIEWS of the same moment. The annotated one answers "did it see
-        # the buoy"; the raw one answers "was the PICTURE any good", which the
-        # annotated frame cannot, because the boxes are drawn over the evidence.
-        # The raw view is also what a RECORDING pulls: a training set made of
-        # frames with boxes burned into them is a training set of the boxes.
+        # TWO VIEWS of the same moment: the annotated one answers "did it see the buoy", the
+        # raw one "was the PICTURE any good" (the boxes cover the evidence) and is what a
+        # RECORDING pulls: frames with boxes burned in would train on the boxes.
         self.buffer = FrameBuffer()
         self.raw_buffer = FrameBuffer()
         self.views = {"annotated": (self.buffer, "Annotated"),
@@ -444,44 +421,31 @@ class OakDetector(Node):
     def _camera_profile(self, values=None):
         """The value of every camera control, as {name: value}.
 
-        One description, read by the pipeline build and by every later change.
-        Two copies is exactly how the runtime path ends up applying something
-        the pipeline was not built with — and that failure looks like a camera
-        whose behaviour depends on whether anybody touched a slider.
-
-        `values` defaults to the node's current parameters; _apply passes a
-        merged copy so a profile can be built and offered to the device before
-        anything is committed.
+        One description, read by the pipeline build and every later change, so the runtime
+        path never applies something the pipeline was not built with. `values` defaults to
+        the node's current parameters; _apply passes a merged copy so a profile can be built
+        and offered to the device before anything is committed.
         """
         values = self.p if values is None else values
         return {c.name: values[c.name] for c in oak_controls.ALL}
 
     def _log_camera(self, profile):
-        """Say what the camera was told, in ONE format.
-
-        Startup and every later change go through here so a session's /rosout
-        carries one consistent record of the profile over time — which is the
-        only way to answer "what was this footage shot at" after the fact.
-        """
+        """Say what the camera was told, in ONE format, at startup and on every change, so
+        /rosout carries one record of the profile over time ("what was this footage shot at")."""
         self.get_logger().info(f"camera: {oak_controls.summary(profile)}")
 
     # ---------------- dynamic params ----------------
     def _apply(self, changes):
         """Push changed camera settings to the running device.
 
-        The profile is built from a MERGED COPY of the parameters and committed
-        to self.p only once the device has taken it. That ordering matters
-        twice over: several controls are read together (the metering band is
-        two parameters, manual exposure is two more), so a change to one has to
-        be combined with the current value of its partner; and self.p is what
-        the Tuning tab reads back, so committing before the device accepts
-        would show a value that is in force nowhere.
+        The profile is built from a MERGED COPY of the parameters and committed to self.p only
+        once the device has taken it: several controls are read together (the metering band is
+        two parameters, manual exposure two more), and self.p is what the Tuning tab reads
+        back, so committing first would show a value that is in force nowhere.
 
-        EVERY setting is re-sent on any change, not just the one that moved. A
-        CameraControl carries only what was set on it and the device keeps the
-        rest, so re-sending costs one message either way and means the camera's
-        state is the whole of what the parameters say, rather than a history of
-        which sliders somebody happened to touch.
+        EVERY setting is re-sent on any change: a CameraControl carries only what was set on
+        it and the device keeps the rest, so this makes the camera's state the whole of what
+        the parameters say, not a history of which sliders were touched.
         """
         # Validated BEFORE self.p moves: a rejected value must leave the node
         # holding what it had, or a typo in a mode name would be reported as a
@@ -491,12 +455,9 @@ class OakDetector(Node):
         if error:
             raise ValueError(error)
 
-        # Built from a MERGED COPY, and committed only once the device has
-        # taken it. Mutating self.p first and rolling back on failure is the
-        # same thing with a window in it where the parameters describe a camera
-        # that refused the settings — and self.p is what the Tuning tab reads
-        # back, so that window is one where the page shows a value that is not
-        # in force anywhere.
+        # Built from a MERGED COPY and committed only once the device has taken it: mutating
+        # self.p first and rolling back leaves a window where the Tuning tab shows a value
+        # that is in force nowhere.
         profile = self._camera_profile(dict(self.p, **changes))
         if self.control is not None:
             control = self.dai.CameraControl()
@@ -515,23 +476,18 @@ class OakDetector(Node):
     def _drain(self):
         """Run the pipeline on up to MAX_GROUPS_PER_TICK frames.
 
-        Bounded on purpose: two engines are far slower than the camera, so an
-        unbounded drain would never return and would starve the executor — no
-        health log, no parameter services, no clean shutdown, while the node
-        still looked alive. Bounded, a backlog costs latency instead of control.
+        Bounded on purpose: two engines are far slower than the camera, so an unbounded drain
+        would starve the executor (no health log, parameter services or clean shutdown) while
+        the node still looked alive. Bounded, a backlog costs latency instead of control.
         """
         for _ in range(MAX_GROUPS_PER_TICK):
             try:
                 group = self.queue.tryGet()
             except RuntimeError as e:
-                # X_LINK_ERROR here means the USB link to the camera fell over,
-                # and the node dies with it. Almost always BANDWIDTH: what
-                # crosses XLink is rgb_isp_denominator's frame plus the depth
-                # frame, every frame, and the product of size and fps has a
-                # ceiling well below what USB3 nominally offers. Raised as a
-                # sentence naming the two knobs, because the bare depthai
-                # message names neither and the failure arrives minutes after
-                # the change that caused it.
+                # X_LINK_ERROR means the USB link fell over and the node dies with it. Almost
+                # always BANDWIDTH: rgb_isp_denominator's frame plus the depth frame cross XLink
+                # every frame, and size x fps has a ceiling well below USB3's nominal rate.
+                # Raised naming the two knobs, since the bare depthai message names neither.
                 raise RuntimeError(
                     f"{e} | "
                     f"  The camera link dropped. This node was streaming "
@@ -551,21 +507,16 @@ class OakDetector(Node):
             if rgb_message is None or depth_message is None:
                 continue
 
-            # What the camera actually DID, off the frame's own metadata.
-            # Without this every control on the Tuning tab is set blind: the
-            # whole reason "dark in strong light" took a probe to diagnose is
-            # that nobody could see the answer was 2214 us at ISO 100, with
-            # fifteen times the shutter and the entire gain range unused.
+            # What the camera actually DID, off the frame's own metadata: without it every
+            # control on the Tuning tab is set blind.
             self._read_exposure(rgb_message)
 
             rgb_frame = rgb_message.getCvFrame()
             depth_frame = depth_message.getFrame()
-            # The two are DELIBERATELY allowed to differ now: depth is
-            # emitted at the stereo scale and aligned into CAM_A's field of
-            # view, so the same scene maps between them by a plain ratio. What
-            # is still fatal is a frame that is not the size this node was
-            # BUILT for, because then the ratio is wrong and the result is a
-            # plausible range rather than an exception.
+            # The two may differ: depth is emitted at the stereo scale and aligned into CAM_A's
+            # field of view, so the scene maps between them by a plain ratio. What is fatal is
+            # a frame not the size this node was BUILT for: the ratio is then wrong and the
+            # result a plausible range rather than an exception.
             if rgb_frame.shape[1] != self.width:
                 self.get_logger().error(
                     f"RGB frame is {rgb_frame.shape[1]}px wide, expected "
@@ -603,12 +554,8 @@ class OakDetector(Node):
             confidences.append(float(box.conf[0]))
 
         # -------- stage 2: SHAPE, from the marking's outline --------
-        # Runs on the full-resolution crop, on the CPU, with no model. This is
-        # what allows det_engine to be a single-class "buoy" detector: at 15 m a
-        # marking is a couple of feature-map cells wide and the detector head is
-        # guessing, while the ISP crop of the same buoy is 60-200 px across and
-        # the outline is right there. Abstentions fall back to the detector's
-        # own class, so switching to 'detector' is always safe.
+        # Full-resolution crop, CPU, no model (see the module docstring). Abstentions fall
+        # back to the detector's own class, so switching to 'detector' is always safe.
         shape_calls = [None] * len(boxes)
         if self.shape_source == "geometry":
             start = time.monotonic()
@@ -627,12 +574,10 @@ class OakDetector(Node):
             self.shape_ms = (time.monotonic() - start) * 1000.0
 
         # -------- stage 3: association, BEFORE classification --------
-        # A crop that fails to cut still keeps its track alive and its history
-        # intact. Classifying first and associating only what classified would
-        # drop the track of any buoy that briefly got too small to crop, and it
-        # would come back as a new one with an empty flash window — which for a
-        # 6 s window means six seconds of `unknown` for a light we had already
-        # called.
+        # A crop that fails to cut keeps its track alive and its history intact. Classifying
+        # first would drop the track of a buoy that briefly got too small to crop, and it
+        # would return as a new one with an empty flash window (6 s of `unknown` for a light
+        # already called).
         track_ids = self.tracks.update(boxes)
         live = self.tracks.live_ids
         self.voter.prune(live)
@@ -705,15 +650,10 @@ class OakDetector(Node):
                 else:
                     colour, colour_conf = self.voter.update(track_id, probs)
 
-                # WRITTEN WHETHER OR NOT FLASH IS ON. It used to live inside the
-                # flash branch, so turning flash off to look at raw predictions
-                # also turned off the log that shows you the raw predictions —
-                # which is the one moment you actually want it.
-                #
-                # The full probability vector goes in, not just the argmax. A
-                # confident wrong answer and a coin-flip that landed wrong are
-                # different problems with different fixes, and the argmax alone
-                # cannot tell them apart.
+                # WRITTEN WHETHER OR NOT FLASH IS ON, so turning flash off to look at raw
+                # predictions does not turn off the log that shows them. The full probability
+                # vector goes in, not just the argmax: a confident wrong answer and a lost
+                # coin-flip are different problems with different fixes.
                 if self._debug is not None:
                     self._debug.write(json.dumps({
                         "t": round(now, 4), "id": int(track_id),
@@ -785,11 +725,9 @@ class OakDetector(Node):
     def _classify(self, crops):
         """Colour probabilities for a list of crops, one vector each.
 
-        A TensorRT engine is built for a fixed batch size. Passing five crops to
-        a batch-1 engine either raises or silently processes one, so the batched
-        path is tried once and the node falls back permanently on failure —
-        loudly, with the re-export command, because the per-crop loop is the slow
-        path and nobody should be on it without knowing.
+        A TensorRT engine has a fixed batch size; five crops into a batch-1 engine either
+        raise or silently process one. The batched path is tried once and the node falls back
+        permanently on failure, loudly with the re-export command (the per-crop loop is slow).
         """
         if not crops:
             return []
@@ -813,17 +751,13 @@ class OakDetector(Node):
         """((x, y, z) or None, sample) — position in camera_link metres, plus
         where depth was read so the viewer can show it.
 
-        Median over a small patch rather than the centre pixel: one pixel of
-        stereo noise on a buoy edge is metres of range error, and the median
-        rejects the background pixels that inevitably fall inside a box.
+        Median over a small patch, not the centre pixel: one pixel of stereo noise on a buoy
+        edge is metres of range error, and the median rejects background pixels in the box.
         """
         x1, y1, x2, y2 = box
-        # TWO COORDINATE SPACES, and the correctness of every range depends on
-        # not mixing them. The box, the sample the viewer draws over the RGB
-        # frame, and the bearing maths are all in RGB pixels, because that is
-        # the size the intrinsics were read at. ONLY the depth lookup moves
-        # into depth pixels. When the two scales are equal every ratio below is
-        # 1.0 and this is exactly the code that ran before.
+        # TWO COORDINATE SPACES; mixing them corrupts every range. The box, the viewer's
+        # sample and the bearing maths are in RGB pixels (the size the intrinsics were read
+        # at); ONLY the depth lookup moves into depth pixels. Equal scales make every ratio 1.0.
         x1 = max(0, min(self.width - 1, x1))
         x2 = max(0, min(self.width - 1, x2))
         y1 = max(0, min(self.height - 1, y1))
@@ -869,21 +803,13 @@ class OakDetector(Node):
     def _annotate(self, rgb_frame, drawn):
         """A copy of the frame with one box and one line of text per detection.
 
-        Copies rather than drawing in place: a viewer must never be able to
-        alter what the detector saw.
+        Copies rather than drawing in place: a viewer must never alter what the detector saw.
 
-        THE BOX COLOUR IS DERIVED FROM THE LABEL, not from a second lookup.
-        Those used to be two independent reads — the box took `state.colour`
-        while the text took `state.label()` — and they disagreed exactly when it
-        mattered: a track whose lit frames voted green but whose duty said OFF
-        drew a GREEN box next to the text `off_diamond`. Both were "right"; they
-        were answering different questions. One source now, so the picture
-        cannot contradict the words.
-
-        Everything else — modulation, which test decided, sample counts, the LED
-        crop, the depth patch — is on crsd/oak_detector_health and in the debug
-        jsonl. A stream is for "is it looking at the right thing"; numbers are
-        for reading, and they read better as text than as rectangles.
+        THE BOX COLOUR IS DERIVED FROM THE LABEL, not a second lookup: they once disagreed (a
+        track whose lit frames voted green but whose duty said OFF drew a GREEN box beside
+        `off_diamond`), so the picture cannot now contradict the words. Everything else
+        (modulation, deciding test, sample counts, LED crop, depth patch) is on
+        crsd/oak_detector_health and in the debug jsonl.
         """
         import cv2                          # already loaded; a dict lookup
 
@@ -938,10 +864,8 @@ class OakDetector(Node):
     def _xlink_mb_s(self):
         """Roughly what this configuration puts on the USB link, MB/s.
 
-        The colour frame crosses as NV12 (1.5 bytes per pixel, not 3 — the
-        BGR conversion happens on this side, in getCvFrame), and depth as
-        16-bit. Approximate on purpose: it exists to tell 30 MB/s from 120
-        MB/s in an error message, not to be a budget.
+        Colour crosses as NV12 (1.5 bytes per pixel; the BGR conversion happens here), depth
+        as 16-bit. Approximate on purpose: it tells 30 MB/s from 120 MB/s in an error message.
         """
         depth_w, depth_h = oak_pipeline.output_size(self.p["isp_denominator"])
         per_frame = self.width * self.height * 1.5 + depth_w * depth_h * 2
@@ -950,11 +874,9 @@ class OakDetector(Node):
     def _read_exposure(self, message):
         """Latch the frame's measured exposure, gain and colour temperature.
 
-        Wrapped because these are metadata a device or a depthai build may not
-        populate, and a missing readout must cost the readout, not the frame.
-        Left at the previous value rather than zeroed: this is a display, and a
-        zero would read as "the camera chose 0 us", which is a measurement, not
-        a gap.
+        Wrapped because a device or depthai build may not populate this metadata, and a
+        missing readout must cost the readout, not the frame. Left at the previous value
+        rather than zeroed: a zero would read as "the camera chose 0 us", a measurement.
         """
         try:
             self.exposure_us = message.getExposureTime().total_seconds() * 1e6
@@ -975,9 +897,8 @@ class OakDetector(Node):
     def _health(self):
         now = time.monotonic()
         delivered = self.frames - self.last_health_frames
-        # Logged as well as drawn: /rosout is what the Logs tab and every
-        # recording capture, so the exposure a session was shot at survives
-        # into the session rather than living only on a screen nobody kept.
+        # Logged as well as drawn: /rosout is what the Logs tab and every recording capture, so
+        # the session's exposure survives with it.
         self.get_logger().info(
             f"camera measured: exp {self.exposure_us:.0f}us ISO {self.iso} "
             f"wb {self.colour_k}K | set: {oak_controls.summary(self.p)}")
@@ -1023,13 +944,10 @@ class OakDetector(Node):
                 "— light states will mostly read `unknown`. See "
                 "tools/bench/bench_flash.py", throttle_duration_sec=30.0)
 
-        # The counters worth watching, and they fail differently:
-        #   no_depth    detector sees buoys, stereo cannot range them -> empty
-        #               arrays, which downstream looks exactly like seeing nothing
-        #   no_crop     boxes too small for an LED band -> shape published with
-        #               no colour, which reads as a classifier problem and is not
-        #   unresolved  no colour called; with flash on, usually a window that
-        #               has not filled yet rather than a bad classifier
+        # The counters worth watching, which fail differently:
+        #   no_depth    buoys seen but stereo cannot range them -> empty arrays (looks like no buoys)
+        #   no_crop     boxes too small for an LED band -> shape with no colour (looks like a classifier fault)
+        #   unresolved  no colour called; with flash on, usually a window not yet full
         states = {}
         for s in self.states.values():
             states[s.state] = states.get(s.state, 0) + 1
@@ -1045,15 +963,11 @@ class OakDetector(Node):
     def _close_device(self):
         """Let go of the camera, or give up loudly after DEVICE_CLOSE_TIMEOUT_S.
 
-        depthai tears down XLink over USB here, and a device that has been
-        streaming for hours can sit in an uninterruptible kernel wait doing it.
-        A node stuck there ignores SIGTERM, the ground station escalates to
-        SIGKILL after its 5 s grace, and even that cannot reap a process in D
-        state — which is why the whole ROS stack ends up being restarted.
-
-        So: daemon thread, deadline, exit anyway. Leaking the handle costs the
-        next start its camera; a node that will not die costs more, and the
-        warning says which one you have.
+        depthai tears down XLink over USB here, and a device that has streamed for hours can
+        sit in an uninterruptible kernel wait doing it; the node then ignores SIGTERM and even
+        the ground station's SIGKILL cannot reap it, so the whole ROS stack ends up restarted.
+        So: daemon thread, deadline, exit anyway. Leaking the handle costs the next start its
+        camera; a node that will not die costs more, and the warning says which you have.
         """
         device, self.device = self.device, None
         if device is None:

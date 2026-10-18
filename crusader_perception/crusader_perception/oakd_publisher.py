@@ -7,39 +7,28 @@ Publishes:
 Both are relative names, so `ros2 run ... --ros-args -r __ns:=/bow` (or the
 `rgb_topic`/`depth_topic` params) moves the whole pair without touching code.
 
-WHY THIS NODE EXISTS AT ALL
----------------------------
-`depthai_ros_driver` publishes RGB and depth too, but it does not guarantee that
-a given RGB frame and a given depth frame are the SAME instant: they arrive as
-independent streams and the consumer is left to match headers. Everything
-downstream of this node (buoy ranging) reads a depth pixel at an RGB bounding
-box, and a half-frame of yaw at 30fps is metres of error at 20m. So the pairing
-is done ON THE DEVICE — a dai.node.Sync with a hard threshold — and the two
-images leave here already matched. If a group is incomplete, nothing is
-published for that instant; a dropped frame is cheap, a mismatched pair is not.
+WHY THIS NODE EXISTS: `depthai_ros_driver` does not guarantee that a given RGB frame and depth
+frame are the SAME instant, and buoy ranging reads a depth pixel at an RGB bounding box (half a
+frame of yaw at 30fps is metres of error at 20 m). So the pairing is done ON THE DEVICE, by a
+dai.node.Sync with a hard threshold, and an incomplete group publishes nothing: a dropped frame
+is cheap, a mismatched pair is not.
 
-The pipeline (1200p, ISP 1/3 -> 640x400, depth aligned to CAM_A and output at
-the same size) is ported from the prequal-proven gate_navigator in
-InspirationRobotics/robotx_2026. Keeping the geometry identical means the RGB
-intrinsics apply to the depth image unchanged, which is the property that makes
-`depth[v, u]` legal for an (u, v) taken off an RGB detection box.
+The pipeline (1200p, ISP 1/3 -> 640x400, depth aligned to CAM_A and output at the same size) is
+ported from the prequal-proven gate_navigator in InspirationRobotics/robotx_2026. Identical
+geometry means the RGB intrinsics apply to the depth image, which makes `depth[v, u]` legal for
+a (u, v) taken off an RGB detection box.
 
-ONLY ONE OAK-D CLIENT
----------------------
-Runs in `asv`, which carries depthai for this package. The device admits exactly
-one client, so this node and `buoy_detector` CONTEND: whichever starts first gets
-the camera and the other fails to open it. That is why neither is in
-core.launch.py — which one runs is an operator choice per session, not a
-constant. Prefer `buoy_detector` unless you specifically want raw pixels; this
-node costs ~38 MB/s at 30fps to publish frames nothing but a human reads.
+ONLY ONE OAK-D CLIENT. Runs in `asv`, which carries depthai for this package. The device admits
+one client, so this node and `buoy_detector` CONTEND: whichever starts first gets the camera.
+That is why neither is in core.launch.py; which one runs is an operator choice per session.
+Prefer `buoy_detector` unless you want raw pixels; this node costs ~38 MB/s at 30fps to publish
+frames nothing but a human reads.
 
-`depthai` is imported inside `_open_device`, not at module scope, so `colcon
-build` and CI's import check still pass on a machine with no SDK and no camera.
-
-Parameters come from crusader_bringup's `crusader_params.yaml` like every other
-node here, so a value can never drift between a code default and the launched
-file (crusader_common/config.py resolves $CRUSADER_PARAMS -> installed share ->
-source tree).
+`depthai` is imported inside `_open_device`, so `colcon build` and CI's import check pass on a
+machine with no SDK and no camera. Parameters come from crusader_bringup's
+`crusader_params.yaml` like every other node here (crusader_common/config.py resolves
+$CRUSADER_PARAMS -> installed share -> source tree), so a value cannot drift between a code
+default and the launched file.
 
 Manual check:
   ros2 topic hz /oak/rgb
@@ -83,13 +72,8 @@ PARAM_SPEC = {
     "isp_denominator": dict(read_only=True, lo=1, hi=8,
                             description="ISP downscale 1/N of 1920x1200 "
                                         "(3 -> 640x400, the stereo-native size)"),
-    # sync_threshold_ms / subpixel / lr_check USED TO LIVE HERE. They were
-    # removed from oak_pipeline.build_rgbd and became constants inside it — see
-    # the "equal by construction, nothing to pin" note in crusader_params.yaml —
-    # but this node was not updated with it, so it kept declaring them and
-    # passing them on. They were never in the YAML either, so the node died at
-    # `p["subpixel"]` with a bare KeyError BEFORE reaching the call that would
-    # have raised TypeError for the stale signature. Fixed 2026-09-03.
+    # sync_threshold_ms / subpixel / lr_check are constants inside oak_pipeline.build_rgbd now
+    # (see the "equal by construction" note in crusader_params.yaml), not parameters.
     "poll_period_s": dict(read_only=True, lo=0.001, hi=1.0,
                           description="output-queue poll period [s]; must be well "
                                       "under 1/fps or frames queue up"),
@@ -143,16 +127,12 @@ class OakDPublisher(Node):
         failure rather than a node that sits there publishing nothing."""
         import depthai as dai                     # function-local: see docstring
 
-        # Same call as buoy_detector. ae_compensation is deliberately NOT passed,
-        # so this takes build_rgbd's default of 0 (off): this node hands out raw
-        # frames for viewing, and a deliberately darkened image is a poor view.
-        # NOTE the asymmetry, because it is a real open question and not an
-        # oversight here — oak_detector passes ae_compensation=-3 as a TRAINING
-        # CONTRACT (it decides what colour the LED records as), and
-        # tools/oak_record.py defaults to -3 too, while buoy_detector and this
-        # node both run at 0. Record training footage with oak_record.py, NOT by
-        # subscribing to this node's topics, or the exposure will not match the
-        # classifier's training set.
+        # Same call as buoy_detector. ae_compensation is deliberately NOT passed (build_rgbd's
+        # default 0, off): this node hands out raw frames for viewing. NOTE the asymmetry:
+        # oak_detector passes ae_compensation=-3 as a TRAINING CONTRACT (it decides what colour
+        # the LED records as) and tools/oak_record.py defaults to -3 too, while buoy_detector
+        # and this node run at 0. Record training footage with oak_record.py, NOT from this
+        # node's topics, or the exposure will not match the classifier's training set.
         pipeline, self.width, self.height = oak_pipeline.build_rgbd(
             isp_denominator=p["isp_denominator"], fps=p["fps"])
 
@@ -174,14 +154,10 @@ class OakDPublisher(Node):
     def _drain(self):
         """Publish up to MAX_GROUPS_PER_TICK complete groups.
 
-        The bound is not an optimization, it is the difference between a node
-        and a hang. Draining "everything waiting" looks right until publishing
-        is slower than the camera: the queue then never empties, this callback
-        never returns, and a single-threaded executor runs NOTHING else — no
-        health log, no parameter service, no clean Ctrl+C. The node still
-        publishes, so from outside it looks alive and merely slow, which is the
-        worst way to be broken. Bounded, a backlog costs latency instead of
-        control, and the health line reports the rate that reveals it.
+        The bound is the difference between a node and a hang: draining "everything waiting"
+        never returns once publishing is slower than the camera, and a single-threaded executor
+        then runs nothing else (no health log, parameter service or clean Ctrl+C) while the node
+        looks alive. Bounded, a backlog costs latency instead of control.
         """
         for _ in range(MAX_GROUPS_PER_TICK):
             group = self.queue.tryGet()
@@ -225,10 +201,9 @@ class OakDPublisher(Node):
     def _ros_stamp(self, message):
         """Device timestamp -> ROS time.
 
-        dai stamps frames on the host steady clock (dai.Clock.now()), which is
-        not the ROS clock. Stamping with "now" instead would fold the whole
-        USB/decode latency into the pose the consumer associates with the frame.
-        So measure that latency and subtract it from the current ROS time.
+        dai stamps frames on the host steady clock (dai.Clock.now()), not the ROS clock;
+        stamping with "now" would fold the USB/decode latency into the pose the consumer
+        associates with the frame. So measure that latency and subtract it from ROS time.
         """
         latency = self.dai.Clock.now() - message.getTimestamp()
         nanoseconds = max(int(latency.total_seconds() * 1e9), 0)

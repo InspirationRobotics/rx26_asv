@@ -54,14 +54,12 @@ def load(course):
 def enu_to_latlon(east_m, north_m, origin):
     """The TRUE lat/lon of a point in the sim world.
 
-    Deliberately NOT crusader_common.geo (M_PER_DEG = 111139). In the sim the
-    ground truth is whatever SITL's GPS reports, and SITL turns Gazebo metres
-    into lat/lon with ArduPilot's Location::offset — 1/LOCATION_SCALING_FACTOR
-    = 111318.845 m/deg. Placing buoys with geo's constant would put every one
-    0.16 % (~8 cm at 50 m) away from where the boat's GPS says the same water
-    is: an error the sim manufactured, not one the boat has. Whatever geo's
-    own constant costs the boat's mapping still shows up, as it would for
-    real."""
+    Deliberately NOT crusader_common.geo (M_PER_DEG = 111139): in the sim the ground truth is
+    whatever SITL's GPS reports, and SITL turns Gazebo metres into lat/lon with ArduPilot's
+    Location::offset (1/LOCATION_SCALING_FACTOR = 111318.845 m/deg). Geo's constant would put
+    every buoy 0.16 % (~8 cm at 50 m) from where the boat's GPS says the same water is, an error
+    the sim manufactured. Whatever geo's own constant costs the boat's mapping still shows up,
+    as it would for real."""
     lat0, lon0 = origin["lat"], origin["lon"]
     lat = lat0 + north_m / EARTH_M_PER_DEG
     lon = lon0 + east_m / (EARTH_M_PER_DEG * math.cos(math.radians(lat0)))

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# ============================================================================
 # setup/install_dev.sh — DEV MACHINE setup (Linux/macOS laptop, NOT the Jetson)
 #
 # There is very little to install: this repo's off-boat surface is the config
@@ -8,7 +7,6 @@
 #
 # Usage:   bash setup/install_dev.sh              # create .venv + install + verify
 #          bash setup/install_dev.sh --no-verify  # skip the verification run
-# ============================================================================
 set -euo pipefail
 cd "$(dirname "$0")/.."   # repo root
 

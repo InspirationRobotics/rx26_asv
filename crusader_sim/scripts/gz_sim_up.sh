@@ -104,13 +104,11 @@ export GZ_PARTITION=crusader_sim
 export GZ_SIM_SYSTEM_PLUGIN_PATH="$APGZ/build${GZ_SIM_SYSTEM_PLUGIN_PATH:+:$GZ_SIM_SYSTEM_PLUGIN_PATH}"
 export GZ_SIM_RESOURCE_PATH="$GEN/models${GZ_SIM_RESOURCE_PATH:+:$GZ_SIM_RESOURCE_PATH}"
 
-# RENDERING ON THE GPU. WSLg's Mesa defaults to llvmpipe on this machine —
-# `glxinfo -B` says "llvmpipe ... Accelerated: no" — so every camera, LiDAR
-# and GUI frame was rendered on the CPU, the sim fell to RTF ~0.2, SITL's
-# HEARTBEAT went stale in wall-clock terms and the tree (rightly) refused to
-# keep going. Naming the adapter selects the RTX through Mesa's d3d12 driver:
-# "D3D12 (NVIDIA GeForce RTX 5060 Ti)". GZ_GPU=cpu forces software rendering
-# back on — slow, but it works if a driver update ever breaks the GPU path.
+# RENDERING ON THE GPU. WSLg's Mesa defaults to llvmpipe here (`glxinfo -B`: "Accelerated: no"),
+# so every camera, LiDAR and GUI frame rendered on the CPU, the sim fell to RTF ~0.2 and SITL's
+# HEARTBEAT went stale. Naming the adapter selects the RTX through Mesa's d3d12 driver ("D3D12
+# (NVIDIA GeForce RTX 5060 Ti)"). GZ_GPU=cpu forces software rendering back on if a driver update
+# ever breaks the GPU path.
 GZ_GPU="${GZ_GPU:-NVIDIA}"
 if [ "$GZ_GPU" = cpu ]; then
   export LIBGL_ALWAYS_SOFTWARE=1
@@ -275,14 +273,14 @@ if [ "$FULL_BUILD" = 1 ] || ! docker exec "$CONTAINER" bash -c \
     "set -o pipefail; cd /root/robotx_ws && source /opt/ros/humble/setup.bash && flock /root/robotx_ws/.colcon.lock colcon build --base-paths src 2>&1 | tail -5" \
     | sed 's/^/  /' || die "colcon build failed: not starting the sim on a stale install"
 else
-  # every package a sim run exercises, every run: nodes run from install/, and a stale
-  # crusader_bt silently ignores nav_mode and runs legacy legs (the review of
-  # 2026-10-01). Unchanged packages cost seconds; a changed crusader_bt about 40 s.
-  # crusader_world_model/_bringup/_common are here since 2026-10-02: a stale target_tracker install crashed on the YAML's colour-vote
-  # keys ('no declared posture for params') and the sim ran with no camera tracks at all.
-  # Only the packages the checkout has: --packages-select refuses an unknown name.
-  # --base-paths src: colcon crawls /root/robotx_ws otherwise, and a second workspace under it (gcs_ws/src/rx26_asv, made
-  # 2026-10-02 for the ground-station work) is a "duplicate package names" failure; so are venvs/ and yolo_dev/ for the crawl itself.
+  # every package a sim run exercises, every run: nodes run from install/, and a stale crusader_bt
+  # silently ignores nav_mode and runs legacy legs. Unchanged packages cost seconds; a changed
+  # crusader_bt about 40 s. crusader_world_model/_bringup/_common are included because a stale
+  # target_tracker install crashed on the YAML's colour-vote keys ('no declared posture for params')
+  # and the sim ran with no camera tracks. Only the packages the checkout has: --packages-select
+  # refuses an unknown name. --base-paths src: colcon would crawl /root/robotx_ws otherwise, and a
+  # second workspace under it (gcs_ws/src/rx26_asv) is a "duplicate package names" failure, as are
+  # venvs/ and yolo_dev/ for the crawl itself.
   docker exec "$CONTAINER" bash -lc \
     "set -o pipefail; cd /root/robotx_ws && source install/setup.bash && P=''; for p in crusader_msgs crusader_common crusader_bringup crusader_world_model crusader_link crusader_bt crusader_perception crusader_sim crusader_nav crusader_nav_layers crusader_groundstation; do [ -d src/rx26_asv/\$p ] && P=\"\$P \$p\"; done; flock /root/robotx_ws/.colcon.lock colcon build --base-paths src --packages-select \$P 2>&1 | tail -2" \
     | sed 's/^/  /' || die "colcon build failed (a crusader_* package did not build): not starting the sim on the previous build"
@@ -293,11 +291,9 @@ docker exec -e TREE="${TREE:-}" -e NAV_MODE="${NAV_MODE:-}" -e SIM_DETECTOR="${S
   "bash /root/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_rig_up.sh $COURSE $UAV_ARG$RIG_ARGS" 2>&1 | sed 's/^/  /'
 
 if [ "$GUI" = 1 ]; then
-  # The GUI sometimes segfaults at startup inside NVIDIA's WSL driver
-  # (glXChooseFBConfig -> libnvwgf2umx.so, seen 2026-09-29) while the server
-  # renders on the same GPU without trouble, and a relaunch has come up every
-  # time. So check it and relaunch it; the third try renders the WINDOW on the
-  # CPU (the sensors stay on the GPU) rather than show nothing.
+  # The GUI sometimes segfaults at startup inside NVIDIA's WSL driver (glXChooseFBConfig ->
+  # libnvwgf2umx.so) while the server renders on the same GPU fine, and a relaunch has always come
+  # up. So check it and relaunch; the third try renders the WINDOW on the CPU (sensors stay on the GPU).
   for try in 1 2 3; do
     pgrep -f "gz sim -g" >/dev/null && break
     cp /tmp/gz_gui.log "/tmp/gz_gui.crash$try.log" 2>/dev/null

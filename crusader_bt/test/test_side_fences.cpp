@@ -289,9 +289,9 @@ static void scenario(const Field & f, const NavParams & P)
   for (const Vec2 & q : with) {nearest = std::min(nearest, minClearance(fenced, q));}
   chk("the route keeps >= 0.9 m from every hazard surface", nearest >= 0.9);
 
-  // The control: the same legs over the buoys alone, the way nav_mode on used to plan them. The
-  // lone buoy and the wrong-way pair are only obstacles then, and the shortest way past them is
-  // the wrong one for at least one -- that is what the fences are for.
+  // The control: the same legs over the buoys alone. The lone buoy and the
+  // wrong-way pair are then only obstacles, and the shortest way past them is the
+  // wrong one for at least one: that is what the fences are for.
   const std::vector<Vec2> bare = driveLegs(f, buoyHazards(f.buoys, P));
   int wrong = 0;
   for (const Buoy & b : f.buoys) {
@@ -307,7 +307,6 @@ int main()
 {
   const NavParams P;
 
-  // ----------------------------------------------------------- 1. geometry
   std::printf("1. sideFences geometry\n");
   {
     // northbound axis, so starboard is EAST: a gate has its red east of its green
@@ -391,7 +390,6 @@ int main()
       countFor(sideFences(nan, pa, f.entry, f.exitp, P), 4) == 0);
   }
 
-  // ------------------------------------------- 2a. the entry / exit orbits
   std::printf("2a. the orbit rings stay untouched\n");
   {
     // A red or green single placed every which way round the ENTRY, from 7.8 m (the nearest a
@@ -460,7 +458,6 @@ int main()
     chk("... and the ones that would have been inside are gone (fewer than 21)", countFor(fz, 2) < 21);
   }
 
-  // -------------------------------------------- 2c. a gate's crossing line
   std::printf("2c. a gate's own fences stay off its straight crossing line\n");
   {
     // The crossing is approach (8 m short of the middle) -> through (6 m past it), driven
@@ -507,7 +504,6 @@ int main()
       "3 m off the approach point", worst >= P.hard_m - P.local_check_tol_m);
   }
 
-  // --------------------------------------------- 3. the planned legs work
   std::printf("3. the planned legs pass every red and green on its handbook side\n");
   scenario(unpairedField(), P);
 

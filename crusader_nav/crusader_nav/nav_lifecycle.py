@@ -1,9 +1,9 @@
 """nav_lifecycle - brings Nav2 lifecycle nodes to ACTIVE and keeps them there.
 
-docs/nav2_avoidance_spec.md section 3.6 (note of 2026-10-01). It replaces
-nav2_lifecycle_manager, whose Humble 1.1.20 change_state call has no timeout and
-hung forever when Fast DDS dropped one reply (lifecycle_core.py has the whole
-story). Every decision is in lifecycle_core.py; this file only makes the calls.
+docs/nav2_avoidance_spec.md section 3.6. It replaces nav2_lifecycle_manager,
+whose Humble 1.1.20 change_state call has no timeout and hung forever when Fast
+DDS dropped one reply (lifecycle_core.py has the story). Every decision is in
+lifecycle_core.py; this file only makes the calls.
 
 Calls (per managed node, every `check_period_s`, one at a time):
   /<node>/get_state      lifecycle_msgs/GetState     what state is it in?
@@ -23,9 +23,9 @@ when nav.launch.py respawns it.
 
 NO BOND. Nav2's nodes create a bond to "the lifecycle manager" on activate
 (nav2_util::LifecycleNode::createBond). Humble 1.1.20 has no parameter to turn
-that off, and with no manager it never connects. Measured 2026-10-01: nothing
-follows the "Creating bond" line (no log, no deactivate) over 50 s of idle, past
-the bond's 10 s connect timeout, so it is left alone.
+that off, and with no manager it never connects: nothing follows the "Creating
+bond" line (no log, no deactivate) over 50 s of idle, past the bond's 10 s
+connect timeout, so it is left alone.
 Parameters are the `nav_lifecycle` section of nav2_params.yaml.
 """
 import time

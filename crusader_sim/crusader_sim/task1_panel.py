@@ -5,58 +5,31 @@ launch the sim, tell the boat what only the UAV can see, answer its checkpoints.
       python3 -u -m crusader_sim.task1_panel --port 8095 >/tmp/task1_panel.log 2>&1 &
     then, on Windows: http://localhost:8095
 
-Runs in: WSL2 Ubuntu-22.04, on the HOST — plain python3, no ROS, not in docker.
-It drives the sim from outside: gz_sim_up.sh / gz_sim_down.sh as children,
-task1_goal through `docker exec crsd-sim`, gz-transport for the boat's TRUE
-pose, and the RXL radio on udp 14555 to rxl_link_node.
+Runs in WSL2 Ubuntu-22.04 on the HOST (plain python3, no ROS, not in docker). It
+drives the sim from outside: gz_sim_up.sh / gz_sim_down.sh as children, task1_goal
+through `docker exec crsd-sim`, gz-transport for the boat's TRUE pose, and the RXL
+radio on udp 14555 to rxl_link_node.
 
-VERIFIED 2026-09-30, all in --dry-run: the whole RXL handshake against a fake
-boat speaking crusader_link/rxl_codec on udp 14655 (ACK, SEND CHANGES + ACK,
-SEND CHANGES alone at a gate, auto-ACK, re-ask counting, 5 s resends, rewind
-on a second START); the judge re-pairing on set_states and grading synthetic
-odometry; the sensor views on synthetic gz messages over a private
-GZ_PARTITION, lazy subscribe/unsubscribe included; the page in a browser.
-
-VERIFIED 2026-09-30 against the REAL sim (three runs, TASK1_PANEL.cmd):
-LAUNCH (--no-uav, side beacons dark, top beacons lit), ATTACH, STOP SIM, task1_goal through
-docker exec, and rxl_link_node + the tree on udp 14555 — ACK, SEND CHANGES +
-ACK at gate checkpoints (the boat replans: plan v2, v3, and circles the NEW
-exit), 5 s resends. Sensor views on a real render: RTF ~1.0 with all three
-on, same as off; the LiDAR view's port/starboard and fore/aft checked
-against true buoy positions.
-
-VERIFIED 2026-10-01, offline only (the panel started on a spare port against a
-scratch GZ_PARTITION/CRUSADER_SIM_GEN, a synthetic feed datagram; no sim): the
-EXIT checkpoint label (checkpoint_text), the default template, the page's JSON,
-and the page's own JS in a browser — Boat's map canvas, the costmap layer, the
-track colours and the track/fused pairing, driven by that synthetic feed.
-
-TODO — what is still unverified or missing:
-  * LIVE SIM CHECK of the 2026-10-01 additions: (1) the EXIT checkpoint banner
-    on a real run of task1_avoid (checkpoint 3 of 2 gates reads "EXIT gate -
-    confirm exit"); (2) the costmap layer against a real panel_feed costmap
-    export (cell/LiDAR density and speed, the square size res_m, whether
-    positions line up with the buoys); (3) track colours once the tracker
-    publishes red_buoy/green_buoy/flashing_blue_buoy/steady_blue_buoy/
-    unknown_buoy (with the side beacons off, unknown_buoy is the normal label),
-    and the "boat says ?, UAV says red" fill, whose track<->fused pairing is by
-    position (FUSE_MATCH_M in the page) because the report carries no track id;
-    (4) task1_avoid itself: that Nav2 routes round all four obstacles.
-  * saved layouts: save/load work; no delete.
+TODO -- unverified against a live sim: (1) the EXIT checkpoint banner on a real
+task1_avoid run ("EXIT gate - confirm exit"); (2) the costmap layer against a real
+panel_feed export (density, square size res_m, alignment with the buoys); (3) track
+colours once the tracker publishes red_buoy/green_buoy/flashing_blue_buoy/
+steady_blue_buoy/unknown_buoy, and the "boat says ?, UAV says red" fill, whose
+track<->fused pairing is by position (FUSE_MATCH_M in the page) because the report
+carries no track id; (4) that Nav2 routes round all four obstacles in task1_avoid.
+Saved layouts can be saved and loaded but not deleted.
 
 WHY A HUMAN UAV. In the Disruptive tier only the TOP beacon is lit (handbook
-3.3.2: one beacon at a time, the upward one for the UAV), so the boat's camera
-sees no colour and the colours reach the boat only in what the UAV reports
-(sim_uav.py:14-16). The world is generated with each buoy's top beacon showing
-its launched colour; a colour changed mid-run goes out on the radio and to the
-referee but the world's light stays as launched. sim_uav plays
-a UAV that reports the course file and acknowledges every checkpoint by itself;
-this panel puts a person in that seat, so a colour can change halfway through a
-run — the case the boat's replanning exists for, and one sim_uav can never
-produce. The sim is started with --no-uav so the two never share the radio.
+3.3.2), so the boat's camera sees no colour and colours reach the boat only through
+the UAV's reports (sim_uav.py:14-16). sim_uav plays a UAV that reports the course
+file and acknowledges every checkpoint itself; this panel puts a person in that
+seat, so a colour can change mid-run -- the case the boat's replanning exists for.
+The world is generated with each top beacon showing its launched colour; a change
+mid-run goes out on the radio and to the referee, but the world's light stays as
+launched. The sim is started with --no-uav so the two never share the radio.
 
-THE RADIO is tools/bench/uav_link.py, imported and never copied — its header
-says why the handshake must exist once. What each control does on the air:
+THE RADIO is tools/bench/uav_link.py, imported and never copied. What each control
+does on the air:
 
     sim up          UavLink(auto_confirm=False); send_plan(field)
     every 50 ms     poll()    USV_REACHED_GATE(seq) off the socket
@@ -71,78 +44,61 @@ says why the handshake must exist once. What each control does on the air:
     SEND + ACK      confirm(STAGED field)    field first, THEN the ack
     auto-ACK        confirm() as each new checkpoint is asked
 
-    seq 1 = "ENTRY orbit done", seq k+1 = "gate k cleared", and the ask after
-    the LAST gate is the EXIT checkpoint: with n gates in the SENT field (n =
+    seq 1 = "ENTRY orbit done", seq k+1 = "gate k cleared", and the ask after the
+    LAST gate is the EXIT checkpoint: with n gates in the SENT field (n =
     min(#red, #green)) seq n+1 is labelled "EXIT gate - confirm exit". The boat
-    waits for it like any other before it circles the EXIT, and circles whatever
-    the latest field calls EXIT, so a moved EXIT may still be sent at that ask.
-    (Verified in a sim log: 3 gates, checkpoint 4 asked and awaited.) Each ask
-    carries `what`: the plain sentence the page's banner shows.
+    waits for it like any other before circling the EXIT, and circles whatever the
+    latest field calls EXIT, so a moved EXIT may still be sent at that ask. Each
+    ask carries `what`: the sentence the page's banner shows.
 
-Every field is the WHOLE course and buoy id = list index, so positions are
-locked once the sim is up; only colours change mid-run. The panel is the
-ground truth of the course, so each changed field is also handed to the
-referee (Task1Judge.set_states) at the moment it goes on the air.
+Every field is the WHOLE course and buoy id = list index, so positions are locked
+once the sim is up; only colours change mid-run. Each changed field is also handed
+to the referee (Task1Judge.set_states) as it goes on the air.
 
-UAV POSITION ERROR, ALWAYS UNDER 1 M. A real UAV does not know where a buoy is to
-the centimetre: its GPS, its attitude and its pixel-to-ground projection put
-each buoy some distance from where the boat's depth camera maps it, and the
-boat's fusePassage pairs the two within assoc_radius_m (crusader_bt
-nav_math.hpp:457-500). The team's requirement is < 1 m, so the panel refuses
-anything else (UAV_MAX_M = 0.99): the first R = 6 m runs (2026-09-30) put the
-boat into a buoy both times — offsets over the 5 m association radius left
-gates mis-paired from tracks of the WRONG buoys — which is a test of a UAV the
-team does not have. Every buoy gets a FIXED random offset, uniform over a disc of
-radius R (default 0.8 m), drawn when the sim comes up (LAUNCH or ATTACH) from a
-seed, and every field the
-panel sends carries the buoy at true + offset — the entry_*/exit_* fields too,
-because they are just the ENTRY/EXIT buoys' reported positions. The course
-file the world is built from and the referee both keep the TRUE positions; the
-map shows the truth (solid) and what the UAV says (hollow, joined by a line).
-A fixed offset is the dominant real error (a systematic georegistration bias);
-the optional per-send jitter (sigma, metres per axis) adds a fresh draw to every
-transmission on top, and the TOTAL offset (fixed + jitter) is clamped to
-UAV_MAX_M, so no field ever carries a buoy 1 m or more from the truth. Jitter
-changes the field's CONTENT, and rxl_link_node
-versions the plan by content, so the boat replans (PlanChanged) on every
-change: with jitter > 0 the periodic 5 s resend is therefore a send_plan of a
-freshly jittered field, not uav_link's resend() — and the boat replans every 5 s.
-Re-roll = a new random seed; allowed whenever no run is going.
+UAV POSITION ERROR, ALWAYS UNDER 1 M (the team's requirement; UAV_MAX_M = 0.99; an
+R above the boat's 5 m assoc_radius_m mis-pairs gates, crusader_bt
+nav_math.hpp:457-500). Each buoy gets a FIXED random offset, uniform over a disc of
+radius R (default 0.8 m), drawn from a seed when the sim comes up (LAUNCH or
+ATTACH); every field sent carries the buoy at true + offset (entry_*/exit_* too).
+The course file and the referee keep the TRUE positions; the map shows the truth
+(solid) and what the UAV says (hollow, joined by a line). Optional per-send jitter
+(sigma, m per axis) adds a fresh draw to every transmission, the TOTAL offset
+clamped to UAV_MAX_M. Jitter changes the field's content and rxl_link_node
+versions the plan by content, so with jitter > 0 the 5 s resend is a send_plan of
+a freshly jittered field (not uav_link's resend()) and the boat replans every 5 s.
+Re-roll = a new seed; not while a run is going.
 
-THE BOAT'S OWN PICTURE (map layers, each toggled in the page, default on). The
-page has TWO canvases sharing one pan/zoom: the top one is the truth (solid) and
-what the UAV sent (hollow), with the referee's gate pairs and the boat's trail;
-the "Boat's map" below it draws only what the boat believes, plus the true buoys as
-faint dots to read it against. A checkbox overlays the boat's layers on the top map.
-The panel has no ROS, so panel_feed.py (a node in crsd-sim, started by gz_rig_up.sh)
-subscribes the boat's topics and sends compact JSON to udp 127.0.0.1:14556
-(--feed-port); a thread here (panel_feed.FeedReceiver) keeps the newest packet.
+THE BOAT'S OWN PICTURE (map layers, each toggled in the page, default on). The page
+has two canvases sharing one pan/zoom: the top one is the truth (solid), what the
+UAV sent (hollow), the referee's gate pairs and the boat's trail; the "Boat's map"
+below draws only what the boat believes, plus the true buoys as faint dots. A
+checkbox overlays the boat's layers on the top map. The panel has no ROS, so
+panel_feed.py (a node in crsd-sim, started by gz_rig_up.sh) subscribes the boat's
+topics and sends compact JSON to udp 127.0.0.1:14556 (--feed-port);
+panel_feed.FeedReceiver keeps the newest packet.
     planned path   /crsd/nav/leg_status: the leg bt_runner is driving, dashed by
-                   state like the ground station (green FOLLOWING, red BLOCKED,
-                   yellow PLANNING/DEGRADED, grey STRAIGHT), the carrot as a
-                   ring, the goal as a cross, and a NAV <state> badge
+                   state (green FOLLOWING, red BLOCKED, yellow PLANNING/DEGRADED,
+                   grey STRAIGHT), the carrot as a ring, the goal as a cross, and
+                   a NAV <state> badge
     boat's tracks  /crsd/world_targets: what target_tracker believes from the
-                   boat's camera — squares, "#id label", faded by time since
-                   seen. The OUTLINE is the boat's own colour vote from the label
-                   (red_buoy, green_buoy, flashing_blue_buoy, steady_blue_buoy;
-                   black_buoy for old data; unknown_buoy = not confidently seen,
-                   the normal case with the side beacons off: a grey outline
-                   with "?"). Where the fused passage gives that buoy a colour,
-                   the FILL is the UAV's colour, so "boat says ?, UAV says red"
-                   reads as a grey "?" outline filled red. Not the true buoys
-                   (solid) and not the UAV's report (hollow circles)
+                   camera: squares, "#id label", faded by time since seen. The
+                   OUTLINE is the boat's colour vote from the label (red_buoy,
+                   green_buoy, flashing_blue_buoy, steady_blue_buoy; black_buoy
+                   for old data; unknown_buoy = a grey outline with "?"). Where
+                   the fused passage gives that buoy a colour, the FILL is the
+                   UAV's colour ("boat says ?, UAV says red" = grey "?" outline
+                   filled red)
     fused passage  /crsd/safe_passage_report: the tree's association of the UAV
                    field to those tracks (the UAV's colour, at the tracker's
-                   position where a track matched, else the UAV's) — small
+                   position where a track matched, else the UAV's) -- small
                    diamonds. Published only while a run is going
     costmap        the Nav2 local costmap, as panel_feed's "costmap" layer
-                   {res_m, cells, lidar, stamp}; each position in the layer's
-                   [x, y] course metres like a path point (a {x, y} object is
-                   read too). cells = lethal/inscribed obstacles, translucent
-                   squares of side res_m; lidar = the STVL LiDAR voxels, in a
-                   second colour. Drawn UNDER the tracks and the path. A
-                   panel_feed that predates the layer sends no key: the layer
-                   draws nothing and says so
+                   {res_m, cells, lidar, stamp}; positions are [x, y] course
+                   metres ({x, y} is read too). cells = lethal/inscribed
+                   obstacles, translucent squares of side res_m; lidar = the STVL
+                   LiDAR voxels, in a second colour. Drawn UNDER the tracks and
+                   path. A panel_feed without the layer sends no key: nothing is
+                   drawn and the page says so
 A layer whose topic is older than 2 s is STALE: the server returns its age and no
 data, and the page draws nothing and says so. Never the last value.
 
@@ -162,9 +118,7 @@ POSTs take a JSON object and return {"ok": bool, "error": str?}.
                                      Asking is what subscribes (panel_sensors.py)
     POST /api/layout   {buoys: [{x, y, state}]}   the Setup layout, whole
     POST /api/template {name}        a courses/*.yaml as the layout (default:
-                                     task1_avoid, which a fresh panel — one with
-                                     no panel.yaml yet — starts on, and the
-                                     Load template list offers first)
+                                     task1_avoid, which a fresh panel starts on)
     POST /api/clear
     POST /api/save     {name}        POST /api/load {name}
     POST /api/launch                 write panel.yaml, gz_sim_up.sh --no-uav
@@ -176,52 +130,56 @@ POSTs take a JSON object and return {"ok": bool, "error": str?}.
     POST /api/ack      POST /api/send_ack
     POST /api/auto_ack {on}
     POST /api/uav_error {radius_m?, jitter_m?, seed?}
-                                     UAV position error (above); not while a run
-                                     is going. With the sim up it redraws the
-                                     offsets and sends the new field at once
+                                     UAV position error; not while a run is going.
+                                     With the sim up it redraws the offsets and
+                                     sends the new field at once
     POST /api/reroll                 a new random seed, same rules
-    GET  /api/tuning                 the planner-tuning catalogue, the saved overrides, the ones
-                                     the current sim was launched with (below); read from disk
-                                     on every request
+    GET  /api/tuning                 the planner-tuning catalogue, the saved
+                                     overrides, the ones the current sim was
+                                     launched with (below); read from disk on
+                                     every request
     POST /api/tuning   {set: {id: n}, reset: [id] | "all"}
-                                     validate, then save the overrides; any time (it only
-                                     affects the next LAUNCH)
+                                     validate, then save the overrides; any time
+                                     (it only affects the next LAUNCH)
     POST /api/tuning   {profile: name}
-                                     replace the saved overrides with a profile's (below)
+                                     replace the saved overrides with a profile's
 
-PLANNER TUNING (sim only). The Planner tuning card edits the numbers that shape the boat's
-avoidance without touching the team's files: every numeric `nav_*` key of bt_runner_node in
-crusader_bringup/config/crusader_params.yaml, and every numeric leaf of planner_server and
-global_costmap in crusader_nav/config/nav2_params.yaml (nested maps keyed with dots, e.g.
-GridBased.tolerance), read from the workspace source tree this panel runs from, on every
-request, with each key's comments as its description. The overrides are saved as
-<panel dir>/tuning.yaml (~/.cache/crusader_sim/panel), in ROS 2 params-file format, only the
-overridden keys, nested exactly like the source files (bt_runner_node.ros__parameters.nav_hard_m;
+PLANNER TUNING (sim only). The Planner tuning card edits the numbers that shape the
+boat's avoidance without touching the team's files: every numeric `nav_*` key of
+bt_runner_node in crusader_bringup/config/crusader_params.yaml and every numeric
+leaf of planner_server and global_costmap in crusader_nav/config/nav2_params.yaml
+(nested maps keyed with dots, e.g. GridBased.tolerance), read from the source tree
+this panel runs from on every request, with each key's comments as its description.
+Overrides are saved as <panel dir>/tuning.yaml (~/.cache/crusader_sim/panel) in ROS 2
+params-file format, only the overridden keys, nested exactly like the source files
+(bt_runner_node.ros__parameters.nav_hard_m;
 planner_server.ros__parameters.GridBased.tolerance;
-global_costmap.global_costmap.ros__parameters.inflation_layer.inflation_radius) and deleted when
-there are none. They are applied at LAUNCH only, on top of the team's files, because the nodes
-read their parameters at start: LAUNCH passes `gz_sim_up.sh --tuning <that file>` when at least
-one is saved (otherwise the command line is what it always was) and remembers what it passed, so
-the page can say "relaunch needed" once the saved set differs from the run's. ATTACH did not
-launch, so what that run used is unknown. An override equal to its default is dropped; one whose
-key has left the catalogue is reported as unknown and dropped by the next save.
-A PROFILE is a ready set of overrides: crusader_sim/config/tuning_profiles/<name>.yaml in the same source
-tree, in tuning.yaml's own format, its leading comment lines `# title: ...` and `# about: ...` naming it
-for the page (GET /api/tuning lists them). Loading one REPLACES the saved overrides (no merge) after every
-leaf is checked like a `set`; one bad leaf refuses the whole load and writes nothing.
+global_costmap.global_costmap.ros__parameters.inflation_layer.inflation_radius), and
+deleted when there are none. They apply at LAUNCH only (the nodes read parameters at
+start): LAUNCH passes `gz_sim_up.sh --tuning <that file>` when any are saved and
+remembers what it passed, so the page can say "relaunch needed"; ATTACH did not
+launch, so what that run used is unknown. An override equal to its default is
+dropped; one whose key has left the catalogue is reported as unknown and dropped by
+the next save.
+A PROFILE is a ready set of overrides: crusader_sim/config/tuning_profiles/<name>.yaml,
+in tuning.yaml's own format, its leading comment lines `# title: ...` and
+`# about: ...` naming it for the page (GET /api/tuning lists them). Loading one
+REPLACES the saved overrides (no merge) after every leaf is checked like a `set`;
+one bad leaf refuses the whole load and writes nothing.
 
 Test hooks: --rxl-endpoint, --feed-port and --port (keep a test clear of a real
 run's 14555, 14556 and 8095); --dry-run (every child process is a harmless stub,
 the mission a --dry-run-mission-s long printout); GZ_PARTITION and CRUSADER_SIM_GEN
 in the environment keep a test's gz traffic and panel.yaml away from a live sim's.
 
-LAKE MODE (--lake --datum LAT,LON). The same radio handshake against the REAL boat at a lake, with no
-simulator: lake_panel.py (LakePanel, a subclass of Panel) and lake_panel.html. It runs inside the `asv`
-container on the Jetson, takes the boat's pose / FCU state / hazards from panel_feed's extra layers, resends
-the field only while a browser polls /api/state (dead-man), and starts lake_goal, which refuses unless the
-pilot has armed the boat and chosen GUIDED. Its HTTP routes are the lake_panel.ACTIONS only: the sim's
-launch / attach / stop_sim do not exist there. LAKE_MODE.md is the operator procedure.
-The sim page and the lake page share panel_common.js / panel_common.css (served at /panel_common.*).
+LAKE MODE (--lake --datum LAT,LON): the same handshake against the REAL boat at a
+lake, with no simulator: lake_panel.py (LakePanel, a Panel subclass) and
+lake_panel.html. It runs inside the `asv` container on the Jetson, takes pose / FCU
+state / hazards from panel_feed's extra layers, resends the field only while a
+browser polls /api/state (dead-man), and starts lake_goal, which refuses unless the
+pilot has armed the boat and chosen GUIDED. Its routes are the lake_panel.ACTIONS
+only (no launch / attach / stop_sim). LAKE_MODE.md is the operator procedure. The
+sim and lake pages share panel_common.js / panel_common.css (served at /panel_common.*).
 """
 import argparse
 import gzip
@@ -280,10 +238,9 @@ COURSE_HEAD = {"origin": {"lat": 1.28060, "lon": 103.85570}, "draft_m": 0.24,
                "depth_m": 5.0, "boat_start": {"x": 0.0, "y": 0.0, "yaw_deg": 0.0},
                "tier": "disruptive"}
 SILENT = ("field-change-released", "timed out", "boat stopped asking")
-# UavLink's own lines for the two events the panel logs itself, with the
-# checkpoint's name and wait (_on_ask, _close; uav_link.py:180, 216-217):
-# passed through, every ask and every answer showed twice in the Radio log.
-# Its "re-asked -> confirmed again" and "rewound" lines still pass.
+# UavLink's own lines for the two events the panel logs itself (_on_ask, _close;
+# uav_link.py:180, 216-217) are filtered, or every ask and answer showed twice in
+# the Radio log. Its "re-asked -> confirmed again" and "rewound" lines still pass.
 LINK_ECHO_RE = re.compile(r"^checkpoint \d+(: the boat is asking| confirmed, field sent)")
 
 STUB_UP = r"""
@@ -407,11 +364,10 @@ def checkpoint_text(seq, gates):
     """(label, what) for the boat's seq-th ask, in a field of `gates` gates.
 
     The boat asks after the ENTRY orbit (seq 1) and after each gate (seq k+1 =
-    gate k cleared), THE LAST GATE INCLUDED, and waits for the answer before it
-    circles the EXIT (seen in a sim log: 3 gates -> checkpoint 4 asked and
-    awaited). So seq == gates + 1 is the EXIT checkpoint. `label` is the table
-    row; `what` is the plain sentence the banner shows. `gates` is counted in
-    the SENT field, the one the boat holds when it asks."""
+    gate k cleared), the last gate included, and waits for the answer before it
+    circles the EXIT, so seq == gates + 1 is the EXIT checkpoint. `label` is the
+    table row; `what` is the sentence the banner shows. `gates` is counted in the
+    SENT field, the one the boat holds when it asks."""
     last = seq == gates + 1
     if seq == 1:
         done, did = "ENTRY orbit done", "circled the ENTRY buoy"
@@ -434,10 +390,10 @@ def _num(v):
 def uav_offsets(seed, radius_m, n):
     """n fixed (dx, dy) offsets [m], uniform over a disc of radius_m.
 
-    The radius is R*sqrt(u), not R*u: the latter piles the points up near the
-    centre (uniform in radius is not uniform in area). Buoy i's draw depends
-    only on the seed and i, so moving or adding a buoy never re-rolls the rest;
-    the generator is drawn from even at R = 0, so R only scales the same angles."""
+    The radius is R*sqrt(u) (uniform in radius is not uniform in area). Buoy i's
+    draw depends only on the seed and i, so moving or adding a buoy never re-rolls
+    the rest; the generator is drawn from even at R = 0, so R only scales the same
+    angles."""
     rng = random.Random(seed)
     out = []
     for _ in range(n):
@@ -779,12 +735,10 @@ def open_link(endpoint, on_log, on_ask):
     """A UavLink that also reports every request it sees.
 
     On the host nothing is colcon-installed, so crusader_common (geo) and
-    crusader_link (rxl_codec) come from the source tree, beside tools/bench —
-    the directory sim_uav.py:27-33 looks for in the container.
-
-    The subclass only OBSERVES: _request is the hook uav_link split out of
-    poll() (uav_link.py:163-171), and the panel needs each call to count the
-    boat's re-asks, which the library answers but does not log.
+    crusader_link (rxl_codec) come from the source tree beside tools/bench (as
+    sim_uav.py:27-33 does in the container). The subclass only OBSERVES: _request
+    is the hook uav_link split out of poll() (uav_link.py:163-171), used to count
+    the boat's re-asks.
     """
     for base in (os.environ.get("RX26_SRC"), _SRC_REPO,
                  os.path.expanduser("~/robotx_ws/src/rx26_asv")):
@@ -811,9 +765,8 @@ def open_link(endpoint, on_log, on_ask):
 class LogBuffer:
     """Numbered lines, bounded; the page asks for everything after line n.
 
-    Its own leaf lock, never the panel's: UavLink calls on_log with ITS lock
-    held (uav_link.py:258-262), and a Radio log that waited on the panel's lock
-    there could deadlock against a panel action waiting on the link.
+    Its own leaf lock, never the panel's: UavLink calls on_log with ITS lock held
+    (uav_link.py:258-262), so waiting on the panel's lock there could deadlock.
     Consecutive repeats collapse into one "(repeated N times)" line.
     """
 
@@ -1325,9 +1278,9 @@ class Panel:
 
     def _resend(self, link):
         """The periodic retransmission. Call with tx_lock held. At jitter 0 it is
-        uav_link's resend() — byte-identical content, so the boat does not
-        replan. With jitter every retransmission must carry a NEW field, which
-        resend() (it replays the cached one) cannot do."""
+        uav_link's resend() (byte-identical, so the boat does not replan); with
+        jitter every retransmission must carry a NEW field, which resend() (it
+        replays the cached one) cannot do."""
         with self.lock:
             jittered, states = self.uav["jitter_m"] > 0, list(self.sent)
         if not jittered:

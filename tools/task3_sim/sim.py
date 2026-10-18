@@ -11,34 +11,28 @@ No ROS, no WSL, no Docker. Plain Python 3.10+ and the runner build.py made.
     RoboCommand, the UAV        <-------->  leaves.cpp + task3_leaves.cpp +
                                   lines     behavior_trees/task3_disruptive.xml
 
-The page is its own server on :8088, deliberately NOT a tab of the ground
-station (:8090). The ground station is the boat's operator page and runs on
-the Jetson; this is a desk tool that invents a world, and the two should never
-be one click apart on competition day. 8088 is clear of 8090 (ground station),
-8086 (Task 1's aircraft page), 8085 (bt_view), 8080/8081 (camera/LiDAR) - and
-of 8087, which rx26_uav's sim_ekko.py already takes, and 8091-8093 (the UAV's).
+The page is its own server on :8088, deliberately NOT a tab of the ground station (:8090): this is
+a desk tool that invents a world, and the two should never be one click apart on competition day.
+8088 is clear of 8090 (ground station), 8086 (Task 1's aircraft page), 8085 (bt_view), 8080/8081
+(camera/LiDAR), 8087 (rx26_uav's sim_ekko.py) and 8091-8093 (the UAV's).
 
-REAL TIME, NOT FASTER. The tree's timers - Sleep, Timeout, every "resend
-every 10 s" - read the wall clock, so the world must too. A Disruptive run
-takes about two minutes.
+REAL TIME, NOT FASTER: the tree's timers (Sleep, Timeout, every "resend every 10 s") read the wall
+clock, so the world must too. A Disruptive run takes about two minutes.
 
-    --headless   no server: run one mission, print the judge's verdict as
-                 JSON, exit 0 only if every report was right. test_e2e.py
-                 drives it this way.
+    --headless   no server: run one mission, print the judge's verdict as JSON, exit 0 only if
+                 every report was right. test_e2e.py drives it this way.
 
 THE FIXED-NOZZLE SHOT, on its own tree:
 
     python tools/task3_sim/sim.py --fire --fire-pump
 
---fire runs behavior_trees/task3_fire_manual.xml - MANUAL, on the sticks,
-strafing - on a course where the upper-left window is already burning and the
-boat starts 3.8 m off the green bay (inside wall_range_node's r_max, 4 m, which
-is where the pilot must hand over), in MANUAL, with the camera level as it is
-on the boat. --fire-guided runs task3_fire_test.xml, the GUIDED heading+speed
-version, instead. Without --fire-pump the bursts run DRY, as on the boat
-until Gate G7.
---set StationKeep.lateral=fingers (repeatable) runs a copy of the tree with
-that port changed; the file itself stays the one truth.
+--fire runs behavior_trees/task3_fire_manual.xml (MANUAL, on the sticks, strafing) on a course where
+the upper-left window is already burning and the boat starts 3.8 m off the green bay (inside
+wall_range_node's r_max, 4 m, where the pilot must hand over), with the camera level as on the boat.
+--fire-guided runs task3_fire_test.xml, the GUIDED heading+speed version, instead. Without
+--fire-pump the bursts run DRY, as on the boat until Gate G7.
+--set StationKeep.lateral=fingers (repeatable) runs a copy of the tree with that port changed; the
+file itself stays the one truth.
 """
 import argparse
 import http.server

@@ -194,7 +194,7 @@ mismatch, and holds (§5.3). It times out plan requests at 1.0 s, and treats a t
 `x = 100.050439`, `y = 100.075434`, within ±1e-6.
 
 **`nav_frames_node.py`** (node name `nav_frames_node`) follows the house pattern:
-`declare_from_config` + `PARAM_SPEC` + `run_node`, as in lidar_cluster_node.py:54-90.
+`declare_from_config` + `PARAM_SPEC` + `run_node`, as in lidar_cluster_node.py.
 
 | Param | Type | Default | RO/DYN | Meaning |
 |---|---|---|---|---|

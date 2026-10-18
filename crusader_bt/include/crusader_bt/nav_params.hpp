@@ -5,17 +5,15 @@
 //
 //     g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -I include test/test_nav_params.cpp
 //
-// WHY THIS EXISTS. path::NavParams was filled ONCE, at construction, from the node's
-// parameters. A later `ros2 param set /bt_runner_node nav_hard_m 1.2` (or the ground
-// station's Tuning tab, which does exactly that) changed the PARAMETER and left the
-// planner on the old number: the set succeeded, the number on the page changed, and
-// nothing about the boat did. That is the posture crusader_common.param_utils calls the
-// worst one available - a declared-but-ignored parameter.
+// WHY. path::NavParams was filled ONCE at construction, so a later
+// `ros2 param set /bt_runner_node nav_hard_m 1.2` (or the ground station's Tuning
+// tab) changed the PARAMETER and left the planner on the old number: the
+// declared-but-ignored posture crusader_common.param_utils calls the worst there is.
 //
-// So bt_runner_node now re-reads every key below into ctx_->nav when a mission goal is
-// ACCEPTED (never mid-mission), and refuses a value the planner cannot work with at the
-// moment it is set, in words. Four consumers (declare, read, check, diff), one list of
-// names. A key added to NavParams and not to this table is caught by test_nav_params.
+// So bt_runner_node re-reads every key below into ctx_->nav when a mission goal is
+// ACCEPTED (never mid-mission), and refuses a value the planner cannot work with
+// at the moment it is set, in words. Four consumers (declare, read, check, diff),
+// one list of names; test_nav_params catches a NavParams key missing from here.
 #ifndef CRUSADER_BT__NAV_PARAMS_HPP_
 #define CRUSADER_BT__NAV_PARAMS_HPP_
 

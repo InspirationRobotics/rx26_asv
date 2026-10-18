@@ -40,15 +40,13 @@ def arm(endpoint=TOOLING_ENDPOINT, timeout_s=60.0):
 
 
 def set_mode(node, publisher, name, timeout_s=15.0):
-    """Ask telemetry_bridge for a mode via /crsd/set_mode (its own path) and
-    WAIT until /crsd/fcu_status reports it. Returns True once confirmed.
+    """Ask telemetry_bridge for a mode via /crsd/set_mode (its own path) and WAIT until
+    /crsd/fcu_status reports it. Returns True once confirmed.
 
-    Fire-and-forget is not enough, and it failed once (2026-09-29): a fresh
-    publisher's first messages can be dropped before DDS has matched it to the
-    bridge's subscription, and even a delivered request only shows up in the
-    next HEARTBEAT. A goal sent in that gap meets a tree that still sees HOLD
-    and refuses (OUTCOME_NOT_AUTONOMOUS). So: re-request every 0.5 s until the
-    autopilot says so."""
+    Fire-and-forget is not enough: a fresh publisher's first messages can be dropped before DDS
+    has matched it to the bridge's subscription, and even a delivered request only shows up in
+    the next HEARTBEAT. A goal sent in that gap meets a tree that still sees HOLD and refuses
+    (OUTCOME_NOT_AUTONOMOUS). So re-request every 0.5 s until the autopilot says so."""
     import time
 
     import rclpy

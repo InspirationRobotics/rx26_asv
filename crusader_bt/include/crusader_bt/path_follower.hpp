@@ -1,22 +1,22 @@
 // path_follower.hpp — drive a dense polyline with GUIDED position setpoints, and know how far
 // along it the boat is.
 //
-// Header-only, pure (no ROS, no clock). Pinned by test/test_global_passage.cpp, which closes
-// the loop with a kinematic boat and drives whole plans.
+// Header-only, pure (no ROS, no clock). Pinned by test/test_global_passage.cpp,
+// which closes the loop with a kinematic boat and drives whole plans.
 //
-// WHY NOT path::carrot(). Two things it was never asked to do. An ORBIT ends where it began,
-// and closestIndex() searches the whole remaining path, so a boat at the start of a lap is
-// "closest" to the end of it and skips the lap; here progress is searched only in a short
-// window round where the boat already is, and never runs backwards. And its carrot sits at
-// least lookahead_min (3 m) ahead, which on a 2-3 m orbit is a chord through the buoy.
+// WHY NOT path::carrot(). An ORBIT ends where it began and closestIndex() searches
+// the whole remaining path, so a boat at the start of a lap is "closest" to its
+// end and skips the lap; here progress is searched only in a short window round
+// the boat and never runs backwards. And carrot's lookahead_min (3 m) on a 2-3 m
+// orbit is a chord through the buoy.
 //
-// HOW ARDUROVER TAKES A SETPOINT (4.6, GUID_OPTIONS = 0, on the boat and in SITL alike). A
-// position target in GUIDED goes to AR_WPNav::set_desired_location_expect_fast_update(): the
-// position controller's input shaping runs a target straight at the new point at up to
-// WP_SPEED and decelerates to stop ON it, and "reached" needs that target within 1 cm of the
-// point. So a point 1.5 m ahead is driven to, not declared reached at WP_RADIUS, and a new
-// point sent before then simply re-aims the boat. That is what makes a short lookahead
-// possible: pure pursuit 1.5 m ahead, re-sent each resend_m the target moves (~3 Hz at 1 m/s).
+// HOW ARDUROVER TAKES A SETPOINT (4.6, GUID_OPTIONS = 0, boat and SITL alike). A
+// GUIDED position target goes to AR_WPNav::set_desired_location_expect_fast_update():
+// input shaping runs a target straight at the new point at up to WP_SPEED and
+// decelerates to stop ON it, and "reached" needs that target within 1 cm of the
+// point. So a point 1.5 m ahead is driven to, not declared reached at WP_RADIUS,
+// and a new point re-aims the boat: pure pursuit 1.5 m ahead, re-sent each
+// resend_m the target moves (~3 Hz at 1 m/s).
 //
 // PURE PURSUIT CUTS INSIDE A CURVE. Aiming at a point L ahead on a circle of radius R settles
 // on radius sqrt(R^2 - L^2): at R 3, L 1.5 that is 0.4 m inside, toward the buoy being

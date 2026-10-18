@@ -10,8 +10,8 @@ Three jobs, deliberately fused into one node:
      /crsd/rc_channels   interfaces/RcChannels   (RC_CHANNELS)
      /crsd/autonomy_drop std_msgs/Bool           (latched, TRANSIENT_LOCAL)
    Other nodes subscribe to these topics instead of opening their own MAVLink
-   connection — this node existing is what keeps the "no second consumer racing
-   the ROS graph" rule enforceable.
+   connection, which keeps the "no second consumer racing the ROS graph" rule
+   enforceable.
 
 2. TX (safety): the ONLY sanctioned force-disarm path. rc_heartbeat_watchdog
    publishes std_msgs/Bool on /crsd/force_disarm on RC-transmitter link loss;
@@ -21,17 +21,17 @@ Three jobs, deliberately fused into one node:
 
 3. TX (autonomy): the ONLY sanctioned path for RC overrides. Nodes publish
    interfaces/RcChannels on /crsd/rc_override; this node forwards them to the
-   autopilot — UNLESS the autonomy-drop latch (crusader_common.drop_latch) has
+   autopilot UNLESS the autonomy-drop latch (crusader_common.drop_latch) has
    tripped, in which case it sends release frames (all-zero override) and drops
    every subsequent override until the operator resets via the
-   /crsd/autonomy_drop_reset service (std_srvs/Trigger). Because misbehaving
-   nodes have no MAVLink connection of their own, a tripped latch cannot be
-   bypassed from the ROS graph.
+   /crsd/autonomy_drop_reset service (std_srvs/Trigger). Misbehaving nodes have no
+   MAVLink connection of their own, so a tripped latch cannot be bypassed from
+   the ROS graph.
 
-   NOTE: this repo currently ships NO publisher on /crsd/rc_override — the
-   override path and its latch are the Gate G1 mechanism, kept here so the
-   enforcement point exists, but nothing exercises them yet. G1 sign-off needs a
-   bench node that drives this topic (docs/G1_bench_procedure.md).
+   NOTE: this repo ships NO publisher on /crsd/rc_override yet: the override path
+   and its latch are the Gate G1 mechanism, kept so the enforcement point exists.
+   G1 sign-off needs a bench node that drives this topic
+   (docs/G1_bench_procedure.md).
 
 4. TX (payload): the ONLY sanctioned path to the water pump. Nodes publish
    crusader_msgs/PumpCommand on /crsd/pump_cmd; this node checks it against
@@ -55,24 +55,16 @@ Three jobs, deliberately fused into one node:
 
 The hardware e-stop (SB switch) remains below and independent of all of this.
 
-Why attitude is its OWN topic and not three more fields on LatLonHead: ATTITUDE
-and GLOBAL_POSITION_INT are separate MAVLink streams (EXTRA1 and POSITION) that
-can die independently, and a consumer mapping a detection needs to know WHICH
-one went quiet. Folding them together would make one stream's staleness silently
-gate the other's — the exact frozen-value failure StreamCache exists to stop —
-and LatLonHead is also used as a bare position carrier (goals, origins) where
-attitude has no meaning. The cost is that a mapping consumer must check two
-topics; that cost is the point.
-
-And why attitude alone is published FROM THE RX THREAD rather than on the 20 Hz
-tick: it is the one stream whose value is the instantaneous number, not the
-latest known state. ATTITUDE is set to 30 Hz (SR0_EXTRA1) to match the camera,
-and resampling 30 Hz onto a 20 Hz tick drops one frame in three and time-shifts
-the rest by up to 50 ms — at a 2 rad/s roll that is ~6 degrees of attitude
-error, which is most of what roll/pitch compensation was added to remove.
-Publishing on arrival also makes the staleness rule below automatic for this
-topic: there is no cached value to replay, so silence is silence for free. The
-StreamCache is kept anyway, purely so _publish_tick still logs the stale edge.
+Why attitude is its OWN topic and not fields on LatLonHead: ATTITUDE and
+GLOBAL_POSITION_INT are separate MAVLink streams (EXTRA1 and POSITION) that die
+independently, and a consumer mapping a detection needs to know WHICH went quiet
+(folding them lets one stream's staleness silently gate the other's); LatLonHead is
+also a bare position carrier (goals, origins). Attitude alone is published FROM THE
+RX THREAD, not on the 20 Hz tick: ATTITUDE is 30 Hz (SR0_EXTRA1) to match the
+camera, and resampling onto 20 Hz drops a frame in three and time-shifts the rest by
+up to 50 ms (~6 degrees of attitude error at 2 rad/s roll). Publishing on arrival
+also makes the staleness rule automatic for it; the StreamCache is kept only so
+_publish_tick still logs the stale edge.
 
 Parameters:
   mav_endpoint     (str,  default udp:127.0.0.1:14551)  MAVProxy --out for ROS
@@ -85,10 +77,9 @@ Parameters:
 
 Staleness rule (safety-relevant): each RX stream is republished ONLY while it
 is fresh, and its header carries the stamp captured at RECEIPT. Rebroadcasting
-the last cached frame with a fresh stamp — as this node originally did —
-makes a dead MAVProxy indistinguishable from a healthy one, which silently
-disables rc_heartbeat_watchdog (both its RC-loss and its gateway-down paths).
-Silence must stay silent.
+the last cached frame with a fresh stamp makes a dead MAVProxy indistinguishable
+from a healthy one, which silently disables rc_heartbeat_watchdog (both its
+RC-loss and its gateway-down paths). Silence must stay silent.
 """
 import os
 import threading
@@ -112,14 +103,10 @@ from crusader_common.stream_cache import StreamCache
 
 from crusader_fcu import guided_hs_core, override_core, pump_core
 
-# MAVLink 2 is REQUIRED, and must be selected before pymavlink is first
-# imported anywhere in this process: mavutil binds its dialect module at
-# import time, and tests only for the PRESENCE of this variable, not its
-# value. The v1.0 dialect has no OBSTACLE_DISTANCE at all - msgid 330 is
-# above v1's 255 ceiling - so on v1 the proximity TX path does not fail at
-# startup. It fails on the FIRST crsd/obstacle_distance message and takes
-# the whole FCU gateway down with it, which is how a LiDAR feature became a
-# total telemetry and arming outage on 2026-09-05.
+# MAVLink 2 is REQUIRED, selected before pymavlink is first imported anywhere in
+# this process (mavutil binds its dialect at import time). The v1.0 dialect has no
+# OBSTACLE_DISTANCE (msgid 330 is above v1's 255 ceiling), so on v1 the first
+# crsd/obstacle_distance message takes the whole FCU gateway down.
 os.environ["MAVLINK20"] = "1"
 
 # Every MAVLink sender this node uses, verified once against the dialect we
@@ -226,22 +213,20 @@ class TelemetryBridge(Node):
             invert=p["drop_invert"],
             stale_timeout=p["rc_stale_timeout"])
 
-        # THE AUTONOMY INTERLOCK IS THE FLIGHT MODE, not an RC channel.
-        #
-        # The pilot selects an autonomous mode on SC; anything else means they
-        # are flying it. That gives two independent things which must BOTH agree
-        # before the boat moves under our command:
+        # THE AUTONOMY INTERLOCK IS THE FLIGHT MODE, not an RC channel. The pilot
+        # selects an autonomous mode on SC; anything else means they are flying it.
+        # Two independent things must BOTH agree before the boat moves under our
+        # command:
         #   * we choose to send        — this gate
         #   * ArduPilot chooses to obey — SET_POSITION_TARGET_* is acted on only
         #                                 in GUIDED/AUTO/RTL and ignored elsewhere
-        # so leaving the mode stops both at once, with no software in the path
-        # and nothing for us to get wrong. It also needs no spare RC channel,
-        # which matters because the drop_channel default (7) is the SB arm/e-stop
-        # switch — arming drives it to ~1995 and trips the RC latch.
+        # so leaving the mode stops both at once, with no software in the path. It
+        # also needs no spare RC channel (the drop_channel default 7 is the SB
+        # arm/e-stop switch; arming drives it to ~1995 and trips the RC latch).
         #
         # Uppercased once here: mode_string_v10 returns e.g. "GUIDED", and a YAML
-        # typo of "guided" silently meaning "never autonomous" is exactly the
-        # class of failure this repo keeps getting bitten by.
+        # typo of "guided" silently meaning "never autonomous" is the class of
+        # failure this repo keeps hitting.
         self.autonomous_modes = {str(m).upper() for m in p["autonomous_modes"]}
         self._mode_timeout_s = p["mode_timeout_s"]
         self.get_logger().info(
@@ -260,44 +245,40 @@ class TelemetryBridge(Node):
 
         self.create_subscription(RcChannels, "/crsd/rc_override",
                                  self._override_cb, 10)
-        # Sanctioned force-disarm TX — rc_heartbeat_watchdog publishes here on RC
-        # link loss instead of opening its own MAVLink connection. Deliberately
-        # NOT gated by the autonomy-drop latch: a force-disarm must fire even
-        # (especially) when the latch has already tripped. This is the ONLY
-        # sanctioned disarm path from the ROS graph.
+        # Sanctioned force-disarm TX: rc_heartbeat_watchdog publishes here on RC
+        # link loss. Deliberately NOT gated by the autonomy-drop latch (a
+        # force-disarm must fire even, especially, when the latch has tripped).
+        # The ONLY sanctioned disarm path from the ROS graph.
         self.create_subscription(Bool, "/crsd/force_disarm",
                                  self._force_disarm_cb, 10)
         # Sanctioned GUIDED setpoint TX. Gated by the MODE interlock above, not
         # by the RC drop latch — see _guided_cb.
         self.create_subscription(GuidedSetpoint, "/crsd/guided_setpoint",
                                  self._guided_cb, 10)
-        # Sanctioned mode-change TX. Fire-and-forget by design: there is no ack
-        # to wait on that is worth more than reading the mode back off
-        # /crsd/fcu_status, which is the autopilot's own answer rather than an
-        # acknowledgement of our request.
+        # Sanctioned mode-change TX. Fire-and-forget: reading the mode back off
+        # /crsd/fcu_status is the autopilot's own answer, worth more than an ack
+        # of our request.
         self.create_subscription(String, "/crsd/set_mode", self._set_mode_cb, 10)
         # Proximity TX. Deliberately NOT mode-gated: obstacle data is an input to
-        # the autopilot's own avoidance, not a command from us. The pilot flying
-        # in MANUAL benefits from ArduPilot knowing where things are just as much
-        # as an autonomous run does, and withholding it in MANUAL would make the
-        # boat's behaviour change with the mode switch for no good reason.
+        # the autopilot's own avoidance, not a command from us, and withholding it
+        # in MANUAL would change the boat's behaviour with the mode switch for no
+        # reason.
         self.create_subscription(ObstacleDistance, "crsd/obstacle_distance",
                                  self._obstacle_cb, 10)
         self.create_service(Trigger, "/crsd/autonomy_drop_reset", self._reset_cb)
         # Sanctioned pump TX (job 4 above). Checked by pump_core, timed by the
-        # autopilot. A topic, not a service: a service waiting on COMMAND_ACK
-        # would block this single-threaded executor, force-disarm included.
+        # autopilot. A topic, not a service: a service waiting on COMMAND_ACK would
+        # block this single-threaded executor, force-disarm included.
         self.create_subscription(PumpCommand, "/crsd/pump_cmd", self._pump_cb, 10)
         # Sanctioned GUIDED heading+speed TX (job 5). Gated by the mode AND the
         # drop latch, with a dead-man; see _hs_cb.
         self.create_subscription(GuidedHeadingSpeed, "/crsd/guided_heading_speed",
                                  self._hs_cb, 10)
 
-        # Each stream is republished ONLY while it is fresh. Rebroadcasting the
-        # last cached frame with a fresh stamp after MAVProxy dies makes a dead
-        # gateway indistinguishable from a healthy one — it defeats
-        # rc_heartbeat_watchdog's RC-loss AND gateway-down detection. See
-        # stream_cache.py.
+        # Each stream is republished ONLY while fresh: rebroadcasting a cached
+        # frame with a fresh stamp after MAVProxy dies defeats
+        # rc_heartbeat_watchdog's RC-loss AND gateway-down detection
+        # (stream_cache.py).
         self._lock = threading.Lock()
         t_out = p["stream_timeout_s"]
         self._pose = StreamCache(t_out)    # (lat, lon, heading_deg, speed_mps)
@@ -350,12 +331,10 @@ class TelemetryBridge(Node):
             RuntimeError: if any name in REQUIRED_SENDERS is missing from the
                 connection's MAVLink object.
 
-        A missing sender means MAVLINK20 was not in effect when pymavlink was
-        first imported - something imported it ahead of this module. Checked
-        here rather than left to the call site because the call site is a
-        subscriber callback: the failure would otherwise surface a second
-        after a clean-looking start, as an AttributeError with no hint that
-        the dialect is the cause.
+        That means MAVLINK20 was not in effect when pymavlink was first imported.
+        Checked here because the call site is a subscriber callback, where it would
+        fail a second after a clean-looking start with no hint that the dialect is
+        the cause.
         """
         missing = [n for n in REQUIRED_SENDERS
                    if not hasattr(self.conn.mav, n)]
@@ -402,9 +381,9 @@ class TelemetryBridge(Node):
                                    t, stamp)
                 elif mtype == "ATTITUDE":
                     # Republished in the autopilot's own axes/units (rad, NED
-                    # body) — see Attitude.msg. Converting here would put a
-                    # frame convention in the gateway, where nothing can check
-                    # it; crusader_common.geo owns that instead.
+                    # body), see Attitude.msg: converting here would put a frame
+                    # convention in the gateway, where nothing can check it;
+                    # crusader_common.geo owns that.
                     att_now = (msg.roll, msg.pitch, msg.yaw,
                                msg.rollspeed, msg.pitchspeed, msg.yawspeed)
                     # cached ONLY so _publish_tick can log the stale edge; the
@@ -663,10 +642,9 @@ class TelemetryBridge(Node):
     def _autonomy_allowed(self):
         """(allowed, reason) — may we send an autonomous command right now?
 
-        Fails CLOSED on every uncertainty. An unknown mode is not autonomy: if
-        HEARTBEAT has gone stale we do not know what the pilot has selected, and
-        assuming the last known mode still holds is exactly the stale-value
-        failure StreamCache exists to prevent.
+        Fails CLOSED on every uncertainty: if HEARTBEAT is stale we do not know
+        what the pilot has selected, and assuming the last known mode still holds
+        is the stale-value failure StreamCache exists to prevent.
         """
         status = self._status.get(time.monotonic())
         if status is None:
@@ -681,17 +659,15 @@ class TelemetryBridge(Node):
     def _guided_cb(self, msg: GuidedSetpoint):
         """Forward a position setpoint, but only while the pilot has given us the mode.
 
-        Deliberately NOT gated by the RC drop latch. The latch keys off
-        drop_channel, whose default (7) is the SB arm/e-stop switch — arming
-        drives it to ~1995 and trips the latch, which would block autonomy at
-        exactly the moment autonomy becomes possible. The mode is the honest
-        interlock and ArduPilot enforces the same decision independently.
+        Deliberately NOT gated by the RC drop latch: it keys off drop_channel,
+        whose default (7) is the SB arm/e-stop switch, so arming trips the latch
+        and would block autonomy exactly when it becomes possible. The mode is the
+        honest interlock and ArduPilot enforces the same decision independently.
         """
         allowed, reason = self._autonomy_allowed()
         if not allowed:
-            # Throttled: a mission publishing at 1-20 Hz into a non-autonomous
-            # mode is the NORMAL state on the bench, not an error worth a line
-            # per message.
+            # Throttled: publishing at 1-20 Hz into a non-autonomous mode is the
+            # NORMAL bench state, not an error worth a line per message.
             self.get_logger().warning(
                 f"guided setpoint DROPPED — {reason}", throttle_duration_sec=5.0)
             return
@@ -709,14 +685,10 @@ class TelemetryBridge(Node):
     def _obstacle_cb(self, msg: ObstacleDistance):
         """Forward a sector map as MAVLink OBSTACLE_DISTANCE.
 
-        Requires PRX1_TYPE=2 (MAVLink) on the autopilot or ArduPilot ignores it
-        entirely and the proximity viewer stays empty — which looks exactly like
-        this node being broken.
-
-        Both `increment` (uint8 degrees) and `increment_f` (float) are set.
-        ArduPilot has historically read the integer field when the float was
-        intended, rendering obstacles at wrong bearings; setting both makes the
-        message correct under either behaviour.
+        Requires PRX1_TYPE=2 (MAVLink) on the autopilot or ArduPilot ignores it and the
+        proximity viewer stays empty. Both `increment` (uint8 degrees) and
+        `increment_f` (float) are set: ArduPilot has historically read the integer
+        field when the float was intended.
         """
         time_usec = int(time.time() * 1e6)
         inc = float(msg.increment_deg)
@@ -736,13 +708,13 @@ class TelemetryBridge(Node):
     def _set_mode_cb(self, msg: String):
         """Ask the autopilot to change flight mode.
 
-        NOT gated: this is how a mission ENTERS an autonomous mode, so gating it
-        on already being in one is circular. It is also how a mission can put the
-        boat somewhere safe. The pilot always outranks it — moving SC re-applies
-        the switch position and takes the mode back.
+        NOT gated: this is how a mission ENTERS an autonomous mode (gating on
+        already being in one is circular) and how it can put the boat somewhere
+        safe. The pilot always outranks it: moving SC re-applies the switch
+        position and takes the mode back.
 
-        Refuses a mode this vehicle does not have rather than sending a number
-        the autopilot will silently ignore.
+        Refuses a mode this vehicle does not have rather than sending a number the
+        autopilot will silently ignore.
         """
         name = str(msg.data).strip().upper()
         if not name:
@@ -792,11 +764,10 @@ class TelemetryBridge(Node):
 
     def _reset_cb(self, request, response):
         """Never raises: an exception in a service callback kills the whole
-        bridge (and with it telemetry and the force-disarm gateway). It did,
-        on the water 2026-09-28: one call site switching between .warn and
-        .error is a ValueError in rclpy ("Logger severity cannot be changed
-        between calls"), so the first REFUSED reset after an accepted one took
-        the bridge down. One severity per call site."""
+        bridge (and with it telemetry and the force-disarm gateway). One call site
+        switching between .warn and .error is a ValueError in rclpy ("Logger
+        severity cannot be changed between calls"), so the first REFUSED reset
+        after an accepted one took the bridge down. One severity per call site."""
         try:
             ok, reason = self.latch.reset(time.monotonic())
             response.success = ok

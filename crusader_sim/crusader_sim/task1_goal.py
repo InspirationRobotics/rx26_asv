@@ -2,25 +2,21 @@
 
     python3 -m crusader_sim.task1_goal --course task1_core [--tier disruptive] [--no-judge]
 
-Runs in: the crsd-sim container, after gz_rig_up.sh.
+Runs in the crsd-sim container, after gz_rig_up.sh. --no-judge leaves the referee out: the
+Task 1 panel runs its own, because only the panel knows when it changed a beacon mid-run.
 
---no-judge leaves the referee out: the Task 1 panel runs its own, because only
-the panel knows when it changed a beacon mid-run.
-
-Does what an operator does before a Task 1 attempt, in order, and then watches:
-  1. ARM, over MAVLink on the TOOLING port 14550 (the bridge has no arm path on
-     purpose; on the water the pilot arms with SB). Retries while pre-arm
-     refuses, as ArduPilot does for ~10-20 s after boot.
+Does what an operator does before a Task 1 attempt, in order, then watches:
+  1. ARM, over MAVLink on the TOOLING port 14550 (the bridge has no arm path on purpose; on
+     the water the pilot arms with SB). Retries while pre-arm refuses, as ArduPilot does for
+     ~10-20 s after boot.
   2. GUIDED, through /crsd/set_mode — the bridge's own mode path.
-  3. The SafePassage goal to bt_runner (/crsd/safe_passage): tier from the
-     course, approach point = the course's `approach` if it has one, else 6 m
-     short of the ENTRY buoy on the line from the start — the operator's rough
-     "the course is over there".
+  3. The SafePassage goal to bt_runner (/crsd/safe_passage): tier from the course, approach
+     point = the course's `approach` if it has one, else 6 m short of the ENTRY buoy on the
+     line from the start.
 Then prints the tree's feedback (phase, progress, buoys) until the result.
 
-Ctrl-C / SIGTERM CANCELS the goal (goal_client.run_goal) and waits for the tree to finish
-it: the action server keeps ticking when its client dies, so before 2026-10-02 stopping
-this script left the tree running. The task 1 panel's "abort" relies on it.
+Ctrl-C / SIGTERM CANCELS the goal (goal_client.run_goal) and waits for the tree to finish it:
+the action server keeps ticking when its client dies. The task 1 panel's "abort" relies on it.
 """
 import argparse
 import math
@@ -41,9 +37,8 @@ from crusader_sim.task1_judge import Task1Judge, format_verdict
 
 # bt_runner enforces the mission timeout against its own now(), and the sim runs on WALL clock
 # (nav2_params.yaml: never use_sim_time), so a slow machine burns it at real-time-factor speed.
-# 400 s killed the first Intel Iris Xe laptop run at 95% of task1_core; measured 2026-10-11: that
-# course takes 615 s wall at RTF ~0.5-0.9. 1200 s leaves ~2x headroom for slower runs; a faster
-# machine just finishes early, the timeout only ever fires on a stuck mission.
+# task1_core takes ~615 s wall at RTF ~0.5-0.9 (400 s killed a slow-laptop run at 95%); 1200 s
+# leaves ~2x headroom, and the timeout only ever fires on a stuck mission.
 DEFAULT_TIMEOUT_S = 1200.0
 
 

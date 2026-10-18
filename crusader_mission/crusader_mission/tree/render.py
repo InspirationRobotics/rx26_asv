@@ -33,10 +33,9 @@ def _label(node):
 def ascii(root, unicode_ok=True):
     """Box-drawing tree. Reads top-to-bottom as execution order.
 
-    unicode_ok=False swaps the box-drawing characters for plain ASCII. That is
-    not cosmetic: a Windows console at cp1252 renders the unicode ones as
-    mojibake, and a review artefact nobody can read is a review that does not
-    happen. print_tree.py decides from the real stdout encoding.
+    unicode_ok=False swaps the box-drawing characters for plain ASCII: a Windows
+    console at cp1252 renders the unicode ones as mojibake. print_tree.py decides
+    from the real stdout encoding.
     """
     last_c, mid_c, blank, bar = (("└── ", "├── ",
                                   "    ", "│   ") if unicode_ok else

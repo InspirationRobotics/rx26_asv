@@ -1,10 +1,9 @@
 """pixhawk_led_status_node — maps autopilot + RC state to /crsd/led_state.
 
-Ported and REWIRED for this repo: the operational version opened its own
-`udpin:127.0.0.1:14550` MAVLink connection, making it a second consumer of the
-Pixhawk stream. Here it subscribes to telemetry_bridge's republished topics
-instead — telemetry_bridge is the single ROS-side gateway, so this node adds no
-new MAVLink connection and cannot race the graph.
+Single-gateway rule: this node subscribes to telemetry_bridge's republished
+topics rather than opening its own MAVLink connection (the operational version
+used `udpin:127.0.0.1:14550`), so it adds no MAVLink connection and cannot race
+the graph.
 
   in:  /crsd/fcu_status     (FcuStatus)   mode + armed
        /crsd/rc_channels    (RcChannels)  e-stop switch position
@@ -41,15 +40,12 @@ PARAM_SPEC = {
 }
 
 RED, YELLOW, GREEN = 1, 2, 3
-# Which modes light the mast GREEN. Loaded from shared.autonomous_modes at
-# construction (see __init__) rather than hardcoded here, because the SAME list
-# decides three things that must never disagree: what telemetry_bridge will
-# obey, what this light shows, and what ocs_client reports to RoboCommand as
+# Which modes light the mast GREEN: loaded from shared.autonomous_modes at
+# construction, because the SAME list decides what telemetry_bridge will obey,
+# what this light shows, and what ocs_client reports to RoboCommand as
 # STATE_AUTO. handbook 5.3.1 makes the visual state a requirement, so a light
-# saying GREEN while the bridge refuses commands is a compliance problem, not
-# just a cosmetic one.
-#
-# This tuple is only the fallback for a config that predates the shared key.
+# saying GREEN while the bridge refuses commands is a compliance problem. This
+# tuple is only the fallback for a config that predates the shared key.
 AUTO_MODES_FALLBACK = ("AUTO", "GUIDED")
 
 

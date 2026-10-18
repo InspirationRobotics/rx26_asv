@@ -3,17 +3,16 @@
 //     g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -I include -o /tmp/t test/test_planned_leg.cpp && /tmp/t
 //
 // No ROS, no Nav2, no real time. FakePlannerPort answers (or does not) exactly as
-// the test says, and Rig owns the clock: a tick is 100 ms unless a test says otherwise,
-// kept as integer milliseconds so "at 5.0 s" is not a question about floating point.
-// The numbered sections are docs/nav2_avoidance_spec.md section 5.9's list for this
-// file, in its order; 15+ are the edges that list leaves to the implementation:
-// 17 a moved goal is re-targeted (not hysteresis'd away), 18 a guarded straight leg
-// needs its line to stay CLEAR before it resumes, 19 Off mode is guarded too
-// (spec 5.5, 2026-10-01).
+// the test says, and Rig owns the clock: a tick is 100 ms unless a test says
+// otherwise, kept as integer milliseconds so "at 5.0 s" is not a question about
+// floating point. The numbered sections are docs/nav2_avoidance_spec.md section
+// 5.9's list for this file, in its order; 15+ are edges that list leaves to the
+// implementation (17 a moved goal is re-targeted, 18 a guarded straight leg needs
+// its line to stay CLEAR before it resumes, 19 Off mode is guarded too, spec 5.5).
 //
-// What these pin is what keeps the boat off a buoy when something upstream is wrong:
-// a planner that never answers, a pose that goes stale, a heading that goes NaN, a
-// plan that crosses a hazard the costmap has not heard of yet.
+// What these pin is what keeps the boat off a buoy when something upstream is
+// wrong: a planner that never answers, a pose that goes stale, a heading that
+// goes NaN, a plan that crosses a hazard the costmap has not heard of yet.
 #include <cmath>
 #include <cstdio>
 #include <functional>
@@ -216,7 +215,6 @@ private:
 
 int main()
 {
-  // ------------------------------------------- 1. Off: the legacy send sequence
   std::printf("1. Off mode, on a clear line, reproduces the legacy NavigateTo send sequence\n");
   {
     Rig r(Mode::Off);
@@ -255,7 +253,6 @@ int main()
     chk("a Straight leg in Off never fails on its own", haz.failures == 0);
   }
 
-  // ------------------------------------- 2. On: plan, follow, resend, true goal
   std::printf("2. On: a plan arrives, FOLLOWING, the carrot 5 m ahead\n");
   {
     Rig r(Mode::On);
@@ -326,7 +323,6 @@ int main()
     chk("... and no hold was sent on the way", g.holds() == 0);
   }
 
-  // ------------------------------------ 3. No plan ever: hold, clear, FAILURE
   std::printf("3. No plan ever arrives\n");
   {
     Rig r(Mode::On);
@@ -366,7 +362,6 @@ int main()
       w.out.state == LegState::Blocked && w.out.why == "no plan within first_plan_wait_s" && w.holds() == 1);
   }
 
-  // ----------------------- 4. Blocked, a valid plan at 8 s, and the flip-flop
   std::printf("4. Blocked, then a valid plan; blocked_s held until 3 s of FOLLOWING\n");
   {
     Rig r(Mode::On);
@@ -409,7 +404,6 @@ int main()
     chk("... and it failed by blocked_s >= 15, not by luck", f.out.blocked_s >= 15.0 - 1e-6);
   }
 
-  // ----------------------------------- 5. IsPathValid: once is nothing, twice is
   std::printf("5. IsPathValid: invalid once does nothing; twice gives BLOCKED\n");
   {
     NavParams quiet;
@@ -458,7 +452,6 @@ int main()
       lost.out.state == LegState::Following);
   }
 
-  // ------------------------------------- 6. A new known hazard; a plan across one
   std::printf("6. A new known hazard on the path is BLOCKED in the same tick\n");
   {
     Rig r(Mode::On);
@@ -517,7 +510,6 @@ int main()
     chk("... and one 0.9 m off is adopted", m.out.state == LegState::Following);
   }
 
-  // ----------------------------------------------------- 7. NaN heading: DEGRADED
   std::printf("7. NaN heading: DEGRADED\n");
   {
     Rig r(Mode::On);
@@ -549,7 +541,6 @@ int main()
     chk("... and never fails", d.failures == 0 && d.port.reqs.empty());
   }
 
-  // ------------------------------------------- 8. A stale pose holds where it was
   std::printf("8. A stale pose holds at the last fresh pose, with no Failure\n");
   {
     Rig r(Mode::On);
@@ -579,7 +570,6 @@ int main()
       same(r.port.reqs.back().first, {3, 0}));
   }
 
-  // -------------------------------------------- 9. planner_server not available
   std::printf("9. ready() == false\n");
   {
     Rig r(Mode::On);
@@ -614,7 +604,6 @@ int main()
     chk("... and it comes back: FOLLOWING again", b.out.state == LegState::Following);
   }
 
-  // ------------------------------------------------------ 10. timeout; late reply
   std::printf("10. A timeout at 1.0 s; the late reply is ignored by seq\n");
   {
     Rig r(Mode::On);
@@ -662,7 +651,6 @@ int main()
       fl.out.state == LegState::Blocked && fl.out.why == "planner aborted (no path)");
   }
 
-  // ------------------------------------------------------------------ 11. Shadow
   std::printf("11. Shadow: legacy sends, real state, never a Failure\n");
   {
     Rig r(Mode::Shadow);
@@ -712,7 +700,6 @@ int main()
     chk("... and no planner call", s.port.reqs.empty());
   }
 
-  // -------------------- 12. avoid=false, exempt gate: straight, with a guard
   std::printf("12. avoid=false with exempt=gate\n");
   {
     LegConfig c;
@@ -810,7 +797,6 @@ int main()
     chk("a straight leg arrives on tolerance", ar.tick().result == Result::Success);
   }
 
-  // -------------------------------------------------------------- 13. A 100 m goal
   std::printf("13. A 100 m goal: the requested goal sits 35 m out and advances\n");
   {
     Rig r(Mode::On);
@@ -842,7 +828,6 @@ int main()
     chk("... with no hold on the way", r.holds() == 0);
   }
 
-  // ------------------------------------------------------ 14. Start inside the band
   std::printf("14. A start inside the hard zone: the escape point first\n");
   {
     Rig r(Mode::On);
@@ -878,7 +863,6 @@ int main()
       b.out.why == "boxed in" && b.holds() == 1);
   }
 
-  // ------------------------------------------------- 15. The edges of the machine
   std::printf("15. Halt, no goal, the stub port, the state names\n");
   {
     Rig r(Mode::On);
@@ -964,7 +948,6 @@ int main()
     chk("a null port in Off mode is the legacy leg", off.start(LegConfig{}, in).send);
   }
 
-  // ------------------------------------------ 16. Hysteresis, cadence, goal moves
   std::printf("16. Replans: hysteresis, cadence, a moving goal, a failure while FOLLOWING\n");
   {
     const LegConfig c;
@@ -1067,17 +1050,15 @@ int main()
     chk("start() after halt() begins a fresh episode: blocked_s 0", n.leg.step(n.in).blocked_s == 0.0);
   }
 
-  // ---------------- 17. A goal that moved is re-targeted, never hysteresis'd away
   std::printf("17. A planned leg re-targets a goal that moved while FOLLOWING\n");
   {
     LegConfig c;
     c.tolerance = 1.0;                       // the Task 3 lead-in (task3_disruptive.xml)
 
     // The boat is 3 m short of the end of a path to (30, 0) when the goal moves 5 m
-    // sideways. The old path scored 3 + 5 = 8 m against the fresh plan's 5.8 m: 27 % but
-    // only 2.2 m shorter, so hysteresis refused it, and following the old path to its end
-    // made the two EQUAL (5 m each). A new plan was never adopted and the boat parked
-    // 5 m from a goal it could not arrive at.
+    // sideways. The old path scores 3 + 5 = 8 m against a fresh plan's 5.8 m: 27 %
+    // but only 2.2 m shorter, so hysteresis would refuse it and the boat would park
+    // 5 m from a goal it cannot arrive at.
     Rig r(Mode::On);
     r.in.goal = {30, 0};
     r.start(c);
@@ -1134,7 +1115,6 @@ int main()
     chk("... and the leg ARRIVES", k.out.result == Result::Success);
   }
 
-  // ------- 18. A guarded straight leg resumes only after a CLEAR line stays clear
   std::printf("18. A guarded straight leg needs unblock_reset_s of clear line to resume\n");
   {
     LegConfig c;
@@ -1199,7 +1179,6 @@ int main()
     chk("... and the leg resumes then", h.out.state == LegState::Straight && h.out.send && h.ms == 6200);
   }
 
-  // ------------- 19. Off: every leg is a guarded straight leg, avoid or not
   std::printf("19. Off mode: a leg never drives through a known hazard\n");
   {
     for (const bool avoid : {true, false}) {

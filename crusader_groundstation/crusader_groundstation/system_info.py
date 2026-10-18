@@ -2,23 +2,17 @@
 kernel.
 
 No psutil, no jtop, no dependency at all: everything here is a file in /proc or
-/sys that the Jetson has by definition. Adding a package to the `asv` image so
-a dashboard can print a temperature is the wrong trade, and an import that
-fails at node start takes the whole ground station down with it.
+/sys that the Jetson has by definition (an import failing at node start would
+take the whole ground station down).
 
 EVERY READER RETURNS None ON FAILURE rather than raising or inventing a zero.
-These paths differ between JetPack releases and are different again inside a
-container, so some of them WILL be missing on some machine. A dashboard that
-prints "—" for a value it cannot read is telling the truth; one that prints
-0 degrees is lying, and 0 is a plausible-looking number that nobody questions.
+Paths differ between JetPack releases and inside a container; a dashboard
+printing "-" is telling the truth, one printing 0 degrees is lying.
 
-CONTAINER CAVEAT, and it is not a small one: read from inside `asv`, /proc
-belongs to the HOST (the container shares the host's kernel and, on this
-fleet, its PID namespace), so CPU, uptime and temperature are the Jetson's and
-are what you want. Disk usage is NOT: it reports the container's view of the
-filesystem, which is the same underlying device here but need not be. The disk
-figure is labelled with the path it measured so the number can be checked
-rather than trusted.
+CONTAINER CAVEAT: inside `asv`, /proc belongs to the HOST (shared kernel and PID
+namespace), so CPU, uptime and temperature are the Jetson's. Disk usage is the
+container's view of the filesystem, so the figure is labelled with the path it
+measured.
 """
 import os
 import time
@@ -70,11 +64,9 @@ def _cpu_jiffies():
 class CpuMeter:
     """CPU load as a percentage over the interval between two reads.
 
-    Stateful on purpose. /proc/stat holds cumulative counters since boot, so a
-    single read can only ever give the average since power-on — a number that
-    barely moves and tells you nothing about now. The load a dashboard wants is
-    a difference between two samples, which means something has to remember the
-    last one.
+    Stateful on purpose: /proc/stat holds cumulative counters since boot, so a
+    single read only gives the average since power-on; the load wanted is the
+    difference between two samples.
     """
 
     def __init__(self):
@@ -96,9 +88,8 @@ class CpuMeter:
 def temperature_c():
     """Warmest plausible SoC/CPU thermal zone in Celsius, or None.
 
-    The warmest is the honest one to show: the Jetson has several zones and a
-    dashboard reporting the coolest would stay reassuring right up until
-    thermal throttling started.
+    The warmest is the honest one: a dashboard reporting the coolest stays
+    reassuring until throttling starts.
     """
     try:
         zones = sorted(os.listdir(_THERMAL_ROOT))
@@ -127,10 +118,9 @@ def temperature_c():
 def memory():
     """(used_gb, total_gb) or None. MemAvailable, not MemFree.
 
-    MemFree counts only untouched pages and reads alarmingly low on any machine
-    that has been up a while, because the kernel is using the rest for cache it
-    would hand back instantly. MemAvailable is the kernel's own estimate of
-    what a new process could actually get, which is the question being asked.
+    MemFree reads alarmingly low on any machine that has been up a while (the
+    kernel keeps the rest as cache it would hand back instantly); MemAvailable is
+    the kernel's estimate of what a new process could get.
     """
     raw = _read(_MEMINFO)
     if not raw:
@@ -151,11 +141,8 @@ def memory():
 def disk(path="/"):
     """(free_gb, total_gb, path) for the filesystem holding `path`, or None.
 
-    AttributeError is caught alongside OSError because os.statvfs does not
-    exist at all on Windows — where nobody runs the boat, but where people do
-    develop the page. A reader that raises instead of returning None violates
-    this module's contract and, before snapshot() was made defensive, took the
-    entire dashboard down with it.
+    AttributeError is caught alongside OSError because os.statvfs does not exist
+    on Windows, where people develop the page.
     """
     try:
         st = os.statvfs(path)
@@ -172,20 +159,14 @@ _MOUNTINFO = "/proc/self/mountinfo"
 def mount_for(path):
     """Where `path` actually lives: (mountpoint, source, persists).
 
-    `persists` answers the only question that matters for recordings: will
-    this survive the container being recreated? A path on the container's own
-    root filesystem will NOT — `docker rm` takes it with it, and a session
-    recorded on the water is exactly the thing nobody wants to discover was
-    thrown away by a routine image rebuild.
+    `persists` answers the question that matters for recordings: will this
+    survive the container being recreated? A path on the container's own root
+    filesystem will NOT (`docker rm` takes it).
 
-    Read from /proc/self/mountinfo rather than guessed from the path string.
-    The alternative is hardcoding "anything under /root/robotx_ws is a bind
-    mount", which is true on this fleet today and silently wrong on the first
-    machine set up differently — and wrong in the direction that loses data.
-
-    The longest mountpoint that prefixes the path is the one it is on; that is
-    how the kernel resolves it, and shorter matches are ancestors. A result of
-    "/" means the container's own writable layer.
+    Read from /proc/self/mountinfo rather than guessed from the path string,
+    which would be silently wrong on a machine set up differently, in the
+    direction that loses data. The longest mountpoint that prefixes the path is
+    the one it is on; "/" means the container's own writable layer.
     """
     try:
         target = os.path.realpath(path)
@@ -214,13 +195,9 @@ def mount_for(path):
 def _safe(fn, *args):
     """Call a reader, turning ANY failure into None.
 
-    The readers are already written to return None, but "already written to"
-    is not a guarantee across five JetPack releases and two container layouts.
-    This dashboard shows six tabs from one /state document, so an exception
-    escaping a temperature probe does not degrade the system tab — it blanks
-    the whole page including the map and the node list. That happened the first
-    time this ran on a machine without os.statvfs, and one line of defence is
-    cheaper than being sure about every sysfs path on every image.
+    The readers already return None, but that is no guarantee across JetPack
+    releases and container layouts, and one exception escaping a probe blanks
+    the whole /state page (map and node list included).
     """
     try:
         return fn(*args)

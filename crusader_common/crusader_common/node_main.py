@@ -17,16 +17,14 @@ Fixes three defects of the naive init/spin/shutdown idiom:
 `executor_factory` exists for action servers. An rclpy action server whose
 execute_callback blocks CANNOT service the cancel request it is waiting on: the
 single-threaded executor is busy running the callback, so the cancel sits in the
-queue until the mission finishes on its own — which is precisely never, from the
-operator's point of view. Such a node passes `MultiThreadedExecutor()` here and
-puts its server in a ReentrantCallbackGroup. Every other node keeps the default
-single-threaded spin and is unaffected.
+queue until the mission ends on its own. Such a node passes
+`MultiThreadedExecutor()` here and puts its server in a ReentrantCallbackGroup;
+every other node keeps the default single-threaded spin.
 
-It is a FACTORY, not an executor, for the same reason node_factory is: an rclpy
-Executor grabs a GuardCondition from the global context in its constructor, so
-building one before rclpy.init() dies with a bare `AttributeError: __enter__`
-that names neither the executor nor init. Constructing it inside, after init,
-is the only order that works.
+It is a FACTORY, not an executor, like node_factory: an rclpy Executor grabs a
+GuardCondition from the global context in its constructor, so building one before
+rclpy.init() dies with a bare `AttributeError: __enter__`. Construct it after
+init.
 """
 import signal
 import sys

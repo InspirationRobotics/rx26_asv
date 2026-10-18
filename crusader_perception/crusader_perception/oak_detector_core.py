@@ -1,13 +1,12 @@
 """oak_detector_core — the ROS-free half of oak_detector.
 
 No rclpy, no depthai, no ultralytics, and no cv2 at module scope: crop geometry,
-association, voting and flash detection are all exercisable against invented
-inputs on a laptop, which is the only reason the logic below is trustworthy —
-none of it is verifiable by watching a live stream. `oak_detector.py` is the
-thin ROS wrapper (Format rule 3, same split as lidar_cluster_core/node).
+association, voting and flash detection are exercisable against invented inputs on
+a laptop, the only way to trust logic none of which is verifiable from a live
+stream. `oak_detector.py` is the thin ROS wrapper (Format rule 3, same split as
+lidar_cluster_core/node).
 
-Five sections below, one per pipeline stage, each headed by why it works the
-way it does. The short version:
+One section per pipeline stage, each headed by why it works the way it does:
 
   crops         what each stage is allowed to look at — and they differ
   marking_shape diamond vs circle, from the outline. No model.
@@ -15,9 +14,8 @@ way it does. The short version:
   LabelVoter    colour, smoothed. DESTROYS a flash; see the last section
   FlashTracker  flashing / solid / off, from how the light moves over time
 
-`import cv2` is function-local so this module imports with numpy alone — which
-is what lets tools/bench/bench_flash.py run on a laptop with no OpenCV, and what
-would let CI's import check cover it.
+`import cv2` is function-local so this module imports with numpy alone
+(tools/bench/bench_flash.py runs on a laptop with no OpenCV).
 """
 import numpy as np
 
@@ -39,20 +37,14 @@ MOD_STEADY_MAX = 0.20       # p90-p10 swing below which an abstention is
                             # `aperiodic` — diagnostic wording, nothing else
 
 
-# ==========================================================================
-# WHAT EACH STAGE IS ALLOWED TO LOOK AT
-# ==========================================================================
-# Three crops, three different jobs, and they are NOT interchangeable.
-#
-#   led_patch   the colour classifier's input: a tight box on the LED, resized to
-#               the engine's input size. Must match the training exporter exactly.
-#   buoy_patch  the shape stage's input: the whole buoy at native resolution,
-#               because a resize is what destroys the outline it measures.
-#
-# led_patch drifted from the exporter once — it cut a full-width top band while
-# 4_export.py cut buoylib's led_box — and a classifier measuring 98.6% on
-# held-out crops underperformed on the boat until the two matched. That failure
-# is silent: nothing errors, the answers just get worse.
+# ---------------------------------------------------------------- what each stage may look at
+# Two crops, two jobs, NOT interchangeable:
+#   led_patch   the colour classifier's input: a tight box on the LED, resized to the engine's
+#               input size. Must match the training exporter exactly: a full-width top band
+#               once drifted from 4_export.py's led_box, and a classifier measuring 98.6% on
+#               held-out crops silently underperformed on the boat.
+#   buoy_patch  the shape stage's input: the whole buoy at native resolution, because a
+#               resize destroys the outline it measures.
 
 
 def iou(a, b):
@@ -71,47 +63,31 @@ def led_patch(image, box, pad=0.10, top_frac=0.25, size=64, min_height_px=10,
               return_box=False):
     """The classifier's input for one detection, or None if the box is too small.
 
-    return_box=True gives (patch, (x0, y0, x1, y1)) with the box in FRAME pixels
-    — what the annotated stream should draw. It exists because the overlay used
-    to draw a rectangle computed independently of this function, so the picture
-    on screen and the picture the engine saw could disagree without anyone
-    noticing. They now come from the same line of code.
+    return_box=True gives (patch, (x0, y0, x1, y1)) with the box in FRAME pixels, what the
+    annotated stream should draw, so the overlay and the engine's picture come from one line.
 
-    THIS MUST CUT THE SAME PICTURE THE TRAINING EXPORTER CUT. It did not, and
-    that is why a classifier scoring 98.6% on the bench underperformed on the
-    boat. The exporter uses buoylib.led_box; this reproduces it from a detector
-    box, with no polygon available.
+    THIS MUST CUT THE SAME PICTURE THE TRAINING EXPORTER CUT (buoylib.led_box); this reproduces
+    it from a detector box, with no polygon available. A buoy is a truncated pyramid (wide base,
+    narrow flat top, LED on the top face), so a full-width band frames mostly sky and deck (27%
+    buoy vs 69% for the box below, measured on 29 real instances).
 
-    The old version took the top `top_frac` of the padded crop at FULL WIDTH. A
-    buoy is a truncated pyramid — wide at the base, narrow flat top, LED on that
-    top face — so a full-width band frames mostly sky and deck. Measured on 29
-    real instances the full-width band was 27% buoy and 73% background, against
-    69% buoy for the box below. The engine had never seen the former.
-
-    Cut in four steps:
-
-      1. pad the box by `pad` of its size on each side, as before.
-      2. ROWS START AT THE TOP OF THE BRIGHT REGION, not row 0. The pad puts
-         ~10% of background above the buoy, and starting at 0 pulls sky into
-         the LED band.
-      3. COLUMNS COME FROM THE APEX ONLY — the top 15% of the buoy — then
-         narrow to the centred 62%. Taking the extent over the whole band lets
-         the widest row set the width, and on a trapezoid that is the bottom
-         row.
+    Steps:
+      1. pad the box by `pad` of its size on each side.
+      2. ROWS START AT THE TOP OF THE BRIGHT REGION, not row 0: the pad puts ~10% background
+         above the buoy, which would pull sky into the LED band.
+      3. COLUMNS COME FROM THE APEX ONLY (top 15% of the buoy), then narrow to the centred
+         62%; the widest row would otherwise set the width, and on a trapezoid that is the
+         bottom.
       4. resize to `size` x `size`.
 
-    `top_frac` now means what the exporter's --crop-frac means: fraction of the
-    BUOY kept below the LED (0.25), not fraction of the crop taken off the top
-    (0.40). Change the param with the code.
+    `top_frac` means what the exporter's --crop-frac means: fraction of the BUOY kept below the
+    LED (0.25), not of the crop taken off the top. Change the param with the code. The exporter
+    takes rows/columns from a polygon mask and a detector box gives only pixels, so brightness
+    stands in for the outline, leaving a residual gap; closing it needs a maskless mode in
+    4_export.py and a retrain on the boat's own crop.
 
-    The exporter has a polygon and takes rows/columns from the mask; a detector
-    box gives only pixels, so brightness stands in for the outline. That leaves
-    a residual gap. To close it, add a maskless mode to 4_export.py and retrain
-    on the crop the boat actually produces.
-
-    Sampling is bilinear and OUT-OF-IMAGE PIXELS REPLICATE THE EDGE rather than
-    going black. A buoy at the top of the frame otherwise gets a black bar in
-    exactly the rows the LED lives in, and the classifier reads that as "off".
+    Sampling is bilinear and OUT-OF-IMAGE PIXELS REPLICATE THE EDGE rather than going black: a
+    black bar in the LED rows reads as "off".
     """
     import cv2                                   # not needed to import this file
 
@@ -173,10 +149,8 @@ def led_patch(image, box, pad=0.10, top_frac=0.25, size=64, min_height_px=10,
 def buoy_patch(image, box, pad=0.10, min_height_px=24):
     """The WHOLE padded box at native resolution — what the shape stage needs.
 
-    Deliberately not led_patch. The colour stage wants a tight LED box resized
-    to the engine's input; the shape stage wants the entire buoy at full
-    resolution, because it is measuring the outline of a marking a few dozen
-    pixels across and a resize is exactly what destroys that outline.
+    Deliberately not led_patch: the shape stage measures the outline of a marking a few dozen
+    pixels across, and a resize is what destroys it.
     """
     import cv2                                   # not needed to import this file
 
@@ -193,20 +167,13 @@ def buoy_patch(image, box, pad=0.10, min_height_px=24):
                              ((x1 + x2) / 2.0, (y1 + y2) / 2.0))
 
 
-# ==========================================================================
-# STAGE 2 — SHAPE, measured rather than predicted
-# ==========================================================================
-# No model. The 4th harmonic of r(theta) after whitening the outline by its own
-# second moments, plus the bounding-box fill ratio, and the two must agree or it
-# abstains.
-#
-# The whitening is what survives a yawed buoy: a foreshortened circle is an
-# ellipse, and an ellipse has a real 4th harmonic — at 66 deg of yaw a RAW circle
-# measures h4 = 0.068, squarely in diamond territory. Rescaled by its own
-# covariance it measures 0.003, and the two classes never meet.
-#
-# The marking is found as a HOLE in the hull rather than by thresholding
-# darkness, so a shadow on the deck or the water is never a candidate.
+# ---------------------------------------------------------------- STAGE 2: shape, measured not predicted
+# No model: the 4th harmonic of r(theta) after whitening the outline by its own second moments,
+# plus the bounding-box fill ratio; the two must agree or it abstains.
+# The whitening is what survives a yawed buoy: a foreshortened circle is an ellipse with a real
+# 4th harmonic (raw h4 = 0.068 at 66 deg yaw, squarely diamond; whitened 0.003).
+# The marking is found as a HOLE in the hull, not by thresholding darkness, so a shadow on the
+# deck or the water is never a candidate.
 
 # Decision constants. MUST match buoylib's, or the bench stops predicting the
 # boat. Ranges in the comments are measured, not assumed.
@@ -372,13 +339,9 @@ def marking_shape(crop, names=("circle", "diamond"),
 class ShapeVoter:
     """Per-track majority vote over `marking_shape` calls.
 
-    The geometric test abstains often — a buoy at range, edge-on, or with the
-    marking in shadow all return None — and it can flip frame to frame at the
-    boundary. A track sees the same buoy dozens of times, so vote.
-
-    Abstentions are NOT votes. A frame that could not tell should neither help
-    nor hurt; counting them as evidence for anything is how "cannot see it yet"
-    turns into a confident wrong answer at range.
+    The geometric test abstains often (range, edge-on, shadow) and can flip at the boundary, so
+    a track votes over its many sightings. Abstentions are NOT votes: counting them as evidence
+    is how "cannot see it yet" becomes a confident wrong answer at range.
     """
 
     def __init__(self, min_share=0.6, min_votes=3):
@@ -407,16 +370,10 @@ class ShapeVoter:
                 del self.counts[k]
 
 
-# ==========================================================================
-# STAGE 3 — IDENTITY, one buoy across frames
-# ==========================================================================
-# Greedy IoU association. Not a real tracker: buoys are slow, few, and rarely
-# occlude each other, and the association that actually matters happens
-# downstream in crusader_world_model, in the world frame, against pose. This one
+# ---------------------------------------------------------------- STAGE 3: identity, one buoy across frames
+# Greedy IoU association, not a real tracker: buoys are slow and rarely occlude, and the
+# association that matters happens downstream in crusader_world_model, in the world frame. This
 # only has to hold an identity long enough to vote on it.
-#
-# Ids are never reused, matching TrackedTarget's rule: a stored reference to
-# "track 7" can never be silently re-pointed at a different buoy.
 
 
 class TrackTable:
@@ -469,33 +426,24 @@ class TrackTable:
         return set(self.tracks)
 
 
-# ==========================================================================
-# STAGE 4 — COLOUR OVER TIME
-# ==========================================================================
-# A single frame's colour flickers: an LED strip is a handful of pixels at
-# range and one frame of glare reads as a different colour. Decayed accumulation
-# lets a confident observation outweigh several ambiguous ones while still being
-# able to change its mind, which a plain majority vote cannot.
-#
-# Memory is 1/(1-decay) frames. Set decay=0.0 and min_vote=0.0 to turn it off and
-# see the raw per-frame argmax.
-#
+# ---------------------------------------------------------------- STAGE 4: colour over time
+# A single frame's colour flickers (an LED strip is a handful of pixels at range). Decayed
+# accumulation lets a confident observation outweigh several ambiguous ones while still being
+# able to change its mind, which a plain majority vote cannot. Memory is 1/(1-decay) frames;
+# decay=0.0 and min_vote=0.0 turn it off (raw per-frame argmax).
 # THIS DESTROYS A FLASH, which is why FlashTracker bypasses it entirely.
 
 
 class LabelVoter:
     """Per-track exponentially decayed accumulation of class probabilities.
 
-    `update` returns (label, confidence). The label is None until the winning
-    class clears `min_vote` — an unresolved colour is reported as unresolved
-    rather than as a guess, because downstream a wrong colour is worse than no
-    colour (a gate is defined by which colour is on which side).
+    `update` returns (label, confidence). The label is None until the winning class clears
+    `min_vote`: an unresolved colour is reported as unresolved, not guessed, because downstream
+    a wrong colour is worse than none (a gate is defined by which colour is on which side).
 
-    SET decay=0.0, min_vote=0.0 TO TURN VOTING OFF: the accumulator becomes this
-    frame's probabilities and you get the raw per-frame argmax. That is the
-    honest way to look at what the engine is actually saying, and it is what
-    FlashTracker needs — smoothing averages a flashing light into whichever of
-    {colour, off} happens to dominate, which is exactly the signal we want.
+    SET decay=0.0, min_vote=0.0 TO TURN VOTING OFF: the accumulator becomes this frame's
+    probabilities, the raw per-frame argmax. FlashTracker needs that, since smoothing averages
+    a flashing light into whichever of {colour, off} dominates.
     """
 
     def __init__(self, classes, decay=0.85, min_vote=0.55):
@@ -528,30 +476,19 @@ class LabelVoter:
                 del self.accumulated[track_id]
 
 
-# ==========================================================================
-# STAGE 5 — LIGHT STATE OVER TIME
-# ==========================================================================
-# A flashing buoy's off-phase is pixel-identical to an unlit buoy, so no single
-# frame can tell them apart and no per-frame model can learn to. It is a property
-# of a track.
-#
-# NOT decided by duty cycle. A 1 s ON / 1 s OFF light averages 0.5 lit — and so
-# does a classifier hedging at 0.5 on every frame, which is how this classifier
-# actually fails (27% recall on `off`, measured on a held-out session). Duty
-# cannot separate them.
-#
-# What separates them is whether the signal MOVES LIKE A LIGHT: anti-correlation
-# at half the flash period. A square wave scores ~1.0 there, noise ~0. That test
-# is SCALE-FREE, so a barely-visible green flash swinging 0.52 to 0.47 passes as
-# easily as a bright red one swinging 1.0 to 0.0 — which matters, because green's
-# entire margin over an unlit hull is +6 saturation points.
-#
-# Level is asked second, and only decides solid vs off. The gap between off_max
-# and solid_min is a deliberate dead band: mistaking Task 1's solid-blue EXIT for
-# its flashing-blue ENTRY sends the boat to the wrong end of the course, so
-# refusing to answer is much cheaper than answering wrongly.
-#
-# SAMPLING FLOOR: 2 fps, measured. Below that it reports `unknown`.
+# ---------------------------------------------------------------- STAGE 5: light state over time
+# A flashing buoy's off-phase is pixel-identical to an unlit buoy, so no per-frame model can
+# tell them apart; it is a property of a track.
+# NOT decided by duty cycle: a 1 s ON / 1 s OFF light averages 0.5 lit, and so does a classifier
+# hedging at 0.5 on every frame (how it actually fails: 27% recall on `off`, measured).
+# What separates them is whether the signal MOVES LIKE A LIGHT: anti-correlation at half the
+# flash period (square wave ~1.0, noise ~0). That test is SCALE-FREE, so a barely-visible green
+# flash (0.52 to 0.47; green's whole margin over an unlit hull is +6 saturation points) passes
+# as easily as a bright red one.
+# Level is asked second and only decides solid vs off. The gap between off_max and solid_min is
+# a deliberate dead band: mistaking Task 1's solid-blue EXIT for its flashing-blue ENTRY sends
+# the boat to the wrong end of the course, so refusing to answer is much cheaper than answering
+# wrongly. SAMPLING FLOOR: 2 fps, measured; below that it reports `unknown`.
 
 
 class FlashState:
@@ -581,24 +518,17 @@ class FlashState:
             off        off_diamond
             no colour  diamond
 
-        SOLID IS THE UNMARKED CASE, on purpose. Steady is what a light does
-        unless something is being signalled by it, so `flash_` is the word that
-        carries meaning and everything else reads as the plain object. Task 1's
-        ENTRY buoy stays distinguishable from its EXIT buoy — `flash_blue_circle`
-        against `blue_circle` — which is the one place the distinction decides
-        where the boat goes.
+        SOLID IS THE UNMARKED CASE, on purpose: `flash_` carries the meaning, so Task 1's ENTRY
+        buoy stays distinguishable from its EXIT buoy (`flash_blue_circle` against `blue_circle`).
 
-        AN UNDECIDED STATE PUBLISHES AS SOLID, and that is a deliberate trade
-        rather than an oversight. Every track spends its first flash_min_span_s
-        as `unknown` because the window has not filled, so during those seconds
-        a flashing buoy reads as a steady one. Downstream that washes out:
-        target_tracker labels a track by MAJORITY VOTE over every sighting, and
-        four seconds of the wrong answer loses against minutes of the right one.
+        AN UNDECIDED STATE PUBLISHES AS SOLID, a deliberate trade: every track spends its first
+        flash_min_span_s as `unknown` (window not full), so a flashing buoy reads as steady for
+        that time. Downstream that washes out: target_tracker labels by MAJORITY VOTE over every
+        sighting, and four seconds of wrong loses against minutes of right.
 
-        What it does mean: do not branch on a track younger than
-        flash_min_span_s. If you need certainty now rather than eventually,
-        crsd/oak_detector_health carries the state, the basis and the sample
-        count per track, and `unknown` is unambiguous there.
+        So do not branch on a track younger than flash_min_span_s. For certainty now,
+        crsd/oak_detector_health carries the state, basis and sample count per track, where
+        `unknown` is unambiguous.
         """
         if self.state == "off":
             parts = ["off"]
@@ -642,10 +572,9 @@ class FlashTracker:
     def modulation(scores):
         """How much the light SWINGS over the window, 0..1.
 
-        p90 - p10 of the lit score, not max - min: one misclassified frame in a
-        180-frame window would take max-min to 1.0 and call a dead buoy
-        flashing. The percentile pair ignores the tails and still sees a real
-        1 s ON / 1 s OFF cycle, which spends ~45% of the window at each end.
+        p90 - p10 of the lit score, not max - min: one misclassified frame in a 180-frame window
+        would take max-min to 1.0 and call a dead buoy flashing. The percentile pair ignores the
+        tails and still sees a real 1 s ON / 1 s OFF cycle (~45% of the window at each end).
         """
         if len(scores) < 4:
             return 0.0
@@ -653,26 +582,19 @@ class FlashTracker:
         return float(np.percentile(a, 90) - np.percentile(a, 10))
 
     def periodicity(self, history):
-        """-> anti-correlation at half the flash period, 0..1. Higher = more
-        like a square wave at the expected rate.
+        """-> anti-correlation at half the flash period, 0..1. Higher = more like a square wave
+        at the expected rate.
 
-        THIS IS THE TEST THAT AMPLITUDE CANNOT DO. A weak flash (the lit score
-        wobbling 0.60 to 0.35, which is what a barely-separated green LED
-        produces) and a classifier hedging with noise both swing about 0.25.
-        Nothing about the SIZE of the swing tells them apart -- measured, by
-        sweeping the modulation threshold: every value either accepted both or
-        rejected both.
+        THIS IS THE TEST THAT AMPLITUDE CANNOT DO: a weak flash (lit score 0.60 to 0.35, a
+        barely-separated green LED) and a classifier hedging with noise both swing about 0.25,
+        and sweeping the modulation threshold either accepted both or rejected both. What
+        differs is SHAPE: a 1 s ON / 1 s OFF light is always the opposite of what it was one
+        second earlier (correlation at lag = period/2 near -1), noise has no memory (near 0),
+        and correlation is scale-free.
 
-        What differs is SHAPE. A 1 s ON / 1 s OFF light is, one second later,
-        always the opposite of what it was: correlation at lag = period/2 is
-        near -1. Noise has no memory, so its correlation is near 0. And
-        correlation is scale-free, so a 0.25-amplitude flash scores exactly as
-        strongly as a 1.0-amplitude one.
-
-        Samples arrive at irregular times (the node's frame rate wanders), so
-        the history is resampled onto a uniform grid first. Returns 0.0 rather
-        than guessing whenever the window is too short or too sparse to support
-        the lag being asked about.
+        Samples arrive at irregular times, so the history is resampled onto a uniform grid
+        first. Returns 0.0 rather than guessing when the window is too short or sparse for the
+        lag asked.
         """
         if len(history) < 8:
             return 0.0
@@ -747,52 +669,39 @@ class FlashTracker:
 
         THREE QUESTIONS, IN THIS ORDER, AND THE ORDER IS THE DESIGN.
 
-        1. Does it sit still?  ->  the mean decides: solid, off, or (parked in
-           the middle and not moving) `unknown`. That last case is a classifier
-           with no idea, and duty alone would have called it FLASHING, because a
-           model hedging at 0.5 every frame averages exactly what a real 1 s ON
-           / 1 s OFF light averages.
+        1. Does it move like a LIGHT?  ->  anti-correlation at half the flash period. Scale-free,
+           so a barely-visible green flash scores like a bright red one, while noise of any
+           amplitude scores near zero.
+        2. Not periodic. Is the LEVEL decisive?  ->  the mean decides solid or off.
+        3. Mid-range and not periodic  ->  `unknown`: a classifier with no idea, which duty
+           alone would have called FLASHING.
 
-        2. It moves. Does it move like a LIGHT?  ->  anti-correlation at half
-           the flash period. Scale-free, so a barely-visible green flash scores
-           as strongly as a bright red one, while noise of any amplitude scores
-           near zero.
-
-        3. Moves, but not periodically  ->  `unknown`.
-
-        THE DEAD BANDS ARE DELIBERATE. Mistaking Task 1's solid-blue EXIT for
-        its flashing-blue ENTRY sends the boat to the wrong end of the course,
-        so refusing to answer is much cheaper than answering wrongly.
+        THE DEAD BANDS ARE DELIBERATE: mistaking Task 1's solid-blue EXIT for its flashing-blue
+        ENTRY sends the boat to the wrong end of the course, so refusing to answer is much
+        cheaper than answering wrongly.
         """
-        # 1. Does it move like a LIGHT? Asked FIRST, because this test is
-        #    SCALE-FREE and a level test is not. A barely-separated green LED
-        #    wobbling 0.55 to 0.42 swings less than some hedging noise, so any
-        #    amplitude gate placed first would file it as "not moving" and the
-        #    periodicity test would never run on the case that needs it most.
+        # 1. Does it move like a LIGHT? Asked FIRST: the test is SCALE-FREE and a level test is
+        #    not. A barely-separated green LED (0.55 to 0.42) swings less than some hedging
+        #    noise, so an amplitude gate placed first would file it "not moving" and never run
+        #    the periodicity test on the case that needs it most.
         if period >= self.flash_corr_min:
             near = 1.0 - min(1.0, abs(duty - 0.5) / FLASH_BALANCE_SPAN)
             return "flashing", max(0.15, 0.5 * period + 0.5 * near), "periodic"
 
-        # 2. Not periodic. Is the LEVEL decisive on its own?
-        #    Modulation deliberately does NOT gate this. An earlier version
-        #    required the signal to be quiet before it would read the mean, and
-        #    that was wrong at both ends: a genuinely solid light seen through a
-        #    noisy classifier swings enough to fail a quietness test, and then a
-        #    buoy lit 90% of the time came back `unknown` when nothing about
-        #    that reading is ambiguous. Noise moves the mean very little; it is
-        #    only in the MIDDLE that noise and a real signal are confusable, and
-        #    the dead band already covers the middle.
+        # 2. Not periodic. Is the LEVEL decisive on its own? Modulation deliberately does NOT
+        #    gate this: a solid light seen through a noisy classifier swings enough to fail a
+        #    quietness test, and a buoy lit 90% of the time would come back `unknown`. Noise
+        #    moves the mean very little; only in the MIDDLE are noise and signal confusable,
+        #    and the dead band covers the middle.
         if duty >= self.solid_min:
             return "solid", (duty - self.solid_min) / max(
                 1.0 - self.solid_min, 1e-6), "level"
         if duty <= self.off_max:
             return "off", 1.0 - duty / max(self.off_max, 1e-6), "level"
 
-        # 3. Middle of the range and not periodic. This is a classifier with no
-        #    idea, and duty ALONE would have called it flashing. `mod` is
-        #    reported so you can tell the two apart on the debug log: a hedging
-        #    model sits flat, a light the tracker merely failed to lock onto
-        #    does not.
+        # 3. Middle of the range and not periodic: a classifier with no idea (duty ALONE would
+        #    have called it flashing). `mod` is reported so the debug log can tell a hedging
+        #    model (flat) from a light the tracker failed to lock onto (not flat).
         return "unknown", 0.0, ("steady-but-unsure" if mod <= MOD_STEADY_MAX
                                 else "aperiodic")
 

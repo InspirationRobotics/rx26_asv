@@ -7,56 +7,45 @@ Procedure and results: docs/G2_lidar_orientation.md.
     python3 tools/lidar_view.py                   # body frame, forward 180 deg
     python3 tools/lidar_view.py --frame raw       # what the driver actually sends
 
-Then open http://<JETSON_IP>:8081. Port 8081, NOT 8080 — buoy_detector's
-annotated view and oak_view.py already contend for that one.
+Then open http://<JETSON_IP>:8081. Port 8081, NOT 8080 — buoy_detector's annotated view and
+oak_view.py already contend for that one.
 
-TABS, not a split canvas. Plan and Elevation each get the full window; "Both"
-puts them side by side when you want to compare. Only the visible tab streams —
-switching clears the <img> src, which drops the old connection — and a panel
-nobody is watching is never rendered or encoded at all.
+TABS, not a split canvas: Plan and Elevation each get the full window ("Both" puts them side by
+side). Only the visible tab streams (switching clears the <img> src, dropping the old
+connection), and a panel nobody is watching is never rendered or encoded.
 
-  Plan       x-y, looking down. x forward is UP the screen, y left is LEFT —
-             the nautical convention, so a target on the port bow belongs in the
-             upper-left and nowhere else. THIS is the orientation check.
-  Elevation  x-z, from starboard. x forward is RIGHT, z up is UP. The
-             ground/water plane must sit BELOW the sensor marker; if it is
-             above, the z sign is wrong.
+  Plan       x-y, looking down. x forward is UP the screen, y left is LEFT — the nautical
+             convention, so a target on the port bow belongs in the upper-left and nowhere else.
+             THIS is the orientation check.
+  Elevation  x-z, from starboard. x forward is RIGHT, z up is UP. The ground/water plane must sit
+             BELOW the sensor marker; if it is above, the z sign is wrong.
 
-WHAT IS FILTERED, and why both filters run in the RAW sensor frame (so the raw
-and body views show the same population and stay comparable):
+WHAT IS FILTERED, both in the RAW sensor frame (so the raw and body views show the same
+population):
 
-  --r-min 0.5   a clear sphere around the sensor. The mount, the cabling and the
-                deck immediately under the LiDAR return constantly; they are not
-                the world, and left in they cluster as a permanent obstacle at
-                arm's length.
-  --fov 180     forward sector only. The LiDAR is at the bow and the hull blocks
-                most of the view aft of the beam, so returns behind it are the
-                boat's own structure.
+  --r-min 0.5   a clear sphere around the sensor: the mount, cabling and deck under the LiDAR
+                return constantly and would cluster as a permanent obstacle at arm's length.
+  --fov 180     forward sector only: the LiDAR is at the bow and the hull blocks most of the view
+                aft of the beam, so returns behind it are the boat's own structure.
 
-Both are drawn on the plan panel — the clear-zone circle and the FOV wedge edges
-— so what was excluded is visible rather than implied. `--fov 360 --r-min 0`
-shows the unfiltered cloud.
+Both are drawn on the plan panel (clear-zone circle, FOV wedge edges) so what was excluded is
+visible. `--fov 360 --r-min 0` shows the unfiltered cloud.
 
-With --fov <= 180 the plan panel puts the boat at the BOTTOM and spends its full
-height on the range ahead, twice the resolution of a centred 360 view whose
-lower half is hull. Both axes keep the same scale, so range rings still match a
-tape measure; the trade is lateral coverage of +/-range/2, printed on the panel.
+With --fov <= 180 the plan panel puts the boat at the BOTTOM and spends its full height on the
+range ahead, twice the resolution of a centred 360 view whose lower half is hull. Both axes keep
+one scale, so range rings still match a tape measure; the trade is lateral coverage of
++/-range/2, printed on the panel.
 
-MESSAGE TYPE. The Livox driver publishes `sensor_msgs/PointCloud2` when its
-`xfer_format` is 0 and `livox_ros_driver2/CustomMsg` when it is 1. ROS 2 matches
-NOTHING across types, so a subscriber guessing wrong sees perfect-looking output
-from `ros2 topic list`/`ros2 topic info` and receives not one message. This tool
-looks up the publisher's actual type before subscribing, reads either, and says
-plainly which it found. `ros2 topic info -v /livox/lidar` shows the same per
-endpoint, plus QoS.
+MESSAGE TYPE. The Livox driver publishes `sensor_msgs/PointCloud2` when `xfer_format` is 0 and
+`livox_ros_driver2/CustomMsg` when it is 1, and ROS 2 matches NOTHING across types: a subscriber
+guessing wrong sees a perfect `ros2 topic list` and receives not one message. This tool looks up
+the publisher's actual type before subscribing, reads either, and says which it found
+(`ros2 topic info -v /livox/lidar` shows the same per endpoint, plus QoS). Prefer `xfer_format:
+0`: PointCloud2 is the standard type, `asv` needs no livox package to deserialise it, and it
+decodes as a numpy stride view instead of a Python loop over 20k objects.
 
-Prefer `xfer_format: 0`. PointCloud2 is the standard type, rviz and every ROS
-tool speak it, `asv` needs no livox package to deserialise it, and it decodes as
-a numpy stride view instead of a Python loop over 20k objects.
-
-REQUIREMENTS: rclpy + sensor_msgs + numpy + cv2 — i.e. the `asv` container.
-Run it there, with --network host, or DDS will not see the livox container's
-publisher.
+REQUIREMENTS: rclpy + sensor_msgs + numpy + cv2 — i.e. the `asv` container. Run it there, with
+--network host, or DDS will not see the livox container's publisher.
 """
 import argparse
 import math
@@ -91,15 +80,13 @@ DEFAULT_PORT = 8081                       # 8080 belongs to the camera views
 DEFAULT_PANEL = 700                       # px per panel
 JPEG_QUALITY = 75
 
-# Extrinsic fallback. Overridden by crusader_params.yaml once
-# `lidar_cluster_node` exists there, and by CLI flags always.
+# Extrinsic fallback. Overridden by crusader_params.yaml once `lidar_cluster_node` exists there,
+# and by CLI flags always.
 #
-# sign_y = -1 is BENCH-CONFIRMED (G2, 2026-08-14): the raw frame has +y to
-# STARBOARD, so it negates into REP-103's y-left. Resources.md originally
-# described the mount as "y left, z down", which is left-handed and could not
-# come from rotating a rigid sensor; the truth is the plain 180-degree roll
-# about the forward axis, giving x forward / y right / z down. Right-handed,
-# and consistent with what "mounted upside down" physically means.
+# sign_y = -1 is BENCH-CONFIRMED (G2): the raw frame has +y to STARBOARD, so it negates into
+# REP-103's y-left. The mount is the plain 180-degree roll about the forward axis (x forward / y
+# right / z down), right-handed; Resources.md's "y left, z down" is left-handed and could not come
+# from rotating a rigid sensor.
 _P = ClusterParams()          # the node's defaults, not a second opinion
 FALLBACK_EXTRINSIC = dict(sign_y=_P.sign_y, sign_z=_P.sign_z,
                           x=_P.tx, y=_P.ty, z=_P.tz)
@@ -115,9 +102,8 @@ CLIP = (70, 70, 110)                      # filter boundaries (FOV wedge, clear 
 def load_extrinsic():
     """crusader_params.yaml's copy if it is reachable, else FALLBACK_EXTRINSIC.
 
-    Returns (dict, source_str). Never raises: this is a bench tool that has to
-    start before the node it is checking exists, and a hard failure here would
-    just send someone to rviz2.
+    Returns (dict, source_str). Never raises: this bench tool has to start before the node it is
+    checking exists.
     """
     try:
         from crusader_common import config as crsd_config
@@ -142,10 +128,9 @@ def as_params(ext: dict) -> ClusterParams:
 def custommsg_to_xyz(msg) -> np.ndarray:
     """(N,3) xyz from a livox_ros_driver2/CustomMsg.
 
-    CustomPoint carries x/y/z as plain float32 members, so this is a straight
-    read — but it is a Python loop over ~20k objects per sweep (~10-30 ms),
-    where the PointCloud2 path is a numpy stride view. Fine for a viewer at
-    10 Hz; the clustering node should be fed PointCloud2 (xfer_format: 0).
+    CustomPoint carries x/y/z as plain float32 members, so this is a straight read, but a Python
+    loop over ~20k objects per sweep (~10-30 ms); fine for a viewer at 10 Hz. The clustering node
+    should be fed PointCloud2 (xfer_format: 0).
     """
     pts = msg.points
     if not pts:
@@ -157,12 +142,11 @@ def custommsg_to_xyz(msg) -> np.ndarray:
 
 
 def pointcloud2_to_xyz(msg: PointCloud2) -> np.ndarray:
-    """Extract (N,3) float32 xyz from a PointCloud2, tolerant of extra fields
-    (Livox adds intensity/tag/line). Assumes little-endian float32 x/y/z.
+    """Extract (N,3) float32 xyz from a PointCloud2, tolerant of extra fields (Livox adds
+    intensity/tag/line). Assumes little-endian float32 x/y/z.
 
-    Hand-rolled rather than sensor_msgs_py.point_cloud2.read_points: that helper
-    builds a structured array per call and is far slower than a stride view at
-    20k points a sweep.
+    Hand-rolled: sensor_msgs_py.point_cloud2.read_points builds a structured array per call, far
+    slower than a stride view at 20k points a sweep.
     """
     offs = {f.name: f.offset for f in msg.fields}
     if not all(k in offs for k in ("x", "y", "z")):
@@ -374,13 +358,9 @@ class LidarView(Node):
         self.last_stats = ""
         self.sub = None
 
-        # Subscription is DEFERRED until the publisher's type is known. The
-        # Livox driver publishes livox_ros_driver2/CustomMsg when xfer_format=1
-        # and sensor_msgs/PointCloud2 when xfer_format=0, and ROS 2 matches
-        # nothing across types: `ros2 topic info` shows the publisher, `ros2
-        # topic list` looks perfect, and not one message arrives. Guessing the
-        # type and then reporting "no clouds yet" describes the symptom and
-        # hides the cause.
+        # Subscription is DEFERRED until the publisher's type is known (see MESSAGE TYPE in the
+        # module docstring): guessing the type and reporting "no clouds yet" describes the symptom
+        # and hides the cause.
         self._resolve_timer = self.create_timer(1.0, self._resolve)
         self.create_timer(5.0, self._health)
 

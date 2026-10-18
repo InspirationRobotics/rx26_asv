@@ -9,10 +9,10 @@ Publishes:
   /tf                   map -> base_footprint     - at each new pose stamp, finite heading only
   /crsd/nav/frames_health  std_msgs/String (JSON) - 1 Hz, for humans
 
-THE ONE RULE. The TF frame `map`, bt_runner's east/north frame and every
-HazardArray coordinate are the same equirectangular ENU plane centred on one
-datum (frames_core.to_local). This node is the only place the datum is chosen;
-bt_runner adopts it from /crsd/datum, so there is no second origin to disagree.
+THE ONE RULE. TF `map`, bt_runner's east/north frame and every HazardArray
+coordinate are one equirectangular ENU plane on one datum (frames_core.to_local).
+This node is the only place the datum is chosen; bt_runner adopts it from
+/crsd/datum, so there is no second origin to disagree.
 
 WHY NO TRANSFORM WITHOUT A HEADING. A NaN heading means GPS yaw is unresolved,
 and a transform with a made-up yaw would place every LiDAR point wrongly while

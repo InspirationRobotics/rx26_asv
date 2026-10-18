@@ -7,10 +7,8 @@
 # and the clockwise ENTRY orbit must still complete. Pass: referee PASS,
 # black_entry centre-to-surface >= 0.73 m.
 
-# RXL_SAFE_PASSAGE carries at most 10 buoys (robotx dialect, array length 10), so the
-# obstacle REPLACES task1_core's black1 (27, 8), which is off every leg,
-# rather than adding an 11th: with 11 the UAV stand-in cannot
-# send the field and the tree fails at once (found 2026-10-01).
+# RXL_SAFE_PASSAGE carries at most 10 buoys (see task1_avoid.yaml), so the obstacle REPLACES
+# task1_core's black1 (27, 8), which is off every leg, rather than adding an 11th.
 
 name: task1_entry_black
 origin: {lat: 1.28060, lon: 103.85570}   # = tools/sitl/start_sitl.sh SITL_HOME

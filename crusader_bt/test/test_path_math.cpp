@@ -121,7 +121,6 @@ int main()
 {
   const NavParams P;      // the defaults ARE the yaml's, so the tests pin the defaults
 
-  // ----------------------------------------------- 1. clearance: signs, keepout
   std::printf("1. clearance\n");
   {
     const Hazard c = circle(1, 0, 0, 0.3);
@@ -147,7 +146,6 @@ int main()
       minClearance({circle(1, 10, 0, 0.3), circle(2, 3, 0, 0.3)}, {0, 0}), 2.7, 1e-12);
   }
 
-  // --------------------------------------------------------- 2. buildHazards
   std::printf("2. buildHazards\n");
   {
     std::vector<nav::Buoy> buoys{
@@ -204,7 +202,6 @@ int main()
     chk_near("... and at 1.25 m to the side", clearance(d[2], {21.75, -0.5}), 0.5, 1e-9);
   }
 
-  // ---------------------------------------------------------------- 3. exempt
   std::printf("3. exempt\n");
   {
     std::vector<Hazard> hz{
@@ -237,7 +234,6 @@ int main()
       ids(exempt(hz, {99}, false, 1.0)).size() == hz.size());
   }
 
-  // -------------------------------------------- 4. segmentClear, firstConflict
   std::printf("4. segmentClear and firstConflict\n");
   {
     const std::vector<Hazard> hz{circle(1, 5, 0, 0.3)};
@@ -269,7 +265,6 @@ int main()
     chk("closestIndex of an empty path is 0", closestIndex({}, {1, 1}, 5) == 0);
   }
 
-  // ------------------------------------------------------------ 5. pushGoalOut
   std::printf("5. pushGoalOut\n");
   {
     const std::vector<Hazard> hz{circle(1, 50, 0, 0.3)};
@@ -292,7 +287,6 @@ int main()
       near2c(far_from.p, {51.45, 0}));
   }
 
-  // ------------------------------------------------------------ 6. clipToWindow
   std::printf("6. clipToWindow\n");
   {
     const Vec2 a = clipToWindow({100, 0}, {0, 0}, 35.0);
@@ -308,7 +302,6 @@ int main()
     chk("exactly on the radius is inside", d.x == 35.0);
   }
 
-  // ------------------------------------------------------------- 7. escapeStart
   std::printf("7. escapeStart\n");
   {
     // A boat 0.5 m off a buoy's SURFACE (0.8 m from its centre: inside hard = 0.8).
@@ -348,7 +341,6 @@ int main()
     chk("boxed in by four buoys: needed, and ok = false", bx.needed && !bx.ok);
   }
 
-  // ---------------------------------------------------------------- 8. carrot
   std::printf("8. carrot\n");
   {
     const std::vector<Vec2> l = line(0, 30);
@@ -393,7 +385,6 @@ int main()
     chk("one vertex: that vertex, is_end", carrot({{7, 7}}, {0, 0}, 0, {}, P).is_end);
   }
 
-  // ---------------------------------------------------------------- 9. preferNew
   std::printf("9. preferNew\n");
   {
     chk("10 % shorter is kept (not switched)", !preferNew(true, 100, 90, 0.2, 3.0));
@@ -405,7 +396,6 @@ int main()
     chk("a longer path never replaces a valid one", !preferNew(true, 100, 120, 0.2, 3.0));
   }
 
-  // --------------------------------------------------------------- 10. orbitRing
   std::printf("10. orbitRing\n");
   {
     const Vec2 anchor{0, 0};
@@ -440,11 +430,10 @@ int main()
       orbitRing(anchor, anchor, 4.0, 8, true)[0].x > 3.9);
   }
 
-  // --------------------------------------------- 10b. orbitRing, overshoot_deg
-  // Each hop is "arrived" within the leg tolerance (2 m at a 6 m ring is ~19 degrees), so
-  // a ring that stops at exactly 360 closes ~340 and an off-start approach loses more
-  // (task1_blocked_exit scored 328 against the referee's 330). The ring runs past the
-  // start by overshoot_deg, the same way round.
+  // Each hop is "arrived" within the leg tolerance (2 m at a 6 m ring is ~19
+  // degrees), so a ring that stops at exactly 360 closes ~340 and an off-start
+  // approach loses more. The ring runs past the start by overshoot_deg, the same
+  // way round.
   std::printf("10b. orbitRing, overshoot_deg\n");
   {
     const Vec2 anchor{0, 0};
@@ -519,7 +508,6 @@ int main()
       unwound_deg(anchor, orbitRing(anchor, {0, 20}, 4.0, 8, true, 1e9)), -720.0, 1e-6);
   }
 
-  // -------------------------------------------------------------- 11. adjustRing
   std::printf("11. adjustRing\n");
   {
     const Vec2 anchor{0, 0};
@@ -579,7 +567,6 @@ int main()
       same_points({gone_extra.back()}, {over[0]}) && same_points({gone_extra.front()}, {over[0]}));
   }
 
-  // ------------------------------------------------------ 12. projection parity
   std::printf("12. projection parity (spec 3.2; WP3's Python test pins the same literal)\n");
   {
     const nav::LatLon datum{1.2806, 103.8557};

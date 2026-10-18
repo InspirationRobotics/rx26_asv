@@ -11,11 +11,11 @@
        /crsd/guided_setpoint   (GuidedSetpoint)  ONLY when publish_setpoints
 
 THE MISSION IS CURRENTLY EMPTY, ON PURPOSE. Every phase is a dwell (see
-safe_passage_core), and `publish_setpoints` defaults FALSE, so this node cannot
-move the boat. What it does exercise is the workflow that has to work before any
-navigation logic is worth writing — goal accepted, feedback streaming, cancel
-honoured promptly, result returned, tree advances — plus the three ways a run
-ends badly, on the real vehicle, with real HEARTBEAT.
+safe_passage_core) and `publish_setpoints` defaults FALSE, so this node cannot
+move the boat. It exercises the workflow that must work before any navigation
+logic is worth writing (goal accepted, feedback streaming, cancel honoured
+promptly, result returned, tree advances) plus the three ways a run ends badly,
+on the real vehicle, with real HEARTBEAT.
 
 THREE THINGS THAT ARE NOT SCAFFOLDING, and will not change when the mission
 fills in:
@@ -30,16 +30,14 @@ fills in:
    obey (SET_POSITION_TARGET_* is ignored outside GUIDED). Neither alone.
 
 3. **One goal at a time.** A second goal is REJECTED, not queued and not
-   preempting. Two missions steering one boat is not a state anyone can reason
-   about at a dock, and a queue would let a goal sit invisible behind a running
-   one until long after whoever sent it stopped watching.
+   preempting: two missions steering one boat is not a state anyone can reason
+   about at a dock.
 
-CANCEL. Written first, because a cancel that arrives late is a cancel that does
-not work. The server runs under a MultiThreadedExecutor with its action server
-in a ReentrantCallbackGroup: without both, execute_callback blocks the executor
-that would have to service the cancel, and the cancel is only noticed when the
-mission ends by itself. The loop checks cancel at the TOP of every tick, so the
-worst-case latency is one tick (default 10 Hz), not one phase.
+CANCEL. Written first, because a cancel that arrives late does not work. The
+server runs under a MultiThreadedExecutor with its action server in a
+ReentrantCallbackGroup: without both, execute_callback blocks the executor that
+would have to service the cancel. The loop checks cancel at the TOP of every
+tick, so worst-case latency is one tick (default 10 Hz), not one phase.
 """
 import time
 
@@ -82,9 +80,9 @@ PARAM_SPEC = {
                           description="per-phase seconds, as 'PHASE:secs' strings"),
 }
 
-# Latched: a subscriber that starts after us must still learn the current value
-# rather than sit on a default. avoidance_enable especially — proximity_bridge
-# coming up mid-mission and defaulting to "off" would silently disarm avoidance.
+# Latched: a late-starting subscriber must learn the current value.
+# avoidance_enable especially: proximity_bridge coming up mid-mission and
+# defaulting to "off" would silently disarm avoidance.
 LATCHED = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                      durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
@@ -97,11 +95,10 @@ TASK_NONE = "TASK_NONE"
 def parse_phase_dwell(entries):
     """['APPROACH:8', 'OBSERVE:15'] -> {'APPROACH': 8.0, 'OBSERVE': 15.0}.
 
-    A list of strings rather than a nested dict because rcl's parameter types
-    are flat — there is no dict parameter, and encoding one as parallel
-    name/value arrays lets them drift out of step. Raises on a malformed entry
-    instead of skipping it: a typo that silently leaves a phase at its default
-    reads as "the parameter had no effect", which is a long afternoon.
+    A list of strings because rcl's parameter types are flat (parallel name/value
+    arrays can drift out of step). Raises on a malformed entry instead of
+    skipping it: a typo that silently leaves a phase at its default reads as "the
+    parameter had no effect".
     """
     out = {}
     for e in entries:
@@ -139,9 +136,8 @@ class SafePassageServer(Node):
                 "list this node could never be allowed to drive, and starting "
                 "it would only look like it might")
 
-        # Both caches use the shared pose_timeout_s: a mission trusting state
-        # for longer than telemetry_bridge vouches for it is the frozen-pose
-        # failure that value exists to prevent.
+        # Both caches use the shared pose_timeout_s: trusting state for longer than
+        # telemetry_bridge vouches for it is the frozen-pose failure.
         timeout = float(shared["pose_timeout_s"])
         self._status = StreamCache(timeout)
         self._pose = StreamCache(timeout)
@@ -160,8 +156,7 @@ class SafePassageServer(Node):
                                                    "/crsd/guided_setpoint", 10)
 
         # Publish the idle task state at startup so the latched topic is never
-        # empty. A subscriber that finds nothing there cannot tell "no mission"
-        # from "the publisher is dead".
+        # empty (an empty topic cannot tell "no mission" from "publisher dead").
         self._publish_task(TASK_NONE)
         self._avoid_pub.publish(Bool(data=True))
 
@@ -240,15 +235,12 @@ class SafePassageServer(Node):
             verdict = self._run_loop(goal_handle, seq)
 
             elapsed = time.monotonic() - started
-            # TWO call sites, not one logger picked by a conditional. rclpy
-            # caches a logger's severity PER CALL SITE and raises
-            #   ValueError: Logger severity cannot be changed between calls
-            # the second time one line logs at a different level. `say = info if
-            # ok else warn` therefore works for the first result and throws for
-            # every result of the other kind afterwards — which lands INSIDE
-            # execute_callback, so rclpy returns a DEFAULT result and the caller
-            # sees outcome 0 (SUCCESS) on a run that timed out. Observed on the
-            # boat 2026-09-05: a TIMEOUT reported as outcome 0, status ABORTED.
+            # TWO call sites, not one logger picked by a conditional. rclpy caches
+            # a logger's severity PER CALL SITE and raises ValueError ("Logger
+            # severity cannot be changed between calls") the second time one line
+            # logs at a different level. That lands INSIDE execute_callback, so
+            # rclpy returns a DEFAULT result and the caller sees outcome 0
+            # (SUCCESS) on a run that timed out.
             line = "RESULT {} after {:.1f}s in {}: {}".format(
                 OUTCOME_NAMES.get(verdict.outcome, verdict.outcome), elapsed,
                 verdict.phase, verdict.detail)
@@ -286,10 +278,10 @@ class SafePassageServer(Node):
             r.exit_latitude, r.exit_longitude = float("nan"), float("nan")
             return r
         finally:
-            # Everything here must happen on EVERY exit path, including an
-            # exception thrown from the loop. Leaving current_task at the task
-            # value tells the OCS the attempt is still running, and leaving
-            # avoidance disabled leaves the boat blind for the next mission.
+            # Must happen on EVERY exit path, exceptions included: leaving
+            # current_task at the task value tells the OCS the attempt is still
+            # running, and leaving avoidance disabled leaves the boat blind for the
+            # next mission.
             self._publish_task(TASK_NONE)
             self._avoid_pub.publish(Bool(data=True))
             self._autonomy_pub.publish(Bool(data=False))
@@ -310,9 +302,9 @@ class SafePassageServer(Node):
             if verdict.phase_changed:
                 self.get_logger().info("phase -> {}".format(verdict.phase))
 
-            # The LED heartbeat, and it is deliberately inside the loop rather
-            # than on its own timer: the mast light goes GREEN because a mission
-            # is actually ticking, not because a node is merely alive.
+            # The LED heartbeat is inside the loop, not on its own timer: the mast
+            # light goes GREEN because a mission is actually ticking, not because a
+            # node is merely alive.
             self._autonomy_pub.publish(Bool(data=True))
 
             fb.phase = verdict.phase

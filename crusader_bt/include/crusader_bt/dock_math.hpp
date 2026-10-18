@@ -1,34 +1,16 @@
 // dock_math.hpp — every calculation Task 3 needs, and nothing else.
 //
-// Same contract as nav_math.hpp, for the same reason: header-only, stdlib only,
-// no ROS, no BehaviorTree.CPP. It compiles and runs on a laptop in a second,
+// Header-only, stdlib only, no ROS, no BehaviorTree.CPP (same contract as
+// nav_math.hpp), so it builds and runs on a laptop in a second:
 //
 //     g++ -std=c++17 -O2 -I include -o t test/test_dock_math.cpp && ./t
 //
-// and it is where every number that can be silently wrong lives. The Task 3
-// leaves (src/task3_leaves.cpp) read the Context, call in here, and publish.
+// The Task 3 leaves (src/task3_leaves.cpp) read the Context, call in here, and publish.
 //
-// WHAT IS IN HERE, in mission order:
-//
-//   colours    three numbering schemes meet in this task and they DISAGREE.
-//              The CV's DockBay/DockWindow put OFF at 1 and RED at 2;
-//              RoboCommand's Color and RXL_COLOR put RED at 1. A cast between
-//              them sends "GREEN" when the light was RED, so every crossing is
-//              a named function with a test.
-//   placing    a DockBay sighting (bearing + face plane, camera frame) as a
-//              point in the world, so it survives the boat moving.
-//   the book   world-anchored bay tracks. The CV's bay_index is "left to right
-//              in THIS frame (not a persistent id)" - a boat that sees bays 2
-//              and 3 is told 0 and 1. Identity therefore comes from WHERE a bay
-//              is, never from its index in a frame.
-//   layout     the dock as a line of three: which way it faces, which bay is
-//              "1" (left, handbook: "bay numbers referenced left-to-right when
-//              facing the bays").
-//   choice     indicator votes -> exactly one GREEN bay, or a reason why not.
-//   berthing   the line-up point on the bay's centreline, the berth itself,
-//              and "am I docked".
-//   the code   DockObservation's (pattern, colours) -> RoboCommand's
-//              ResourceDeliveryRequest, and a check that it held still.
+// Colours: three numbering schemes meet here and DISAGREE (the CV's DockBay and
+// DockWindow put OFF at 1 and RED at 2; RoboCommand's Color and RXL_COLOR put RED
+// at 1), so every crossing is a named function with a test. Bay identity comes
+// from WHERE a bay is, never from the CV's per-frame bay_index.
 //
 // CONVENTIONS (the same as nav_math, and the same order they bite):
 //
@@ -153,21 +135,16 @@ struct Mount
   double x = 0.37;         ///< m forward of the body origin
   double y = 0.0;          ///< m to PORT
   double yaw_deg = 0.0;    ///< + = aimed to PORT
-  /// + = aimed DOWN, as target_tracker's cam_pitch_deg. NOT decoration for
-  /// Task 3: from inside a 2 m slip a level camera 0.41 m up cannot see the
-  /// upper window (docs/T3_coordinated_logistics.md), so the mount may well
-  /// end up pitched UP - negative here - and every range and normal the CV
-  /// reports is then in a tilted frame.
+  /// + = aimed DOWN, as target_tracker's cam_pitch_deg. From inside a 2 m slip a
+  /// level camera 0.41 m up cannot see the upper window
+  /// (docs/T3_coordinated_logistics.md), so the mount may end up pitched UP
+  /// (negative); CV ranges and normals are then in a tilted frame.
   double pitch_deg = 0.0;
 };
 
-/// A vector in the CAMERA frame, levelled: its (forward, left) components in
-/// the body's horizontal plane. Undoes the mount pitch, which the CV's
-/// camera-frame bearings and plane normals still carry.
-///
-/// Rotation about +y (left): camera forward (1, 0, 0) pitched down by p is
-/// (cos p, 0, -sin p) in the body - target_tracker's convention, checked in
-/// test_dock_math against the same easy ray.
+/// A vector in the CAMERA frame, levelled: its (forward, left) components in the
+/// body's horizontal plane (undoes the mount pitch). Camera forward (1, 0, 0)
+/// pitched down by p is (cos p, 0, -sin p) in the body, as in target_tracker.
 inline Vec2 levelled(double cx, double cy, double cz, double pitch_deg)
 {
   const double p = pitch_deg * nav::kDeg;
@@ -194,9 +171,7 @@ inline Vec2 camDirToWorld(double heading_deg, double mount_yaw_deg, double cx, d
 /// the plane n.p + d = 0 (camera frame; DockBay.plane_normal / plane_offset).
 ///
 /// NaN when the ray grazes the plane, points away from it, or the plane is not
-/// finite. The ray is horizontal because DockBay carries only a bearing, and a
-/// bay face is vertical: the horizontal ray reaches the face at the right
-/// horizontal distance whatever height the face centre is at.
+/// finite. The ray is horizontal because DockBay carries only a bearing.
 inline double rangeToPlane(double nx, double ny, double d, double bearing_deg)
 {
   if (!std::isfinite(nx) || !std::isfinite(ny) || !std::isfinite(d) ||
@@ -241,19 +216,13 @@ struct BaySighting
 /// Where a face is, HORIZONTALLY, in the body frame (forward, left), from its
 /// plane - exactly, even with the camera pitched.
 ///
-/// The CV's bearing is the face centre's azimuth in the CAMERA frame. With a
-/// level camera that is also its azimuth in the body, at any height. With a
-/// pitched one it is not: the horizontal camera ray at that azimuth meets the
-/// face plane BESIDE the face's centreline - 0.2 m off for a face 2 m to the
-/// side at 5 m under 20 deg of pitch (test_dock_math). So take the point on
-/// the plane at that camera azimuth AND at the face centre's height above the
-/// camera, `face_dz` (a property of the course: the build guide puts the face
-/// centre ~0.8 m above the water). At zero pitch the answer does not depend
-/// on `face_dz` at all.
-///
-/// The ray is r = (cos b, sin b, w) in the camera frame; its body height per
-/// unit t is (-cos b sin p + w cos p), and t = -d / (n . r). Setting the height
-/// to face_dz is linear in w. False when the plane is edge-on or behind.
+/// The CV's bearing is the face centre's azimuth in the CAMERA frame; with a
+/// pitched camera the horizontal ray at that azimuth meets the plane BESIDE the
+/// centreline (0.2 m off for a face 2 m to the side at 5 m under 20 deg of pitch;
+/// test_dock_math). So take the point on the plane at that azimuth AND at the
+/// face centre's height above the camera, `face_dz` (the build guide puts the
+/// face centre ~0.8 m above the water); at zero pitch it does not matter. False
+/// when the plane is edge-on or behind.
 inline bool faceInBody(
   double bearing_deg, double nx, double ny, double nz, double d, double pitch_deg,
   double face_dz, Vec2 & out)
@@ -315,10 +284,8 @@ struct BookParams
   /// The real dock's bays are 2.0 m apart (1.5 m slips, 0.5 m fingers).
   double gate_m = 0.7;
   /// Two TRACKS closer than this are one bay seen twice, and are merged. The
-  /// same number as layout()'s min_spacing_m: anything it would refuse as "too
-  /// close to be two bays" is folded together here instead of stalling the
-  /// survey. A biased early sighting outside the gate but inside this did
-  /// exactly that for 70 s in the sim (2026-09-24). Under the 2 m pitch.
+  /// same number as layout()'s min_spacing_m, so nothing layout() would refuse
+  /// as "too close to be two bays" stalls the survey. Under the 2 m pitch.
   double merge_m = 1.2;
   int max_tracks = 6;           ///< room for a false positive or two
   /// Face centre above the CAMERA, m, for placing sightings from a pitched
@@ -400,13 +367,11 @@ struct DockBook
     return nullptr;
   }
 
-  /// Fold one frame in. Returns, per sighting, the track id it went to (-1 if
-  /// it placed nothing: no range, too far, or a truncated face with no track
-  /// to join).
-  ///
-  /// ASSOCIATION IS GREEDY BY DISTANCE, ONE SIGHTING PER TRACK PER FRAME. Two
-  /// bays in one frame are two bays, even if the gate would let both join the
-  /// same track - otherwise a range error at the edge of the gate merges them.
+  /// Fold one frame in. Returns, per sighting, the track id it went to (-1 if it
+  /// placed nothing: no range, too far, or a truncated face with no track to
+  /// join). Association is greedy by distance, one sighting per track per frame:
+  /// two bays in one frame are two bays, even if the gate would let both join one
+  /// track.
   std::vector<int> ingest(const Frame & f, Vec2 boat, double heading_deg, const Mount & m)
   {
     ++frames;
@@ -420,9 +385,8 @@ struct DockBook
       const auto & s = f.bays[i];
       if (!std::isfinite(s.range_m) || !std::isfinite(s.bearing_deg)) {continue;}
       if (s.range_m <= 0.0 || s.range_m > prm.max_range_m) {continue;}
-      // With the face plane: the exact point (faceInBody). Without it - the
-      // window-size range, below the stereo minimum - the range is along the
-      // camera-frame ray at the bearing, which a pitched camera tilts out of
+      // Without the face plane (window-size range, below the stereo minimum) the
+      // range is along the camera-frame ray, which a pitched camera tilts out of
       // the horizontal: level it and scale.
       Vec2 fb;
       if (!(s.has_normal &&
@@ -436,7 +400,6 @@ struct DockBook
       placed.push_back({i, cam + dir * hr, hr});
     }
 
-    // Every (sighting, track) pair inside the gate, nearest first.
     struct Pair {double d; std::size_t pi; std::size_t ti;};
     std::vector<Pair> pairs;
     for (std::size_t pi = 0; pi < placed.size(); ++pi) {
@@ -582,10 +545,9 @@ struct DockLayout
 /// sightings, sorted left to right as seen FACING them.
 ///
 /// "Facing the bays" is looking along -out, so left-to-right is the
-/// STARBOARD direction of that look: starboardOf(-out). Get this backwards and
-/// every bay number is mirrored - bay 1 reported as bay 3 - while the boat
-/// still docks in the right place, which is the kind of error nobody catches
-/// until the score comes back.
+/// STARBOARD direction of that look: starboardOf(-out). Backwards, and every bay
+/// number is mirrored (bay 1 reported as bay 3) while the boat still docks in
+/// the right place.
 ///
 /// Refuses (ok=false, with why) rather than guess when: fewer than `bays`
 /// tracks are confirmed; the faces do not sit on one line; or two are closer
@@ -672,11 +634,10 @@ struct Choice
 
 /// Exactly one GREEN bay among the numbered ones, or a reason.
 ///
-/// need_others_red: also demand that every other bay has read RED. The
-/// handbook's course has one safe bay and two unsafe ones, so a GREEN plus two
-/// REDs is a consistent picture; a GREEN plus two unknowns is one reading of
-/// one light. The tree asks strictly first and only relaxes after it has run
-/// out of places to look from.
+/// need_others_red: also demand that every other bay has read RED (the course has
+/// one safe and two unsafe bays, so GREEN plus two REDs is a consistent picture
+/// while GREEN plus two unknowns is one reading of one light). The tree asks
+/// strictly first and relaxes only after running out of places to look from.
 inline Choice chooseSafeBay(
   const DockBook & b, const DockLayout & L, const VoteParams & v, bool need_others_red)
 {
@@ -734,13 +695,10 @@ struct Vantage
 {
   bool ok = false;
   Vec2 p;            ///< where to look from
-  /// Where to drive FIRST: `lead_m` further out along the dock's normal, so
-  /// the last leg is driven TOWARD the dock and the boat stops facing it.
-  ///
-  /// This is not a nicety. GuidedSetpoint.yaw is discarded by telemetry_bridge
-  /// (position-only type mask), so the heading at a vantage is whatever the
-  /// arrival direction was - and the camera faces forward. A vantage reached
-  /// sideways is a vantage from which the dock is out of frame.
+  /// Where to drive FIRST: `lead_m` further out along the dock's normal, so the
+  /// last leg is driven TOWARD the dock. GuidedSetpoint.yaw is discarded
+  /// (position-only type mask), so heading at a vantage is the arrival direction
+  /// and the camera faces forward.
   Vec2 lead;
   bool from_bays = false;   ///< placed relative to seen bays (counts as an attempt)
   std::string why;
@@ -758,21 +716,16 @@ struct Vantage
 ///   nothing seen, blind > N    REFUSE: the dock is not near the approach point
 ///
 /// `attempt` counts looks taken WITH bays in the book, `blind` those without
-/// (Vantage::from_bays says which this one is), so a look spent getting the
-/// dock into view does not use up the whole-dock view.
+/// (Vantage::from_bays says which), so a look spent getting the dock into view
+/// does not use up the whole-dock view.
 ///
-/// EVERY VANTAGE IS OUTSIDE THE SLIPS. A "close look" nearer than the finger
-/// ends is a look from inside a slip, and moving between two such looks
-/// crosses a finger (two hull contacts in the sim, 2026-09-24, before this).
-/// `standoff` must be at least the finger length (2.0 m, build guide) plus
-/// half a hull plus margin; the tree uses 5 m, which also keeps all three
-/// faces in view and the indicators inside the 6 m the CV reads them well at.
-/// Head-on from there is the closest look there is without entering a bay.
-///
-/// "In front" is along the bays' outward normal, so every vantage is on the
-/// water side of the dock and faces it. With nothing seen there is no normal,
-/// so the approach point has no lead: its facing is the direction it was
-/// driven from, which is why it belongs on the line from the start to the dock.
+/// EVERY VANTAGE IS OUTSIDE THE SLIPS (moving between looks from inside slips
+/// crosses a finger): `standoff` must be at least the finger length (2.0 m, build
+/// guide) plus half a hull plus margin; the tree uses 5 m, which also keeps all
+/// three faces in view and the indicators inside the 6 m the CV reads them at.
+/// "In front" is along the bays' outward normal; with nothing seen there is no
+/// normal, so the approach point has no lead and its facing is the direction it
+/// was driven from.
 inline Vantage vantage(
   const DockBook & b, bool have_approach, Vec2 approach, int blind, int attempt,
   double standoff, int min_obs, double lead_m = 3.0, double ring_m = 4.0,
@@ -796,9 +749,8 @@ inline Vantage vantage(
       v.p = approach;
       v.why = "approach point: no bay seen yet";
     } else {
-      // Out from the approach point along a bearing, so the boat ARRIVES
-      // facing that bearing: GuidedSetpoint.yaw is discarded, and arrival is
-      // the only way this hull chooses where its camera points.
+      // Out from the approach point along a bearing: the boat ARRIVES facing it
+      // (GuidedSetpoint.yaw is discarded), the only way to aim its camera.
       const double brg = 360.0 * (blind - 1) / ring_looks;
       v.p = approach + nav::headingVec(brg) * ring_m;
       v.why = "ring search " + std::to_string(blind) + "/" + std::to_string(ring_looks) +
@@ -840,9 +792,8 @@ struct Berth
   Vec2 face;         ///< face centre
   Vec2 out;          ///< unit, face -> water
   /// On the centreline, `lead_m` beyond the line-up point. Driven to FIRST, so
-  /// the boat reaches the line-up point already heading in: a boat that
-  /// arrives there from the side has to turn 90 degrees inside the run-in and
-  /// enters the slip crooked.
+  /// the boat reaches the line-up point already heading in instead of turning
+  /// 90 degrees inside the run-in.
   Vec2 lead;
   Vec2 predock;      ///< on the centreline, `predock_m` out: line up here
   Vec2 berth;        ///< where the BODY ORIGIN sits when docked
@@ -852,10 +803,9 @@ struct Berth
 
 /// The lead-in, line-up point and berth for one bay, all on its centreline.
 ///
-/// The bay's own plane normal is preferred over the dock's average: a bay a
-/// few degrees off square is still entered square to ITS face. `berth_m` is
-/// the distance from the face to the body origin (the pose point) when docked
-/// - bow offset plus clearance, not the clearance alone.
+/// The bay's own plane normal is preferred over the dock's average (a bay a few
+/// degrees off square is entered square to ITS face). `berth_m` is the distance
+/// from the face to the body origin when docked: bow offset plus clearance.
 inline Berth berthFor(
   const BayTrack & t, const DockLayout & L, double predock_m, double berth_m,
   double lead_m = 4.0)
@@ -886,8 +836,8 @@ struct DockedCheck
 
 /// Is the boat in the berth: close enough in, on the centreline, bow in?
 ///
-/// The heading check is not decoration. A boat that arrived at the berth point
-/// sideways is at the right coordinates and not in the bay.
+/// The heading check matters: a boat that arrived sideways is at the right
+/// coordinates and not in the bay.
 inline DockedCheck dockedIn(
   const Berth & b, Vec2 boat, double heading_deg, double berth_m, double along_tol,
   double lateral_tol, double heading_tol_deg)
@@ -913,10 +863,9 @@ inline DockedCheck dockedIn(
   return d;
 }
 
-/// Centre-to-centre spacing of the numbered bays, as MEASURED: the mean gap
-/// between neighbours along the dock. NaN without a layout. With thin fingers
-/// this is the slip width, which the course drawings have not given us - so
-/// the boat measures it rather than trusting a number typed into a tree.
+/// Centre-to-centre spacing of the numbered bays, as MEASURED (the mean gap
+/// between neighbours along the dock); NaN without a layout. The course drawings
+/// do not give the slip width, so the boat measures it.
 inline double bayPitch(const DockBook & b, const DockLayout & L)
 {
   if (!L.ok || L.ids.size() < 2) {return kNaN;}
@@ -931,9 +880,8 @@ inline double bayPitch(const DockBook & b, const DockLayout & L)
 }
 
 /// Worst hull corner's distance off the bay's centreline, m: how far the hull
-/// really reaches sideways, which a centre-point test does not see. A 1 m hull
-/// 15 deg off straight swings its corners 0.13 m further out than its middle -
-/// a quarter of the 0.45 m a 0.6 m beam has either side in a 1.5 m slip.
+/// really reaches sideways, which a centre-point test does not see (a 1 m hull
+/// 15 deg off straight swings its corners 0.13 m further out than its middle).
 inline double hullHalfWidthUsed(
   const Berth & b, Vec2 boat, double heading_deg, double hull_length, double hull_beam)
 {
@@ -951,13 +899,9 @@ inline double hullHalfWidthUsed(
   return worst;
 }
 
-/// Already lined up: on the bay's centreline, at least `min_along_m` out from
-/// the face, bow pointing in. The lead-in leg is skipped when this holds.
-///
-/// Without it, a boat already facing the bay from the survey vantage - which
-/// is exactly where it is when the chosen bay is the middle one - is sent BACK
-/// to a lead-in point behind it: it turns round to get there, and turns round
-/// again to come in. Seen in the sim, 2026-09-24.
+/// Already lined up: on the bay's centreline, at least `min_along_m` out from the
+/// face, bow pointing in. The lead-in leg is skipped when this holds, so a boat
+/// already facing the bay from the survey vantage is not sent back behind itself.
 inline bool linedUp(
   const Berth & b, Vec2 boat, double heading_deg, double min_along_m, double lateral_tol,
   double heading_tol_deg)
@@ -1014,13 +958,10 @@ inline Request requestFrom(const std::string & pattern, const std::vector<Colour
   return r;
 }
 
-/// The same request, held steady.
-///
-/// The timing layer already wants two full cycles before it says "code". This
-/// adds: the SAME answer for `hold_s` and `min_frames` more, because the
-/// report cannot be taken back and one more five-second period is cheap out of
-/// sixty. A frame with no request (pattern momentarily "pending") does not
-/// contradict; a different request restarts the clock.
+/// The same request, held steady: the SAME answer for `hold_s` and `min_frames`
+/// on top of the timing layer's two full cycles, because the report cannot be
+/// taken back. A frame with no request does not contradict; a different request
+/// restarts the clock.
 struct RequestHold
 {
   Request cand;
@@ -1044,11 +985,10 @@ struct RequestHold
   }
 };
 
-/// "Did the fire go out?", independent of the timing layer's one-frame "hit".
-///
-/// DockObservation.last_event is set on ONE frame; a dropped message loses it.
-/// This watches the target window's own per-frame state: armed by RED, a hit
-/// once GREEN has held `min_green_s`. Either source ends the spraying.
+/// "Did the fire go out?", independent of the timing layer's one-frame "hit"
+/// (DockObservation.last_event is set on ONE frame; a dropped message loses it):
+/// armed by RED, a hit once the target window has held GREEN `min_green_s`. Either
+/// source ends the spraying.
 struct HitWatch
 {
   bool armed = false;
@@ -1074,11 +1014,10 @@ struct HitWatch
 
 // --------------------------------------------------------------- reports
 //
-// The JSON each runner publishes, built HERE so the ROS node and the off-ROS
-// sim runner send byte-identical text. Field names are rx_reports.proto's, and
-// enums travel as their protobuf NAMES, as the Task 1 report's do: the OCS
-// re-serialises with ParseDict, which takes names, and a number there is one
-// renumbering away from meaning something else.
+// The JSON each runner publishes, built HERE so the ROS node and the off-ROS sim
+// runner send byte-identical text. Field names are rx_reports.proto's; enums
+// travel as protobuf NAMES (the OCS re-serialises with ParseDict, which takes
+// names).
 
 /// DockingReport. bay_id is 1-based, left to right facing the bays.
 inline std::string dockingReportJson(int bay_id)

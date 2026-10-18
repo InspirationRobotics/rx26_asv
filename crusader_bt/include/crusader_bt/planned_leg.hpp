@@ -1,9 +1,9 @@
 // planned_leg.hpp — one leg of a mission, driven through a planner or straight.
 //
 // Pure: no ROS, no Nav2, no clock of its own. The leaf feeds it the world each
-// tick (LegInputs) and applies what it says (LegOutput); everything that decides
-// WHAT the boat is told to do lives here, so it can be pinned by test_planned_leg
-// with a scripted fake planner and a manual clock. Spec: docs/nav2_avoidance_spec.md
+// tick (LegInputs) and applies what it says (LegOutput), so everything that
+// decides WHAT the boat is told to do is pinned by test_planned_leg with a
+// scripted fake planner and a manual clock. Spec: docs/nav2_avoidance_spec.md
 // section 5.3 ("Leg behaviour" is the contract the tests pin).
 //
 // FOUR BEHAVIOURS, picked once at start() from (Mode, LegConfig::avoid):
@@ -21,11 +21,9 @@
 //                                        what is SENT is A's. Never a hold, never a
 //                                        Failure: it shows what C would have done.
 //
-// OFF IS B, NOT A (2026-10-01, spec 5.5). Off is the boat's default until the asv
-// container has Nav2, and the old run-in detour is gone, so an Off leg that merely
-// drove the straight line would go through any black buoy or track on it. Off has
-// no planner to go round a hazard with, so it HOLDS in front of one and FAILS after
-// blocked_timeout_s: it never drives through. It needs no Nav2.
+// OFF IS B, NOT A (spec 5.5). Off has no planner to go round a hazard with, so it
+// HOLDS in front of a known hazard and FAILS after blocked_timeout_s: it never
+// drives the straight line through a black buoy or track. It needs no Nav2.
 //
 // THE RULES THAT MATTER MOST, because they are the ones that keep the boat off a
 // buoy when something upstream is wrong:
@@ -41,8 +39,8 @@
 //     planner's goal was pushed out of a hazard and clipped into the window.
 //
 // Time is the caller's clock (LegInputs::now_s); `dt` is the gap between steps.
-// Times are compared with a 1 us slack so "after 5.0 s" does not depend on whether
-// fifty additions of 0.1 landed a hair either side of 5.
+// Times are compared with a 1 us slack so "after 5.0 s" does not depend on
+// floating-point rounding.
 #ifndef CRUSADER_BT__PLANNED_LEG_HPP_
 #define CRUSADER_BT__PLANNED_LEG_HPP_
 
@@ -352,13 +350,10 @@ private:
   }
 
   /// B's guard, once per tick with a fresh pose. True = the leg is held (or has
-  /// failed) this tick and sends nothing more.
-  ///
-  /// A held leg resumes only when the line has stayed clear for unblock_reset_s, the
-  /// same rule a planned leg lives by: a track that flickers on and off the line must
-  /// not make the boat lurch at it on every clear tick. blocked_s counts for as long
-  /// as the leg is BLOCKED, the line clear or not (the boat is held either way), and
-  /// only the resume zeroes it, so a flicker still ends in FAILURE at blocked_timeout_s.
+  /// failed) this tick and sends nothing more. A held leg resumes only when the line
+  /// has stayed clear for unblock_reset_s (a flickering track must not make the boat
+  /// lurch at it); blocked_s counts while BLOCKED, line clear or not, and only the
+  /// resume zeroes it, so a flicker still ends in FAILURE at blocked_timeout_s.
   bool guardHolds(const LegInputs & in, const Tick & t, LegOutput & o, bool blocked)
   {
     Run & r = r_;
@@ -532,18 +527,17 @@ private:
   /// one that does not must be replaced however the hysteresis scores the two.
   double retargetM() const {return std::min(p_.goal_replan_m, r_.cfg.tolerance);}
 
-  /// The path in hand is worth keeping: valid against the known field, planned for the
-  /// goal we have NOW, and not a window-clipped path that is nearly used up. THE
-  /// SECOND AND THIRD TESTS ARE NOT IN THE SPEC AND ARE NEEDED.
-  /// Goal: preferNew measures both paths to the CURRENT goal, and an old-goal path
-  /// followed to its end scores |old end - goal| = d against a fresh plan's ~d, so the
-  /// new plan would never win and the leg would sit at the old end, d from a goal it
-  /// can never arrive at, until the mission timeout. Hysteresis is there to stop a good
-  /// path to THIS goal being swapped for a marginally better one, nothing more.
-  /// Window: for a goal beyond clip_radius, the plan after the boat has advanced is
-  /// exactly as long (path + |end - goal|) as the one it replaces, so preferNew would
-  /// never take it and the boat would stop at the end of the first window. A spent
-  /// window path is replaced by the next plan, whatever it measures.
+  /// The path in hand is worth keeping: valid against the known field, planned for
+  /// the goal we have NOW, and not a nearly used-up window-clipped path. The last two
+  /// tests are not in the spec and are needed.
+  /// Goal: preferNew measures both paths to the CURRENT goal, so an old-goal path
+  /// followed to its end scores |old end - goal| = d against a fresh plan's ~d, the
+  /// new plan never wins, and the leg sits d from a goal it can never reach.
+  /// Hysteresis only guards a good path to THIS goal.
+  /// Window: for a goal beyond clip_radius the plan after the boat has advanced is
+  /// exactly as long as the one it replaces, so preferNew never takes it and the boat
+  /// stops at the end of the first window; a spent window path is replaced whatever
+  /// the next plan measures.
   bool pathWorthKeeping(const LegInputs & in) const
   {
     const Run & r = r_;
@@ -719,11 +713,10 @@ private:
     const Carrot c = carrot(r.path, in.boat, r.closest, in.hazards, p_);
     // The third clause: an intermediate carrot the boat is about to reach would be
     // counted as reached by ArduRover (WP_RADIUS) and the boat would loiter there.
-    // The fourth is NOT in the spec and is needed: the end of the path is the
-    // pushed-out goal, up to ~1.4 m short of the true one, and the true goal is what
-    // arrival is judged on. Behind a resend_m deadband the last intermediate carrot
-    // can sit 1.1 m short of the end, the boat parks on it 2.5 m from the true goal,
-    // and the leg waits forever. The end is therefore always sent, to within 0.3 m.
+    // The fourth is NOT in the spec and is needed: the path end is the pushed-out
+    // goal, up to ~1.4 m short of the true one, which arrival is judged on, and
+    // behind a resend_m deadband the last carrot can sit 1.1 m short of it and the
+    // leg would wait forever; so the end is always sent, to within 0.3 m.
     if (!r.have_sent || nav::norm(c.p - r.last_sent) > r.cfg.resend_m ||
       (!c.is_end && nav::norm(in.boat - r.last_sent) < p_.wp_radius_m + 0.5) ||
       (c.is_end && nav::norm(c.p - r.last_sent) > kEndResendM))

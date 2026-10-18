@@ -1,27 +1,22 @@
 #!/bin/bash
 # nodes_down.sh -- stop every ROS node of the Task 1 sim rig.
 #
-# Runs INSIDE the crsd-sim container, and is the only safe place to do this:
-# the kill patterns live in rig_processes.txt precisely so they never reach a
-# command line, where pkill -f would match the shell running them.
+# Runs INSIDE the crsd-sim container, the only safe place to do this: the kill patterns live in
+# rig_processes.txt so they never reach a command line, where pkill -f would match the shell
+# running them.
 #
 #   (container)  bash src/rx26_asv/tools/sitl/nodes_down.sh
 #   (WSL)        docker exec crsd-sim bash /root/robotx_ws/src/rx26_asv/tools/sitl/nodes_down.sh
 #
-# It does NOT touch SITL. SITL is a WSL-side process in a different PID
-# namespace and this cannot see it, let alone kill it -- sim_down.sh does that.
+# It does NOT touch SITL: that is a WSL-side process in a different PID namespace; sim_down.sh
+# does it.
 #
-# THE LIST IS READ THROUGH `tr -d`, NOT TRUSTED. A trailing CR makes a pattern
-# a silent no-op: `pkill -f "crusader_bt/lib<CR>"` matches nothing, kills
-# nothing, and reports success. git checks this file out with CRLF on a Windows
-# clone, and a clone made straight into WSL with core.autocrlf=true keeps it.
-#
-# Stripped on the STREAM rather than per line, deliberately. The obvious
-# `pat="${pat%$'\r'}"` was written first and did not survive being typed
-# through a shell into a script into a sync: the escape arrived as a literal CR
-# inside the quotes, which sync_to_wsl.sh's own `tr -d` then deleted, leaving
-# `${pat%$''}` -- a no-op that looked exactly like the fix. tr's argument is
-# interpreted by tr, so there is no shell escape to lose.
+# THE LIST IS READ THROUGH `tr -d`, NOT TRUSTED. A trailing CR makes a pattern a silent no-op
+# (`pkill -f "crusader_bt/lib<CR>"` matches nothing and reports success), and git checks this file
+# out with CRLF on a Windows clone. Stripped on the STREAM, not per line: the obvious
+# `pat="${pat%$'\r'}"` did not survive being typed through a shell into a script into a sync (the
+# escape arrived as a literal CR that sync_to_wsl.sh's own `tr -d` deleted, leaving a no-op that
+# looked exactly like the fix), and tr's argument is interpreted by tr, so no shell escape is lost.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIST="$HERE/rig_processes.txt"
 

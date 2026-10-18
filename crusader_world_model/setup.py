@@ -19,18 +19,11 @@ setup(
     license="MIT",
     entry_points={
         "console_scripts": [
-            # HAS NOT RUN ON THE BOAT. Listed here — against the letter of
-            # README "Format" rule 1 and following the precedent
-            # lidar_cluster_node set — because a node with no entry point
-            # cannot be started by `ros2 run` at all, which makes the bench
-            # session that would earn it a place impossible. Not in
+            # HAS NOT RUN ON THE BOAT. Listed here, against the letter of README
+            # "Format" rule 1 (as lidar_cluster_node is), because a node with no
+            # entry point cannot be started by `ros2 run` at all, which makes the
+            # bench session that would earn it a place impossible. Not in
             # core.launch.py, and it carries a NOTE at the top of its file.
-            #
-            # map_server used to live here and is now crusader_groundstation's
-            # map tab. A display of world state belongs with the operator's
-            # other controls, not inside the package that computes it — which
-            # puts this package back to pure geometry with no HTTP server
-            # bolted to it.
             "target_tracker = crusader_world_model.target_tracker_node:main",
         ],
     },

@@ -4,7 +4,7 @@ buoy detections in the detector's own message.
     ros2 run crusader_sim sim_camera --ros-args -p course:=task1_core
     ros2 run crusader_sim sim_camera --ros-args -p position_source:=truth
 
-Runs in: the crsd-sim container (sim only — never on the boat).
+Runs in the crsd-sim container (sim only — never on the boat).
 
     in   /sim/oak/rgb/image     Image rgb8  (gz camera, via ros_gz_bridge)
          /sim/oak/depth/image   Image 32FC1 metres (gz depth camera)
@@ -17,79 +17,67 @@ Runs in: the crsd-sim container (sim only — never on the boat).
          crsd/oak/detections    Detection3DArray, frame camera_link (REP-103),
                                 labels as oak_detector/buoy_detector emit them
 
-WHY AN ORACLE FOR THE BOX, NOT THE REAL DETECTOR. oak_detector and
-buoy_detector read the OAK-D through depthai and run the network on the device
-or TensorRT; neither exists in a sim. So existence, bbox and LABEL are what a
-detector that works WOULD report: the buoys inside the camera's field of view,
-big enough in the image to classify (min_bbox_px, from
-oak_detector_core.buoy_patch's 24 px floor), labelled by their SIDE beacon — an
-unlit side beacon reads "black_buoy", which is what the boat really sees in the
-Advanced tier, where only the UAV can see colours. Not modelled: occlusion of
-the BOX, sun, misclassification (bench_world_model --miscolour does that).
+WHY AN ORACLE FOR THE BOX, NOT THE REAL DETECTOR. oak_detector and buoy_detector
+need depthai or TensorRT, which a sim lacks, so existence, bbox and LABEL are what
+a working detector WOULD report: buoys inside the field of view, big enough to
+classify (min_bbox_px, from oak_detector_core.buoy_patch's 24 px floor), labelled
+by their SIDE beacon — an unlit side beacon reads "black_buoy", as in the Advanced
+tier where only the UAV sees colours. Not modelled: occlusion of the BOX, sun,
+misclassification (bench_world_model --miscolour).
 
-POSITION IS NOT AN ORACLE (position_source:=depth, the default). The boat has no
-other way to see a buoy's position than the stereo depth inside its box, and
-that is what oak_detector._position does (oak_detector.py:812-866), so this does
-the same on the SIMULATED depth image:
+POSITION IS NOT AN ORACLE (position_source:=depth, the default): the boat sees a
+buoy's position only through the stereo depth inside its box, as
+oak_detector._position does, so this repeats that on the
+SIMULATED depth image:
 
     1. the sampling patch — the real one: centre u = box centre, v = 55 % down
        the box, half-size box_w/8 x box_h/6 px clamped to (4..12) x (5..20) RGB
-       px (oak_detector.py:112-114, 835-842) — moved into depth pixels by the
-       ratio of the two focal lengths (depth is aligned to the RGB camera, so
-       one scale covers both axes);
+       px (oak_detector's SAMPLE_V_RATIO, HALF_W_LIMITS, HALF_H_LIMITS) — moved into depth pixels by the
+       ratio of the two focal lengths (depth is aligned to the RGB camera);
     2. the MEDIAN of the valid depths in it (range_min_m..range_max_m, at least
-       min_depth_samples of them — the real oak_detector params, read from
-       crusader_params.yaml). None valid (too far, sky, empty water) => the
-       detection is DROPPED, as oak_detector drops it (oak_detector.py:753-758).
-       So is one whose median is not the buoy: the box is an oracle, but a real
-       network does not box a buoy another buoy hides, and without this the
-       depth would report the OCCLUDER's range at the hidden buoy's bearing — a
-       ghost 5-10 m short of it (seen in the first full run, from buoys lined
-       up behind each other during the ENTRY orbit). occlusion_tol_m is how far
-       the median may sit from the buoy's true range (surface bias ~0.15 m);
-    3. stereo noise on that median: sigma_z = z^2 * sigma_disp / (f_px * B), the
-       disparity-domain model (z = f*B/d, so dz = z^2/(f*B) * dd). Applied once,
-       AFTER the median: a stereo matcher's errors are correlated across a
-       patch (the same disparity error moves every pixel of it), so the median
-       does not average them away the way it would independent noise;
+       min_depth_samples — the real oak_detector params from crusader_params.yaml).
+       None valid => the detection is DROPPED (oak_detector counts it as no_depth). So is one
+       whose median is not the buoy: a real network does not box a buoy another
+       one hides, and without the check the depth reports the OCCLUDER's range at
+       the hidden buoy's bearing, a ghost 5-10 m short. occlusion_tol_m is how far
+       the median may sit from the true range (surface bias ~0.15 m);
+    3. stereo noise on the median: sigma_z = z^2 * sigma_disp / (f_px * B)
+       (z = f*B/d). Applied once, AFTER the median, since a stereo matcher's
+       errors are correlated across a patch;
     4. back-projection of the patch CENTRE, z forward: x = z, y = -(u-cx)z/fx,
-       z_up = -(v-cy)z/fy — the conversion oak_detector makes from the optical
-       frame to camera_link (oak_detector.py:862-866).
+       z_up = -(v-cy)z/fy — oak_detector's optical-frame to camera_link
+       conversion (the tail of oak_detector._position).
 
-So what the tracker now sees is what the real pipeline gives it: range from the
-buoy's NEAR SURFACE (a bias of roughly half its depth, ~0.1-0.2 m toward the
-boat, which the old oracle did not have), range noise that grows as z^2, and
-lateral position from the box centre. position_source:=truth is the old
-oracle (truth + 1.5 % range + 0.3 deg bearing noise) and needs no depth.
+So the tracker sees what the real pipeline gives it: range from the buoy's NEAR
+SURFACE (~0.1-0.2 m toward the boat), noise growing as z^2, lateral position from
+the box centre. position_source:=truth is the old oracle (truth + 1.5 % range +
+0.3 deg bearing noise), needing no depth.
 
-Detections are computed per DEPTH FRAME, with the odometry closest to that
-frame's stamp (both are sim time). The depth stream is therefore subscribed
-whenever detections are produced; the RGB stream stays lazy, because 1920x1200
-is what cost RTF (0.2 with the GUI up) and nothing here reads it.
+Detections are computed per DEPTH FRAME with the odometry closest to its stamp
+(both sim time), so depth is subscribed whenever detections are produced; RGB
+stays lazy because 1920x1200 is what cost RTF (0.2 with the GUI up).
 
 error_log:=<path> (settable at runtime: `ros2 param set /sim_camera error_log
-/tmp/e.csv`) appends one row per published detection — the measured position
-against the buoy's true one in camera_link — so a run can report the depth
-error by range instead of inferring it from tracks.
+/tmp/e.csv`) appends one row per published detection: the measured position
+against the true one in camera_link.
 
-The frames ARE real renders — use them to exercise a detector offline, or to
-record a dataset (tools/oak_record.py).
+The frames ARE real renders — use them to exercise a detector offline or record a
+dataset (tools/oak_record.py).
 
-detector:=yolo — THE REAL MODELS INSTEAD OF THE ORACLE (SIM_DETECTOR=yolo in the
-rig; crusader_sim/README.md, "The real YOLO detector in the sim"). The box and the
-label then come from the team's detector + LED classifier running on the RGB
-frames (yolo_detect.py: oak_detector_core's crop, tracking and flash logic, the
-.pt files the boat's .engines are exported from), at yolo_rate_hz, on a worker
-thread. Everything after the box is unchanged: the depth median over the SAME
-patch, the stereo noise, the same Detection3DArray on the same topic, labelled
-the way oak_detector labels (flash_red_diamond, red_diamond, off_diamond, ...). The
-oracle half still runs, only to SCORE the models: every ~10 s a line says recall,
-precision, colour and ENTRY/EXIT agreement against the projected truth boxes (and
-yolo_log:=<path> writes the per-buoy rows). No occlusion oracle either: a real
-network does not box a buoy it cannot see, so the depth under its box is the
-visible surface's. Needs the venv from scripts/setup_yolo_venv.sh and the node
-started with ITS python (gz_rig_up.sh does); without it the node says so and runs
-as detector:=truth.
+detector:=yolo runs THE REAL MODELS INSTEAD OF THE ORACLE (SIM_DETECTOR=yolo in
+the rig; crusader_sim/README.md, "The real YOLO detector in the sim"). The box and
+label come from the team's detector + LED classifier on the RGB frames
+(yolo_detect.py: oak_detector_core's crop, tracking and flash logic, the .pt files
+the boat's .engines are exported from) at yolo_rate_hz on a worker thread;
+everything after the box is unchanged (depth median over the SAME patch, stereo
+noise, same Detection3DArray, labelled as oak_detector labels: flash_red_diamond,
+red_diamond, off_diamond, ...). The oracle half still runs, only to SCORE the
+models: every ~10 s a line gives recall, precision, colour and ENTRY/EXIT
+agreement against the projected truth boxes (yolo_log:=<path> writes per-buoy
+rows). No occlusion oracle: the depth under a network's box is the visible
+surface's. Needs the venv from scripts/setup_yolo_venv.sh and the node started
+with ITS python (gz_rig_up.sh does); without it the node says so and runs as
+detector:=truth.
 """
 import math
 from collections import deque, namedtuple
@@ -117,7 +105,7 @@ BUOY_ZC = 0.15            # the point a depth-based detector would report: the
 
 # oak_detector._position's sampling patch, copied (not imported: the module
 # pulls depthai-side imports the sim container does not have). Keep equal to
-# oak_detector.py:112-114 — they are RGB pixels at the detector's own RGB size.
+# oak_detector's SAMPLE_V_RATIO / HALF_W_LIMITS / HALF_H_LIMITS — they are RGB pixels at the detector's own RGB size.
 ROI_V = 0.55              # patch centre, as a fraction of the box height
 ROI_HALF_W = (4, 12)      # half-width = box_w // 8, clamped
 ROI_HALF_H = (5, 20)      # half-height = box_h // 6, clamped
@@ -224,10 +212,9 @@ class SimCamera(Node):
         with open(default_hull_yaml(), encoding="utf-8") as f:
             oak = yaml.safe_load(f)["sensors"]["oak_d_lr"]
         self.W, self.H = int(oak["rgb_width"]), int(oak["rgb_height"])
-        # one HFOV today; a per-sensor key wins if the hull file grows one. The
-        # depth image's own width is taken from each frame, so only the FOV is
-        # read here — the two cameras are co-located, so any FOV difference is
-        # a pure focal-length ratio between their pixels (see _roi_in_depth)
+        # One HFOV today; a per-sensor key wins if the hull file grows one. Only the
+        # FOV is read here: the depth image's width comes from each frame, and any
+        # FOV difference is a pure focal-length ratio (see _roi_in_depth).
         self.rgb_hfov = float(oak.get("rgb_hfov_deg", oak["hfov_deg"]))
         self.depth_hfov = float(oak.get("depth_hfov_deg", oak["hfov_deg"]))
         self.fx = focal_px(self.W, self.rgb_hfov)
@@ -246,12 +233,11 @@ class SimCamera(Node):
         self.det_pub = self.create_publisher(Detection3DArray, "crsd/oak/detections", 10)
         self.rgb_pub = self.create_publisher(Image, "oak/rgb", qos_profile_sensor_data)
         self.depth_pub = self.create_publisher(Image, "oak/depth", qos_profile_sensor_data)
-        # Frames are subscribed upstream ONLY while someone downstream wants
-        # them: the bridge entries are lazy, and gz renders a camera only while
-        # it has a subscriber, so an idle oak/rgb costs no rendering at all.
-        # (Always-on frames at 1920x1200 took the sim to RTF 0.2 with the GUI up.)
-        # Depth is the exception in depth mode: it IS the detections' input. The
-        # RGB stream is the other with detector:=yolo (and costs the render).
+        # Frames are subscribed upstream ONLY while someone downstream wants them
+        # (the bridge entries are lazy and gz renders a camera only while it has a
+        # subscriber; always-on 1920x1200 took the sim to RTF 0.2). Depth is the
+        # exception in depth mode (it IS the detections' input), and so is RGB
+        # with detector:=yolo.
         self._frame_subs = {"rgb": None, "depth": None}
         self.create_timer(1.0, self._manage_frame_subs)
         if self.source == "truth":
@@ -520,7 +506,7 @@ class SimCamera(Node):
     @staticmethod
     def _patch(bbox):
         """(u, v, half_w, half_h) of oak_detector._position's sampling patch, in
-        RGB pixels (oak_detector.py:827-842), or None for a degenerate box."""
+        RGB pixels (oak_detector._position), or None for a degenerate box."""
         x1, y1, x2, y2 = bbox
         if x2 <= x1 or y2 <= y1:
             return None

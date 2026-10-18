@@ -36,19 +36,13 @@ TREE="${TREE:-$BT/task1_disruptive.xml}"
 bash "$SRC/tools/sitl/nodes_down.sh"
 sleep 1
 
-# IS ANYTHING RUNNING FROM A STALE install/? Nodes import from install/, never
-# from src/, and this script deliberately does NOT build - a colcon build is
-# minutes and a bring-up should be seconds. The cost of that choice is that
-# edited code silently does not run, and it is impossible to see from the
-# outside: the node starts, logs normally, and serves the old behaviour.
+# IS ANYTHING RUNNING FROM A STALE install/? Nodes import from install/, never from src/, and this
+# script deliberately does NOT build (a colcon build is minutes, a bring-up should be seconds). So
+# edited code silently does not run: the node starts, logs normally, and serves the old behaviour
+# (the ground station on :8090 once served a page less than half the size of the one in src).
 #
-# 2026-09-14: the ground station on :8090 was serving a page less than half the
-# size of the one in src, and the param its newer code needed was sitting
-# unused in crusader_bringup. Nothing was wrong with either file. Neither
-# package had been rebuilt in this container for a day.
-#
-# The sync only rewrites files whose CONTENT differs, so an unchanged file
-# keeps its mtime and this does not cry wolf after every bring-up.
+# The sync only rewrites files whose CONTENT differs, so an unchanged file keeps its mtime and this
+# does not cry wolf after every bring-up.
 newest() { find "$1" -type f -printf '%T@
 ' 2>/dev/null | sort -rn | head -1; }
 stale=""

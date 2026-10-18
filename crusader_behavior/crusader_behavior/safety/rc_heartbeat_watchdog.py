@@ -5,12 +5,10 @@ dies, WITHOUT anyone pressing the physical SB kill switch. It complements, and
 does not replace, ArduPilot's own FS_THR / FS_GCS failsafes and the hardware
 e-stop — run all of them for defense in depth.
 
-REWIRED for this repo (like `pixhawk_led_status_node`): the boat-repo original
-opened its own `udpin:127.0.0.1:14552` MAVLink connection, making it a SECOND
-consumer of the Pixhawk stream. Here it consumes `telemetry_bridge`'s republished
-topics and routes its one command — a force-disarm — back through the bridge, so
-it adds no MAVLink connection and cannot race the graph. That is the
-single-gateway rule: only crusader_fcu talks MAVLink.
+Single-gateway rule: only crusader_fcu talks MAVLink. This node consumes
+`telemetry_bridge`'s republished topics and routes its one command, a
+force-disarm, back through the bridge, so it adds no MAVLink connection and
+cannot race the graph.
 
   in:  /crsd/rc_channels   (RcChannels)  monitored-channel PWM = the RC heartbeat
        /crsd/fcu_status    (FcuStatus)   armed state
@@ -19,15 +17,13 @@ single-gateway rule: only crusader_fcu talks MAVLink.
        /crsd/kill_active   (Bool)        watchdog kill state, for observability
 
 How link health is judged: the RC link is alive as long as the monitored channel
-(`rc_channel`, the SB arm/e-stop switch by default) carries a valid PWM. On this
-hardware ArduPilot reports 0 for that channel when the transmitter is out of range
-or powered off — the same "RC loss reads 0" behaviour `pixhawk_led_status_node`
-relies on — so a dropout shows up as `pwm < min_valid_pwm`, republished by
-telemetry_bridge on `/crsd/rc_channels`. (The boat-repo original also consulted
-the SYS_STATUS RC-receiver health bit; telemetry_bridge does not republish
-SYS_STATUS, so that path is dropped. The PWM-zero signal is this repo's canonical
-RC-loss indicator; add SYS_STATUS republishing to the bridge if a second signal
-is ever wanted.)
+(`rc_channel`, the SB arm/e-stop switch by default) carries a valid PWM.
+ArduPilot reports 0 for that channel when the transmitter is out of range or off
+(the "RC loss reads 0" behaviour `pixhawk_led_status_node` also relies on), so a
+dropout shows up as `pwm < min_valid_pwm`, republished by telemetry_bridge on
+`/crsd/rc_channels`. The SYS_STATUS RC-receiver health bit is not used
+(telemetry_bridge does not republish SYS_STATUS); add that republishing if a
+second signal is ever wanted.
 
 If nothing confirms the link for `heartbeat_timeout` seconds while the vehicle is
 ARMED, the watchdog requests a force-disarm (motors off, same as the kill button).
@@ -39,11 +35,11 @@ simply reconnecting with the switch already HIGH does not clear the latch. With
 `enable_latch` False the boat is disarmed while the link is down and recovers on
 its own when it returns.
 
-Relationship to telemetry_bridge's autonomy-drop latch: that latch trips on RC
-staleness too, but only RELEASES RC overrides (returns control to the pilot). This
-watchdog is the layer that actually force-disarms on RC loss — complementary, not
-redundant. Both share RC channel 7 (the SB switch) as a read-only input, which is
-fine: they are independent consumers of the same republished RC_CHANNELS.
+Relationship to telemetry_bridge's autonomy-drop latch: that latch also trips on
+RC staleness, but only RELEASES RC overrides (returns control to the pilot). This
+watchdog actually force-disarms on RC loss: complementary, not redundant. Both
+read RC channel 7 (the SB switch) as independent consumers of the republished
+RC_CHANNELS.
 """
 import time
 

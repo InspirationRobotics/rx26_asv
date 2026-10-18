@@ -1,35 +1,22 @@
 """bag_recorder — record chosen ROS topics into the session, as a real rosbag.
 
-WHY A SUBPROCESS AND NOT rosbag2_py IN THIS NODE. rosbag2_py is present (it
-comes with ros-humble-ros-base, same as the `ros2 bag` verb), and writing the
-bag in-process would be fewer moving parts. It would also put /livox/lidar —
-twenty thousand points at 10 Hz, a few MB a second — through the ground
-station's single-threaded executor, alongside the HTTP snapshot and the /rosout
-ring. The dashboard would then stall exactly when a recording is running, which
-is exactly when nobody can afford to restart it. `ros2 bag record` gets its own
-process, its own executor and its own scheduling, and the worst it can do to
-the dashboard is compete for disk.
+WHY A SUBPROCESS AND NOT rosbag2_py IN THIS NODE. Writing the bag in-process
+would push /livox/lidar (~20k points at 10 Hz, a few MB/s) through the ground
+station's single-threaded executor alongside the HTTP snapshot and the /rosout
+ring, stalling the dashboard exactly when a recording runs. `ros2 bag record`
+gets its own process and executor; the worst it can do is compete for disk.
+(Same argument as the package README: a display that can affect the vehicle is
+a display nobody dares restart.)
 
-That is the same argument the package README already makes for the ground
-station having no publishers and no timers that touch anything but its own
-trail buffer: a display that can affect the vehicle is a display nobody dares
-restart.
+STOPPING IS SIGINT, NOT SIGTERM, which is why this module is not a second caller
+of process_manager. rosbag2 finalises the sqlite database and writes
+metadata.yaml in its SIGINT handler; SIGTERM can leave a .db3 without metadata,
+which `ros2 bag info` and `ros2 bag play` both refuse.
 
-STOPPING IS SIGINT, NOT SIGTERM, and this is the whole reason this module is
-not a second caller of process_manager. rosbag2 finalises the sqlite database
-and writes metadata.yaml in its SIGINT handler. A SIGTERM (what process_manager
-sends, correctly, to every ROS node in this repo) can leave the .db3 without
-its metadata, and a bag with no metadata.yaml will not open — `ros2 bag info`
-and `ros2 bag play` both refuse it. The recording looks like it worked right up
-until the moment somebody needs it, which is the failure mode this whole
-package is written against.
-
-THE SIZE PROBLEM IS REAL AND IS NOT SOLVED BY A WARNING. A Jetson with 38 GB
-free and /livox/lidar ticked fills in under three hours. So this does not
-estimate: it MEASURES the bag directory as it grows and reports bytes per
-second and hours remaining at the current rate. An estimate from a table of
-typical message sizes would be a guess wearing a measurement's clothes, and the
-tree already has a rule about those.
+THE SIZE PROBLEM IS NOT SOLVED BY A WARNING. A Jetson with 38 GB free and
+/livox/lidar ticked fills in under three hours, so this MEASURES the bag
+directory as it grows and reports bytes per second and hours remaining, not an
+estimate from typical message sizes.
 """
 import os
 import signal
@@ -38,14 +25,12 @@ import threading
 import time
 
 # The session directory walk lives in recorder.py, which owns the session
-# directory. A second copy here would be a second answer to "how big is this
-# recording" — and the two would be compared against each other on screen.
+# directory (one answer to "how big is this recording").
 from crusader_groundstation.recorder import GrowthMeter, hours_left
 
-# Message types big enough that ticking one changes the nature of the session.
-# Matched on the type, never on the topic name: a second camera, a different
-# LiDAR, or a remapped topic is still a point cloud, and a name list would
-# quietly stop protecting anyone the first time something was renamed.
+# Message types big enough to change the nature of the session. Matched on the
+# type, never the topic name: a remapped topic or a second LiDAR is still a
+# point cloud.
 HEAVY_TYPES = (
     "sensor_msgs/msg/PointCloud2",
     "sensor_msgs/msg/PointCloud",
@@ -67,10 +52,9 @@ def describe_topics(pairs):
       pairs: what Node.get_topic_names_and_types() returns.
 
     Returns:
-      list of dicts sorted by name, each with the single type name, and the
-      two flags the page colours on. A topic advertised with more than one type
-      is reported with the first: rosbag2 records it either way, and the case
-      is a graph misconfiguration worth seeing rather than hiding.
+      list of dicts sorted by name, each with the single type name and the
+      two flags the page colours on. A topic advertised with more than one
+      type is reported with the first (rosbag2 records it either way).
     """
     rows = []
     for name, types in pairs:
@@ -108,10 +92,8 @@ class BagRecorder:
         """The argv. Separated so it is checkable off-boat, like ProcessManager.
 
         `--output` names a directory that must NOT already exist; the session
-        directory is created fresh per recording so it never does. Topics are
-        passed explicitly rather than using `--all`, because `--all` on this
-        boat means the point cloud, and a recording that fills the disk in an
-        afternoon should be something somebody chose.
+        directory is created fresh per recording. Topics are passed explicitly,
+        not `--all`, which on this boat means the point cloud.
         """
         return ["ros2", "bag", "record", "--output", bag_dir] + list(topics)
 
@@ -125,10 +107,9 @@ class BagRecorder:
             return False, "no topics selected"
         cmd = self.command_for(bag_dir, topics)
         try:
-            # start_new_session for the reason process_manager gives: a Ctrl+C
-            # in the terminal running the dashboard must not reach the child.
-            # Here it matters twice over, because the signal that reaches this
-            # child decides whether the bag is readable.
+            # start_new_session, as in process_manager: Ctrl+C in the
+            # dashboard's terminal must not reach the child, whose signal
+            # decides whether the bag is readable.
             popen = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1, start_new_session=True)
@@ -154,10 +135,9 @@ class BagRecorder:
     def _drain(self, popen):
         """Keep the pipe empty and remember the last line.
 
-        Unread stdout fills the pipe buffer and blocks the child, which for a
-        recorder means it silently stops writing. The last line is kept because
-        rosbag2's complaint about an unwritable directory is one line long and
-        is the only thing that explains an empty bag.
+        Unread stdout fills the pipe buffer and blocks the child. The last line
+        is kept because rosbag2's complaint about an unwritable directory is one
+        line long and explains an empty bag.
         """
         last = ""
         try:
@@ -185,9 +165,8 @@ class BagRecorder:
     def stop(self):
         """SIGINT the group, wait for the database to be finalised.
 
-        Escalates to SIGKILL only after STOP_GRACE_S, and says so — a killed
-        rosbag2 is very likely an unreadable bag, and the operator needs to
-        know that before they sail away trusting it.
+        Escalates to SIGKILL only after STOP_GRACE_S, and says so: a killed
+        rosbag2 is probably an unreadable bag.
         """
         with self._lock:
             popen = self._popen
@@ -228,9 +207,8 @@ class BagRecorder:
     def tick(self):
         """Sample the bag's size. Called from the node's existing timer.
 
-        Free space is NOT read here. It belongs to the filesystem, not to this
-        recorder, and the caller already measures it for the session's own disk
-        guard — sampling it twice invites the two answers to disagree.
+        Free space is NOT read here: the caller already measures it for the
+        session's disk guard, and sampling twice invites disagreement.
         """
         if not self.recording or not self._dir:
             return

@@ -141,11 +141,10 @@ if [ -n "$need" ]; then
   fi
   [ -z "${need// /}" ] || { echo "*** missing packages:$need  (rebuild on the HOST: tools/scripts/rebuild.sh)" >&2; exit 2; }
 fi
-# A rig of OURS that is already up is stopped HERE, before the check below, not just before starting
-# (as it used to be). The check is for a tracker SOMEBODY ELSE started, but our own one from the last
-# start always reached it first, and its parameter query races DDS discovery with --no-daemon ("Node
-# not found"): a plain restart of a POOL rig -- capture with setpoints off, then PUBLISH=1 -- failed
-# with exit 3 (found on the boat 2026-10-03). --check stops nothing.
+# A rig of OURS that is already up is stopped HERE, before the check below: our own tracker from the
+# last start would otherwise reach it first, and its parameter query races DDS discovery with
+# --no-daemon ("Node not found"), which failed a plain restart of a POOL rig with exit 3.
+# --check stops nothing.
 [ "$CHECK" = 1 ] || bash "$HERE/lake_rig_down.sh" --quiet
 if [ "$POOL" = 1 ] && pgrep -f 'crusader_world_model.*target_tracker|target_tracker' >/dev/null; then
   # POOL promises camera only: a tracker somebody else started with use_lidar true would put LiDAR tracks into the plan.
@@ -220,11 +219,10 @@ up() {   # up <name> <logfile> <command...>: its own process group; its pid (= p
   echo "$name $(cat "$pf" 2>/dev/null)" >> "$PIDS"
   printf '  %-16s -> %s\n' "$name" "$log"
 }
-# a live process matching a pattern. pgrep -f falls back to the process NAME for a zombie (empty cmdline), and the
-# container's init does not reap: a dead nav_frames_node read as "already running" on 2026-10-02. Zombies are skipped.
-# The CONTENT of cmdline, not `[ -s ]`: /proc files always stat as size 0, so `-s` was never true
-# and every check below read "not running" (2026-10-03: a second ground_station on the boat, which
-# failed on :8090). An empty cmdline is a zombie or a kernel thread, which is not "running".
+# a live process matching a pattern. pgrep -f falls back to the process NAME for a zombie (empty cmdline),
+# and the container's init does not reap, so a dead node read as "already running". The CONTENT of
+# cmdline is tested, not `[ -s ]` (/proc files always stat as size 0); an empty cmdline is a zombie or a
+# kernel thread, not "running".
 running() { local p; for p in $(pgrep -f -- "$1"); do
               if [ -n "$(tr -d '\0' < /proc/$p/cmdline 2>/dev/null)" ]; then echo "    (pid $p: $(tr '\0' ' ' < /proc/$p/cmdline | cut -c1-90))" >&2; return 0; fi
             done; return 1; }

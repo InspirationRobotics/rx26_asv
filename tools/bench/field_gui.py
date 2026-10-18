@@ -1,27 +1,22 @@
 #!/usr/bin/env python3
 """field_gui — place the invented buoy field by hand, in a browser.
 
-Imported by bench_world_model.py under --gui. Not a ROS node and not runnable
-on its own: it owns an HTTP server and a page, and nothing else. The bench owns
-the field, the anchor and the sensor synthesis, and hands this module two
-callables. Keeping the split there means the GUI cannot invent a buoy the
-sensor model would not have produced, which is the whole failure mode a second
-copy of the field would introduce.
+Imported by bench_world_model.py under --gui. Not a ROS node and not runnable on its own: it owns
+an HTTP server and a page, and nothing else. The bench owns the field, the anchor and the sensor
+synthesis, and hands this module two callables, so the GUI cannot invent a buoy the sensor model
+would not have produced.
 
-WHY A GUI AT ALL. The static FIELDS tables in bench_world_model are the right
-tool for a repeatable check: the same layout every run, diffable, in git. They
-are the wrong tool for a first wet test in a small pool, where the field has to
-fit whatever water you actually have and you find out the size by looking at it.
+WHY A GUI AT ALL. The static FIELDS tables in bench_world_model suit a repeatable check (same
+layout every run, diffable, in git) but not a first wet test in a small pool, where the field has
+to fit the water you actually have.
 
-COORDINATES. The page works in the WORLD frame the bench stores after anchoring
--- east and north metres from the anchor point -- not the (right, ahead) form
-the FIELDS tables are written in. North is up. That makes the page a map rather
-than a bow-relative view, so a buoy stays put on screen while the boat swings,
-which is the only way to tell a tracker bug from a heading bug.
+COORDINATES. The page works in the WORLD frame the bench stores after anchoring (east and north
+metres from the anchor point), not the (right, ahead) form of the FIELDS tables. North is up: a
+map rather than a bow-relative view, so a buoy stays put on screen while the boat swings, the only
+way to tell a tracker bug from a heading bug.
 
-LAT/LON IS COMPUTED SERVER-SIDE, deliberately. geo.py owns M_PER_DEG and warns
-against re-deriving it elsewhere; a copy of that constant in JavaScript is
-exactly the drift it warns about, so the page is sent finished numbers.
+LAT/LON IS COMPUTED SERVER-SIDE, deliberately: geo.py owns M_PER_DEG and warns against re-deriving
+it elsewhere, so the page is sent finished numbers rather than a JavaScript copy of the constant.
 """
 import json
 import re
@@ -538,20 +533,12 @@ class _Handler(BaseHTTPRequestHandler):
 def _check_page_is_wired():
     """Every button in the markup must have a handler. Raises if one does not.
 
-    A DEAD BUTTON IS SILENT. It sits in the page looking enabled, clicking it
-    does nothing, and neither side logs a thing -- there is no error to go
-    looking for.
+    A DEAD BUTTON IS SILENT: it looks enabled, clicking does nothing, and neither side logs a
+    thing. Handlers are ASSIGNMENTS, not declarations, so comparing "functions defined" before and
+    after an edit says nothing about them (a past gate-UI removal left Send goal, Cancel and Return
+    to start dead through a fix that looked complete).
 
-    This exists because removing the gate-authoring UI on 2026-09-14 sliced a
-    whole region out of the script and took four functions and three button
-    handlers with it. The first repair restored the functions, because comparing
-    "functions defined" before and after showed those up; the handlers are
-    ASSIGNMENTS rather than declarations, so that comparison said nothing about
-    them, and Send goal, Cancel and Return to start stayed dead through a fix
-    that looked complete.
-
-    Checked in start() rather than in a test, so it fires wherever the bench is
-    actually run.
+    Checked in start() rather than in a test, so it fires wherever the bench is actually run.
     """
     buttons = set(re.findall(r'<button id="([A-Za-z0-9_]+)"', PAGE))
     wired = set(re.findall(

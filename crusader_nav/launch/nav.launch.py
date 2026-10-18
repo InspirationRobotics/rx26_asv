@@ -20,10 +20,9 @@ planner_server stays in `activating` until TF map -> base_footprint exists,
 which needs a pose WITH A FINITE HEADING. Check with
 `ros2 lifecycle get /planner_server` in the same container.
 
-nav_lifecycle replaces nav2_lifecycle_manager (Humble 1.1.20), whose
-change_state call has no timeout and waited forever for a reply Fast DDS had
-dropped, leaving planner_server `inactive`. nav_lifecycle times out, asks again,
-and re-activates a respawned planner_server; there is no bond to wait for.
+nav_lifecycle stands in for nav2_lifecycle_manager (whose change_state has no
+timeout; see lifecycle_core.py): it times out, asks again, and re-activates a
+respawned planner_server. There is no bond to wait for.
 """
 import os
 

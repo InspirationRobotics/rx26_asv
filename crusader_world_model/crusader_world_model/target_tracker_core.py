@@ -4,86 +4,50 @@ NOTE: unverified on the boat. Written off-boat against invented detections
 (tools/bench/bench_world_model.py drives the whole chain); no part of this has
 seen real water. It is deliberately NOT in core.launch.py.
 
-No ROS imports at all — this is the half of the world model that can be run on
-a laptop with no camera, no LiDAR, no GPU and no boat, which is the entire
-reason crusader_world_model is a package separate from crusader_perception.
-crusader_common.geo is the only import with any geometry in it, and it is
-imported rather than re-derived.
+No ROS imports at all: this half of the world model runs on a laptop with no
+camera, LiDAR, GPU or boat, which is why crusader_world_model is separate from
+crusader_perception. crusader_common.geo is the only import with geometry in it.
 
 THE THREE STAGES, and why they are separate.
 
-1. FUSE (body frame). A camera detection and a LiDAR cluster of the same object
-   arrive in different messages, in different frames, at different rates. The
-   camera knows WHERE TO LOOK — its bearing is an angle read off a rectified
-   image and is good to a fraction of a degree — and knows WHAT the thing is.
-   The LiDAR knows HOW FAR — a time-of-flight range, centimetres, against the
-   camera's stereo disparity which is metres out past 15 m. Fusion is therefore
-   not an average: it keeps the camera's DIRECTION and the LiDAR's DISTANCE,
-   and throws away each sensor's weak number.
-
-   Both inputs are body-frame already (Cluster3DArray is base_link;
-   Detection3DArray is camera_link, which is the same hull with a fixed offset
+1. FUSE (body frame). The camera knows WHERE TO LOOK (a bearing good to a fraction
+   of a degree) and WHAT the thing is; the LiDAR knows HOW FAR (centimetres, against
+   stereo disparity that is metres out past 15 m). Fusion keeps the camera's
+   DIRECTION and the LiDAR's DISTANCE. Both inputs are body-frame already
+   (Cluster3DArray is base_link; Detection3DArray is camera_link with a fixed offset
    applied here), so this stage is pure trigonometry with no attitude in it.
 
-   USE_LIDAR GATES THIS ENTIRE STAGE, and it defaults to FALSE. Fusing is the
-   right answer on open water and the wrong one anywhere with walls: every hard
-   surface in range clusters, arrives unlabelled, and — because track_unlabeled
-   keeps it and a CONFIRMED track never expires by default — becomes a
-   PERMANENT object on the map. That is not a tracker bug; it is the LiDAR
-   honestly reporting a building. But a mission consuming the track set cannot
-   tell that object from a buoy, and crusader_params.yaml already records what
-   it costs: at r_max 40 m the map filled with 100+ permanent tracks at 15-28 m,
-   which were the pool walls, the deck, and the room beyond them.
+   USE_LIDAR GATES THIS ENTIRE STAGE, and it defaults to FALSE: near walls every
+   hard surface clusters unlabelled and becomes a PERMANENT map object a mission
+   cannot tell from a buoy (the pool map filled with 100+ permanent tracks at r_max
+   40 m; see crusader_params.yaml). With it False only the camera can create a
+   track, with stereo ranges; turn it on for open water.
 
-   With use_lidar False the camera is the ONLY thing that can create a track,
-   so nothing anonymous can reach the map at all. The price is that every range
-   is now stereo — a few per cent of the distance rather than centimetres — and
-   the safety invariant below narrows with it: what is never dropped is every
-   camera detection, and an object the camera cannot see is no longer carried
-   by the LiDAR. Turn it back on for open water, where the nearest hard surface
-   IS the thing you wanted to see.
+   The package's standing safety invariant applies HERE: a camera detection with no
+   LiDAR support is passed through with its stereo range, NEVER dropped, and an
+   unlabelled LiDAR cluster is published with an empty label rather than discarded.
 
-   The package's standing safety invariant applies HERE: a camera detection
-   with no LiDAR support is passed through with its stereo range, NEVER
-   dropped. A coarse range for a real buoy beats no buoy. The same goes the
-   other way — an unlabelled LiDAR cluster is a thing that is THERE, and it is
-   published with an empty label rather than discarded for being anonymous.
+2. PROJECT (body -> world). One call to geo.body_to_world_ypr per observation. The
+   ONLY place attitude enters: at 20 m, 5 degrees of uncompensated roll moves a
+   target 1.7 m, most of a buoy gate.
 
-2. PROJECT (body -> world). One call to geo.body_to_world_ypr per observation,
-   with the boat's roll, pitch, yaw and position. This is the ONLY place
-   attitude enters. On a surface vessel in chop this is not a refinement: at
-   20 m, 5 degrees of uncompensated roll moves a target 1.7 m, which is most of
-   a buoy gate.
-
-3. TRACK (world frame). Associate each projected observation with an existing
-   track by nearest neighbour, update it, and let unseen tracks decay. This is
-   what turns a stream of sightings into an object that persists while the boat
-   looks away — the thing a mission actually needs.
+3. TRACK (world frame). Associate each observation with an existing track by
+   nearest neighbour, update it, and let unseen tracks decay, so a target persists
+   while the boat looks away.
 
 WHY NEAREST-NEIGHBOUR AND AN EMA, NOT A KALMAN FILTER. The targets are mostly
-STATIC objects being observed from a moving platform whose own position is RTK
-GPS. The dominant error is not process noise to be modelled, it is
-misassociation — feeding one track sightings of two different buoys — and no
-amount of filter sophistication fixes a wrong association. So the effort goes
-into the gate (a hard radius plus label compatibility) and the residual
-(position_stddev, which grows loudly when the gate is wrong) rather than into
-covariance propagation. An EMA whose gain decays as 1/hits IS the running mean
-for the first few sightings and a tracking filter after that, which is the
-right behaviour for a buoy that is not going anywhere.
+STATIC and the platform has RTK GPS, so the dominant error is misassociation, which
+no filter fixes: the effort goes into the gate (hard radius plus label
+compatibility) and the residual (position_stddev, which grows loudly when the gate
+is wrong). An EMA whose gain decays as 1/hits IS the running mean for the first
+sightings and a tracking filter after that.
 
-ONE BUOY, MANY COLOURS (the colour family). A Task 1 RoboBuoy is one object
-whose beacon changes state: lit red or green, a flashing or steady blue, or
-dark (an unlit side beacon, or the off half of a 1 s on / 1 s off flash). The
-detector names the STATE, so the same buoy arrives as red_buoy on one frame and
-black_buoy on the next. Keyed on the label that is two tracks a metre apart,
-and the duplicate is a phantom obstacle beside a real gate buoy. So the labels
-in `colour_family_labels` are compatible with each other at association, and
-the track's reported colour is decided by VOTING (resolve_label): the lit
-colour with enough votes and a clear lead, else `colour_unknown_label`. Dark
-votes carry no colour and are left out of the ratio, so a flashing red buoy
-(about half red, half dark) still resolves red. A buoy whose colour is not
-confidently known is reported as unknown and is STILL a track: an obstacle is
-an obstacle whatever colour it is, and the UAV's field supplies the colour.
+ONE BUOY, MANY COLOURS. A RoboBuoy's beacon changes state (lit red/green, flashing
+or steady blue, dark) and the detector names the STATE, so one buoy arrives as
+red_buoy then black_buoy; keyed on the label that is two tracks a metre apart. So
+the labels in `colour_family_labels` are compatible at association, and the track's
+reported colour is a VOTE (resolve_label). A buoy of unknown colour is STILL a track
+(an obstacle is an obstacle; the UAV's field supplies the colour).
 """
 import math
 from dataclasses import dataclass, field
@@ -93,12 +57,10 @@ from crusader_common import geo
 SOURCE_CAMERA = 1
 SOURCE_LIDAR = 2
 
-# Smoothing constant for the association-residual estimate that becomes
-# TrackedTarget.position_stddev. Not a tunable: it is a diagnostic, and a
-# diagnostic whose responsiveness moves with a tuning knob cannot be compared
-# between two runs. 0.2 settles in roughly five sightings, which is the same
-# scale as confirm_hits — a track reports a meaningful spread at about the
-# moment it becomes CONFIRMED.
+# Smoothing constant for the association-residual estimate behind
+# TrackedTarget.position_stddev. Not a tunable: a diagnostic whose responsiveness
+# moves with a knob cannot be compared between runs. 0.2 settles in ~five
+# sightings, about when a track becomes CONFIRMED.
 _VAR_ALPHA = 0.2
 
 
@@ -106,12 +68,9 @@ _VAR_ALPHA = 0.2
 
 @dataclass
 class TrackerParams:
-    """Everything tunable, in one object the node fills from the YAML.
-
-    Grouped the way the three stages are: mount geometry, then fusion gates,
-    then tracking gates. A default here is a STARTING POINT for the bench, not
-    a blessed value — crusader_bringup/config/crusader_params.yaml is the
-    single source of truth, and the node passes those in.
+    """Everything tunable, in one object the node fills from the YAML. A default
+    here is a STARTING POINT: crusader_bringup/config/crusader_params.yaml is the
+    single source of truth.
     """
 
     # -- camera extrinsic: camera_link -> base_link (REP-103: x fwd, y left, z up)
@@ -161,12 +120,10 @@ class TrackerParams:
                                      # beaconFromLabel() matches substrings
     colour_family_shapes: tuple = ("diamond",)
                                      # oak_detector's vocabulary is
-                                     # [flash_|off_]<colour>_<shape> or a bare
-                                     # <shape> (oak_detector_core label()): every
-                                     # label ending in _<shape>, and <shape>
-                                     # itself, is one family per shape. Bare and
-                                     # off_ labels are its unlit votes, and its
-                                     # unknown label is unknown_<shape>.
+                                     # [flash_|off_]<colour>_<shape> or a bare <shape>:
+                                     # every label ending in _<shape>, and <shape> itself,
+                                     # is one family per shape; bare and off_ labels are
+                                     # its unlit votes, and its unknown label is unknown_<shape>.
     colour_min_votes: int = 5        # a lit colour needs at least this many
     colour_min_ratio: float = 0.6    # ... and this share of the LIT votes
 
@@ -197,11 +154,9 @@ class LidarCluster:
 class BoatState:
     """Where the boat is and how it is oriented, at one instant.
 
-    east/north are metres in the world frame (geo.latlon_to_xy against the
-    tracker's origin). roll/pitch/yaw are radians straight off /crsd/attitude,
-    in the autopilot's own NED body axes — passed through unconverted, because
-    geo.body_to_world_ypr is documented to take them that way and converting
-    them here would put a second frame convention in a second place.
+    east/north: metres in the world frame (geo.latlon_to_xy against the tracker's
+    origin). roll/pitch/yaw: radians straight off /crsd/attitude in the autopilot's
+    NED body axes, unconverted because geo.body_to_world_ypr takes them that way.
     """
     east: float
     north: float
@@ -233,11 +188,8 @@ def camera_to_body(x_fwd: float, y_left: float, z_up: float,
                    p: TrackerParams) -> tuple:
     """Rotate and translate a camera_link point into base_link.
 
-    Both frames are REP-103 (x forward, y left, z up); what separates them is
-    where the OAK-D is bolted and which way it is aimed. Order is tilt first,
-    then yaw, then the translation — the mount rotates the camera about its own
-    axes before the offset places it on the hull, and doing the translation
-    first would rotate the offset too.
+    Both frames are REP-103 (x forward, y left, z up). Order is tilt, then yaw, then
+    translation (the mount rotates the camera before the offset places it on the hull).
 
     Args:
       x_fwd, y_left, z_up: the Detection3D position [m], in camera_link.
@@ -246,16 +198,13 @@ def camera_to_body(x_fwd: float, y_left: float, z_up: float,
     Returns:
       (x, y, z) in base_link [m].
 
-    The sign conventions are spelled out because they are the kind of thing
-    that is wrong for a whole field season: cam_pitch_deg is POSITIVE DOWN
-    (cameras get tilted down at the water, so the common case is the positive
-    one) and cam_yaw_deg is POSITIVE TO PORT (matching y_left being positive).
+    Signs: cam_pitch_deg is POSITIVE DOWN and cam_yaw_deg is POSITIVE TO PORT
+    (matching y_left).
     """
     t = math.radians(p.cam_pitch_deg)
     ct, st = math.cos(t), math.sin(t)
-    # Tilt about the +y (left) axis. Check it on the two easy rays: a ray
-    # straight ahead in the camera (1, 0, 0) comes out (cos t, 0, -sin t) —
-    # pointing down for a positive (downward) tilt, as it must.
+    # Tilt about the +y (left) axis: a ray straight ahead (1, 0, 0) comes out
+    # (cos t, 0, -sin t), pointing down for a positive tilt.
     x1 = x_fwd * ct + z_up * st
     z1 = -x_fwd * st + z_up * ct
 
@@ -273,13 +222,9 @@ def body_to_camera(x_fwd: float, y_left: float, z_up: float,
                    p: TrackerParams) -> tuple:
     """The exact inverse of camera_to_body — base_link point to camera_link.
 
-    The tracker never calls this; the bench harness does, to work out what the
-    camera WOULD have reported for a buoy it has placed in the world. It lives
-    here beside its forward twin rather than in the bench for the reason
-    tools/lidar_view.py reads the LiDAR extrinsic out of the params file: a
-    checking tool that models the geometry differently from the node under test
-    is worse than no check, because it fails and passes for reasons that have
-    nothing to do with the thing being checked.
+    The tracker never calls this; the bench harness does, to work out what the camera
+    WOULD have reported for a buoy placed in the world, so the checking tool shares the
+    node's geometry.
 
     Args:
       x_fwd, y_left, z_up: the point in base_link [m].
@@ -288,10 +233,7 @@ def body_to_camera(x_fwd: float, y_left: float, z_up: float,
     Returns:
       (x, y, z) in camera_link [m].
 
-    Undoes the forward operations in reverse order — translate, then yaw, then
-    tilt — because that is what an inverse is. Composing them in the same order
-    as the forward pass is wrong the moment either angle is non-zero, which is
-    exactly when the bench stops being able to find the error.
+    Undoes the forward operations in reverse order: translate, yaw, then tilt.
     """
     x2, y2, z1 = x_fwd - p.cam_x, y_left - p.cam_y, z_up - p.cam_z
 
@@ -318,13 +260,10 @@ def angle_diff_deg(a: float, b: float) -> float:
 def _range_gate(cam_range: float, p: TrackerParams) -> float:
     """How far apart the two ranges may be before the pair is rejected [m].
 
-    A single absolute tolerance cannot work across this sensor's useful span.
-    Close in, stereo depth is good to centimetres and a 4 m tolerance would
-    happily pair a buoy at 3 m with a dock at 7 m. Far out, stereo error grows
-    with the square of range, and the same 4 m would reject the correct pairing
-    at 22 m. So the gate is the LARGER of a fixed floor and a fraction of the
-    camera's own range: tight where the camera is trustworthy, loose where it
-    is not, with one line of arithmetic instead of an error model.
+    A single absolute tolerance cannot span the sensor's range (4 m would pair a buoy
+    at 3 m with a dock at 7 m, yet reject the right pairing at 22 m where stereo error
+    grows with range squared), so the gate is the LARGER of a fixed floor and a
+    fraction of the camera's own range.
     """
     return max(p.fuse_range_m, p.fuse_range_frac * cam_range)
 
@@ -343,39 +282,31 @@ def fuse(cameras, lidars, p: TrackerParams):
       (observations, stats) — observations is list[Observation] in base_link;
       stats is a dict of counts for the health topic.
 
-    Association is GREEDY, nearest camera detection first. Greedy is the right
-    trade here: the alternative (a global assignment) buys accuracy only when
-    the gates are wide enough for one cluster to be plausible for several
-    detections at once, and if that is happening the gates are wrong. Taking
-    the near targets first means that when the gates ARE too wide, the object
-    that gets the good range is the close one — which is the one about to be
-    hit.
+    Association is GREEDY, nearest camera detection first: a global assignment buys
+    accuracy only if the gates are wide enough for one cluster to suit several
+    detections, and then the gates are wrong; nearest-first gives the good range to
+    the close object, the one about to be hit.
 
-    Nothing is discarded for FAILING TO PAIR. Every camera detection above
-    min_confidence and (if use_lidar and track_unlabeled) every cluster comes
-    out the other side; the only thing pairing changes is which range the
-    sighting carries. Discarding the LiDAR wholesale on use_lidar is a
-    different decision, taken once at the top and stated in the stats, not a
-    detection quietly failing a gate.
+    Nothing is discarded for FAILING TO PAIR: every camera detection above
+    min_confidence and (if use_lidar and track_unlabeled) every cluster comes out;
+    pairing only changes which range a sighting carries. Discarding the LiDAR on
+    use_lidar is a separate decision taken once at the top and stated in the stats.
     """
     stats = {"cam_in": len(cameras), "lidar_in": len(lidars),
              "cam_low_conf": 0, "fused": 0, "cam_only": 0, "lidar_only": 0,
              "lidar_ignored": 0}
 
     if not p.use_lidar:
-        # Counted FIRST, then dropped. A cluster stream that is arriving and
-        # being deliberately ignored must not look like a LiDAR that has
-        # stopped: "lidar_in 10, lidar_ignored 10" is a configuration and
-        # "lidar_in 0" is a dead sensor, and one health topic has to tell them
-        # apart. Zeroing the list here rather than skipping the loops below
-        # keeps ONE place where the switch is read.
+        # Counted FIRST, then dropped: "lidar_in 10, lidar_ignored 10" is a
+        # configuration and "lidar_in 0" is a dead sensor, and one health topic
+        # must tell them apart. Zeroing the list keeps ONE place where the switch
+        # is read.
         stats["lidar_ignored"] = len(lidars)
         lidars = []
 
-    # Move the camera onto the hull first, so every bearing below is measured
-    # about the same origin the LiDAR's already is. Skipping this puts the
-    # whole fusion stage out by the mount offset — a constant, invisible error
-    # that looks exactly like a miscalibrated extrinsic.
+    # Move the camera onto the hull first, so every bearing is measured about the
+    # same origin as the LiDAR's; skipping it puts fusion out by the mount offset,
+    # which looks like a miscalibrated extrinsic.
     cam_obs = []
     for d in cameras:
         if d.confidence < p.min_confidence:
@@ -427,25 +358,16 @@ def fuse(cameras, lidars, p: TrackerParams):
 def _fused(cam: Observation, lid: LidarCluster) -> Observation:
     """Camera DIRECTION at LiDAR RANGE — the whole point of fusing the two.
 
-    The camera's (x, y, z) is treated as a unit direction and rescaled so its
-    horizontal component equals the cluster's horizontal range. Bearing and
-    elevation survive untouched; only the distance along the ray changes.
-
-    Scaling the WHOLE vector rather than replacing x and y is what keeps z
-    consistent with the new range: a target re-ranged from 8 m to 14 m without
-    its z scaled would appear to sink, and z is the sanity check this package
-    relies on to notice a bad attitude.
-
-    The cluster's own centroid is not used as the position. It is the centroid
-    of whatever surface faced the LiDAR, biased toward the near side and
-    wandering as the boat circles; the camera's bearing to the object does not
-    have that bias.
+    The camera's (x, y, z) is rescaled so its horizontal component equals the
+    cluster's horizontal range: bearing and elevation survive, only the distance along
+    the ray changes (scaling z too keeps it consistent, and z is the sanity check for
+    a bad attitude). The cluster's centroid is not used: it is biased to the near side
+    of whatever surface faced the LiDAR and wanders as the boat circles.
     """
     cam_r = cam.range_h
     lid_r = math.hypot(lid.x, lid.y)
-    # A detection dead ahead at zero horizontal range is degenerate — the ray
-    # has no horizontal direction to preserve, so there is nothing to scale.
-    # Fall back to the cluster, which at least has a position.
+    # Dead ahead at zero horizontal range has no direction to scale; fall back to
+    # the cluster, which at least has a position.
     if cam_r < 1e-6:
         return Observation(lid.x, lid.y, lid.z, cam.label, cam.confidence,
                            SOURCE_CAMERA | SOURCE_LIDAR, tuple(lid.extent))
@@ -461,12 +383,11 @@ def _fused(cam: Observation, lid: LidarCluster) -> Observation:
 class Track:
     """One earth-anchored object and everything known about it.
 
-    Position is world ENU metres against the tracker's origin; the node turns
-    it into lat/lon on the way out. `label_votes` is kept rather than a single
-    label so the reported name is a vote over the track's whole life — see
-    TrackedTarget.msg on why the most recent label is the wrong answer. It
-    holds EVERY label ever seen, dark ones included, so the raw counts stay
-    inspectable and a changed colour_* parameter re-resolves the whole history.
+    Position is world ENU metres against the tracker's origin (the node turns it
+    into lat/lon). `label_votes` holds EVERY label ever seen, dark ones included,
+    so the reported name is a vote over the track's whole life (TrackedTarget.msg:
+    the most recent label is the wrong answer) and a changed colour_* parameter
+    re-resolves the history.
     """
     id: int
     x: float
@@ -474,8 +395,8 @@ class Track:
     z: float
     label_votes: dict = field(default_factory=dict)
     # The REPORTED label: resolve_label() over label_votes, refreshed by
-    # TargetTracker.snapshot() because it depends on parameters that can change
-    # at runtime. "" = LiDAR-only. Not the raw majority — see resolve_label().
+    # TargetTracker.snapshot() since it depends on runtime parameters. "" =
+    # LiDAR-only.
     label: str = ""
     confidence: float = 0.0
     sources: int = 0
@@ -555,18 +476,13 @@ def _unknown_label(key: str, p: TrackerParams) -> str:
 def resolve_label(votes: dict, p: TrackerParams) -> str:
     """The label a track reports, from its complete vote tally.
 
-    A track with no family votes (a dock sign, a target boat, an unlabelled
-    LiDAR return) keeps the plain majority, exactly as before. A COLOUR-FAMILY
-    track reports the lit colour that has BOTH at least colour_min_votes votes
-    AND at least colour_min_ratio of the LIT family votes; anything else is
-    colour_unknown_label. The ratio's denominator leaves out the unlit labels:
-    a flashing red buoy is dark half the time, and counting those frames as
-    votes AGAINST red would make every flashing buoy unresolvable. A track whose
-    only votes are dark is therefore unknown, not "black": whether a buoy is
-    OFF or merely between flashes is not something one tally can tell apart.
-
-    A dead heat between the two leading colours is unknown whatever the ratio
-    parameter says — picking one would be a coin toss reported as a fact.
+    A track with no family votes (a dock sign, a target boat, an unlabelled LiDAR
+    return) keeps the plain majority. A COLOUR-FAMILY track reports the lit colour
+    with BOTH at least colour_min_votes votes AND at least colour_min_ratio of the LIT
+    family votes, else colour_unknown_label. The ratio leaves out unlit labels (a
+    flashing red buoy is dark half the time), so a track with only dark votes is
+    unknown, not "black". A dead heat between the two leading colours is unknown:
+    picking one would be a coin toss reported as a fact.
     """
     if not votes:
         return ""
@@ -593,24 +509,17 @@ def resolve_label(votes: dict, p: TrackerParams) -> str:
 def _label_ok(track: Track, obs: Observation, p: TrackerParams) -> bool:
     """May this sighting be associated with this track?
 
-    Compatible means: same label, both in the colour family, or one of the two
-    has no label at all. The empty case is not a loophole, it is the point — it
-    is how a LiDAR-only track picks up a name the first time the camera sees it,
-    and how a camera-only track picks up a footprint the first time the LiDAR
-    does. Requiring an exact match would keep the two halves of one object
-    apart forever, which is exactly the outcome fusion exists to prevent.
+    Compatible means: same label, both in the colour family, or one of the two has no
+    label. The empty case is how a LiDAR-only track picks up a name the first time the
+    camera sees it (an exact match would keep the two halves of one object apart
+    forever). red_buoy and black_buoy are one buoy in two beacon states; the track
+    side is read from its RAW votes, so an unknown_buoy track still takes any family
+    colour and can stop being unknown.
 
-    The family case is the same argument for colour: red_buoy and black_buoy
-    are one buoy in two beacon states, and keeping them apart would leave a
-    duplicate track beside every flashing buoy. The track side is read from its
-    RAW votes, not from its reported label — an unknown_buoy track still takes
-    sightings of any family colour, which is how it ever stops being unknown.
-
-    Two DIFFERENT labels outside the family never merge, however close: a dock
-    marker and a target boat are different things, and a tracker that averaged
-    them into one object at the midpoint would put a waypoint through the
-    middle of nothing. (Two family buoys of different colours DO merge inside
-    assoc_radius_m, so that radius must stay below the narrowest gate.)
+    Two DIFFERENT labels outside the family never merge, however close: averaging a
+    dock marker with a target boat would put a waypoint through the middle of
+    nothing. (Two family buoys of different colours DO merge inside assoc_radius_m, so
+    that radius must stay below the narrowest gate.)
     """
     if not track.label_votes or not obs.label:
         return True
@@ -623,10 +532,9 @@ def _label_ok(track: Track, obs: Observation, p: TrackerParams) -> bool:
 class TargetTracker:
     """Stage 3: the track set, and the only mutable state in this module.
 
-    Not a ROS node and not thread-safe — the node calls update() from one timer
+    Not a ROS node and not thread-safe: the node calls update() from one timer
     callback and reads the result on the same thread. Time is a caller-supplied
-    monotonic float for the same reason StreamCache takes one: tests drive it
-    deterministically and nothing here reads a clock behind your back.
+    monotonic float so tests drive it deterministically.
     """
 
     def __init__(self, params: TrackerParams):
@@ -649,10 +557,9 @@ class TargetTracker:
         Returns:
           list[Track], sorted nearest-first by horizontal range from the boat.
 
-        An empty sensor cycle is a legitimate call and does real work: tracks
-        still age, and tracks past their timeout are still dropped. Skipping
-        the call when nothing was detected is how a stale track set outlives
-        the boat leaving the area.
+        An empty sensor cycle is a legitimate call and does real work: tracks still
+        age and expire (skipping it lets a stale track set outlive the boat leaving
+        the area).
         """
         obs, stats = fuse(cameras, lidars, self.p)
 
@@ -681,15 +588,15 @@ class TargetTracker:
         """Tracks with range/bearing and label refreshed, nearest first.
 
         Split out from update() so the node can re-range the same track set
-        against a newer pose without inventing sensor observations to do it.
+        against a newer pose without inventing observations.
         """
         for t in self.tracks:
             t.label = resolve_label(t.label_votes, self.p)
             de, dn = t.x - boat.east, t.y - boat.north
             t.range_h = math.hypot(de, dn)
-            # Absolute bearing in the LatLonHead convention: 0 = true north,
-            # clockwise positive. atan2(east, north) — the arguments are in
-            # that order on purpose, and swapping them mirrors the map.
+            # Absolute bearing in the LatLonHead convention (0 = true north,
+            # clockwise): atan2(east, north), in that order; swapping them
+            # mirrors the map.
             t.bearing_true = math.degrees(math.atan2(de, dn)) % 360.0
         return sorted(self.tracks, key=lambda t: t.range_h)
 
@@ -698,16 +605,10 @@ class TargetTracker:
     def _associate(self, projected, now, stats):
         """Greedy nearest-neighbour, one observation to at most one track.
 
-        Candidate pairs are scored by world-frame distance, gated by
-        assoc_radius_m and label compatibility, then consumed best-first. This
-        is O(obs x tracks) with both bounded in the tens, so the simple version
-        is also the fast one.
-
-        Best-first rather than in-arrival-order matters when two targets sit
-        inside one radius of each other: taking the closest pairing first gives
-        each observation to the track it actually fits, where a first-come
-        sweep would hand the first observation to whichever track it happened
-        to reach and strand the second.
+        Candidate pairs are scored by world-frame distance, gated by assoc_radius_m
+        and label compatibility, then consumed best-first (O(obs x tracks), both in
+        the tens): first-come would hand an observation to whichever track it reached
+        when two targets sit inside one radius, and strand the second.
         """
         pairs = []
         for oi, (o, wx, wy, wz) in enumerate(projected):
@@ -739,12 +640,10 @@ class TargetTracker:
                       wx: float, wy: float, wz: float, resid: float, now: float):
         """Blend one sighting into an existing track.
 
-        The position gain is max(pos_alpha, 1/hits): for the first few
-        sightings that IS the running mean, so a new track converges on its
-        true position immediately instead of crawling there at 30% per frame;
-        after about 1/pos_alpha sightings it flattens into a fixed-gain EMA
-        that keeps responding to a target that moves. One expression covers
-        both regimes and there is no mode to get stuck in the wrong one.
+        The position gain is max(pos_alpha, 1/hits): for the first few sightings
+        that IS the running mean, so a new track converges at once instead of
+        crawling at 30% per frame; after ~1/pos_alpha sightings it is a fixed-gain
+        EMA that keeps responding to a moving target.
         """
         dt = max(now - t.last_seen, 1e-3)
         t.hits += 1
@@ -752,16 +651,16 @@ class TargetTracker:
 
         nx = t.x + a * (wx - t.x)
         ny = t.y + a * (wy - t.y)
-        # Velocity from the SMOOTHED positions, not the raw sighting: a finite
-        # difference of raw observations is mostly detector noise divided by a
-        # small dt, which at 10 Hz reads as several m/s for a moored buoy.
+        # Velocity from the SMOOTHED positions: a finite difference of raw
+        # sightings is detector noise over a small dt (several m/s for a moored
+        # buoy at 10 Hz).
         self._blend_velocity(t, (nx - t.x) / dt, (ny - t.y) / dt)
         t.x, t.y = nx, ny
         t.z += a * (wz - t.z)
 
-        # Residual is measured against the estimate BEFORE this update — it is
-        # the innovation, "how wrong were we", not the post-fit leftover, which
-        # would shrink toward zero whatever the data did.
+        # Residual against the estimate BEFORE this update: the innovation, not
+        # the post-fit leftover, which would shrink toward zero whatever the data
+        # did.
         t.var += _VAR_ALPHA * (resid * resid - t.var)
 
         t.last_seen = now
@@ -795,34 +694,22 @@ class TargetTracker:
     def _prune(self, now: float) -> int:
         """Drop expired tracks and enforce the cap. Returns how many went.
 
-        Two timeouts, because the two kinds of track are wrong in different
-        ways. A TENTATIVE track is very often one frame of detector noise, and
-        holding that on the map for half a minute puts phantom obstacles in
-        front of a mission. A CONFIRMED track has been seen repeatedly and is
-        almost certainly a real object that the boat has simply turned away
-        from — dropping it because it left the camera's 80 degree field is how
-        the boat forgets the buoy it just rounded.
+        Two timeouts: a TENTATIVE track is often one frame of detector noise (a
+        phantom obstacle in front of a mission), while a CONFIRMED track is almost
+        certainly a real object the boat has turned away from (dropping it is how the
+        boat forgets the buoy it just rounded). track_timeout_s <= 0 means a CONFIRMED
+        track NEVER expires: right for a buoy field the boat leaves and returns to, and
+        a re-sighting then updates the ORIGINAL track instead of creating a second one.
 
-        track_timeout_s <= 0 means a CONFIRMED track NEVER expires — the boat
-        remembers the whole course for the life of the run. That is the right
-        posture for a buoy field, which does not move and which the boat will
-        leave and return to many times, and it is what makes a re-sighting
-        update the ORIGINAL track instead of creating a second one beside it.
+        Tentative tracks always expire on tentative_timeout_s; that guard cannot be
+        switched off. With immortal tracks, confirm_hits is the only thing between a
+        reflection and a permanent phantom obstacle: raise it if phantoms accumulate.
 
-        Note what it does NOT do: tentative tracks still expire on
-        tentative_timeout_s, always. That guard cannot be switched off, because
-        with it gone a single wave crest that clears confirm_hits would sit on
-        the map permanently. With immortal tracks, confirm_hits is the only
-        thing standing between a reflection and a phantom obstacle that never
-        goes away — raise it if phantoms start accumulating.
-
-        The cap is a last-resort guard against a runaway (a shoreline
-        clustering into hundreds of anonymous objects), not a normal path: the
-        tracks kept are the confirmed ones, then the most recently seen. It is
-        logged by the caller through the health topic because silently
-        forgetting an obstacle is exactly the failure this package's README
-        forbids. It applies to immortal tracks too — "never expires" is not a
-        promise this can keep against an unbounded number of them.
+        The cap is a last-resort guard against a runaway (a shoreline clustering into
+        hundreds of anonymous objects): confirmed tracks are kept first, then the most
+        recently seen. The caller logs it through the health topic, because silently
+        forgetting an obstacle is what this package's README forbids. It applies to
+        immortal tracks too.
         """
         before = len(self.tracks)
         keep = []

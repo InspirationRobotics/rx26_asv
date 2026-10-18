@@ -12,12 +12,10 @@
 //   rclcpp::get_logger    by name
 //   RCLCPP_INFO / WARN / ERROR / DEBUG, and the _THROTTLE forms
 //
-// If a leaf starts using anything else from rclcpp, the off-ROS build fails
-// here, at compile time, naming the symbol - which is the right place to find
-// out that a leaf has stopped being plumbing.
-//
-// Logs go to STDERR, one line each. STDOUT belongs to the JSON-lines protocol
-// the sim speaks, and a log line there would be a malformed message.
+// If a leaf starts using anything else from rclcpp, the off-ROS build fails here at
+// compile time, naming the symbol: the right place to learn a leaf has stopped being
+// plumbing. Logs go to STDERR, one line each: STDOUT belongs to the JSON-lines
+// protocol the sim speaks.
 #ifndef CRUSADER_BT_OFFROS_SHIM_RCLCPP_HPP_
 #define CRUSADER_BT_OFFROS_SHIM_RCLCPP_HPP_
 

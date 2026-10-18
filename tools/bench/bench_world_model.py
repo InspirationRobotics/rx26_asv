@@ -7,35 +7,26 @@ world model can be driven before the camera and LiDAR are trustworthy.
     ros2 run crusader_world_model map_server          # terminal 2
     python3 tools/bench/bench_world_model.py          # terminal 3
 
-DEFAULT MODE USES THE REAL VESSEL. It subscribes to `/crsd/pose` and
-`/crsd/attitude` and publishes only the two SENSOR topics, computing what the
-camera and LiDAR would have reported for a field of buoys that isn't there.
-That is a far better test than a simulated boat: the pose carries real RTK
-noise, the yaw is the real moving-baseline solution with its real latency, and
-the roll and pitch are the real hull in the real water. A synthetic circle
-tests the tracker against a boat that moves perfectly, which is the one kind of
-boat it will never see.
+DEFAULT MODE USES THE REAL VESSEL. It subscribes to `/crsd/pose` and `/crsd/attitude` and
+publishes only the two SENSOR topics, computing what the camera and LiDAR would have reported
+for buoys that aren't there. That is a far better test than a simulated boat: the pose carries
+real RTK noise, the yaw is the real moving-baseline solution with its latency, and roll and
+pitch are the real hull in real water. It also means the bench does NOT contend with
+`telemetry_bridge` for `/crsd/pose` (two publishers interleave and the tracker sees the boat
+teleport), which is why the simulated-vessel mode must be asked for by name:
 
-It also means the bench does NOT contend with `telemetry_bridge` for
-`/crsd/pose`. Two publishers on that topic interleave, and the tracker sees the
-boat teleporting between two positions — which is why the simulated-vessel mode
-now has to be asked for by name.
+    --sim-pose      invent the vessel too: a boat circling the field, publishing /crsd/pose,
+                    /crsd/attitude and /crsd/fcu_status itself. For a DESK run with no boat and
+                    no telemetry_bridge. Do not use it while the core stack is up.
 
-    --sim-pose      invent the vessel too: a boat circling the field, publishing
-                    /crsd/pose, /crsd/attitude and /crsd/fcu_status itself. For
-                    a DESK run with no boat and no telemetry_bridge. Do not use
-                    it while the core stack is up.
+WHERE THE BUOYS GO. The field is anchored at the boat's FIRST FIX and rotated to its heading at
+that instant, so the buoys lie AHEAD OF THE BOW wherever the boat happens to be (fixed lat/lon
+would put the field in Florida while the boat sits in a car park). The true lat/lon of every
+buoy is printed once, at anchor time.
 
-WHERE THE BUOYS GO. The field is anchored at the boat's FIRST FIX and rotated
-to its heading at that instant, so the buoys are laid out AHEAD OF THE BOW
-wherever the boat happens to be. Anchoring to fixed lat/lon would put the field
-in Florida while the boat sits in a car park, and nothing would ever come into
-view. The resulting true lat/lon of every buoy is printed once, at anchor time.
-
-THE GROUND TRUTH IS PRINTED. That is what makes this a check rather than a
-demo: the tracker's output is a number you can compare against a number you
-chose. A track that settles within a metre of its truth row, keeps its id, and
-does not split in two as the boat swings past it, is a tracker that works.
+THE GROUND TRUTH IS PRINTED, which makes this a check rather than a demo: a track that settles
+within a metre of its truth row, keeps its id, and does not split as the boat swings past is a
+tracker that works.
 
 Publishes (topic names READ FROM crusader_params.yaml, never restated here):
   target_tracker.detections_topic  10 Hz  camera_link, EVERY frame, empty or not
@@ -43,17 +34,14 @@ Publishes (topic names READ FROM crusader_params.yaml, never restated here):
 and, ONLY under --sim-pose:
   /crsd/pose          20 Hz   /crsd/attitude 30 Hz   /crsd/fcu_status 1 Hz
 
-WHAT IT CANNOT PROVE. The body/world rotation here is
-crusader_common.geo.world_to_body_ypr, the exact transpose of the one the
-tracker runs — so a sign error shared by both cancels and this bench will show
-a perfect map anyway. It proves the plumbing, the association, the decay, the
-fusion arbitration and the display. It does NOT prove the frame convention, and
-it never will; that is a bench exercise against real hardware, the way
-docs/G2_lidar_orientation.md did it for the LiDAR.
+WHAT IT CANNOT PROVE. The body/world rotation here is crusader_common.geo.world_to_body_ypr,
+the exact transpose of the tracker's, so a sign error shared by both cancels and the map looks
+perfect anyway. It proves the plumbing, association, decay, fusion arbitration and display, NOT
+the frame convention; that is a bench exercise against real hardware (docs/G2_lidar_orientation.md
+did it for the LiDAR).
 
-REQUIREMENTS: rclpy + crusader_msgs + crusader_common + crusader_world_model —
-i.e. the `asv` container, or any sourced workspace. No numpy, no cv2, no device
-SDKs, and no camera or LiDAR.
+REQUIREMENTS: rclpy + crusader_msgs + crusader_common + crusader_world_model — i.e. the `asv`
+container, or any sourced workspace. No numpy, no cv2, no device SDKs, and no camera or LiDAR.
 """
 import argparse
 import math
@@ -103,19 +91,14 @@ SIM_ORIGIN = (27.7745, -82.6320)
 # The buoy field, in metres RELATIVE TO THE BOAT AT ANCHOR TIME:
 #   right  = + to starboard of where the bow was pointing
 #   ahead  = + along the bow
-# A gate to run, a pair of channel markers beyond it, and one unlabelled object
-# the camera will never name — that last one is there to prove an anonymous
-# LiDAR cluster still reaches the map instead of being quietly filtered for
-# having no label.
+# TWO FIELDS, chosen with --field. "tracker" stays the default: changing what an existing bench
+# invents would silently change what every previous run of it meant. It is a gate to run, a pair
+# of channel markers beyond it, and one unlabelled object the camera will never name, which proves
+# an anonymous LiDAR cluster still reaches the map instead of being filtered for having no label.
 #
-# TWO FIELDS, chosen with --field. "tracker" is the original and stays the
-# default: changing what an existing bench invents would silently change what
-# every previous run of it meant.
-#
-# Labels are not free text. bt_runner_node's beaconFromLabel() matches on
-# substrings, in this order: red, green, blue, off/black. So "flashing_blue"
-# and "steady_blue" are the only way to say ENTRY and EXIT, and a label may
-# never contain two colour words.
+# Labels are not free text. bt_runner_node's beaconFromLabel() matches on substrings, in this
+# order: red, green, blue, off/black. So "flashing_blue" and "steady_blue" are the only way to say
+# ENTRY and EXIT, and a label may never contain two colour words.
 FIELDS = {
     # The original: a gate to run, a pair of channel markers beyond it, and one
     # unlabelled object the camera will never name — that last one is there to
@@ -131,23 +114,18 @@ FIELDS = {
         ("",               22.0, 60.0),   # LiDAR sees it; the camera never will
     ],
 
-    # Task 1 Safe Passage, handbook 3.3.2: ten buoys, one flashing-blue ENTRY,
-    # one steady-blue EXIT, RED passed to STARBOARD and GREEN to PORT, plus two
-    # unlit BLACK buoys that carry no side constraint and are pure obstacles.
+    # Task 1 Safe Passage, handbook 3.3.2: ten buoys, one flashing-blue ENTRY, one steady-blue
+    # EXIT, RED passed to STARBOARD and GREEN to PORT, plus unlit BLACK buoys that carry no side
+    # constraint and are pure obstacles (they prove the boat's pairing ignores everything that is
+    # not a beacon, and are what the autopilot's avoidance has to deal with).
     #
-    # RED sits to +right and GREEN to -right because the boat transits along
-    # +ahead: that is what puts red on its starboard hand. Mirror the two
-    # columns and the field becomes a test that the boat drives the wrong side
-    # of every buoy, which is worth doing deliberately and never by accident.
+    # RED sits to +right and GREEN to -right because the boat transits along +ahead, which puts
+    # red on its starboard hand. Mirror the columns and the field tests that the boat drives the
+    # wrong side of every buoy: worth doing deliberately, never by accident.
     #
-    # 92 m from the anchor to the EXIT buoy. The ENTRY sits at 20 m so it is
-    # inside CAM_MAX_M at the moment the field anchors — the rest is discovered
-    # on the way, which is the honest version of the problem.
-    # TWO red-green pairs, ten buoys. Ten because that is what
-    # RXL_SAFE_PASSAGE carries and what the aircraft really sends; two pairs
-    # because that is the passage. The four unlit blacks are not padding -- they
-    # are what proves the boat's pairing ignores everything that is not a
-    # beacon, and what the autopilot's avoidance has to deal with.
+    # 92 m from the anchor to the EXIT buoy; the ENTRY sits at 20 m so it is inside CAM_MAX_M when
+    # the field anchors, and the rest is discovered on the way. Ten buoys because that is what
+    # RXL_SAFE_PASSAGE carries and what the aircraft really sends: two red-green pairs plus blacks.
     "task1": [
         #  label                right  ahead
         ("flashing_blue_buoy",    0.0, 20.0),   # ENTRY — circle it CLOCKWISE
@@ -217,13 +195,11 @@ class WorldModelBench(Node):
         self._field_lock = threading.Lock()
         self._nan_heading = 0       # fixes dropped for unresolved GPS yaw
 
-        # The radio, under --uav. This bench then plays BOTH halves of the
-        # world: the boat's own sensors (camera + LiDAR, as always) and the
-        # aircraft's transmissions. Running both at once is the honest
-        # Disruptive setup and is what exercises nav::fusePassage.
-        # The mission action, so the page can start and stop a run without
-        # anybody opening a terminal. This is a CLIENT of bt_runner_node's
-        # server; the bench never decides anything about the mission itself.
+        # The radio, under --uav: this bench then plays BOTH halves of the world, the boat's own
+        # sensors and the aircraft's transmissions, the honest Disruptive setup that exercises
+        # nav::fusePassage.
+        # The mission action, so the page can start and stop a run without a terminal. This is a
+        # CLIENT of bt_runner_node's server; the bench never decides anything about the mission.
         self.mission = {"state": "idle", "phase": "", "progress": 0.0,
                         "outcome": None, "detail": "", "plan_version": 0,
                         "buoys_known": 0, "elapsed_s": 0.0}
@@ -242,23 +218,18 @@ class WorldModelBench(Node):
             # 20 Hz: the boat asks for a gate once per leg, so this only has to
             # be faster than a person notices, not faster than the radio.
             self.create_timer(0.05, lambda: self.uav.poll())
-            # AND RETRANSMIT, the way a real aircraft does. /crsd/passage_plan
-            # is not latched -- deliberately, because a latched topic would hand
-            # a late subscriber a stale plan stamped with the moment it arrived,
-            # which is exactly the frozen-world lie the staleness check exists to
-            # catch. So the aircraft repeats itself instead, and a bt_runner that
-            # starts after the operator clicked Transmit picks the passage up
-            # within one period. Clicking Transmit once and getting a tree that
-            # fails on its first tick is what this fixes.
+            # AND RETRANSMIT, the way a real aircraft does. /crsd/passage_plan is deliberately not
+            # latched (a latched topic would hand a late subscriber a stale plan stamped with the
+            # moment it arrived, the frozen-world lie the staleness check exists to catch), so the
+            # aircraft repeats itself and a bt_runner that starts after Transmit picks the passage
+            # up within one period.
             self.create_timer(1.0 / 0.2, lambda: self.uav.resend())
         self._warned_no_pose = False
 
-        # The TOPIC NAMES come from the same params file as the extrinsic, and
-        # for the same reason. They were hardcoded here as "oak/detections"
-        # while target_tracker subscribed "crsd/oak/detections", so the bench
-        # published into a topic nothing read: the tracker kept publishing an
-        # EMPTY target array at its usual 10 Hz, which looks exactly like a
-        # bench that is running and a tracker that sees nothing.
+        # The TOPIC NAMES come from the same params file as the extrinsic: hardcoded as
+        # "oak/detections" while target_tracker subscribed "crsd/oak/detections", the bench
+        # published into a topic nothing read, and the tracker's empty 10 Hz array looked like a
+        # running bench and a tracker that sees nothing.
         self.det_pub = self.create_publisher(Detection3DArray,
                                              p["detections_topic"], 10)
         self.clu_pub = self.create_publisher(Cluster3DArray,
@@ -288,11 +259,9 @@ class WorldModelBench(Node):
     def _on_pose(self, msg: LatLonHead):
         """Cache the fix, anchoring the field on the first usable one.
 
-        A NaN heading is GPS yaw unresolved, and the field's orientation is
-        defined by the heading at anchor time — so an unresolved first fix must
-        not be allowed to anchor it. Dropped rather than defaulted to north:
-        laying the field out on a guessed heading puts the buoys somewhere the
-        boat may never look, and the ground-truth table would be wrong.
+        A NaN heading is GPS yaw unresolved and the field's orientation is the heading at anchor
+        time, so an unresolved first fix must not anchor it. Dropped, not defaulted to north: a
+        field laid out on a guessed heading puts buoys where the boat may never look.
         """
         if math.isnan(msg.heading):
             self._nan_heading += 1
@@ -314,21 +283,16 @@ class WorldModelBench(Node):
     # --------------------------------------------------------- SITL reset
 
     def _return_to_start(self):
-        """Drive the boat back to the anchor so the next run starts where the
-        last one did.
+        """Drive the boat back to the anchor so the next run starts where the last one did.
 
-        NOT a reboot. MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN was the obvious thing
-        and it does not work: tried 2026-09-13, the autopilot restarted and
-        re-armed but the simulated vehicle STAYED where it was -- reported "on
-        the start line" from 64 m up the field, which is worse than failing. A
-        genuine position reset means restarting the SITL process itself, and
-        that lives on the WSL host where this container cannot reach it
-        (tools/sitl/start_sitl.sh, by hand).
+        NOT a reboot: MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN restarts and re-arms the autopilot but the
+        simulated vehicle STAYS where it was (reported "on the start line" from 64 m up the
+        field). A genuine position reset means restarting the SITL process on the WSL host, out of
+        this container's reach (tools/sitl/start_sitl.sh, by hand).
 
-        So this drives home under GUIDED instead, using the same setpoint path
-        the mission uses. Publishing on /crsd/guided_setpoint while bt_runner is
-        also publishing would make the boat argue with itself, which is why this
-        refuses to run while a mission is active.
+        So this drives home under GUIDED using the mission's own setpoint path. Publishing on
+        /crsd/guided_setpoint while bt_runner is also publishing would make the boat argue with
+        itself, so it refuses to run while a mission is active.
         """
         if self.mission["state"] in ("active", "starting", "cancelling"):
             raise RuntimeError("cancel the mission first")
@@ -384,24 +348,17 @@ class WorldModelBench(Node):
     # ------------------------------------------------------- the mission
 
     def _mission_send(self, tier=2, timeout_s=400.0):
-        """Start a run. Called from the HTTP thread, so it never BLOCKS.
-
-        send_goal_async returns a future the executor resolves on its own
-        thread. Waiting on it here would deadlock the one spin that is supposed
-        to resolve it, and the page would hang instead of the mission starting.
+        """Start a run. Called from the HTTP thread, so it never BLOCKS: send_goal_async returns a
+        future the executor resolves on its own thread, and waiting on it here would deadlock the
+        one spin that resolves it and hang the page.
         """
         if self._goal_handle is not None and self.mission["state"] == "active":
             raise RuntimeError("a mission is already running")
 
-        # A NEW RUN MEANS THE AIRCRAFT FORGETS TOO. bt_runner resets gate_seq to
-        # 0 when it accepts a goal, so the next run asks about gate 1 again --
-        # and an aircraft still holding the last run's answer for seq 1 treats
-        # that as a lost-reply repeat and acks it instantly, from the cache,
-        # with whatever field it had. The operator never gets the pause the
-        # confirmation exists to give them.
-        #
-        # Seen in SITL 2026-09-14: a second run's gate 1 was "confirmed" 200 ms
-        # after it was asked, with nobody at the keyboard.
+        # A NEW RUN MEANS THE AIRCRAFT FORGETS TOO. bt_runner resets gate_seq to 0 when it accepts a
+        # goal, so the next run asks about gate 1 again, and an aircraft still holding the last
+        # run's answer for seq 1 treats that as a lost-reply repeat and acks it instantly from the
+        # cache, denying the operator the pause the confirmation exists to give.
         if self.uav is not None:
             self.uav.rewind()
         if not self.action.server_is_ready():
@@ -455,13 +412,10 @@ class WorldModelBench(Node):
     def _plan_from_field(self):
         """The current field as (buoys, entry, exit_) for the radio.
 
-        Shared by Transmit and Confirm, because those send the SAME thing --
-        the difference is only whether an acknowledgement follows. Two copies
-        of this drifted once already.
-
-        Buoy ids are the index in the field list, which is exactly the number
-        the page draws on each marker, so a colour changed on screen reaches
-        the boat against the id it already knows.
+        Shared by Transmit and Confirm, which send the SAME thing (the difference is only whether
+        an acknowledgement follows). Buoy ids are the index in the field list, the number the page
+        draws on each marker, so a colour changed on screen reaches the boat against the id it
+        already knows.
         """
         with self._field_lock:
             field = list(self.field)
@@ -503,11 +457,9 @@ class WorldModelBench(Node):
         return "sent %d buoys" % len(buoys)
 
     def _uav_confirm(self):
-        """Answer the boat's outstanding request with the field as it is NOW.
-
-        The field is re-read here rather than repeating what was last
-        transmitted, so "recolour a buoy, then confirm" carries the new colours
-        in the same breath. That is the whole operator gesture.
+        """Answer the boat's outstanding request with the field as it is NOW (re-read, not what was
+        last transmitted), so "recolour a buoy, then confirm" carries the new colours in one
+        gesture.
         """
         if self.uav is None:
             raise RuntimeError("no radio: start with --uav")
@@ -522,9 +474,9 @@ class WorldModelBench(Node):
     def _gui_state(self):
         """What the page polls. Every number here is either fresh or absent.
 
-        The boat is omitted entirely once its pose goes stale rather than being
-        sent at its last known position: a marker frozen on a map is read as a
-        stationary boat, which is the one failure this bench must not imitate.
+        The boat is omitted entirely once its pose goes stale rather than sent at its last known
+        position: a marker frozen on a map reads as a stationary boat, the one failure this bench
+        must not imitate.
         """
         if self.origin is None:
             return {"anchored": False, "boat": None, "buoys": [],
@@ -567,12 +519,11 @@ class WorldModelBench(Node):
     # ---------- vessel: the simulated one ----------
 
     def _start_simulated_vessel(self):
-        """Publish pose/attitude/status for a boat circling the field.
+        """Publish pose/attitude/status for a boat circling the field (desk mode).
 
-        Desk mode. A circle rather than a straight line because a straight run
-        past a buoy never tests the two things most likely to be wrong —
-        whether a track survives leaving the field of view, and whether it is
-        still ONE track when it comes back into view from a different bearing.
+        A circle, not a straight run, because a straight run past a buoy never tests whether a
+        track survives leaving the field of view, or is still ONE track when it returns from a
+        different bearing.
         """
         self.pose_pub = self.create_publisher(LatLonHead, "/crsd/pose", 10)
         self.att_pub = self.create_publisher(Attitude, "/crsd/attitude", 10)
@@ -636,12 +587,9 @@ class WorldModelBench(Node):
     def _anchor(self, lat0: float, lon0: float, heading0: float):
         """Place the buoy field ahead of the bow and print the ground truth.
 
-        FIELD is written as (right, ahead) so the layout reads the way a person
-        describes it from the helm. Rotating by the heading at anchor time is
-        what puts the buoys where the boat can actually see them: the same table
-        works whether the dock faces north or south-west, and the operator does
-        not have to recompute a field every time the boat is put in the water at
-        a different angle.
+        FIELD is written as (right, ahead), the way a person describes it from the helm. Rotating
+        by the heading at anchor time puts the buoys where the boat can see them, so the same
+        table works whichever way the dock faces.
         """
         self.origin = (lat0, lon0)
         self.anchor_heading = heading0
@@ -676,10 +624,9 @@ class WorldModelBench(Node):
     def _vessel(self):
         """(east, north, yaw, roll, pitch) now, or None if the boat is unknown.
 
-        None is a real answer and callers must handle it. Substituting a last
-        known pose would put the invented buoys at bearings computed from a
-        position the boat has left, which is the frozen-pose failure this repo
-        keeps having to design out — and here it would be self-inflicted.
+        None is a real answer and callers must handle it: substituting a last known pose would
+        put the invented buoys at bearings computed from a position the boat has left (the
+        frozen-pose failure this repo keeps designing out).
         """
         if self.args.sim_pose:
             e, n, yaw, _v, roll, pitch = self._sim_state()
@@ -689,26 +636,22 @@ class WorldModelBench(Node):
         if pose is None or self.origin is None:
             return None
         att = self._att.get(now)
-        # A stale attitude falls back to level rather than blocking. It costs
-        # nothing: the tracker refuses to ingest anything without a fresh
-        # attitude of its own, so these detections are computed and then
-        # correctly ignored. Blocking here would instead make a dead ATTITUDE
-        # stream look like a dead CAMERA, which is the wrong diagnosis to hand
-        # someone at the dock.
+        # A stale attitude falls back to level rather than blocking: the tracker ignores anything
+        # without a fresh attitude of its own, and blocking here would make a dead ATTITUDE stream
+        # look like a dead CAMERA, the wrong diagnosis to hand someone at the dock.
         roll, pitch = att if att is not None else (0.0, 0.0)
         return pose[0], pose[1], pose[2], roll, pitch
 
     def _visible(self, half_fov_deg, max_m):
         """Field members inside a sensor's cone, as (label, x, y, z, range).
 
-        One function for both sensors because the difference between them is
-        the cone and the error model, not the geometry — and two copies of a
-        visibility test drift until one sensor "sees" something the other
-        cannot, which looks exactly like a fusion bug.
+        One function for both sensors (the difference is the cone and the error model, not the
+        geometry): two visibility tests drift until one sensor "sees" what the other cannot, which
+        looks like a fusion bug.
 
-        Returns None (not an empty list) when the boat's position is unknown:
-        "no buoys in view" and "no idea where the boat is" are different
-        answers and the callers publish differently for each.
+        Returns None (not an empty list) when the boat's position is unknown: "no buoys in view"
+        and "no idea where the boat is" are different answers and callers publish differently for
+        each.
         """
         v = self._vessel()
         if v is None:
@@ -742,15 +685,13 @@ class WorldModelBench(Node):
     def _detections(self):
         """What buoy_detector would publish: camera_link, EVERY frame.
 
-        The unlabelled field member is skipped here and only here — a camera
-        that cannot name a thing does not report it, which is precisely why the
-        LiDAR-only path has to work.
+        The unlabelled field member is skipped here and only here: a camera that cannot name a
+        thing does not report it, which is why the LiDAR-only path has to work.
 
-        Positions are converted out of base_link into TRUE camera_link before
-        publishing. Without that step the mount offset would be missing from
-        the bench and present in the tracker, and every camera-derived position
-        would land 37 cm forward and 65 cm high of truth — a clean, constant
-        error that looks exactly like a fusion bug and is not one.
+        Positions are converted out of base_link into TRUE camera_link before publishing; without
+        that the mount offset would be missing from the bench and present in the tracker, and
+        every camera-derived position would land 37 cm forward and 65 cm high of truth, a constant
+        error that looks like a fusion bug.
         """
         if self.args.no_camera:
             return
@@ -783,20 +724,14 @@ class WorldModelBench(Node):
     def _maybe_miscolour(self, label):
         """Occasionally report a red buoy as green, or the reverse.
 
-        WHY THE BENCH SHOULD LIE. Above Core tier the aircraft owns the colours
-        and the boat's camera only refines POSITION -- nav::fusePassage takes
-        the beacon from the plan and never from the tracker. That rule was
-        written, tested off-ROS, and never once exercised in SITL, because
-        synthetic detections always carried the true label: the fusion could
-        have been taking the camera's colour all along and every run would have
-        looked identical.
+        WHY THE BENCH SHOULD LIE. Above Core tier the aircraft owns the colours and the camera
+        only refines POSITION: nav::fusePassage takes the beacon from the plan and never from the
+        tracker. That was never exercised in SITL because synthetic detections always carried the
+        true label.
 
-        --miscolour 0.2 makes one detection in five disagree. The passage must
-        not change. If it does, the aircraft is not winning.
-
-        Only red and green are flipped. Miscolouring the ENTRY or EXIT beacon
-        would test a different thing -- those come straight from the plan and
-        never from a detection at all.
+        --miscolour 0.2 makes one detection in five disagree. The passage must not change; if it
+        does, the aircraft is not winning. Only red and green are flipped: ENTRY and EXIT come
+        straight from the plan and never from a detection.
         """
         p = getattr(self.args, "miscolour", 0.0)
         if p <= 0.0 or random.random() >= p:

@@ -1,24 +1,17 @@
 // task3_leaves.cpp — the Task 3 (Coordinated Logistics) leaves.
 //
-// Same rules as leaves.cpp, and for the same reasons:
+// Same rules as leaves.cpp:
 //
-//   * Every calculation is in dock_math.hpp, which is tested off-ROS
+//   * Every calculation is in dock_math.hpp, tested off-ROS
 //     (test/test_dock_math.cpp). A formula growing here belongs there.
-//   * The leaves never subscribe. The runner folds every DockObservation into
-//     the Context through ingestDockObservation(), and a leaf reads the result.
+//   * The leaves never subscribe: the runner folds every DockObservation into
+//     the Context through ingestDockObservation().
 //   * Outputs (reports, the cannon, setpoints) are called OUTSIDE ctx_->mu: the
 //     runner's publish callbacks may take it, and std::mutex does not recurse.
 //
-// The mission these serve, handbook 3.3.4, in the order the tree runs them:
-//
-//   find the safe bay   PickVantage -> NavigateTo -> HoldStation, until
-//                       SafeBayKnown: exactly one bay reads GREEN
-//   commit and dock     CommitSafeBay, DockWaypoint predock/berth, guarded by
-//                       ChosenBaySafe; DockedInBay; ReportDocking
-//   put the fire out    AwaitFireTarget (the RED window), SprayUntilHit,
-//                       ReportFirefighting
-//   read the request    DecodeResourceRequest (the colour code), then
-//                       ReportResourceRequest to RoboCommand and the UAV
+// The mission these serve (handbook 3.3.4), in tree order: find the safe bay, commit
+// and dock, put the fire out, read the colour code and report the request.
+// behavior_trees/task3_*.xml holds the tree.
 //
 // ONE CONTRACT THAT IS LOAD-BEARING: UpdateDockBook sits in the guard band,
 // re-ticked ten times a second, and MUST NEVER RETURN FAILURE - "no bay in
@@ -128,15 +121,11 @@ public:
   }
 };
 
-/// In the berth: close enough in, on the centreline, bow in - AND the whole
-/// hull inside the slip.
-///
-/// The hull test is what makes this honest. Centre-point tolerances alone
-/// once passed a hull whose corner was over a finger: the tree reported
-/// "docked", a strict RoboCommand said otherwise, and the fire never lit (sim,
-/// 2026-09-24). The slip is taken from the bay pitch the boat MEASURED
-/// (dock::bayPitch) less half a finger (finger_margin), not a number typed in
-/// for a course nobody has measured.
+/// In the berth: close enough in, on the centreline, bow in - AND the whole hull
+/// inside the slip. The hull test is what makes this honest (centre-point tolerances
+/// alone can pass a hull whose corner is over a finger, which a strict RoboCommand
+/// will not call docked); the slip comes from the bay pitch the boat MEASURED
+/// (dock::bayPitch) less half a finger (finger_margin).
 class DockedInBay : public CrusaderCondition
 {
 public:
@@ -234,13 +223,10 @@ public:
 
 // ------------------------------------------------------ world-model update
 
-/// Says what the boat believes about the bays, when that belief changes.
-///
-/// The runner has already folded every frame in; this leaf exists so the tree
-/// SHOWS where the world update is, and so the log carries one line per
-/// change of verdict rather than one per frame.
-///
-/// ALWAYS SUCCESS. See the file header.
+/// Says what the boat believes about the bays, when that belief changes. The
+/// runner has already folded every frame in; this leaf SHOWS where the world
+/// update is, and logs one line per change of verdict rather than one per frame.
+/// ALWAYS SUCCESS (see the file header).
 class UpdateDockBook : public CrusaderSyncAction
 {
 public:
@@ -504,17 +490,15 @@ private:
 
 /// Spray the target window until it turns GREEN.
 ///
-/// Aimed EVERY TICK at the CV's latest aim point for that window, so drift in
-/// the berth is followed rather than sprayed past. With no fresh aim point it
-/// STOPS spraying rather than spraying where the window used to be.
+/// Aimed EVERY TICK at the CV's latest aim point so drift in the berth is followed;
+/// with no fresh aim point it STOPS spraying rather than spray where the window used
+/// to be.
 ///
-/// Two independent "it's out" signals, either one ends it: the timing layer's
-/// `hit` event (counted by the runner, since it lives on one frame), and the
-/// window's own state held GREEN for min_green_s (dock::HitWatch).
-///
-/// The cannon is switched off on EVERY exit - success, timeout and halt. A
-/// halted leaf that left the pump running would keep spraying through
-/// whatever the tree did next.
+/// Two independent "it's out" signals, either ends it: the timing layer's `hit` event
+/// (counted by the runner, since it lives on one frame) and the window's own state
+/// held GREEN for min_green_s (dock::HitWatch). The cannon is switched off on EVERY
+/// exit (success, timeout, halt): a halted leaf leaving the pump running would keep
+/// spraying through whatever the tree did next.
 class SprayUntilHit : public CrusaderAction
 {
 public:

@@ -3,8 +3,8 @@
 docs/nav2_avoidance_spec.md section 2. The TF frame `map`, the BT's east/north
 frame (bt_runner's ctx_->origin) and every HazardArray coordinate are the same
 equirectangular ENU plane, centred on one datum. `to_local` is that plane,
-written the way crusader_bt/nav_math.hpp:92-104 writes it (same R, same operand
-order). A SECOND projection anywhere in the chain is a silent offset:
+written the way crusader_bt/nav_math.hpp toLocal() writes it (same R, same
+operand order). A SECOND projection anywhere in the chain is a silent offset:
 crusader_common.geo (111139 m/deg) and SITL (111318.845 m/deg) differ from this
 by 0.05 % and 0.11 %, so neither may be used to make map coordinates.
 
@@ -53,9 +53,9 @@ def is_fix(lat, lon):
     """A usable position: finite, on the globe, and not exactly (0, 0).
 
     GLOBAL_POSITION_INT reports lat = lon = 0 before the autopilot has a
-    position. (0, 0) is a real place, but it is 8000 km from anywhere this boat
-    floats, so a first fix of exactly that is the absence of a fix, and a datum
-    pinned there is wrong for the life of the process.
+    position. (0, 0) is 8000 km from anywhere this boat floats, so a first fix of
+    exactly that is the absence of a fix, and a datum pinned there is wrong for
+    the life of the process.
     """
     if not (math.isfinite(lat) and math.isfinite(lon)):
         return False

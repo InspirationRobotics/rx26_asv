@@ -73,8 +73,7 @@ global_costmap:
           clearing: false
           # obstacle_range is PER SOURCE in STVL and defaults to 2.5 m (the layer-level 40.0 above is
           # not inherited): left out, every return beyond 2.5 m is dropped and the voxel grid stays EMPTY
-          # with no warning. Found 2026-10-01 (crsd-sim:nav2): the LiDAR-only platform and buoys were
-          # never marked until this was set; the buoys at 15 m then became lethal cells.
+          # with no warning (the LiDAR-only platform and the buoys at 15 m were never marked).
           obstacle_range: 40.0
           min_obstacle_height: 0.0           # cloud is already water-gated upstream
           max_obstacle_height: 5.0
@@ -98,10 +97,10 @@ global_costmap:
           min_z: 0.5                         # m, = lidar_cluster_node r_min
           max_z: 20.0                        # m: in-view decay only where a 0.3 m buoy is reliably seen
           decay_acceleration: 5.0            # 1/s^2: in-view & unseen -> gone in ~3 s
-          # 0 = no staleness check on THIS source. Measured 2026-10-01 (crsd-sim:nav2, STVL 2.3.4):
-          # with 1.0 here this buffer is never marked updated, warns "buffer updated in Ns" at 5 Hz
-          # and the costmap stays non-current forever, so every plan hangs. lidar_mark carries the
-          # same topic and DOES update, so silence is still caught there.
+          # 0 = no staleness check on THIS source. With 1.0 here (STVL 2.3.4) this buffer is never marked
+          # updated, warns "buffer updated in Ns" at 5 Hz and the costmap stays non-current forever, so
+          # every plan hangs. lidar_mark carries the same topic and DOES update, so silence is still
+          # caught there.
           expected_update_rate: 0.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
@@ -111,9 +110,9 @@ global_costmap:
         inflate_unknown: false
         inflate_around_unknown: false
 
-# crusader_nav/nav_lifecycle.py replaces nav2_lifecycle_manager (2026-10-01): Humble's manager
-# calls change_state with no timeout and hung forever on one reply Fast DDS dropped. Floats stay
-# floats here: rcl will not take 3 for a double.
+# crusader_nav/nav_lifecycle.py stands in for nav2_lifecycle_manager, whose Humble change_state call
+# has no timeout and hung forever on one reply Fast DDS dropped. Floats stay floats here: rcl will
+# not take 3 for a double.
 nav_lifecycle:
   ros__parameters:
     node_names: ["planner_server"]           # configured, activated, and again after a respawn
@@ -122,12 +121,12 @@ nav_lifecycle:
     recreate_after_timeouts: 3               # in a row -> new service clients (fresh discovery)
 
 # FALLBACK if STVL misbehaves: replace "stvl_layer" in `plugins` with "obstacle_layer" and
-# add the block below under global_costmap.global_costmap.ros__parameters. VERIFIED in the
-# sim 2026-10-01: with this block a LiDAR-sized cluster is marked LETHAL at the right lat/lon
+# add the block below under global_costmap.global_costmap.ros__parameters. Verified in the
+# sim: with this block a LiDAR-sized cluster is marked LETHAL at the right lat/lon
 # (costmap_probe). Marks then never decay; only the BT's blocked-recovery clear removes them.
 # ObstacleLayer per-source max_obstacle_height defaults to 0.0 [H] - it MUST be set.
-# STVL itself marked nothing in that rig until the per-source obstacle_range (default 2.5 m) was
-# set on lidar_mark; with it STVL marks the same cluster LETHAL (see the stvl_layer block).
+# (STVL marks the same cluster LETHAL once the per-source obstacle_range is set; see the
+# stvl_layer block.)
 #      obstacle_layer:
 #        plugin: "nav2_costmap_2d::ObstacleLayer"
 #        enabled: true

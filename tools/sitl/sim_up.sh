@@ -1,28 +1,25 @@
 #!/usr/bin/env bash
 # sim_up.sh -- the whole Task 1 simulator, from cold, in one call.
 #
-# Runs INSIDE WSL. On Windows do not run this by hand: double-click SIM_UP.cmd,
-# which is this script plus the three browser tabs and QGroundControl.
+# Runs INSIDE WSL. On Windows double-click SIM_UP.cmd, which is this script plus the three browser
+# tabs and QGroundControl.
 #
 #   Windows laptop  ->  WSL2 Ubuntu-22.04  ->  docker crsd-sim
 #                       ArduRover SITL         every ROS node
 #
-# WHY SITL IS NOT IN THE CONTAINER. ardupilot is built in the WSL home
-# (~/ardupilot) and the container runs NET=host, so udp:127.0.0.1:14551 is the
-# same socket seen from either side. Moving SITL inside would cost a rebuild and
-# buy nothing.
+# SITL is not in the container: ardupilot is built in the WSL home (~/ardupilot) and the container
+# runs NET=host, so udp:127.0.0.1:14551 is the same socket from either side.
 #
-# CLICKING THIS TWICE IS A CLEAN RESTART, deliberately: start_sitl.sh stops what
-# is running before it starts, so the boat goes back to the home position and
-# the rig comes up fresh. Between two attempts at the same mission the GUI's
-# "Return to start" button is the cheaper move -- it drives home under GUIDED
-# without dropping the link. This one is for between sessions.
+# CLICKING THIS TWICE IS A CLEAN RESTART, deliberately: start_sitl.sh stops what is running first, so
+# the boat returns to the home position and the rig comes up fresh. Between two attempts at the same
+# mission the GUI's "Return to start" button is cheaper (it drives home under GUIDED without dropping
+# the link); this one is for between sessions.
 #
-# IT DOES NOT BUILD, because a colcon build is minutes and a bring-up should be
-# seconds. A C++ change needs, from Windows:
+# IT DOES NOT BUILD (a colcon build is minutes, a bring-up should be seconds). A C++ change needs,
+# from Windows:
 #     bash tools/sitl/sim.sh 'colcon build --packages-select crusader_bt'
-# The Python tools -- bench_world_model.py, bt_view.py -- run straight out of
-# src, so the sync below is all they need.
+# The Python tools (bench_world_model.py, bt_view.py) run straight out of src, so the sync is all
+# they need.
 set -uo pipefail
 
 DEFAULT_WIN=/mnt/c/Users/chase/OneDrive/Documents/GitHub/RobotX_2026/Boat/rx26_asv

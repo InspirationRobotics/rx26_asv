@@ -2,16 +2,14 @@
 //
 //     g++ -std=c++17 -O2 -I include -o /tmp/t test/test_nav_math.cpp && /tmp/t
 //
-// Runs in under a second on a laptop with nothing installed, which is the point:
-// every assertion here is a mistake that would otherwise be discovered on the
-// water, once, by watching the boat pass a buoy on the wrong side.
+// Runs in under a second with nothing installed: every assertion here is a
+// mistake that would otherwise be found on the water.
 //
-// The side rule is the reason this file exists. handbook 3.3.2 says a FLASHING
-// RED light is passed on the vehicle's STARBOARD side and GREEN on its PORT —
-// which is inverted from what a sailor expects and means the WAYPOINT for a red
-// buoy is offset to PORT. On a symmetric layout a mirrored implementation looks
-// perfectly plausible on a plot, so it is asserted against hand-worked cases
-// with the compass directions spelled out.
+// The side rule is why this file exists: handbook 3.3.2 passes a FLASHING RED on
+// the vehicle's STARBOARD side and GREEN on its PORT, so the WAYPOINT for a red
+// buoy is offset to PORT. A mirrored implementation looks plausible on a
+// symmetric plot, so it is asserted against hand-worked cases with the compass
+// directions spelled out.
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -97,7 +95,6 @@ int main()
     chk_near("RED waypoint is 4 m WEST of the buoy", wp_red.x, -4.0, 1e-9);
     chk_near("RED waypoint keeps the buoy's northing", wp_red.y, 20.0, 1e-9);
 
-    // ...and sailing that waypoint really does leave the buoy to starboard.
     chk("sailing the RED waypoint leaves it to starboard",
       crossTrack({0, 0}, wp_red, red) < 0.0);
 
@@ -186,15 +183,13 @@ int main()
     chk("with nothing ahead it steers at the exit", n.ok && n.buoy_id == -1);
     chk_near("...at the exit itself", norm(n.wp - exit_p), 0.0, 1e-9);
 
-    // The buoy astern is never selected, even though it is unconsumed and the
-    // only side-constrained one left. Steering back to it is how a boat ends up
-    // circling in the middle of the field.
+    // The astern buoy is never selected, though it is unconsumed and the only
+    // side-constrained one left.
     chk("the astern buoy is never chosen", n.buoy_id != 3);
 
     // No exit and nothing ahead -> the loop's secondary way out.
-    // Heading north with the only buoy 30 m ASTERN. Before the heading was
-    // passed in, travel was derived from the nearest buoy — which made that
-    // buoy "ahead" by construction and turned the boat round.
+    // Heading north with the only buoy 30 m ASTERN: travel must come from the
+    // heading, not from the nearest buoy.
     std::vector<Buoy> astern_only{{3, {0, -30}, Beacon::FlashingRed, false}};
     chk("no exit and the only buoy astern returns not-ok",
       !nextWaypoint(astern_only, boat, north, false, {}, 4.0).ok);
@@ -210,16 +205,15 @@ int main()
     chk("no exit still yields a side-offset waypoint", n.ok && n.buoy_id == 5);
     chk("...offset, not steered at", norm(n.wp - ahead_only[0].p) > 3.9);
 
-    // An empty field is not a crash.
     chk("an empty field returns not-ok",
       !nextWaypoint({}, boat, north, false, {}, 4.0).ok);
   }
 
   // ------------------------------------------------------------------ gates
   //
-  // The whole claim is: heading = bearingDeg(green -> red) - 90. Each case
-  // below names the compass direction the boat should end up on, because a
-  // mirrored implementation passes any symmetric case perfectly.
+  // heading = bearingDeg(green -> red) - 90. Each case names the compass
+  // direction the boat should end up on: a mirrored implementation passes any
+  // symmetric case.
   {
     // red EAST of green -> the boat runs NORTH, red on its starboard hand.
     const Gate g = gateWaypoints({3, 0}, {-3, 0}, 6.0, 8.0);
@@ -258,9 +252,8 @@ int main()
       dot(g.through - g.approach, u) > 0.0);
   }
 
-  // Degenerate pairs: every one of these must REFUSE, not steer somewhere
-  // plausible. A gate is the one place a wrong bearing drives the boat between
-  // the buoys backwards.
+  // Degenerate pairs must REFUSE, not steer somewhere plausible: a wrong bearing
+  // here drives the boat between the buoys backwards.
   {
     chk("a gate narrower than the minimum is refused",
       !gateWaypoints({0.5, 0}, {-0.5, 0}, 6.0, 8.0, 2.0).valid);
@@ -353,7 +346,6 @@ int main()
       !(g.passage[0].p.x == g.passage[1].p.x &&
         g.passage[0].p.y == g.passage[1].p.y));
 
-    // Degenerate inputs.
     chk("a plan with no tracker at all still yields the passage",
       fusePassage(plan, {}, 3.0).passage.size() == 4);
     chk("... using the plan's own positions",
@@ -368,14 +360,13 @@ int main()
 
   // ------------------------------------------------------------ planPassage
   //
-  // The boat does the path planning now: the aircraft sends ten buoys with
-  // colours and nothing about which pair is a gate or what order to drive them.
+  // The boat pairs and orders the gates: the aircraft sends ten buoys with
+  // colours and nothing about which pair is a gate.
   {
-    // A three-gate channel running due north from the entry, with the reds to
-    // the EAST so a northbound boat has them to starboard. Deliberately not
-    // symmetric: gate 2 is offset east, so ordering by distance-from-entry and
-    // ordering by projection-onto-the-axis disagree, and only the second is
-    // right.
+    // A three-gate channel running due north from the entry, reds to the EAST so
+    // a northbound boat has them to starboard. Gate 2 is offset east, so ordering
+    // by distance-from-entry and by projection-onto-the-axis disagree; only the
+    // second is right.
     const std::vector<Buoy> field{
       {0, {0, 0}, Beacon::FlashingBlue, false},      // entry
       {1, {5, 20}, Beacon::FlashingRed, false},      // gate A
@@ -532,9 +523,8 @@ int main()
 
   // ------------------------------------------------ gateCleared / nextGate
   //
-  // Cleared gates are remembered BY BUOY IDS. A confirmation can bring new
-  // colours, the plan re-runs, and the order can change underneath the boat;
-  // counting "I have done two, start at index two" skips a gate never driven.
+  // Cleared gates are remembered BY BUOY IDS: a confirmation can change the
+  // colours and re-run the plan in a different order.
   {
     const std::vector<Buoy> field{
       {1, {5, 20}, Beacon::FlashingRed, false},

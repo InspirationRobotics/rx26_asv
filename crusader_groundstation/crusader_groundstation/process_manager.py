@@ -1,24 +1,19 @@
 """process_manager — start and stop the boat's nodes as child processes.
 
 No ROS imports. The ROS half of "is it running" (the node graph) lives in the
-node, because only the node can ask; this file knows about the processes IT
-started, which is a different and smaller question.
+node; this file knows about the processes IT started.
 
-WHY BOTH ANSWERS ARE NEEDED. A node started by core.launch.py, by systemd, or
-by someone in another terminal is running, and the page must say so — nobody
-wants a dashboard that reports the telemetry bridge is down because it did not
-personally start it. That answer comes from the ROS graph. But the page may
-only STOP what it owns: killing a process this server did not spawn means
-guessing at a PID from a node name, and getting that wrong on a boat kills
-something else. So: presence is global, control is local, and the page shows
-the difference rather than pretending it does not exist.
+WHY BOTH ANSWERS ARE NEEDED. A node started by core.launch.py, systemd or
+another terminal is running and the page must say so (that answer comes from the
+ROS graph), but the page may only STOP what it owns: killing a PID guessed from
+a node name could kill something else. So presence is global, control is local,
+and the page shows the difference.
 
-TERMINATION IS SIGTERM, THEN SIGKILL. Every node in this repo routes SIGTERM
-through crusader_common.node_main into a normal exception so destroy_node()
-runs — thread joins, MAVLink close, override release. Going straight to
-SIGKILL would skip all of that, which for telemetry_bridge means leaving RC
-overrides latched in the autopilot. The escalation exists only for a process
-that has stopped responding at all.
+TERMINATION IS SIGTERM, THEN SIGKILL. Every node routes SIGTERM through
+crusader_common.node_main so destroy_node() runs (thread joins, MAVLink close,
+override release); going straight to SIGKILL would leave RC overrides latched in
+the autopilot. The escalation exists only for a process that has stopped
+responding.
 """
 import os
 import signal
@@ -67,10 +62,8 @@ class ManagedProcess:
 class ProcessManager:
     """Owns every process this server started. Thread-safe.
 
-    Callers come from HTTP threads and from the ROS executor, so every mutation
-    of the table takes the lock. The reads are cheap enough that one lock for
-    the whole structure is simpler than being clever, and being clever here
-    buys nothing measurable.
+    Callers come from HTTP threads and the ROS executor, so every mutation of the
+    table takes one lock.
     """
 
     def __init__(self, tools_dir="", ros_distro_setup="", logger=None):
@@ -90,9 +83,8 @@ class ProcessManager:
     def status(self, name):
         """(state, detail) for one name, from THIS server's point of view.
 
-        States: "running", "exited", "unknown". "unknown" means we never
-        started it — which is not the same as "not running", and the caller
-        must not collapse the two.
+        States: "running", "exited", "unknown". "unknown" means we never started
+        it, which is not "not running"; callers must not collapse the two.
         """
         with self._lock:
             p = self._procs.get(name)
@@ -118,10 +110,9 @@ class ProcessManager:
     def start(self, spec):
         """Spawn a node. Returns (ok, message).
 
-        start_new_session puts the child in its own process group. Without it a
-        Ctrl+C in the terminal running the ground station would deliver SIGINT
-        to every node it had started, so quitting the dashboard would take the
-        boat's stack down with it — a dashboard must be safe to close.
+        start_new_session puts the child in its own process group, so Ctrl+C in
+        the ground station's terminal does not take the boat's stack down with
+        it: a dashboard must be safe to close.
         """
         with self._lock:
             existing = self._procs.get(spec.name)
@@ -150,10 +141,9 @@ class ProcessManager:
     def _drain(self, proc):
         """Pump the child's output into its ring buffer.
 
-        A node that dies at startup says why on stderr and then is gone. Without
-        someone reading the pipe that message is lost, and worse, a full pipe
-        buffer blocks the child — so this thread is not only for the log tail,
-        it is what stops a chatty node from wedging itself.
+        A node that dies at startup says why on stderr, and a full pipe buffer
+        blocks the child, so this thread is also what stops a chatty node from
+        wedging itself.
         """
         try:
             for line in proc.popen.stdout:
@@ -174,9 +164,8 @@ class ProcessManager:
         """SIGTERM the process group, escalate to SIGKILL. (ok, message).
 
         `ros2 run` starts the node as a SEPARATE process and waits on it, so
-        there are always two. Both the signal and the "is it gone yet" check
-        have to cover both of them — signalling or checking only `ros2 run`
-        leaves the node running with the camera open.
+        there are two: the signal and the "is it gone yet" check must cover
+        both, or the node stays up with the camera open.
         """
         with self._lock:
             proc = self._procs.get(name)
@@ -210,11 +199,10 @@ class ProcessManager:
         if self.log:
             self.log(f"{name} ignored SIGTERM for {TERM_GRACE_S:.0f}s — killed")
 
-        # Confirm the SIGKILL actually landed. It usually does, but a process
-        # sitting in a USB call inside the kernel — depthai closing the OAK-D
-        # is the case that bites — does not die until that call returns, and
-        # SIGKILL waits. Saying "killed" while it still holds the camera is
-        # worse than saying nothing.
+        # Confirm the SIGKILL landed: a process in a USB call inside the kernel
+        # (depthai closing the OAK-D) does not die until that call returns, and
+        # saying "killed" while it still holds the camera is worse than saying
+        # nothing.
         deadline = time.time() + KILL_GRACE_S
         while time.time() < deadline:
             if not _group_alive(pgid):
@@ -227,18 +215,14 @@ class ProcessManager:
     def stop_external(self, name, pids):
         """Stop a process we did NOT start, by PID. (ok, message).
 
-        Reachable now only because proc_scan gives us real PIDs. The original
-        objection to stopping a foreign node was that it meant guessing a PID
-        from a node name and guessing wrong on a boat kills the wrong thing —
-        /proc removes the guess, so the objection goes with it.
+        Reachable because proc_scan gives real PIDs, not a guess from a node
+        name.
 
-        SIGNALS THE PID, NOT THE GROUP, and this is the whole reason the method
-        is separate from stop(). Our own children are put in their own session,
-        so signalling their group hits exactly them. A node started by
-        core.launch.py shares its process group with THE ENTIRE LAUNCH — the
-        telemetry bridge, the watchdog, the LED stack. Sending SIGTERM to that
-        group to stop one node would take the whole core stack down, which is
-        the single worst thing this dashboard could do by accident.
+        SIGNALS THE PID, NOT THE GROUP, which is why this is separate from
+        stop(). Our own children have their own session, but a node started by
+        core.launch.py shares its process group with THE ENTIRE LAUNCH (telemetry
+        bridge, watchdog, LED stack), so signalling the group would take the
+        whole core stack down.
         """
         if not pids:
             return False, f"{name} is not running"
@@ -281,23 +265,16 @@ class ProcessManager:
 def _group_alive(pgid):
     """Is ANY process still in this group?
 
-    `ros2 run` IS NOT THE NODE. It starts the node as a separate process, and
-    it has no SIGTERM handler, so it dies instantly. The node does have one
-    (crusader_common.node_main), which is the whole point — it gets to run
-    destroy_node() and close the camera properly, and that takes seconds.
+    `ros2 run` IS NOT THE NODE: it starts the node as a separate process and
+    dies instantly, while the node's own SIGTERM handler
+    (crusader_common.node_main) runs destroy_node() and takes seconds. Polling
+    popen answered the wrong question (`ros2 run` reads dead 0.05 s after the
+    signal, the node 5.6 s), so stop() never reached the SIGKILL escalation.
+    Asking about the group covers both.
 
-    So popen.poll() answers the wrong question. Measured here: `ros2 run` reads
-    dead 0.05 s after the signal, the node 5.6 s. stop() used to poll the first
-    number, report "stopped", and return — so it never got as far as the
-    SIGKILL escalation, and a node that was NOT going to exit on its own just
-    stayed up. Asking about the group covers both processes.
-
-    ZOMBIES DO NOT COUNT. A process that has exited but has not been reaped is
-    still listed, and killpg(pgid, 0) still succeeds on it. Counting that as
-    alive means SIGKILLing something already dead and then reporting that the
-    SIGKILL failed. Reading the state letter out of /proc skips those. killpg
-    stays as a fallback if /proc cannot be read — that path is the old
-    behaviour, which is pessimistic rather than wrong.
+    ZOMBIES DO NOT COUNT: an exited but unreaped process is still listed and
+    killpg(pgid, 0) succeeds on it. The state letter in /proc skips those; killpg
+    is the fallback if /proc cannot be read.
     """
     try:
         names = os.listdir("/proc")
@@ -333,9 +310,7 @@ def _group_alive(pgid):
 def _alive(pid):
     """Is this PID still there AND not a zombie?
 
-    Same point as in _group_alive: a zombie has already exited, and calling it
-    alive turns a clean stop into a false "survived SIGKILL". State letter from
-    /proc, with signal 0 as the fallback.
+    As in _group_alive: the /proc state letter, with signal 0 as the fallback.
     """
     try:
         with open(f"/proc/{pid}/stat") as f:

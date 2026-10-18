@@ -1,26 +1,22 @@
 """mjpeg_server — serve live JPEG views to a browser over HTTP.
 
-Shared by the bench viewers in this directory (`oak_view.py`, `lidar_view.py`).
-Extracted rather than copied: the two need identical dead-stream and
-browser-closed behaviour, and two copies of that drift silently — one gets the
-ConnectionError fix and the other hangs a thread per closed tab.
+Shared by the bench viewers in this directory (`oak_view.py`, `lidar_view.py`): they need
+identical dead-stream and browser-closed behaviour, and two copies drift (one gets the
+ConnectionError fix, the other hangs a thread per closed tab).
 
-The pattern throughout tools/: the Jetson renders, the laptop only needs a
-browser. No ROS on the laptop, no rviz2, no X forwarding.
+The pattern throughout tools/: the Jetson renders, the laptop only needs a browser. No ROS on the
+laptop, no rviz2, no X forwarding.
 
-MULTIPLE VIEWS. Pass a dict of named FrameBuffers and the page grows a tab bar;
-pass one FrameBuffer and it serves that alone. Only ONE stream is live at a time
-— switching tabs clears the <img> src first, which drops the old connection
-before opening the new one. Two panels crammed side by side into one canvas is
-how you get an image too wide to read on a laptop.
+MULTIPLE VIEWS. Pass a dict of named FrameBuffers and the page grows a tab bar; pass one
+FrameBuffer and it serves that alone. Only ONE stream is live at a time: switching tabs clears the
+<img> src first, dropping the old connection before opening the new one.
 
-CLIENT COUNTING. Each buffer knows whether anyone is watching (`has_clients`),
-so a producer can skip rendering and encoding a view nobody has open. On a
-Jetson also running inference that is CPU worth not spending — the same reason
-buoy_detector only annotates while a browser is connected.
+CLIENT COUNTING. Each buffer knows whether anyone is watching (`has_clients`), so a producer can
+skip rendering and encoding a view nobody has open: CPU worth not spending on a Jetson also
+running inference (the reason buoy_detector only annotates while a browser is connected).
 
-Import works from any working directory — Python puts the running script's own
-directory on sys.path, and these tools live beside each other.
+Import works from any working directory: Python puts the running script's own directory on
+sys.path, and these tools live beside each other.
 """
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -84,9 +80,8 @@ class FrameBuffer:
     def has_clients(self) -> bool:
         """True while at least one browser is streaming this view.
 
-        Lets a producer skip work nobody will see. Deliberately a plain read of
-        an int: a race here costs one wasted or one skipped frame, never
-        correctness, and a lock around it would serialise the render loop
+        Lets a producer skip work nobody will see. A plain read of an int on purpose: a race costs
+        one wasted or skipped frame, never correctness, and a lock would serialise the render loop
         against every HTTP thread for no gain.
         """
         return self._clients > 0

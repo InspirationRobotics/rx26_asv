@@ -3,12 +3,11 @@
     ros2 run crusader_sim panel_feed --ros-args -p course:=task1_core
     python3 -m crusader_sim.panel_feed --selftest          # pure python, no ROS
 
-Runs in: the crsd-sim container (started by gz_rig_up.sh on every sim rig) and, in
+Runs in the crsd-sim container (started by gz_rig_up.sh on every sim rig) and, in
 lake mode, the `asv` container on the boat (lake_rig_up.sh, `python3 -m
 crusader_sim.panel_feed --ros-args -p origin:=<LAKE_DATUM>`: crusader_sim is not
-colcon-built there). The panel (task1_panel; WSL host python in the sim, inside `asv`
-in lake mode) cannot subscribe to anything in the sim, so this node does it and sends
-what the panel draws as compact JSON over UDP on 127.0.0.1 (both containers are
+colcon-built there). The panel cannot subscribe to anything itself, so this node
+sends what it draws as compact JSON over UDP on 127.0.0.1 (both containers are
 --net=host). It only SUBSCRIBES: it commands nothing and opens no autopilot port.
 
     in   /crsd/nav/leg_status       std_msgs/String JSON, nav spec 4.3: the leg
@@ -38,65 +37,55 @@ what the panel draws as compact JSON over UDP on 127.0.0.1 (both containers are
     out  udp 127.0.0.1:14556        one datagram every 0.25 s (SEND_PERIOD_S)
 
 UDP PORT 14556. The aircraft owns 1454x and the boat 1455x (CLAUDE.md, the
-crusader-net skill), and this is a boat-side process. Taken or reserved in that
-range: 14550 ad-hoc tooling, 14551 telemetry_bridge, 14552 batt_watchdog,
-14553 the RFD900 shim, 14555 RXL (rxl_link_node). 14556 is the first free one
-above RXL and appears nowhere else in the tree. The panel BINDS it (--feed-port);
-this node only sends, so nothing can steal a flight-stack datagram: the boat's
-own ports are never opened here.
+crusader-net skill). Taken in that range: 14550 ad-hoc tooling, 14551
+telemetry_bridge, 14552 batt_watchdog, 14553 the RFD900 shim, 14555 RXL
+(rxl_link_node); 14556 is the first free one. The panel BINDS it (--feed-port);
+this node only sends, so it cannot steal a flight-stack datagram.
 
-EVERY COORDINATE LEAVES AS COURSE ENU METRES (x east, y north, from the course
-file's origin), because that is the panel's map. All three topics carry lat/lon;
-latlon_to_enu() is the exact inverse of course.enu_to_latlon (the sim's
-111318.845 m/deg, SITL's own), so a point the sim placed at (x, y) comes back at
-(x, y). The boat's own conversions (crusader_common.geo, 111139 m/deg) round-trip
-through THEIR lat/lon, so the scale cancels for everything the boat publishes
-back as lat/lon — which is all of it. The origin is the course's, the same one
-gz_rig_up.sh gives the nav datum and SITL as home.
+COORDINATES are course ENU metres (x east, y north, from the course file's
+origin), the panel's map. latlon_to_enu() is the exact inverse of
+course.enu_to_latlon (the sim's 111318.845 m/deg), so a point the sim placed at
+(x, y) comes back at (x, y). The boat's own conversions (crusader_common.geo,
+111139 m/deg) round-trip through THEIR lat/lon, so the scale cancels for
+everything the boat publishes back as lat/lon. The origin is the one gz_rig_up.sh
+gives the nav datum and SITL home.
 
-THE LAKE LAYERS (pose, fcu, hazards) follow the same rules as leg/tracks/passage: `age`,
-blank when stale, never the last value. The packet also carries `datum` = {"lat", "lon"} or
-null: the nav frame's origin as the boat itself published it. It is a definition, not a
-measurement (latched, sent once), so it has no age; the lake panel compares it with its own
-origin and refuses to commit a field when they differ. `passage` also passes the report's
-"n_gates" / "gates_cleared" / "single_count" through (null when the tree predates them):
-n_gates = PAIRED gates, which is what the panel's checkpoint labels count.
+BLANKS OVER GUESSES. Each layer carries `age` (seconds since this node last
+received that topic); the lake layers (pose, fcu, hazards) follow the same rule.
+A layer never heard is null, not an empty list; an empty list means "heard, and
+the boat holds nothing". A point whose lat/lon is not two finite numbers on this
+course is dropped, never moved to (0, 0). The panel judges staleness from the age
+(STALE_S) and then draws nothing. `datum` = {"lat", "lon"} or null is the nav
+frame's origin as the boat published it: a definition (latched, sent once), so it
+has no age; the lake panel refuses to commit a field when it differs from its own
+origin. `passage` also passes the report's "n_gates" / "gates_cleared" /
+"single_count" through (null when the tree predates them); n_gates = PAIRED
+gates, which the panel's checkpoint labels count.
 
-BLANKS OVER GUESSES. Each layer carries `age`: seconds since this node last
-received that topic. A layer never heard is null, not an empty list; an empty
-list means "heard, and the boat holds nothing" (target_tracker publishes every
-tick, empty or not, for exactly that reason). A point whose lat/lon is not two
-finite numbers on this course is dropped, never moved to (0, 0). The panel
-decides staleness from the age (STALE_S) and then draws nothing; this node never
-keeps showing a value because it is the last one it has.
-
-THE COSTMAP LAYER ("costmap") is the one layer that is not a boat message passed
-through: it is the planner's occupancy grid reduced to its LETHAL cells (grid value
-100: a hazard_layer circle or an STVL voxel, never the inflation bands, which the
-panel can derive from them), once a second, riding on that second's datagram. The
-planner's map frame is the nav datum's ENU with the boat's own Earth radius, the
-panel's is the course's with the sim's, so a cell is converted through lat/lon like
-every other point here (map_affine); with no datum yet the layer is blank, not
-guessed. `cells` is every lethal cell; `lidar` is STVL's voxels alone, projected to
-the same cell size, so the panel can colour a LiDAR mark apart from a camera/UAV
-one (a cell can be in both). Schema, with every position [x, y] course ENU metres,
-2 dp, the centre of a cell:
+THE COSTMAP LAYER ("costmap") is not a boat message passed through: it is the
+planner's occupancy grid reduced to its LETHAL cells (grid value 100: a
+hazard_layer circle or an STVL voxel, not the inflation bands), once a second,
+riding on that second's datagram. The planner's map frame is the nav datum's ENU
+with the boat's Earth radius, the panel's is the course's with the sim's, so
+cells go through lat/lon like every other point (map_affine); with no datum the
+layer is blank. `cells` is every lethal cell; `lidar` is STVL's voxels alone at
+the same cell size, so the panel can colour a LiDAR mark apart (a cell can be in
+both). Positions are [x, y] course ENU metres, 2 dp, the centre of a cell:
 
     "costmap": {"res_m": 0.1, "stamp": <grid stamp, epoch s; wall clock of receipt when 0>,
                 "thr": 100, "n": <lethal cells in the grid>, "cells": [[x, y], ...],
                 "n_lidar": <STVL cells> | null, "lidar": [[x, y], ...] | null,
                 "age": <s since the planner last sent a grid or update>}
 
-A list past its cap keeps the cells nearest the window's centre (= the boat). `lidar`
-is null when no voxel cloud arrived in the last STALE_S seconds (STVL's
-publish_voxel_map off, or nav down): not an empty list, which means "STVL holds
+A list past its cap keeps the cells nearest the window's centre (= the boat).
+`lidar` is null when no voxel cloud arrived in the last STALE_S seconds (STVL's
+publish_voxel_map off, or nav down), not an empty list, which means "STVL holds
 nothing". The receiver keeps the newest costmap layer across datagrams and its
-view() reports it like the other layers, with the longer COSTMAP_STALE_S.
+view() reports it with the longer COSTMAP_STALE_S.
 
-The subscriptions are BEST_EFFORT: a monitor must not hold back, or be held back
-by, the boat's own publishers (the costmap's are the planner's own latched QoS). The callbacks only store the message; the
-conversion runs on the 4 Hz timer, so a 10 Hz tracker costs one conversion per
-packet, not one per message.
+Subscriptions are BEST_EFFORT so a monitor never holds back, or is held back by,
+the boat's publishers (the costmap's use the planner's latched QoS). Callbacks
+only store the message; conversion runs on the 4 Hz timer.
 """
 import json
 import math
@@ -721,9 +710,9 @@ def main(args=None):
     try:
         from map_msgs.msg import OccupancyGridUpdate
     except ImportError:
-        # The boat's asv image has no Nav2, and map_msgs comes with Nav2. Only the costmap-updates
-        # layer needs it; without this the whole feed died at import and the lake panel had no pose,
-        # no FCU status, so no PIN AT BOAT and no START (found on the boat 2026-10-03).
+        # The boat's asv image has no Nav2, and map_msgs comes with Nav2. Only the
+        # costmap-updates layer needs it; without this guard the whole feed died at
+        # import and the lake panel lost pose and FCU status (PIN AT BOAT and START).
         OccupancyGridUpdate = None
     from nav_msgs.msg import OccupancyGrid
     from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy

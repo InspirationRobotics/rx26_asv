@@ -1,18 +1,17 @@
 // ros_planner_port.cpp — path::PlannerPort over Nav2's planner_server.
 //
-// WHAT THE LEG SEES. A non-blocking port (planner_port.hpp): requestPlan() sends a
-// ComputePathToPose goal and returns a sequence number at once; lastPlan() later
-// answers for THAT number or for a newer one, never for an older one. A new request
-// cancels the one in flight, and whatever the old one eventually says is dropped by
-// seq here as well as in the leg, so a late reply can never be adopted as the answer
-// to a later question. The leg runs on the tick thread; every callback in this file
-// runs on an executor thread in this port's own callback group; the two meet only
-// through `mu_`, which is this port's own and is never the Context's.
+// A non-blocking port (planner_port.hpp): requestPlan() sends a ComputePathToPose
+// goal and returns a sequence number at once; lastPlan() answers for THAT number
+// or a newer one, never an older one. A new request cancels the one in flight,
+// and the old one's late reply is dropped by seq here as well as in the leg. The
+// leg runs on the tick thread; every callback here runs on an executor thread in
+// this port's own callback group; the two meet only through `mu_`, which is never
+// the Context's.
 //
-// WHAT NAV2 DOES NOT TELL US. Humble's ComputePathToPose has no error code: a path
-// that cannot be planned is just ABORTED, whatever the reason (no path, a start in
-// lethal space, a costmap that is not current), and a costmap that is not current
-// may not answer at all. The leg times a request out at plan_timeout_s itself.
+// WHAT NAV2 DOES NOT TELL US. Humble's ComputePathToPose has no error code: an
+// unplannable path is just ABORTED (no path, a start in lethal space, a costmap
+// that is not current), and a costmap that is not current may not answer at all.
+// The leg times a request out at plan_timeout_s itself.
 //
 // Spec: docs/nav2_avoidance_spec.md section 5.4.
 //

@@ -1,32 +1,24 @@
 """mjpeg_view — the annotated-frame HTTP viewer, in one place.
 
-`buoy_detector` and `oak_detector` each carried their own byte-identical copy of
-this: a FrameBuffer, a page handler, a stream handler, a viewer count and a
-shutdown sequence, ~130 lines apiece. Two copies of a thing with this many
-sharp edges is two places to fix every bug and one place to forget.
+Shared by `buoy_detector` and `oak_detector`: one copy of the FrameBuffer, page
+and stream handlers, viewer count and shutdown, so each sharp edge is fixed once.
 
-NOT in stream_cache.py, which answers a different question: that module is about
-a cached telemetry VALUE knowing how old it is, so a dead MAVLink stream cannot
-be rebroadcast as fresh. This is a video server. They share the word "stream"
-and nothing else.
+NOT in stream_cache.py: that is about a cached telemetry VALUE knowing its age;
+this is a video server.
 
 WHAT THE SHARP EDGES ARE
 
-  ONE FRAME, NEVER A QUEUE. A queue lets a slow browser build a backlog and
-  start showing the past. The only question a bring-up viewer answers is what
-  the camera sees NOW.
+  ONE FRAME, NEVER A QUEUE. A queue lets a slow browser build a backlog and show
+  the past; a bring-up viewer answers what the camera sees NOW.
 
-  THE VIEWER COUNT IS LOAD-BEARING. The detection loop reads it and skips
-  annotation entirely when nobody is watching — drawing every frame for an
-  audience of zero is CPU taken from two engines on a Jetson that has none
-  spare. So the decrement must happen on EVERY exit path, including the ones
-  that are not clean.
+  THE VIEWER COUNT IS LOAD-BEARING. The detection loop skips annotation when
+  nobody is watching (CPU taken from two engines on a Jetson with none spare),
+  so the decrement must happen on EVERY exit path, clean or not.
 
   SHUTDOWN MUST NOT WAIT ON A BROWSER. A stream handler blocks waiting for the
-  next frame. If teardown waits for handlers to notice, a tab left open on
-  somebody's laptop holds the node's shutdown open with it. `close()` wakes
-  every waiter and makes them leave; handler threads are daemons and the server
-  does not join them.
+  next frame, so a tab left open would hold the node's shutdown open. `close()`
+  wakes every waiter and makes them leave; handler threads are daemons and the
+  server does not join them.
 
   object-fit:contain, NOT width:100%. The ground station embeds this page in an
   iframe far wider than the frame, and a width-only rule scales the height past
@@ -91,8 +83,8 @@ class FrameBuffer:
 def normalize_views(views):
     """A FrameBuffer or a {name: (buffer, label)} mapping -> the mapping.
 
-    A bare buffer is the old shape and stays the old shape: one unnamed view,
-    served on any path. Every existing caller passes one and is unchanged.
+    A bare buffer is the old shape and stays: one unnamed view, served on any
+    path.
     """
     if isinstance(views, FrameBuffer):
         return {"view": (views, "View")}
@@ -102,24 +94,21 @@ def normalize_views(views):
 def serve_mjpeg(port, quality, views, logger, title="crusader"):
     """Start the viewer on `port`. -> the server, or None if it could not bind.
 
-    `views` is a FrameBuffer, or an ordered {name: (buffer, label)} mapping for
-    a producer that can show the same moment more than one way — the detector
-    offers its annotated frame and the raw one behind it, because "is the box
-    wrong or is the PICTURE wrong" is the question a bring-up viewer exists to
-    answer, and you cannot answer it from the annotated frame alone.
+    `views` is a FrameBuffer, or an ordered {name: (buffer, label)} mapping for a
+    producer that shows the same moment more than one way (the detector offers
+    its annotated frame and the raw one: "is the box wrong or is the PICTURE
+    wrong" cannot be answered from the annotated frame alone).
 
-    Streams live at `/stream/<name>`; `/` serves a page for whichever view the
-    `?view=` query names, defaulting to the first. An unknown name is a 404
-    that LISTS the names, because the alternative is a blank viewer and no clue
-    which of the two ends is wrong.
+    Streams live at `/stream/<name>`; `/` serves a page for whichever view
+    `?view=` names, defaulting to the first. An unknown name is a 404 that LISTS
+    the names.
 
-    Each view counts its own subscribers, so a producer skips the work for a
-    view nobody is watching: opening the raw stream costs nothing until it is
-    opened, and costs nothing again the moment it is closed.
+    Each view counts its own subscribers, so a producer skips the work for a view
+    nobody is watching.
 
-    Failure to bind is a WARNING, not a fatal error: this is a bring-up viewer
-    and a busy port must not stop the boat from seeing buoys. The detections
-    topic is the product; this is a convenience.
+    Failure to bind is a WARNING, not fatal: a busy port must not stop the boat
+    from seeing buoys; the detections topic is the product, this is a
+    convenience.
     """
     import cv2
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -158,13 +147,13 @@ def serve_mjpeg(port, quality, views, logger, title="crusader"):
             return self._stream(name)
 
         def _page(self, name):
-            # no-store because this markup changes and a cached copy of the old
-            # page is indistinguishable from a fix that did not work.
+            # no-store: a cached copy of the old page is indistinguishable from a
+            # fix that did not work.
             #
             # The picker is rendered only when there is something to pick, so
-            # the single-view callers get exactly the page they had. It is
-            # here as well as in the ground station because this port is opened
-            # directly during bring-up, with no dashboard in front of it.
+            # single-view callers get the page they had. It is here as well as in
+            # the ground station because this port is opened directly during
+            # bring-up.
             if len(views) > 1:
                 links = "".join(
                     f"<a href='/?view={n}' style='color:#eee;padding:3px 9px;"
@@ -252,14 +241,12 @@ def serve_mjpeg(port, quality, views, logger, title="crusader"):
 def stop_mjpeg(server, buffer, logger, timeout=2.0):
     """Tear the viewer down without ever blocking on a connected browser.
 
-    `buffer` takes the same shapes serve_mjpeg does: one FrameBuffer, or the
-    mapping of named views.
+    `buffer` takes the same shapes serve_mjpeg does.
 
-    Closing the buffers FIRST: it wakes every handler and tells it to leave, so
-    `shutdown()` is not racing threads that are mid-write. Then the whole
-    server teardown runs on a daemon thread with a deadline, because
-    `serve_forever`'s poll interval and a socket in an odd state can each cost
-    seconds and neither is worth a hung node.
+    Closing the buffers FIRST wakes every handler so `shutdown()` is not racing
+    threads mid-write. Then the server teardown runs on a daemon thread with a
+    deadline, because `serve_forever`'s poll interval and a socket in an odd state
+    can each cost seconds.
     """
     # Every view, not just the first: a buffer left open holds its handler
     # threads in wait_for, and shutdown() would then race them mid-write.

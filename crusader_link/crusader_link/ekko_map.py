@@ -1,49 +1,44 @@
 """ekko_map -- what the boat makes of Ekko's v3 TUNNEL traffic, with no ROS in it.
 
-Plain Python on top of tunnel_link (the copy of Ekko's boat_link.py), so the
-rules below can be tested on a laptop with nothing installed:
+Plain Python on top of tunnel_link (the copy of Ekko's boat_link.py), testable on
+a laptop:
 
-    python3 -m unittest crusader_link/test/test_ekko_map.py
+    cd rx26_asv/crusader_link && python3 -m unittest discover -s test -v
 
-WHY THIS EXISTS. Ekko does not speak the native RXL messages. Over the RFD mesh
-it sends MAVLink TUNNEL frames: POSITIONS (where each buoy is) and LIGHTS (what
-each one shows, once a second). This turns the two into the SAME passage dict
-rxl_codec.decode returns for an RXL_SAFE_PASSAGE, so rxl_link_node publishes one
-kind of plan whichever way it arrived and nothing downstream has to know.
+Ekko sends MAVLink TUNNEL frames, not the native RXL messages: POSITIONS (where
+each buoy is) and LIGHTS (what each shows, 1 Hz). This turns them into the SAME
+passage dict rxl_codec.decode returns for an RXL_SAFE_PASSAGE, so rxl_link_node
+publishes one kind of plan whichever way it arrived.
 
-WHAT IT DECIDES, AND WHAT IT DOES NOT.
-
-  * The plan is every buoy of the CURRENT map that has a known position and a
-    light state other than UNKNOWN. A buoy Ekko has not decided yet is not a
-    buoy anyone can steer by, and one it has not placed is not on the map.
+Rules:
+  * The plan is every buoy of the CURRENT map with a known position and a light
+    state other than UNKNOWN.
   * ENTRY is the FLASHING_BLUE buoy, EXIT the SOLID_BLUE one. Missing -> the
-    plan's "unknown" position, (0.0, 0.0), the same thing the native path
-    carries. If there are two of either (a mapper fault), the lowest slot wins.
+    plan's "unknown" position (0.0, 0.0), as on the native path. Two of either
+    (a mapper fault): the lowest slot wins.
   * A new map number throws the old map away (tunnel_link.Receiver does it).
-  * NO BUOYS -> NO PLAN. An empty map is how Ekko says "cleared", and a plan
-    with no buoys and a (0, 0) entry would be read downstream as "the entry is
-    in the Gulf of Guinea". Silence ages the old plan out instead: the tree's
-    PassagePlanFresh guard stops the boat. Blanks over guesses.
-  * The BUOY IDS in the plan are Ekko's radio SLOTS (1-31), not its tracker ids.
-    A slot is never reused within a map, so an id means the same buoy for as
-    long as the map lives; PassageBuoy.id is a uint8, which a tracker id (u16)
-    would not always fit.
+  * NO BUOYS -> NO PLAN. An empty map is how Ekko says "cleared", and publishing
+    it would read downstream as an entry at (0, 0). Silence ages the old plan out
+    and the tree's PassagePlanFresh guard stops the boat. Blanks over guesses.
+  * The plan's BUOY IDS are Ekko's radio SLOTS (1-31), not tracker ids: a slot
+    is never reused within a map, and PassageBuoy.id is a uint8, which a u16
+    tracker id would not always fit.
 
-The boat's own side of the handshake lives here too: boat_payload() is the BOAT
-packet Ekko waits for (our position, plus the map we hold and which of its slots
--- the acknowledgement), and lights_fresh() is the clock behind the boat
-answering its own gate checkpoints, which Ekko never answers.
+The boat's side of the handshake lives here too: boat_payload() is the BOAT
+packet Ekko waits for (our position, the map we hold and which of its slots --
+the acknowledgement), and lights_fresh() is the clock behind the boat answering
+its own gate checkpoints.
 """
 import threading
 
 from crusader_link import tunnel_link as tl
 
 #: A LIGHTS frame this recent means Ekko is up and watching the same map, so the
-#: boat may answer its own checkpoint (see rxl_link_node._on_gate_reached).
+#: boat may answer its own checkpoint (rxl_link_node._on_gate_reached).
 LIGHTS_FRESH_S = 5.0
 
-#: tunnel_link.ACTIVITY[0] == "unknown". The boat does not tell Ekko what it is
-#: doing; a made-up "transiting" would be a guess wearing a measurement's clothes.
+#: tunnel_link.ACTIVITY[0]. The boat does not report an activity; a made-up one
+#: would be a guess.
 ACTIVITY_UNKNOWN = 0
 
 #: The plan's "no such position" (RXL_SAFE_PASSAGE carries the same zeros).

@@ -1,11 +1,10 @@
 """Autonomy-drop switch latch — the state machine behind the G1 safety gate.
 
-Context: `dp_hold` overrides RC sticks, and
-flipping SC to manual does NOT regain control while an override is active. The
-pilot's only recovery paths were Ctrl+C (needs WiFi — not a safety tool) or the
-hardware e-stop. This latch closes that gap: a dedicated RC channel, read via the
-Pixhawk (so it works at ELRS range, far beyond WiFi), software-latches autonomy
-OFF and releases all RC overrides.
+Context: `dp_hold` overrides the RC sticks, and flipping SC to manual does NOT
+regain control while an override is active; the pilot's only recovery was Ctrl+C
+(WiFi, not a safety tool) or the hardware e-stop. This latch closes that gap: a
+dedicated RC channel, read via the Pixhawk (so it works at ELRS range, far beyond
+WiFi), software-latches autonomy OFF and releases all RC overrides.
 
 Design rules (deliberate, do not weaken):
   * FAIL-SAFE START: overrides are NOT allowed until the latch has seen a fresh,
