@@ -1,23 +1,21 @@
 // global_leaves.cpp — the leaves of the whole-field Task 1 trees (behavior_trees/task1_global.xml).
 //
-// Nothing here is geometry. The plan is global_passage.hpp, the driving is path_follower.hpp,
-// both pinned off the boat by test/test_global_passage.cpp (closed loop included). This file
-// reads the context, calls them, sends setpoints, keeps the mission's phase and says what it
-// did.
+// Nothing here is geometry: the plan is global_passage.hpp and the driving path_follower.hpp,
+// both pinned off the boat by test/test_global_passage.cpp (closed loop included).
 //
 // THE MODEL. One plan covers the rest of the mission from the boat: approach, entry orbit
 // (clockwise), transit (every red to starboard, every green to port), exit orbit (counter-
-// clockwise). ctx.global_passage.phase says which of the four is being driven. A plan is KEPT
-// while it is still good, and re-made from the boat when it is not:
-//   * there is none, or the field changed (a new plan_version: the aircraft re-tasked);
+// clockwise); ctx.global_passage.phase says which is being driven. A plan is KEPT while good
+// and re-made from the boat when:
+//   * there is none, or the aircraft's field changed (a re-task);
 //   * the boat is not near the start of what is left of the leg it is about to drive;
 //   * a hazard now sits closer to what is left than the plan allowed (fusion moved a buoy,
 //     or a LiDAR/camera track appeared on it).
-// That is the whole re-tasking mechanism, Advanced and Disruptive alike. Advanced plans once
-// and keeps it; Disruptive also stops at checkpoints and asks, and replans on any change.
+// That is the whole re-tasking mechanism. Advanced plans once and keeps it; Disruptive also
+// stops at checkpoints and asks, and replans on any change.
 //
-// NO NAV2. These leaves never call the planner_server: the boat follows its own plan with
-// GUIDED setpoints, so they behave the same in every nav_mode (off on the boat today).
+// NO NAV2: the boat follows its own plan with GUIDED setpoints, so these behave the same in
+// every nav_mode.
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -54,8 +52,7 @@ std::vector<path::Hazard> planHazards(const Context & c)
   return hz;
 }
 
-/// The field is there to plan with: the aircraft's ENTRY and EXIT, a frame and a boat.
-/// CALL UNDER ctx.mu.
+/// Enough to plan with: ENTRY, EXIT, a frame and a boat. CALL UNDER ctx.mu.
 bool fieldKnown(const Context & c)
 {
   return c.origin_set && c.have_entry && c.have_exit && c.pose_fresh &&
@@ -78,8 +75,8 @@ gp::FieldSig currentField(const Context & c)
   return gp::fieldSig(c.plan, c.entry, c.exitp);
 }
 
-/// "" while the aircraft's field is the one the plan was made against (gp::fieldChange:
-/// colours, buoys, or a move beyond retask_move_m); otherwise what changed. CALL UNDER ctx.mu.
+/// What changed in the aircraft's field since the plan was made ("" = nothing): colours,
+/// buoys, or a move beyond retask_move_m (gp::fieldChange). CALL UNDER ctx.mu.
 std::string retasked(const Context & c)
 {
   const Context::GlobalPassage & g = c.global_passage;
@@ -108,9 +105,8 @@ std::string planUnusable(const Context & c, Phase phase)
   return "";
 }
 
-/// Plan the rest of the mission from the boat, from `from` on, and adopt it if it worked.
-/// The search runs WITHOUT the lock (tens to a few hundred ms); its inputs and its result
-/// cross under it.
+/// Plan the mission from the boat, phase `from` on, and adopt it if it worked. The search
+/// (tens to hundreds of ms) runs WITHOUT the lock; inputs and result cross under it.
 bool replan(Context & c, Phase from, const rclcpp::Logger & lg, const std::string & why)
 {
   gp::Request rq;
@@ -166,7 +162,7 @@ bool replan(Context & c, Phase from, const rclcpp::Logger & lg, const std::strin
   return true;
 }
 
-/// Hold where the boat is: its own position as the setpoint, once per hold.
+/// Hold where the boat is.
 void holdHere(Context & c, const rclcpp::Logger & lg, const char * why)
 {
   sendHold(c, lg, std::string("hold (") + why + ") at");
@@ -187,7 +183,7 @@ public:
 
   BT::NodeStatus tick() override
   {
-    int want = 2;                           // an unrecognised name reads as disruptive, as before
+    int want = 2;                           // an unrecognised name reads as disruptive
     parseTier(getInput<std::string>("tier").value_or("disruptive"), &want);
     std::lock_guard<std::mutex> lk(ctx_->mu);
     return ctx_->tier == want ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
@@ -210,7 +206,7 @@ public:
   }
 };
 
-/// The last transit stretch stopped at a gate's checkpoint (not at the end of the transit).
+/// The last transit stretch stopped at a gate's checkpoint, not the transit's end.
 class AtCheckpoint : public CrusaderCondition
 {
 public:
@@ -228,9 +224,8 @@ public:
 
 // ------------------------------------------------------------------- actions
 
-/// Waits (RUNNING) until there is a field to plan with: the aircraft's ENTRY and EXIT, a
-/// frame and a fresh pose. No timeout of its own: the mission timeout is the backstop, and
-/// handbook 3.3.2 says the boat may not transit before the aircraft has reported.
+/// RUNNING until fieldKnown(). No timeout of its own: the mission timeout is the backstop,
+/// and handbook 3.3.2 says the boat may not transit before the aircraft has reported.
 class WaitForField : public CrusaderAction
 {
 public:
@@ -269,12 +264,12 @@ private:
   bool said_ = false;
 };
 
-/// Makes sure there is a plan for the rest of the mission from the current phase: keeps the
-/// one in hand while it is good (planUnusable), re-plans from the boat when it is not. Sets the
-/// planner's parameters for every later replan, too.
+/// Ensures a plan for the rest of the mission from the current phase: keeps the one in hand
+/// while planUnusable() allows, else re-plans from the boat. Its ports set the planner's
+/// parameters for every later replan too.
 ///
-/// Cannot plan: HOLDS the boat where it is, tries again every retry_s (the field may change,
-/// fusion may move a buoy), FAILURE after timeout_s. Never drives on a guess.
+/// Cannot plan: HOLDS, retries every retry_s (the field may change, fusion may move a buoy),
+/// FAILURE after timeout_s. Never drives on a guess.
 class PlanGlobalPassage : public CrusaderAction
 {
 public:
@@ -339,7 +334,7 @@ public:
       if (!fieldKnown(*ctx_)) {return BT::NodeStatus::RUNNING;}
       why = planUnusable(*ctx_, phase);
     }
-    if (why.empty()) {return BT::NodeStatus::SUCCESS;}           // the plan in hand is good
+    if (why.empty()) {return BT::NodeStatus::SUCCESS;}
     const auto now = std::chrono::steady_clock::now();
     const double since = std::chrono::duration<double>(now - last_try_).count();
     if (since >= getInput<double>("retry_s").value_or(1.0)) {
@@ -363,23 +358,20 @@ private:
   bool held_ = false;
 };
 
-/// Drives one phase of the plan (or, for the transit with stop_at_checkpoints, the stretch up
-/// to the next gate's checkpoint).
+/// Drives one phase of the plan (for the transit with stop_at_checkpoints, the stretch to the
+/// next gate's checkpoint).
 ///
-///   * Already past this phase: SUCCESS at once (so a Retry round the whole sequence resumes
-///     where the mission is). Not yet at it: FAILURE (a wiring error).
-///   * Starts from the plan in hand if it is still usable for this phase, else re-plans first.
-///   * Every tick: the follower's setpoint; the transit's track is recorded (its parity is
-///     what a mid-transit replan starts from).
-///   * The field changes (Disruptive re-task) during the approach or the transit: re-plans
-///     from the boat AT ONCE and carries on. During an orbit: the orbit carries on (it does
-///     not depend on colours) and the next phase picks the change up.
-///   * A hazard sits closer to the path ahead than the plan allowed: re-plans from the boat
-///     (at most every 2 s) and carries on; if the path ahead is BLOCKED (closer than
-///     hard - local_check_tol), HOLDS, re-plans every second, resumes once a clear plan has
-///     stayed clear for nav_unblock_reset_s, FAILS after blocked_timeout_s.
-///   * Arrives: approach and entry orbit hand over without stopping (pass-through) unless
-///     stop_at_end; the transit's checkpoint stretches and the exit orbit stop on the point.
+///   * Already past this phase: SUCCESS at once, so a Retry round the whole sequence resumes
+///     where the mission is. Not yet at it: FAILURE (a wiring error).
+///   * The transit's track is recorded: its parity is what a mid-transit replan starts from.
+///   * The field changes (Disruptive re-task) during the approach or transit: re-plans from
+///     the boat AT ONCE and carries on. An orbit carries on (it does not depend on colours)
+///     and the next phase picks the change up.
+///   * A hazard closer to the path ahead than the plan allowed: re-plans and carries on; if
+///     the path ahead is BLOCKED (closer than hard - local_check_tol), HOLDS, re-plans every
+///     second, resumes once clear for nav_unblock_reset_s, FAILS after blocked_timeout_s.
+///   * Arrives: approach and entry orbit hand over while moving unless stop_at_end; the
+///     transit's checkpoint stretches and the exit orbit stop on the point.
 ///   * Stale pose or a changed datum: holds once and waits; never fails for it.
 class DrivePlanPhase : public CrusaderAction
 {
@@ -477,8 +469,7 @@ public:
       follower_.reset({});
     }
 
-    // 1. The aircraft re-tasked: re-plan the approach or the transit from here, now. An orbit
-    //    carries on (it does not depend on colours); the next phase picks the change up.
+    // 1. The aircraft re-tasked: re-plan the approach or the transit from here, now.
     if (replannable && now - last_replan_ >= 1.0) {
       const std::string change = fieldChanged();
       if (!change.empty()) {replanHere(now, "the aircraft's field changed: " + change);}
@@ -509,8 +500,8 @@ public:
       }
       return BT::NodeStatus::RUNNING;
     }
-    // 4. Was stuck, clear now: drive on only once it has STAYED clear (a flickering track
-    //    must not make the boat lurch at it), still counting toward the timeout meanwhile.
+    // 4. Clear again: drive on only once it has STAYED clear (a flickering track must not
+    //    make the boat lurch at it), counting toward the timeout meanwhile.
     if (blocked_) {
       blocked_s_ += dt;
       if (clear_since_ < 0.0) {clear_since_ = now;}
@@ -527,10 +518,9 @@ public:
     }
     if (o.arrived) {return finish(o);}
 
-    // 5. Not blocked, but the water ahead shrank since this path was planned: the boat's own
-    //    camera has moved a buoy from where the aircraft put it (its fix is good to ~1 m),
-    //    or a track appeared. Re-plan from here, without stopping, so the path re-centres on
-    //    the better positions instead of waiting until it is nearly blocked.
+    // 5. Not blocked, but the water ahead shrank since planning (the boat's camera moved a
+    //    buoy from the aircraft's ~1 m fix, or a track appeared): re-plan without stopping,
+    //    so the path re-centres on the better positions before it is nearly blocked.
     if (replannable && now - last_replan_ >= 3.0) {
       const std::string why = shrunk(hz);
       if (!why.empty() && replanHere(now, why)) {o = follower_.step(boat, hz);}
@@ -556,8 +546,8 @@ public:
   }
 
 private:
-  /// Load what is left of this phase's leg into the follower (re-planning first when the plan
-  /// in hand will not do and `allow_replan`). False = no usable leg.
+  /// Load what is left of this phase's leg into the follower, re-planning first if the plan
+  /// in hand will not do and `allow_replan`. False = no usable leg.
   bool startLeg(bool allow_replan)
   {
     std::string why;
@@ -647,8 +637,7 @@ private:
     return "";
   }
 
-  /// Re-plan the rest of the mission from the boat now and load this phase's new leg.
-  /// True = the follower has a new leg.
+  /// replan() now and load this phase's new leg. True = the follower has one.
   bool replanHere(double now, const std::string & why)
   {
     last_replan_ = now;
@@ -666,7 +655,7 @@ private:
     return ctx_->global_passage.plans;
   }
 
-  /// What changed in the aircraft's field since the plan in hand was made ("" = nothing).
+  /// retasked(), under the lock.
   std::string fieldChanged()
   {
     std::lock_guard<std::mutex> lk(ctx_->mu);

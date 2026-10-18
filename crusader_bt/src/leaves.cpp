@@ -1,21 +1,14 @@
-// leaves.cpp — every Task 1 leaf. Eleven of them, and none is interesting.
+// leaves.cpp — the per-gate Task 1 leaves and the shared ones; registers every leaf.
 //
-// That is the design working. All the geometry that can be silently wrong lives
-// in nav_math.hpp, which compiles and tests on a laptop in a second
-// (test/test_nav_math.cpp, 125 checks). What is left here is: read a port, call
-// nav_math, publish, poll. If a leaf in this file grows a formula, move the
-// formula to nav_math and test it.
+// No leaf here should be interesting: geometry that can be silently wrong lives in
+// nav_math.hpp, tested on a laptop (test/test_nav_math.cpp). What is left is: read a
+// port, call nav_math, publish, poll. A leaf that grows a formula: move it there and test it.
 //
-// TWO CONTRACTS THAT ARE LOAD-BEARING, both in the reactive guard band that is
-// re-ticked ten times a second:
-//
-//   ResolveBuoyStates and PublishSafePassageReport MUST NEVER RETURN FAILURE.
-//   A FAILURE there propagates to the root and ends the mission, so a single
-//   dropped camera frame would abort the run. "I saw nothing this tick" is
-//   SUCCESS; EntryResolved is what gates on actually knowing something.
-//
-//   NextWaypoint's FAILURE is not an error — it is how the transit loop ends
-//   when there is nothing sensible left to steer to.
+// LOAD-BEARING, in the reactive guard band re-ticked at 10 Hz:
+//   ResolveBuoyStates and PublishSafePassageReport MUST NEVER RETURN FAILURE: it reaches
+//   the root and ends the mission, so one dropped camera frame would abort the run.
+//   "Saw nothing this tick" is SUCCESS; EntryResolved gates on actually knowing.
+//   NextWaypoint's FAILURE is not an error: it ends the transit loop.
 #include <algorithm>
 #include <cmath>
 #include <chrono>
@@ -31,11 +24,9 @@
 #include "crusader_bt/path_math.hpp"
 #include "crusader_bt/planned_leg.hpp"
 
-// NOTE ON PORTS. BT::InputPort has two overloads: (name, description) and
-// (name, default_value, description). There is NO (name, default_value) form —
-// it binds to the first, fails to convert the default into a StringView, and
-// emits a template error long enough to bury what it is telling you. A port
-// with a default MUST also carry a description.
+// PORTS: BT::InputPort has (name, description) and (name, default, description), NO
+// (name, default). That binds to the first and fails with a template error that buries
+// the cause, so a port with a default MUST also carry a description.
 
 namespace crusader_bt
 {
@@ -46,15 +37,11 @@ using nav::Vec2;
 
 // ------------------------------------------------- setpoints and planned legs
 //
-// What NavigateTo, CircleBuoy and HoldStation have in common. Each used to carry
-// its own copy of "convert, publish if allowed, log" (spec 5.5), and the two legs
-// now also share one PlannedLeg driver, so there is exactly one place that turns a
-// leg's output into a setpoint, a log line and a status for the map.
+// NavigateTo and CircleBuoy share one PlannedLeg driver: the one place a leg's output
+// becomes a setpoint, a log line and a status for the map. sendSetpoint() is in
+// context.hpp so the whole-field leaves (global_leaves.cpp) send the same way.
 
-// sendSetpoint() is in context.hpp: the whole-field leaves (global_leaves.cpp) send the same way.
-
-/// The world a PlannedLeg needs this tick, read under ONE lock: the clock, the
-/// pose and its freshness, the datum verdict and the known hazards (the same
+/// The world a PlannedLeg needs this tick, read under ONE lock (hazards: the same
 /// knownHazards() the costmap is drawn from).
 path::LegInputs legInputs(Context & c, bool goal_ok, Vec2 goal)
 {
@@ -81,9 +68,8 @@ path::LegConfig legConfigFromPorts(const BT::TreeNode & node)
   return cfg;
 }
 
-/// One PlannedLeg and what is done with its output: the setpoint it asks for, its
-/// log lines, and the status the runner publishes. NavigateTo owns one for its
-/// whole life; CircleBuoy restarts one per hop.
+/// One PlannedLeg and its output's setpoint, log lines and map status. NavigateTo
+/// keeps one for its whole life; CircleBuoy restarts it per hop.
 class LegDriver
 {
 public:
@@ -186,11 +172,8 @@ private:
 
 // ---------------------------------------------------------------- conditions
 
-/// The autonomy latch, at the top of the guard band.
-///
-/// Deliberately a CONDITION and deliberately first: a tree that ticks missions
-/// while the pilot has the boat is a tree that fights the pilot. Its FAILURE
-/// halts every descendant within one tick.
+/// The autonomy latch: a CONDITION, first in the guard band, because a tree that ticks
+/// while the pilot has the boat fights the pilot. FAILURE halts everything within a tick.
 class IsAutonomous : public CrusaderCondition
 {
 public:
@@ -233,11 +216,9 @@ public:
   }
 };
 
-/// Are we close enough to the exit buoy to stop transiting?
-///
-/// `radius` MUST be larger than CircleBuoy's radius, or the transit would end
-/// inside the orbit and the circle would start from the wrong place. The tree
-/// uses 8 m against a 6 m orbit.
+/// Close enough to the exit buoy to stop transiting? `radius` MUST exceed CircleBuoy's,
+/// or the transit ends inside the orbit and the circle starts from the wrong place
+/// (the tree: 8 m against a 6 m orbit).
 class NearExit : public CrusaderCondition
 {
 public:
@@ -262,12 +243,10 @@ public:
 
 // -------------------------------------------------------- world-model update
 
-/// Refreshes nothing by itself — the runner's subscriptions already filled the
-/// context. This leaf exists so the tree SHOWS where the world update happens,
-/// and so that a future ledger (flash discrimination, colour-change tracking)
-/// has an obvious home that is already ticked at the right rate.
-///
-/// ALWAYS SUCCESS. See the file header.
+/// Refreshes nothing: the runner's subscriptions fill the context. It exists so the
+/// tree SHOWS where the world update happens, and gives a future ledger (flash
+/// discrimination, colour-change tracking) a home already ticked at the right rate.
+/// ALWAYS SUCCESS (file header).
 class ResolveBuoyStates : public CrusaderSyncAction
 {
 public:
@@ -291,11 +270,9 @@ private:
   std::size_t last_n_ = static_cast<std::size_t>(-1);
 };
 
-/// Sends SafePassageReport. Rate-limited HERE rather than by the tree, because
-/// the guard band ticks at 10 Hz and the handbook wants an update "when new
-/// buoys are detected or the mapped buoy state changes" — not 10 a second.
-///
-/// ALWAYS SUCCESS. See the file header.
+/// Sends SafePassageReport, rate-limited HERE: the guard band ticks at 10 Hz and the
+/// handbook wants an update "when new buoys are detected or the mapped buoy state
+/// changes", not 10 a second. ALWAYS SUCCESS (file header).
 class PublishSafePassageReport : public CrusaderSyncAction
 {
 public:
@@ -345,13 +322,12 @@ public:
   }
 };
 
-/// One task attempt as the heartbeat reports it (handbook 3.4.11). `token` goes out on the first
-/// tick; TASK_NONE goes out when the child returns SUCCESS or FAILURE and when this is halted, so
-/// every attempt is a clean NONE -> task -> NONE. Returns the child's status.
+/// One task attempt as the heartbeat reports it (handbook 3.4.11): `token` on the first tick,
+/// TASK_NONE when the child finishes or this is halted, so every attempt is NONE -> task -> NONE.
+/// Returns the child's status.
 ///
-/// TASK_NONE is held `none_dwell_s` before the next attempt is claimed: back to back, NONE would
-/// be replaced within one 100 ms tick and the 2 Hz heartbeat would never carry it. Until then the
-/// first tick returns RUNNING and the child is not ticked.
+/// TASK_NONE is held `none_dwell_s` first (RUNNING, child not ticked): back to back it would
+/// last one 100 ms tick and the 2 Hz heartbeat would never carry it.
 class TaskAttempt : public BT::DecoratorNode
 {
 public:
@@ -409,7 +385,7 @@ private:
 /// Holds station until RoboCommand's RunStart has reached the boat (handbook 3.4.10: position-hold
 /// after switching to autonomous, begin once the run has started). A RunStart that arrived up to
 /// `max_age_s` before this node started still counts, so one that beat the START button is not
-/// lost. RUNNING until then; FAILURE only after `timeout_s` > 0.
+/// lost. FAILURE only after `timeout_s` > 0.
 class WaitForRunStart : public CrusaderAction
 {
 public:
@@ -513,34 +489,29 @@ public:
 
 /// Reads a named target out of the context, drives there, and polls for arrival.
 ///
-/// The driving is path::PlannedLeg (planned_leg.hpp), picked once at start from
-/// nav_mode and the `avoid` port (docs/nav2_avoidance_spec.md 5.3):
-///   * shadow with avoid=false: THE LEGACY LEG. Publish the goal, re-send it when it
+/// The driving is path::PlannedLeg, picked once at start from nav_mode and `avoid`
+/// (docs/nav2_avoidance_spec.md 5.3):
+///   * shadow, avoid=false: THE LEGACY LEG. Publish the goal, re-send it when it
 ///     moves, arrive on `tolerance`.
-///   * off (whatever `avoid` says), or on with avoid=false: that, plus a guard that
-///     holds if the straight line to the goal crosses a known hazard, resumes only
-///     once the line has stayed clear for nav_unblock_reset_s, and FAILS after
-///     `blocked_timeout_s`. Never calls the planner and needs no Nav2. Off is the boat
-///     default until its container has Nav2, with no planner to go round a hazard, so
-///     it holds in front of one: it never drives through (spec 5.5, 2026-10-01). With
-///     avoid=false this is also the gate crossing and the Task 3 predock and berth,
-///     where the hazard IS the thing driven past.
-///   * on, avoid=true (the default): plan around every known hazard through Nav2
-///     and follow a carrot 3-5 m ahead. Cannot plan = HOLD, and FAILURE only after
-///     `blocked_timeout_s`; arrival is judged on the true goal.
-///   * shadow, avoid=true: the planner runs for real and the map shows it, but the
-///     boat is driven by the legacy leg. Never holds, never fails.
+///   * off (any `avoid`), or on with avoid=false: that, plus a guard that holds while
+///     the straight line to the goal crosses a known hazard, resumes once it has stayed
+///     clear for nav_unblock_reset_s, FAILS after `blocked_timeout_s`. No planner, no
+///     Nav2: off (the boat default) holds in front of a hazard, never drives through it
+///     (spec 5.5). With avoid=false this is also the gate crossing and the Task 3
+///     predock and berth, where the hazard IS the thing driven past.
+///   * on, avoid=true (default): plan round every known hazard through Nav2, follow a
+///     carrot 3-5 m ahead. Cannot plan = HOLD, FAILURE after `blocked_timeout_s`;
+///     arrival is judged on the true goal.
+///   * shadow, avoid=true: the planner runs and the map shows it, but the legacy leg
+///     drives. Never holds, never fails.
 ///
-/// `target` selects WHICH position, as a string rather than a typed port, so the
-/// XML needs no custom convertFromString (see context.hpp):
-///     "waypoint"  the one NextWaypoint just wrote
-///     "approach"  the team-provided lat/lon from the action goal
-///     "exit"      the exit buoy
+/// `target` is a string rather than a typed port so the XML needs no custom
+/// convertFromString (see context.hpp). "waypoint" is NextWaypoint's; "approach" is
+/// the team-provided lat/lon from the action goal.
 ///
-/// WITH publish_setpoints FALSE it does not publish but still polls arrival.
-/// That is the read-only posture for a water test: a human drives, and the tree
-/// tracks whether the boat reached where the mission wanted it. A version that
-/// faked arrival would prove nothing.
+/// WITH publish_setpoints FALSE it still polls arrival without publishing: the read-only
+/// water-test posture, where a human drives and the tree tracks whether the boat reached
+/// where the mission wanted. Faked arrival would prove nothing.
 class NavigateTo : public CrusaderAction
 {
 public:
@@ -551,8 +522,8 @@ public:
     return {
       BT::InputPort<std::string>("target", "waypoint",
                                  "port | waypoint | approach | exit | home | fix"),
-      // THE PERCEPTION WIRE. With target="port" this reads a Waypoint written
-      // by an upstream compute leaf, so the XML shows where the goal came from:
+      // THE PERCEPTION WIRE: with target="port" the goal is a Waypoint an upstream
+      // leaf wrote, so the XML shows where it came from:
       //     <SomeDetector out="{goal}"/>
       //     <NavigateTo target="port" goal="{goal}"/>
       BT::InputPort<Waypoint>("goal", "a Waypoint from an upstream leaf"),
@@ -582,16 +553,11 @@ public:
 
   BT::NodeStatus onRunning() override
   {
-    // THE GOAL IS ALLOWED TO MOVE. A tree rewrites {goal} as the mission learns
-    // more, and a leaf that read it once in onStart would keep driving the
-    // original line. The leg re-sends only when the point has moved further than
-    // resend_m: a setpoint republished at 10 Hz is a different control mode from
-    // this one - it is a stream, ArduRover treats it as one, and the deadband is
-    // what keeps this leaf a leaf rather than a controller. resend_m 0 freezes
-    // the goal at its start value.
-    //
-    // resolve() is called outside the lock: it touches ctx_ directly and takes
-    // no lock of its own.
+    // THE GOAL IS ALLOWED TO MOVE: a tree rewrites {goal} as the mission learns more.
+    // The leg re-sends only past resend_m: a setpoint republished at 10 Hz is a stream,
+    // which ArduRover treats as a different control mode, and the deadband keeps this
+    // leaf a leaf rather than a controller. resend_m 0 freezes the goal at its start.
+    // resolve() takes ctx_->mu itself, so it is called outside the lock.
     const std::string which = getInput<std::string>("target").value_or("waypoint");
     const bool follow = getInput<double>("resend_m").value_or(1.5) > 0.0;
     Vec2 want;
@@ -647,10 +613,8 @@ private:
       return true;
     }
     if (which == "fix") {
-      // Literal coordinates from the XML. This is what lets a tree be written
-      // and driven with no perception at all -- the whole point of the
-      // waypoint-tour demo, which exercises every phase transition the real
-      // mission uses without needing a single buoy.
+      // Literal XML coordinates: a tree driven with no perception at all (the
+      // waypoint-tour demo exercises every phase transition without a buoy).
       if (!ctx_->origin_set) {return false;}
       const auto la = getInput<double>("lat");
       const auto lo = getInput<double>("lon");
@@ -701,17 +665,12 @@ private:
   LegDriver leg_;
 };
 
-/// A stand-in for a detector: turns "something is 50 m off the bow to
-/// starboard" into a Waypoint on the blackboard.
+/// A stand-in for a detector: turns "something 50 m off the bow to starboard" into a
+/// Waypoint on the blackboard, so the compute-leaf -> action-leaf wire can be exercised
+/// in SITL with no camera. A real perception leaf has this shape but reads ctx_->buoys
+/// (filled from /crsd/world_targets).
 ///
-/// THIS IS THE SHAPE EVERY PERCEPTION LEAF HAS. A real one would read
-/// ctx_->buoys (which the runner fills from /crsd/world_targets), pick the
-/// target it cares about and write its position. This one computes the position
-/// from a range and bearing relative to the boat, so the wire from a compute
-/// leaf to an action leaf can be exercised in SITL with no camera at all.
-///
-/// It is named for what it does rather than for what it stands in for. A leaf
-/// called "DetectBuoy" that invented a buoy would be a lie in the tree.
+/// Named for what it does: a "DetectBuoy" that invented a buoy would be a lie in the tree.
 class TargetAhead : public CrusaderSyncAction
 {
 public:
@@ -739,9 +698,8 @@ public:
         RCLCPP_WARN(log(), "TargetAhead: no fresh pose");
         return BT::NodeStatus::FAILURE;
       }
-      // Relative to the BOW, so it needs the heading. NaN heading means we do
-      // not know which way we are pointing, and a bearing off an unknown datum
-      // is a guess -- refuse rather than steer somewhere plausible.
+      // Bow-relative: with a NaN heading the bearing is a guess, so refuse
+      // rather than steer somewhere plausible.
       if (!std::isfinite(ctx_->heading_deg)) {
         RCLCPP_WARN(log(), "TargetAhead: heading is NaN, refusing to guess");
         return BT::NodeStatus::FAILURE;
@@ -760,29 +718,23 @@ public:
   }
 };
 
-/// Drives once around a buoy: `points` waypoints on a ring, preceded by one explicit
-/// hop onto the ring and followed by the overshoot (below). Core Tier: ENTRY
-/// clockwise before the transit, EXIT counterclockwise to complete the task.
+/// Drives once around a buoy: one hop onto the ring, `points` waypoints round it, then
+/// the overshoot. Core Tier: ENTRY clockwise before the transit, EXIT counterclockwise.
 ///
-/// THE RING STARTS ON THE BOAT'S OWN BEARING and is built by path::orbitRing, so
-/// ring[0] is the hop that gets the boat onto the circle and the sweep over
-/// ring[1..] is +-(360 + overshoot_deg) whatever the start (the old orbit() measured
-/// it from the boat's position, and a far start read as a 313 degree circle). Each hop
-/// is one PlannedLeg, restarted per hop: in every nav_mode the hops are at least
-/// straight ones (in off, guarded ones that hold in front of a known hazard), so the
-/// short-circle fix does not need Nav2. A ring point
-/// within orbit_clear_m of a known hazard is pushed outward (path::adjustRing) or
-/// dropped, and the log says how many.
+/// THE RING STARTS ON THE BOAT'S OWN BEARING (path::orbitRing): ring[0] is the hop onto
+/// the circle and the sweep over ring[1..] is +-(360 + overshoot_deg) whatever the start
+/// (measured from the boat's position instead, a far start read as a 313 degree circle).
+/// Each hop is one PlannedLeg, so in every nav_mode it is at least a straight one (in off,
+/// guarded) and the orbit needs no Nav2. A ring point within orbit_clear_m of a known
+/// hazard is pushed outward (path::adjustRing) or dropped, and the log says how many.
 ///
-/// THE OVERSHOOT. A hop counts as arrived within `tolerance` (2 m, ~19 degrees at a 6 m
-/// ring), so a ring that stops at exactly 360 closes the circle ~19 degrees short, and an
-/// approach that enters off ring[0] loses more: the independent referee scored 328
-/// degrees where it needs 330. The ring therefore keeps going `overshoot_deg` past the
-/// start, the same way round, and the circle is complete only once the LAST point
-/// (the overshoot one) has been reached.
+/// THE OVERSHOOT. A hop arrives within `tolerance` (2 m, ~19 degrees on a 6 m ring), so a
+/// ring stopping at exactly 360 closes ~19 degrees short, more if the approach enters off
+/// ring[0] (the independent referee scored 328 where 330 is needed). So the ring runs
+/// `overshoot_deg` past the start, the same way round, and is complete only at the LAST point.
 ///
-/// A hop that cannot be driven FAILS the leaf after its blocked_timeout_s, and the
-/// tree's RetryUntilSuccessful restarts the whole orbit.
+/// A hop that cannot be driven FAILS the leaf after blocked_timeout_s; the tree's
+/// RetryUntilSuccessful restarts the whole orbit.
 class CircleBuoy : public CrusaderAction
 {
 public:
@@ -886,9 +838,7 @@ private:
     return "  orbit " + std::to_string(i_ + 1) + "/" + std::to_string(ring_.size());
   }
 
-  /// Start hop i_, or finish the orbit when there is none left. Hop 0 is the
-  /// explicit hop onto the ring; the orbit is over once the last point (the overshoot
-  /// one, when there is one) is reached.
+  /// Start hop i_ (0 = the hop onto the ring), or finish the orbit when none is left.
   BT::NodeStatus startHop()
   {
     if (i_ >= ring_.size()) {
@@ -897,8 +847,8 @@ private:
       return BT::NodeStatus::SUCCESS;
     }
     // The goal rule (path::clearPoint) against the field as it is NOW: adjustRing never
-    // moves ring[0], and a track can appear after the ring was built. Both once put the
-    // hop beside a buoy where it could never arrive (2026-10-02, the EXIT orbit by b9).
+    // moves ring[0], and a track can appear after the ring was built; either can leave
+    // a hop beside a buoy where it never arrives.
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       const Vec2 p = path::clearPoint(
@@ -919,11 +869,9 @@ private:
   LegDriver leg_;
 };
 
-/// Publishes the current position as the setpoint, and never succeeds. Whatever
-/// wraps it — a Timeout, or a sibling condition in a ReactiveFallback — is what
-/// ends it. That is deliberate: a HoldStation that timed out on its own would
-/// put the give-up policy in the leaf instead of in the tree, where it is
-/// visible.
+/// Publishes the current position as the setpoint and never succeeds: whatever wraps it
+/// (a Timeout, a sibling condition in a ReactiveFallback) ends it, so the give-up policy
+/// stays visible in the tree instead of hidden in the leaf.
 class HoldStation : public CrusaderAction
 {
 public:
@@ -940,15 +888,12 @@ public:
   BT::NodeStatus onRunning() override {return BT::NodeStatus::RUNNING;}
 };
 
-/// Works out the next place to steer during the transit.
+/// The next place to steer during the transit; the decision is nav::nextWaypoint(),
+/// tested off the boat.
 ///
-/// The whole decision is nav::nextWaypoint(), which is tested off-boat. This
-/// leaf reads the context, calls it, and writes the answer back.
-///
-/// FAILURE means "nothing sensible left to steer to", which is the transit
-/// loop's secondary exit. The PRIMARY exit is NearExit — arriving at the exit
-/// buoy, not running out of buoys. Ending the transit on an empty candidate
-/// list would make a single missed detection stop the boat mid-field.
+/// FAILURE ("nothing sensible left to steer to") is the transit loop's secondary exit.
+/// The PRIMARY exit is NearExit: ending on an empty candidate list would let one missed
+/// detection stop the boat mid-field.
 class NextWaypoint : public CrusaderSyncAction
 {
 public:
@@ -987,23 +932,18 @@ public:
 
 // ============================================================== Disruptive tier
 //
-// Six leaves the UAV handshake needs. NONE of them is a ROS action client:
-// four decide in one tick and return, one publishes once and returns, and only
-// AwaitConfirmation can be RUNNING -- so it is the only one that needs onHalted().
-//
-// The runner owns every subscription, as always. These read the Context fields
-// its /crsd/passage_plan and /crsd/next_gate callbacks filled in.
+// The per-gate UAV handshake. NONE is a ROS action client, and only AwaitConfirmation
+// can be RUNNING, so it is the only one that needs onHalted(). The runner owns every
+// subscription; these read the Context its /crsd/passage_plan and /crsd/next_gate fill.
 
-/// Has the aircraft reported, and recently enough to still believe?
+/// Has the aircraft reported, recently enough to still believe?
 ///
-/// THE HANDBOOK GATE. Above Core tier the UAV must complete its overfly and
-/// report before the USV may transit into the field, so this sits in the guard
-/// band and its FAILURE halts the whole mission in one tick.
+/// THE HANDBOOK GATE: above Core the UAV must overfly and report before the USV may
+/// transit the field, so this sits in the guard band and its FAILURE halts the mission.
 ///
-/// It is also the dead-radio stop. rxl_link_node publishes NOTHING when the
-/// link goes quiet -- it never repeats the last plan -- precisely so the age
-/// here keeps climbing and the boat stops instead of driving a passage nobody
-/// can still confirm.
+/// Also the dead-radio stop: rxl_link_node never repeats the last plan when the link
+/// goes quiet, so the age here climbs and the boat stops instead of driving a passage
+/// nobody can still confirm.
 class PassagePlanFresh : public CrusaderCondition
 {
 public:
@@ -1032,8 +972,7 @@ public:
   }
 
 private:
-  /// The guard band re-ticks at 10 Hz, so an un-gated log line is ten copies of
-  /// the same sentence every second.
+  /// The guard band re-ticks at 10 Hz: un-gated, this is ten copies a second.
   void warnOnce(const char * why)
   {
     if (warned_) {return;}
@@ -1044,15 +983,12 @@ private:
   bool warned_ = false;
 };
 
-/// Did the UAV supersede the plan since we last looked?
+/// Did the UAV supersede the plan since we last looked? The Disruptive trigger: in a
+/// reactive branch, a new plan halts an in-flight NavigateTo and the leg restarts on it.
 ///
-/// The Disruptive trigger, and the whole reason the tier needs no new
-/// machinery: this sits in a reactive branch, so a new plan halts an in-flight
-/// NavigateTo and the leg restarts against the new one.
-///
-/// PRIMES ON ITS FIRST TICK rather than comparing against zero. The tree is
-/// rebuilt per goal, so a plan that arrived BEFORE the goal would otherwise
-/// read as a change on tick one and cancel the first leg before it started.
+/// PRIMES ON ITS FIRST TICK rather than comparing against zero: the tree is rebuilt per
+/// goal, so a plan that arrived BEFORE the goal would read as a change and cancel the
+/// first leg before it started.
 class PlanChanged : public CrusaderCondition
 {
 public:
@@ -1081,20 +1017,12 @@ private:
   std::uint32_t seen_ = 0;
 };
 
-/// Has the aircraft said there are no more gates?
-///
-/// The ONLY thing that ends the transit loop. Set when a pair arrives as
-/// 255/255. Deliberately not a geometric test: the boat must clear every gate
-/// before the exit, and the exit buoy can sit well inside any sane arrival
-/// radius of the last one.
 /// Has the boat cleared every gate in its own plan?
 ///
-/// THE BOAT DECIDES, not the aircraft. It holds all ten buoys, so it knows how
-/// many red-green pairs there are and which it has driven. The aircraft used to
-/// end the transit by answering 255/255; it no longer assigns gates, so it can
-/// no longer end them either. It can still SHORTEN a passage -- a confirmation
-/// carrying a field with one pair recoloured away leaves one fewer gate to
-/// drive -- which is the honest way for it to influence this.
+/// THE BOAT DECIDES, not the aircraft: it holds all ten buoys, so it knows the red-green
+/// pairs and which it has driven. Not a geometric test: the exit buoy can sit well inside
+/// any sane arrival radius of the last gate. The aircraft can still SHORTEN a passage: a
+/// confirmation that recolours a pair away leaves one fewer gate to drive.
 class PassageComplete : public CrusaderCondition
 {
 public:
@@ -1112,12 +1040,9 @@ public:
   }
 };
 
-/// Work out the gate order from the fused field. One call, every tick.
-///
-/// Cheap enough to re-run rather than cache: two pairs out of ten buoys is a
-/// handful of distances. Re-running is the POINT -- a confirmation can bring
-/// new colours or new positions, and a cached plan would keep driving the old
-/// field while the report showed the new one.
+/// The gate order from the fused field, re-planned every tick: cheap (a handful of
+/// distances), and a cached plan would keep driving the old field after a confirmation
+/// brought new colours or positions, while the report showed the new one.
 class PlanPassage : public CrusaderSyncAction
 {
 public:
@@ -1178,14 +1103,9 @@ private:
   std::size_t last_unpaired_ = static_cast<std::size_t>(-1);
 };
 
-/// DEPRECATED, AND NOW A PASS-THROUGH: `out` = `in`, SUCCESS.
-///
-/// It used to rewrite {goal} to steer round one obstacle at a time, locally and
-/// reactively (the nav_math detour helper, since deleted). NavigateTo avoids by itself now: it
-/// plans around every known hazard through Nav2's planner_server and holds when it
-/// cannot (docs/nav2_avoidance_spec.md 5.5). The leaf stays registered ONLY so a
-/// tree that still names it - an old local XML - loads and runs; its `clearance`
-/// and `margin` ports are accepted and ignored. It says so once per run.
+/// DEPRECATED PASS-THROUGH: `out` = `in`, SUCCESS. NavigateTo avoids by itself
+/// (docs/nav2_avoidance_spec.md 5.5). Registered ONLY so an old XML that still names it
+/// loads and runs; `clearance` and `margin` are ignored. It says so once per run.
 class AvoidObstacles : public CrusaderSyncAction
 {
 public:
@@ -1217,10 +1137,8 @@ private:
   bool warned_ = false;
 };
 
-/// Point gate_red_id / gate_green_id at the first gate not yet cleared.
-///
-/// FAILURE means the passage is done. That is not an error and the tree treats
-/// it as the loop exit -- PassageComplete asks the same question one level up.
+/// Point gate_red_id / gate_green_id at the first gate not yet cleared. FAILURE = the
+/// passage is done: the loop exit, not an error (PassageComplete asks the same one level up).
 class SelectNextGate : public CrusaderSyncAction
 {
 public:
@@ -1245,19 +1163,12 @@ public:
   }
 };
 
-/// Tell the aircraft a gate is done and ask it to confirm the field.
+/// Tell the aircraft a gate is done and ask "is the rest of the field still where you
+/// said?". It acks this sequence number and retransmits all ten buoys; the boat re-plans
+/// from that. One publish, SUCCESS in the same tick; the waiting is AwaitConfirmation's.
 ///
-/// One publish, SUCCESS in the same tick. The WAITING is AwaitConfirmation, and
-/// splitting the two is what keeps this one free.
-///
-/// WHAT IS BEING ASKED HAS CHANGED. This used to mean "assign me the next
-/// pair". It now means "I am through a gate -- is the rest of the field still
-/// where you said it was?". The aircraft answers by acking this sequence number
-/// and retransmitting all ten buoys; the boat re-plans from that and drives on.
-///
-/// It advances the sequence only when the previous gate was actually cleared,
-/// so a leg that failed re-asks under the SAME number and gets the aircraft's
-/// idempotent repeat rather than burning a sequence.
+/// The sequence advances only when the previous gate was cleared, so a failed leg
+/// re-asks under the SAME number and gets the aircraft's idempotent repeat.
 class RequestConfirmation : public CrusaderSyncAction
 {
 public:
@@ -1265,10 +1176,8 @@ public:
   : CrusaderSyncAction(n, c) {}
   static BT::PortsList providedPorts()
   {
-    // FOR THE LOG ONLY, and it earns its place: the sequence number no longer
-    // counts gates. The entry orbit asks first, so seq 1 is the entry and seq 2
-    // is gate 1, and a log line reading "gate 1" at the entry sends whoever is
-    // reading it looking for a gate the boat has not reached yet.
+    // FOR THE LOG ONLY: seq does not count gates (the entry orbit asks first, so seq 2
+    // is gate 1), and "gate 1" logged at the entry sends a reader looking for the wrong one.
     return {BT::InputPort<std::string>("what", "gate",
       "what the boat just finished, for the log line")};
   }
@@ -1297,12 +1206,10 @@ public:
   }
 };
 
-/// The boat is through this gate. Records it by the ids of its two buoys.
-///
-/// Last step of the leg, so anything that fails before it leaves the gate
-/// un-cleared and the boat drives it again. Keyed on the BUOYS rather than on a
-/// counter, so a confirmation that recolours the field and reshuffles the order
-/// cannot make the boat skip one it never drove.
+/// The boat is through this gate; recorded by its two buoy ids. Last step of the leg, so
+/// anything failing earlier leaves the gate un-cleared and it is driven again. Keyed on
+/// the BUOYS, not a counter, so a recolour that reshuffles the order cannot make the boat
+/// skip one it never drove.
 class MarkGateCleared : public CrusaderSyncAction
 {
 public:
@@ -1330,16 +1237,13 @@ public:
 
 /// Wait for the aircraft to confirm the field before driving the next gate.
 ///
-/// KEEPS ASKING, THEN GIVES UP AND CARRIES ON. Re-requesting every `retry_s`
-/// covers a lost reply on a lossy radio; FAILURE at `timeout_s` hands the
-/// decision back to the tree, which drives on with the last field it was given
-/// rather than parking on the course forever. That is a deliberate trade and
-/// the WARN is how it stays visible -- a boat that quietly proceeds on an
-/// unconfirmed field looks identical to one that was confirmed.
+/// KEEPS ASKING, THEN CARRIES ON: re-requests every `retry_s` cover a lost reply;
+/// FAILURE at `timeout_s` lets the tree drive on with the last field rather than park
+/// forever. A deliberate trade, and the WARN keeps it visible: otherwise proceeding on
+/// an unconfirmed field looks identical to a confirmed one.
 ///
-/// NOTHING HOLDS STATION HERE and nothing needs to: the boat arrived at this
-/// gate's `through` waypoint under GUIDED, the autopilot is still holding that
-/// setpoint, and no leaf below is publishing a new one.
+/// NOTHING HOLDS STATION HERE, nor needs to: under GUIDED the autopilot is still holding
+/// the gate's `through` setpoint and nothing below publishes a new one.
 class AwaitConfirmation : public CrusaderAction
 {
 public:
@@ -1461,7 +1365,7 @@ public:
 
     if (plain.valid) {
       // Move the two points off anything on the straight crossing: the same hazard set and
-      // exemption the crossing leg checks (exempt="gate"). See path::clearGateWaypoints.
+      // exemption the crossing leg checks (exempt="gate").
       bool tight = false;
       const nav::Gate gate = path::clearGateWaypoints(
         nav::findById(ctx_->buoys, r)->p, nav::findById(ctx_->buoys, g)->p, standoff, approach,
