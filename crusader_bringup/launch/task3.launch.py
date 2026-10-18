@@ -80,6 +80,10 @@ TREES = {
     # or that hold + wait for a RED window and spray it until GREEN
     "cannon_hold": "task3_cannon_hold.xml",
     "cannon_fire": "task3_cannon_fire.xml",
+    # the same in a SLIP (2026-10-16, the practice slip): the camera brings the
+    # bow to the slip's mouth, then the LiDAR's slip (dock_slot_node) centres,
+    # squares and sets the distance
+    "cannon_slip": "task3_cannon_slip.xml",
     # TEST variants (headers say how they differ):
     "fire_1p6": "task3_fire_manual_1p6.xml",  # pool tuning: 1.6 m, no attempt limit
     "approach_test": "task3_approach_test.xml",  # GUIDED approach to line-up only; dock_bays:=1
@@ -114,7 +118,7 @@ def _nodes(context):
             "HOLD (sticks, pump DRY)" if setpoints else
             "SHADOW (logs only, touches nothing)" if not pump else
             "PUMP WITHOUT STICKS")
-    if tree in ("cannon", "cannon_hold", "cannon_fire"):
+    if tree in ("cannon", "cannon_hold", "cannon_fire", "cannon_slip"):
         mode += " | cannon " + ("FIRES THE PUMP" if water else "DRY")
 
     # The cannon tree docks on the slip, not the wall range, and its water goes
@@ -123,9 +127,13 @@ def _nodes(context):
                   output="screen", parameters=[params])
     wall = Node(package="crusader_perception", executable="wall_range_node",
                 output="screen", parameters=[params])
+    slot = Node(package="crusader_perception", executable="dock_slot_node",
+                output="screen", parameters=[params])
     if tree == "cannon":
-        lidar = [Node(package="crusader_perception", executable="dock_slot_node",
-                      output="screen", parameters=[params]), cannon]
+        lidar = [slot, cannon]
+    elif tree == "cannon_slip":
+        # the approach is on the wall range and the face, the dock on the slip
+        lidar = [wall, slot, cannon]
     elif tree in ("cannon_hold", "cannon_fire"):
         # the hold is on the wall range and the face; the cannon aims (cal
         # window during a hold, the tree in cannon_fire)
@@ -151,7 +159,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("tree", default_value="fire_manual",
                               description="fire_manual | fire_test | disruptive | part1 | part2 | "
-                                          "cannon | cannon_hold | cannon_fire | fire_1p6 | "
+                                          "cannon | cannon_hold | cannon_fire | cannon_slip | "
+                                          "fire_1p6 | "
                                           "approach_test"),
         DeclareLaunchArgument("dock_bays", default_value="3",
                               description="bays in the dock; 1 only to test against one practice bay"),

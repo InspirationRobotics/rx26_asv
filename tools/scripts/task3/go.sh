@@ -110,7 +110,7 @@ for i in 1 2 3; do
   [ -n "$FCU_MODE" ] && break
 done
 case "$TREE" in
-  task3_fire_manual*|task3_part2_*|task3_cannon_hold*|task3_cannon_fire*)
+  task3_fire_manual*|task3_part2_*|task3_cannon_hold*|task3_cannon_fire*|task3_cannon_slip*)
     [ "$FCU_MODE" = "MANUAL" ] || fail "flight mode is '${FCU_MODE:-unknown}'; this tree strafes on the sticks and needs MANUAL (SC)"
     ;;
   *)
@@ -128,7 +128,7 @@ say "flight mode: $FCU_MODE"
 
 # 2b. what a MANUAL fire tree reads, so it does not abort on its first tick
 case "$TREE" in
-  task3_fire_manual*|task3_part2_*|task3_cannon_hold*|task3_cannon_fire*)
+  task3_fire_manual*|task3_part2_*|task3_cannon_hold*|task3_cannon_fire*|task3_cannon_slip*)
     n=$(count "[c]rusader_perception/wall_range_node")
     [ "$n" -ge 1 ] || fail "wall_range_node is not running (the LiDAR distance to the wall):
        task3.launch.py starts it; by hand, docs/T3_running.md"
@@ -141,7 +141,7 @@ case "$TREE" in
       say "inputs: one wall_range_node (wall seen), one dock_view"
     else
       case "$TREE" in
-        task3_cannon_hold*|task3_cannon_fire*)
+        task3_cannon_hold*|task3_cannon_fire*|task3_cannon_slip*)
           # these range on the camera's face until the LiDAR has the wall
           B=0; for i in 1 2 3; do B=$(timeout 4 ros2 topic echo --once /dock/observations 2>/dev/null | grep -c "bay_index"); [ "${B:-0}" -gt 0 ] && break; done
           [ "${B:-0}" -gt 0 ] || fail "neither the LiDAR (no wall) nor the camera (no bay) sees the dock:
@@ -157,7 +157,19 @@ case "$TREE" in
     ;;
 esac
 case "$TREE" in
-  task3_cannon_hold*|task3_cannon_fire*)
+  task3_cannon_slip*)
+    # the dock is on the LiDAR's slip: it must be running (it need not see the
+    # slip yet: the camera brings the boat to its mouth first)
+    n=$(count "[c]rusader_perception/dock_slot_node")
+    [ "$n" -ge 1 ] || fail "dock_slot_node is not running (the LiDAR's slip): start the tree with
+       task3.launch.py tree:=cannon_slip"
+    [ "$n" -eq 1 ] || fail "$n dock_slot_nodes are running: pkill -f crusader_perception/dock_slot_node, then start ONE"
+    S=$(timeout 4 ros2 topic echo --once /crsd/dock_slot 2>/dev/null | awk '/^valid:/{v=$2} /^why:/{$1=""; w=$0} END{print v "|" w}')
+    say "slip: dock_slot_node running; the LiDAR sees the slip now: ${S%%|*} ${S#*|}"
+    ;;
+esac
+case "$TREE" in
+  task3_cannon_hold*|task3_cannon_fire*|task3_cannon_slip*)
     n=$(count "[c]rusader_fcu/cannon_aim_node")
     [ "$n" -ge 1 ] || fail "cannon_aim_node is not running: cal node (or start with task3.launch.py)"
     [ "$n" -eq 1 ] || fail "$n cannon_aim_nodes are running (cal node AND task3.launch.py?): they fight
@@ -175,7 +187,7 @@ case "$TREE" in
     ;;
 esac
 case "$TREE" in
-  task3_cannon_fire*)
+  task3_cannon_fire*|task3_cannon_slip*)
     [ "$(count "[c]annon_cal.py window")" -eq 0 ] \
       || fail "cal window is running: Ctrl-C it first - it and this tree would both aim the cannon"
     ;;

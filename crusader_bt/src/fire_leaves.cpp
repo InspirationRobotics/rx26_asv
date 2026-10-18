@@ -1079,6 +1079,10 @@ public:
   {
     return {
       BT::InputPort<double>("standoff_m", 1.1, "LiDAR -> back wall to hold (along the slip)"),
+      BT::InputPort<bool>("watch", false,
+        "true: hold the WATCH standoff (live strafe.watch_range_m, else watch_range_m) "
+        "instead, e.g. backed off in the slip to see the lights"),
+      BT::InputPort<double>("watch_range_m", 1.6, "the watch standoff, when watch is true"),
       BT::InputPort<double>("lateral_bias_m", 0.0,
         "+ holds the hull this far LEFT of the slip's centreline"),
       BT::InputPort<double>("slot_timeout_s", 0.6, "slip older than this: every stick at zero"),
@@ -1123,7 +1127,8 @@ public:
     sp.min_range_m = in("min_range_m", 0.9);
     sp.square_first_deg = in("square_first_deg", sp.square_first_deg);
     const double bias = in("lateral_bias_m", 0.0), slot_to = in("slot_timeout_s", 0.6);
-
+    const bool watching = getInput<bool>("watch").value_or(false);
+    const double watch_port = in("watch_range_m", 1.6);
     fire::StrafeCmd cmd;
     fire::StrafeInputs si;
     bool publish = false;
@@ -1132,6 +1137,14 @@ public:
       std::lock_guard<std::mutex> lk(ctx_->mu);
       const double now = ctx_->now_s;
       tuned = ctx_->strafe_tune.apply(sp);
+      if (watching) {
+        sp.fire_range_m = ctx_->strafe_tune.watch_range_m >= 0.0 ?
+          ctx_->strafe_tune.watch_range_m : watch_port;
+      }
+      // the standoff held now, for AwaitStrafeSolution and %RANGE%: after a
+      // camera approach (task3_cannon_slip.xml) the last one is StrafeKeep's
+      ctx_->strafe_target_range = sp.fire_range_m;
+      ctx_->strafe_target_t = now;
       const double rate_s = ctx_->strafe_tune.rate_window_s >= 0.0 ?
         ctx_->strafe_tune.rate_window_s : 0.8;
       const bool fresh = ctx_->slot.valid_age(now) <= slot_to;
@@ -1177,14 +1190,87 @@ public:
     if (ctx_->node) {
       const std::string live = tuned.empty() ? "" : " [live: " + tuned + "]";
       RCLCPP_INFO_THROTTLE(log(), *ctx_->node->get_clock(), 1000,
-        "slot: LiDAR %.2f m from the back wall, centreline %+.2f m left, square %+.1f deg | "
-        "sticks fwd %+.0f lat %+.0f yaw %+.0f us (%s)%s%s",
-        si.range_m, si.lat_err_m, si.yaw_err_deg, cmd.sticks.fwd_us, cmd.sticks.lat_us,
+        "slot: LiDAR %.2f m from the back wall (holding %.2f%s), centreline %+.2f m left, "
+        "square %+.1f deg | sticks fwd %+.0f lat %+.0f yaw %+.0f us (%s)%s%s",
+        si.range_m, sp.fire_range_m, watching ? ", watch" : "", si.lat_err_m, si.yaw_err_deg,
+        cmd.sticks.fwd_us, cmd.sticks.lat_us,
         cmd.sticks.yaw_us, cmd.why.c_str(),
         publish ? "" : " [shadow: publish_setpoints is off]", live.c_str());
     }
     return BT::NodeStatus::SUCCESS;
   }
+};
+
+/// Wait, RUNNING, until the LiDAR has had the WHOLE slip (DockSlot valid: both
+/// side walls, or one and slip_width_m, and the back wall) for hold_s with no gap
+/// over gap_s. The hand-over from the camera's approach to SlotKeep
+/// (task3_cannon_slip.xml): one stray sweep does not hand the boat to a slip
+/// that is not there. Says why not, every 2 s. FAILURE after timeout_s.
+class AwaitDockSlot : public CrusaderAction
+{
+public:
+  AwaitDockSlot(const std::string & n, const BT::NodeConfig & c) : CrusaderAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<double>("hold_s", 1.0, "the slip seen this long"),
+      BT::InputPort<double>("gap_s", 0.5, "...with no sweep gap longer than this"),
+      BT::InputPort<double>("timeout_s", 1e6, "give up after this")};
+  }
+  BT::NodeStatus onStart() override
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    t0_ = ctx_->now_s;
+    since_ = -1.0;
+    return BT::NodeStatus::RUNNING;
+  }
+  BT::NodeStatus onRunning() override
+  {
+    const double hold = getInput<double>("hold_s").value_or(1.0);
+    const double gap = getInput<double>("gap_s").value_or(0.5);
+    double now = 0.0, range = fire::kNaN, lat = fire::kNaN;
+    std::string why;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      now = ctx_->now_s;
+      if (ctx_->slot.valid_age(now) <= gap) {
+        if (since_ < 0.0) {since_ = now;}
+      } else {
+        since_ = -1.0;
+      }
+      range = ctx_->slot.range(now);
+      lat = ctx_->slot.lat(now);
+      why = ctx_->slot_why;
+    }
+    if (since_ >= 0.0 && now - since_ >= hold) {
+      {
+        // the hold changes reference (the camera's face -> the LiDAR's slip):
+        // what the integrals built up against the old one starts over
+        std::lock_guard<std::mutex> lk(ctx_->mu);
+        ctx_->strafe_state.i_fwd = 0.0;
+        ctx_->strafe_state.i_lat = 0.0;
+      }
+      RCLCPP_INFO(log(), "the LiDAR has the slip: back wall %.2f m, centreline %+.2f m left",
+        range, lat);
+      return BT::NodeStatus::SUCCESS;
+    }
+    if (ctx_->node) {
+      const std::string note = since_ >= 0.0 ? " (seen, holding)" :
+        (why.empty() ? std::string() : " (" + why + ")");
+      RCLCPP_INFO_THROTTLE(log(), *ctx_->node->get_clock(), 2000,
+        "waiting for the LiDAR to see the slip%s", note.c_str());
+    }
+    if (now - t0_ > getInput<double>("timeout_s").value_or(1e6)) {
+      RCLCPP_WARN(log(), "AwaitDockSlot: no slip after %.0f s", now - t0_);
+      return BT::NodeStatus::FAILURE;
+    }
+    return BT::NodeStatus::RUNNING;
+  }
+  void onHalted() override {}
+
+private:
+  double t0_ = 0.0;
+  double since_ = -1.0;
 };
 
 /// Wait for the autopilot to be in `mode` - for a mission whose next part runs
@@ -1400,6 +1486,7 @@ void registerFireNodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<AwaitStrafeSolution>("AwaitStrafeSolution");
   factory.registerNodeType<DockSlotAlive>("DockSlotAlive");
   factory.registerNodeType<SlotKeep>("SlotKeep");
+  factory.registerNodeType<AwaitDockSlot>("AwaitDockSlot");
   factory.registerNodeType<AwaitMode>("AwaitMode");
   factory.registerNodeType<FaceBay>("FaceBay");
 }

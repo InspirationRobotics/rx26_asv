@@ -200,6 +200,36 @@ somewhat right of the bay. Reproduce it with the camera's lag and bearing noise,
   a face cut on one side is still used).
 - Docked and held well enough on 2026-10-11 to put the fire out in 15-28 s of spray.
 
+## Added 2026-10-16: the practice slip
+
+The team built a real slip (side walls and a back wall). A new tree,
+`task3_cannon_slip.xml` (`task3.launch.py tree:=cannon_slip`), uses it:
+
+1. The camera approach from `cannon_fire` brings the bow to the slip's mouth (2.4 m wall
+   range).
+2. `AwaitDockSlot` waits until `dock_slot_node` has had the whole slip for 1 s.
+3. `SlotKeep` then centers, squares and holds 1.1 m from the back wall, backing to 1.4 m
+   to watch.
+4. If the slip is lost for 2 s, the camera approach takes over again (three tries).
+
+`SlotKeep` gained `watch` / `watch_range_m`, and it now publishes the standoff it holds to
+the gates (`strafe_target_range`), which `task3_cannon.xml` also goes through.
+
+Before the water test, in Gazebo:
+
+- **A practice-slip course** with the team's measured slip (width, wall length, wall height
+  above the water; ask Dominick) and the dock face with its two windows. Run
+  `cannon_slip` on it:
+  - the hand-over at the mouth
+  - straight in, and from 0.5 m off to one side at 20 deg
+  - a 0.3 m shove while docked
+  - the slip lost for 3 s (does the retry back out and come in again?)
+- **Re-run `task3_cannon.xml`** on your four courses: `SlotKeep` changed.
+- **The new fire and code steps** against the sim's lights: the 2.5 s RED confirm, and
+  `readCode`'s trace lines.
+- **Continuous water through SITL:** the pump output stays ON across the re-sent bursts,
+  and the watchdog does not latch.
+
 ## Rules
 
 - **One params file, two boats.** Sim-only values go in `gz_rig_up.sh` overrides or

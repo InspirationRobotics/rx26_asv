@@ -1,0 +1,115 @@
+<?xml version="1.0"?>
+<!--
+  task3_cannon_slip.xml - Task 3 with the pan/tilt cannon, docking INTO a slip
+  (the practice slip with side walls, 2026-10-16), MANUAL on SC. The same steps
+  as task3_cannon_fire.xml, but once the LiDAR sees the slip it is the LiDAR that
+  centres the boat, sets the distance and squares the bow (SlotKeep on
+  dock_slot_node), not the camera's face:
+
+    APPROACHING   bow pointed AT the bay on the camera (StrafeKeep, as in
+                  cannon_fire), heading for the slip's mouth (2.4 m from the
+                  wall, body origin): it does not drive into the slip on the
+                  camera alone
+    IN THE SLIP   the LiDAR has seen the whole slip (both side walls, or one and
+                  slip_width_m, AND the back wall) for 1 s: SlotKeep takes over
+    DOCKING       within ~0.3 m of the docking standoff: line up
+    DOCKED        held there 2 s: the docking report
+    WATCHING      back to the watch standoff, still in the slip
+    ON FIRE / MOVING IN / FIRE OUT / BACKING OUT / CODE   as in cannon_fire
+
+  THE DISTANCES ARE NOT THE CANNON_FIRE ONES. SlotKeep's standoff is the LiDAR
+  to the BACK WALL along the slip; cannon_fire's wall range is the BODY ORIGIN
+  to the wall. The LiDAR is 0.32 m ahead of the body origin, so standoff 1.1
+  here = wall range ~1.42 there (where the fire was sprayed and seen GREEN on
+  2026-10-11), and watch 1.4 here = 1.72 there. Live: strafe.fire_range_m (dock
+  and spray) and strafe.watch_range_m, in these units while this tree's slip
+  hold runs; -1 = the values below. A value saved from cannon_fire applies here
+  too, in the other units: check them in the Tuning tab before a run.
+
+  The slip lost for 2 s (DockSlotAlive): back to the camera approach, which
+  backs the boat out to the mouth and lets the LiDAR find the slip again; three
+  times, then the tree ends and the pilot has the boat.
+
+  The camera must see the windows for the fire and the code (2026-10-11: from a
+  wall range of 1.4 m it did). The water: crusader_params.yaml (see
+  task3_cannon_fire.xml).
+-->
+<root BTCPP_format="4" main_tree_to_execute="CannonSlip">
+  <BehaviorTree ID="CannonSlip">
+    <RetryUntilSuccessful num_attempts="3" name="find_the_slip_again">
+      <Sequence>
+        <Script code="watching := false"/>
+
+        <!-- 1. the camera brings the bow to the slip's mouth -->
+        <ReactiveSequence name="approach">
+          <ModeIs mode="MANUAL"/>
+          <NotDropped/>
+          <WallRangeAlive max_age_s="1.0" face_max_age_s="1.0"/>
+          <AttitudeAlive max_age_s="0.5"/>
+          <DockCameraAlive max_age_s="3.0"/>
+          <StrafeKeep fire_range_m="2.4" lateral_ref="face" range_fallback="face"
+                      approach_m="0.8" watch="false"
+                      lateral_bias_m="0.0" nozzle_y_m="0.0"
+                      cam_timeout_s="0.5" face_timeout_s="3.0"
+                      range_check_m="0" face_setback_m="0.0"
+                      deadband_range_m="0.08" deadband_lat_m="0.06" deadband_yaw_deg="3.0"
+                      kp_fwd="90" kd_fwd="60" kp_lat="100" kd_lat="200" kp_yaw="5" kd_yaw="0.5"
+                      ki_fwd="40" ki_lat="10" i_max_us="100"
+                      min_us="30" max_us="120" slew_us_s="200"
+                      min_range_m="0.6" square_first_deg="10"/>
+          <Sequence>
+            <Announce text="APPROACHING the bay, bow on it"/>
+            <AwaitDockSlot hold_s="1.0" gap_s="0.5"/>
+          </Sequence>
+        </ReactiveSequence>
+
+        <!-- 2. the LiDAR's slip: centred between the walls, square, the standoff -->
+        <ReactiveSequence name="in_the_slip">
+          <ModeIs mode="MANUAL"/>
+          <NotDropped/>
+          <DockSlotAlive max_age_s="2.0"/>
+          <AttitudeAlive max_age_s="0.5"/>
+          <DockCameraAlive max_age_s="3.0"/>
+          <SlotKeep standoff_m="1.1" watch="{watching}" watch_range_m="1.4"
+                    lateral_bias_m="0.0" slot_timeout_s="0.6" min_range_m="0.8"
+                    max_us="90"/>
+          <Sequence name="mission">
+            <Announce text="IN THE SLIP: the LiDAR has it"/>
+            <AwaitStrafeSolution fire_range_m="1.1" range_tol_m="0.30" lat_tol_m="0.20"
+                                 yaw_tol_deg="10.0" hold_s="0.5" gap_s="0.0" timeout_s="1000000"
+                                 steady="false"/>
+            <Announce text="DOCKING: lining up %RANGE% m from the back wall"/>
+            <AwaitStrafeSolution fire_range_m="1.1" range_tol_m="0.08" lat_tol_m="0.10"
+                                 yaw_tol_deg="6.0" hold_s="2.0" gap_s="0.0" timeout_s="1000000"
+                                 steady="false"/>
+            <ReportDocking bay="1"/>
+
+            <!-- back to watch the lights, still in the slip -->
+            <Script code="watching := true"/>
+            <AwaitStrafeSolution fire_range_m="1.4" range_tol_m="0.10" lat_tol_m="0.15"
+                                 yaw_tol_deg="8.0" hold_s="1.0" gap_s="0.0" timeout_s="1000000"
+                                 steady="false"/>
+            <Announce text="WATCHING the lights from %RANGE% m"/>
+
+            <KeepRunningUntilFailure>
+              <ForceSuccess>
+                <Sequence name="one_fire">
+                  <Script code="watching := true"/>
+                  <AwaitFireTarget timeout_s="1000000" resend_s="1000000"/>
+                  <Script code="watching := false"/>
+                  <Announce text="MOVING IN to spray"/>
+                  <SprayUntilHit timeout_s="90.0" min_green_s="0.4" max_aim_age_s="3.0"/>
+                  <Script code="watching := true"/>
+                  <Announce text="BACKING OUT to read the code"/>
+                  <ForceSuccess>
+                    <DecodeResourceRequest timeout_s="80.0" hold_s="5.0" min_frames="20"/>
+                  </ForceSuccess>
+                </Sequence>
+              </ForceSuccess>
+            </KeepRunningUntilFailure>
+          </Sequence>
+        </ReactiveSequence>
+      </Sequence>
+    </RetryUntilSuccessful>
+  </BehaviorTree>
+</root>
