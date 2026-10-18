@@ -8,9 +8,7 @@ re-run, verifies its own work, and fails loudly rather than half-installing.
 | `install_dev.sh` / `install_dev.ps1` | dev laptop (Linux/macOS / Windows) | venv + pyyaml, then proves the install by running the config guards |
 | `install_jetson_host.sh` | Jetson host (sudo) | udev rules → systemd units (MAVProxy + container, ordered) → verification |
 | `install_container.sh` | inside the `asv` container | dependency guard → colcon build → import smoke |
-| `init_git_remote.sh` | any standalone clone with no git yet | idempotent `git init` + remote wiring |
-| `install_robocommand_sim.sh` | the simulated RoboNation server (Linux, sudo) | static `192.168.65.2` + DHCP on one NIC → RoboNation's docker stub → isolation check |
-| `asv_add_bt.Dockerfile`, `asv_add_nav2.Dockerfile` | Jetson host (`docker build`) | one layer each on top of the image the boat RUNS: BehaviorTree.CPP, then Nav2 + STVL. Not a rebuild of `../Dockerfile`: see "Recreating the asv container" |
+| `asv_add_nav2.Dockerfile` | Jetson host (`docker build`) | one layer on top of the image the boat RUNS: BehaviorTree.CPP, Nav2 + STVL. Not a rebuild of `../Dockerfile`: see "Recreating the asv container" |
 
 ## Order, on a boat being set up from scratch
 
@@ -26,22 +24,6 @@ flowchart TD
 The host script must run before the container one: the container's nodes need the udev
 symlinks to exist, and MAVProxy must own the Pixhawk before anything else starts.
 
-## The sim box is off the boat's critical path
-
-`install_robocommand_sim.sh` builds the bench's third machine and touches nothing the
-boat depends on. It is deliberately paranoid about two things, both of which cost you
-the machine or the gate if they go wrong:
-
-- **It refuses the interface carrying your default route.** Reconfiguring the NIC your
-  SSH session runs over ends the session, and on a headless box ends your access.
-- **`--check` fails if any second network is up.** Docker sets `ip_forward=1` for you,
-  so a sim box that is also on the team wifi is a router between the course subnet and
-  the boat — exactly the topology the handbook prohibits. Pull the images while you
-  have internet, then take the wifi down.
-
-**Status: syntax-checked, never run on a real Linux box.** The apt, nmcli, netplan and
-dnsmasq paths are unexercised. Read it before you run it.
-
 ## Runtime dependencies live in the image, not in these scripts
 
 `install_container.sh` **installs nothing**. It checks that the image already provides
@@ -55,8 +37,8 @@ and rebuild the image instead.
 The boat's `asv` container runs an image that is not a build of `../Dockerfile` (its history
 has hand-made steps that file no longer has), so a new package set goes in as **one layer on
 top of the image the boat runs**, and the container is then recreated from that image with the
-SAME flags. `asv_add_bt.Dockerfile` (BehaviorTree.CPP) and `asv_add_nav2.Dockerfile` (Nav2
-planner and costmap, STVL, and BehaviorTree.CPP again, idempotently) are those layers. The
+SAME flags. `asv_add_nav2.Dockerfile` (Nav2 planner and costmap, STVL, and
+BehaviorTree.CPP) is that layer. The
 Nav2 one is for `docs/nav2_avoidance_spec.md`.
 
 **Done on the boat 2026-10-03 (Chase approved).** The boat's `asv` container now runs

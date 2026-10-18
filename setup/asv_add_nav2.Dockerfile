@@ -1,9 +1,11 @@
 # ============================================================================
 # asv_add_nav2.Dockerfile - Nav2 planner + costmap (+ STVL) on top of the image the boat RUNS.
 #
-# WHY A LAYER: see asv_add_bt.Dockerfile. The boat's asv container runs an image
-# that is not a build of the repo's Dockerfile, so this adds the packages the
-# tree's planned legs need to that exact image and nothing else.
+# WHY A LAYER, NOT A REBUILD OF ../Dockerfile: the boat's asv container runs an
+# image whose history has steps that file no longer has (the Livox SDK/driver
+# build), and whatever else was added by hand since is not written down. A clean
+# rebuild could drop any of it, so this adds the packages the tree's planned legs
+# need to that exact image and nothing else.
 # Spec: docs/nav2_avoidance_spec.md section 8.
 #
 # On the Jetson host the BASE build-arg is the image the live asv container runs
@@ -32,8 +34,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-humble-tf2-ros-py \
     && rm -rf /var/lib/apt/lists/*
 
-# Same arch-generic lib link as asv_add_bt.Dockerfile, and ONLY when needed: an
-# unconditional ln -sf would replace a real library with a link to a missing file.
+# The apt package puts libbehaviortree_cpp.so under lib/<arch>-linux-gnu/, but
+# ament looks in lib/: without this link find_package(behaviortree_cpp) fails,
+# saying nothing about paths. ONLY when needed: an unconditional ln -sf would
+# replace a real library with a link to a missing file.
 RUN L=/opt/ros/humble/lib; A="$L/$(uname -m)-linux-gnu/libbehaviortree_cpp.so"; \
     if [ ! -e "$L/libbehaviortree_cpp.so" ] && [ -e "$A" ]; then ln -s "$A" "$L/libbehaviortree_cpp.so"; fi
 

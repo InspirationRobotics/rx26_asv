@@ -140,10 +140,3 @@ flowchart LR
 | Add a message | `crusader_msgs/msg/` + its `CMakeLists.txt` line, then `rebuild.sh`, and update all producers/consumers in one commit. A `.msg` not listed in CMakeLists is silently not generated. |
 | Add a package | `package.xml` + `setup.py` + `setup.cfg` + `resource/<name>`, then add it to `crusader_bringup/package.xml`'s exec_depends and to CI's discovery list — or it silently stops being built by every path. |
 | Bring a mission node back | Define the topic contract with the livox container first; port the algorithm from [robotx_2026](https://github.com/InspirationRobotics/robotx_2026) (prequal-proven), not from this repo's deleted rewrite. |
-
-### Git / remote
-
-```bash
-bash setup/init_git_remote.sh                       # init + initial commit
-bash setup/init_git_remote.sh <remote-url> --push   # wire origin + first push
-```

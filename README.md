@@ -107,7 +107,6 @@ on the boat, and `core.launch.py` is for what has.
 | Dev laptop (Linux/macOS) | `bash setup/install_dev.sh` | ” |
 | Jetson host | `sudo bash setup/install_jetson_host.sh` | udev → systemd → checks |
 | Inside `asv` container | `bash /root/robotx_ws/src/rx26_asv/setup/install_container.sh` | deps → colcon → smoke |
-| New/standalone clone, no git yet | `bash setup/init_git_remote.sh <remote-url>` | idempotent init + remote |
 
 ### Building
 

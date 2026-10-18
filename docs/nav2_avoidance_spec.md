@@ -1,8 +1,7 @@
 # Nav2 obstacle avoidance for Crusader: implementation spec (2026-09-30)
 
-Status: **implementation spec for Option A**, decided 2026-09-30. Its predecessor is
-`docs/avoidance_design_study.md`, which has the current state and the requirements.
-Nothing is implemented yet.
+Status: **implementation spec for Option A**, decided 2026-09-30. Implemented: the boat
+has run `asv:nav2-20261003` since 2026-10-03.
 
 Per `CLAUDE.md`, ROS-node changes need a proposal before they are made, and this spec
 is that proposal. Each package below says what changes in the boat's **behaviour**.
@@ -1351,12 +1350,12 @@ build (lines 151-158).
 
 ### 8.3 `setup/asv_add_nav2.Dockerfile` (WP5, new)
 
-It follows `asv_add_bt.Dockerfile`: it adds Nav2 to **exactly the image the boat runs**,
+It adds Nav2 to **exactly the image the boat runs**,
 and nothing else.
 
 ```dockerfile
 # asv_add_nav2.Dockerfile - Nav2 planner + costmap (+ STVL) on top of the image the boat RUNS.
-# WHY A LAYER: see asv_add_bt.Dockerfile. Spec: docs/nav2_avoidance_spec.md section 8.
+# Spec: docs/nav2_avoidance_spec.md section 8.
 # Jetson host:
 #   cd ~/robotx_ws/src/rx26_asv/setup
 #   docker build -f asv_add_nav2.Dockerfile --build-arg BASE="$(docker inspect asv --format '{{.Config.Image}}')" -t asv:nav2-YYYYMMDD .
@@ -1396,8 +1395,7 @@ The comments in the real file must not contain `--`; check_config enforces that.
 **This needs explicit team approval.** Run it on the **Jetson host** over
 `ssh crusader@192.168.100.109`, in bash, with the boat on the stand and **disarmed**.
 `sudo` needs Chris's password. WP5 writes it into `setup/README.md` as the missing
-section "Recreating the asv container", which `asv_add_bt.Dockerfile` already
-references and which does not exist.
+section "Recreating the asv container".
 
 ```bash
 # 0. Record the truth: the flags the live container was created with are NOT written down anywhere else.
@@ -1459,8 +1457,7 @@ starts the container by name (`docker start -a asv`), so no unit file changes.
 | crusader_bringup/launch/core.launch.py:36-50 | comment: the LiDAR gates arming (PRX1_TYPE=2) | "only if the autopilot has PRX1_TYPE=2; baseline 0 (working_crusader.params:544)". This is a **comment-only** launch-file change, but it still needs the team's OK | 5 |
 | crusader_params.yaml:413-415 | proximity_bridge "feeds the autopilot's avoidance" as if it were the mechanism | Note that the tree's planner is the mechanism and proximity_bridge is optional | 3 |
 | crusader_sim/README.md:124-128 | "not fixed here" | point to this spec and the new courses; add a "Nav2 avoidance in the sim" section (`NAV_MODE`, image rebuild) | 5 |
-| docs/avoidance_design_study.md:3 | "proposal, awaiting sign-off" | "Decided 2026-09-30: Option A, see nav2_avoidance_spec.md" | 5 |
-| setup/README.md | the "Recreating the asv container" section that asv_add_bt references is missing | add it from §8.4 | 5 |
+| setup/README.md | the "Recreating the asv container" section is missing | add it from §8.4 | 5 |
 | docs/OPERATIONS.md | — | grep it first, since it is 44 KB. Add a short section "Obstacle avoidance (Nav2)": start order, `nav_mode`, the pool switch, `costmap_probe`, and BLOCKED/DEGRADED meanings | 5 |
 | crusader_perception/README.md, crusader_nav/README.md, crusader_nav_layers/README.md | — | the nav cloud; the new packages | 4, 3, 3 |
 | Boat/.claude/skills/crusader-triage/SKILL.md "Avoidance appears to do nothing" | — | one paragraph pointing to `/crsd/nav/leg_status` and `costmap_probe` | 5 |
