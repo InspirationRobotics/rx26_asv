@@ -1,49 +1,40 @@
 """ocs_link — the boat's end of the OCS link. One TCP connection, both directions.
 
 Telemetry goes up, commands come back down the same socket. No broker, no ROS in
-this file: it is transport only, so it can be run and broken on a laptop with no
-workspace sourced (see `python -m ... ocs_link --help` at the bottom).
+this file: transport only, so it runs on a laptop with no workspace sourced
+(`python -m ... ocs_link --help`).
 
-WHY THERE IS NO PROTOBUF HERE. The OCS re-stamps seq and sent_at and re-serialises
-every report before it reaches RoboCommand, so the format we send was never
-coupled to the format RoboNation receives. That lets the boat send plain JSON and
-carry no generated code, no protobuf dependency, and no schema to regenerate.
-The OCS converts with protobuf's own ParseDict, which rejects a misspelled key
-rather than silently dropping it.
+NO PROTOBUF HERE. The OCS re-stamps seq and sent_at and re-serialises every
+report before RoboCommand, so the boat sends plain JSON and carries no generated
+code or schema. The OCS converts with protobuf's ParseDict, which rejects a
+misspelled key rather than silently dropping it.
 
-THE FRAMING IS DUPLICATED FROM THE OCS REPO, deliberately. `OCS/rx_bridge/
-framing.py` carries the same header format. A ROS package must not import from
-that repo, so the twenty lines are copied instead -- and if you change the header
-in one place you MUST change it in the other in the same commit. A mismatched
-length prefix is indistinguishable from a corrupt payload, so the failure is
-silent garbage rather than an error.
+THE FRAMING IS COPIED FROM `OCS/rx_bridge/framing.py`, deliberately: a ROS
+package must not import from that repo. Change the header in BOTH in the same
+commit — a mismatched length prefix reads as a corrupt payload, so the failure
+is silent garbage, not an error.
 
     4 bytes   big-endian uint32 length N
     N bytes   UTF-8 JSON
 
-TWO THINGS THIS GETS RIGHT THAT THE OBVIOUS TCP CLIENT DOES NOT:
+TWO THINGS THE OBVIOUS TCP CLIENT GETS WRONG:
 
-  * `recv()` returning b'' means the far end closed. Treated as "no data yet" --
-    which `if data:` does -- the client loops forever believing it is connected
-    to a socket that is gone, and the boat looks healthy while saying nothing.
-  * Telemetry is a SINGLE LATEST-WINS SLOT, not a queue. A queue that fills
-    during a dropped link dumps every stale heartbeat on reconnect: the OCS rate
-    governor then discards most of them as a rate problem when it was a link
-    problem, and the survivors are re-stamped with the current time, so a
-    position from ten seconds ago reaches RoboNation labelled as current. The
-    newest fix is the only one worth sending, so it is the only one kept.
+  * `recv()` returning b'' means the far end closed. Treated as "no data yet"
+    (as `if data:` does), the client loops forever on a dead socket and the boat
+    looks healthy while saying nothing.
+  * Telemetry is a SINGLE LATEST-WINS SLOT, not a queue. A queue filled during a
+    dropped link dumps stale heartbeats on reconnect: the OCS rate governor
+    discards most as a rate problem, and the survivors are re-stamped, so a
+    ten-second-old position reaches RoboNation labelled as current.
 
-FINDING THE OCS. `OcsLink("192.168.8.107", 37564)` dials that address and nothing
-else, exactly as it always did. `OcsLink("auto", 37564, team=..., discovery_port=
-37565, fallback_hosts=[...])` instead listens for the OCS's UDP beacon (the other
-half, and the full account of where the OCS does and never broadcasts, is
-OCS/rx_bridge/beacon.py). While it has no connection it dials the newest matching
-beacon's source IP, at the port the beacon names, if that beacon is under 5 s old;
-otherwise it tries each fallback host in turn. Once connected it stays: a beacon
-from elsewhere changes nothing until the connection drops, so two OCS laptops
-cannot make the boat flap between them. A beacon from, or a fallback host on, one
-of RoboNation's course networks is refused outright -- the boat must never be
-pointed at it.
+FINDING THE OCS. `OcsLink("192.168.8.107", 37564)` dials that address only.
+`OcsLink("auto", 37564, team=..., discovery_port=37565, fallback_hosts=[...])`
+listens for the OCS's UDP beacon (other half: OCS/rx_bridge/beacon.py). While
+unconnected it dials the newest matching beacon's source IP at the port the
+beacon names, if under 5 s old; otherwise each fallback host in turn. Once
+connected it stays, so two OCS laptops cannot make the boat flap between them.
+A beacon from, or a fallback host on, a RoboNation course network is refused
+outright -- the boat must never be pointed at it.
 """
 from __future__ import annotations
 
@@ -66,14 +57,9 @@ _READ_TIMEOUT_S = 0.05
 # ---- RxTask, transcribed from RoboCommand's own schema ----------------------
 #
 # robonation/robocommand, RobotX_2026/proto/robotx/rx_common.proto, enum RxTask.
-# Transcribed rather than generated for the reason at the top of this file: the
-# boat carries no protobuf dependency. That makes this a COPY, with the usual
-# obligation — if RoboNation changes the enum, change it here in the same commit.
-#
-# Heartbeat.current_task is what starts and stands down a task attempt, so a
-# value the OCS cannot parse is not a cosmetic error: ParseDict rejects the frame
-# and the heartbeat never reaches RoboCommand at all. Every string that leaves
-# this boat is checked against this set first.
+# A COPY (no protobuf here): if RoboNation changes the enum, change it here too.
+# Heartbeat.current_task starts and stands down a task attempt; every string that
+# leaves this boat is checked against this set first (see coerce_task).
 RX_TASKS = frozenset((
     "TASK_NONE",                    # deliberately idle / not attempting a task
     "TASK_SAFE_PASSAGE",            # Task 1
@@ -85,26 +71,19 @@ RX_TASKS = frozenset((
 #: The idle value, and the fallback whenever a token cannot be trusted.
 TASK_NONE = "TASK_NONE"
 
-# TASK_UNKNOWN (proto value 0) is deliberately ABSENT from RX_TASKS. The schema
+# TASK_UNKNOWN (proto value 0) is deliberately ABSENT from RX_TASKS: the schema
 # says it means "field unset or unparsed — not a stand-down signal", so sending
-# it claims nothing while looking like a report. If we do not know what we are
-# doing, TASK_NONE is the honest claim.
+# it claims nothing while looking like a report. TASK_NONE is the honest claim.
 TASK_UNKNOWN = "TASK_UNKNOWN"
 
 
 def coerce_task(token):
     """(token_to_send, error_or_None). Never returns something unsendable.
 
-    Pure, so the one rule that decides whether a heartbeat survives the OCS can
-    be tested with no ROS and no link. The rule: a name RoboCommand's RxTask
-    enum does not have makes protobuf's ParseDict reject the WHOLE FRAME, so an
-    unknown token costs every heartbeat sent while it is set — position, speed,
-    state and all — not merely the task field. Falling back to TASK_NONE keeps
-    the part that cannot be reconstructed afterwards.
-
-    TASK_UNKNOWN is refused like any other invalid name even though the enum has
-    it: the schema says it means "unset or unparsed, NOT a stand-down signal",
-    so sending it deliberately claims nothing while looking like a report.
+    A name the RxTask enum lacks makes ParseDict reject the WHOLE FRAME, so an
+    unknown token costs every heartbeat while it is set — position and all —
+    not just the task field. Falling back to TASK_NONE keeps the part that
+    cannot be reconstructed afterwards. TASK_UNKNOWN is refused too (above).
     """
     name = str(token).strip().upper()
     if name in RX_TASKS:
@@ -151,11 +130,10 @@ class FrameReader:
 def json_safe(obj):
     """Replace non-finite floats with the strings protobuf's JSON mapping wants.
 
-    NaN is real data here, not a bug to scrub: telemetry_bridge emits it when GPS
-    yaw is unresolved, and the OCS validator exists to catch exactly that and
-    refuse the frame. So it must SURVIVE the trip -- but `json.dumps` writes bare
-    `NaN`, which is not valid JSON and which ParseDict rejects outright with
-    "use quoted NaN instead". Send the quoted form and the OCS sees a real NaN.
+    NaN is real data, not a bug to scrub: telemetry_bridge emits it when GPS yaw
+    is unresolved, and the OCS validator exists to refuse exactly that frame. So
+    it must SURVIVE the trip -- but `json.dumps` writes bare `NaN`, which
+    ParseDict rejects ("use quoted NaN instead"). The quoted form arrives as NaN.
     """
     if isinstance(obj, float):
         if math.isnan(obj):
@@ -182,9 +160,8 @@ def rfc3339(when: float | None = None) -> str:
 #: UDP port the OCS beacons on. = [discovery] port in the OCS bridge.toml.
 DEFAULT_DISCOVERY_PORT = 37565
 
-#: Mirror of OCS/rx_bridge/beacon.py. A COPY, with the usual obligation: change
-#: one, change the other. OCS/tests/test_beacon.py imports this file and fails if
-#: the two stop agreeing.
+#: A COPY of OCS/rx_bridge/beacon.py: change both. OCS/tests/test_beacon.py
+#: imports this file and fails if they disagree.
 BEACON_KEY = "ocs_beacon"
 BEACON_VERSION = 1
 
@@ -195,9 +172,9 @@ BEACON_FRESH_S = 5.0
 #: `ocs_host` value that means "find it from the beacon".
 AUTO_HOST = "auto"
 
-#: Where the OCS has been seen on the team networks (lab WiFi, Rocket). Tried in
-#: turn when no beacon arrives. ocs_client falls back to this only when the params
-#: file omits ocs_fallback_hosts; the YAML is the real source of truth.
+#: Where the OCS has been seen on the team networks (lab WiFi, Rocket), tried in
+#: turn when no beacon arrives. Only used when the params file omits
+#: ocs_fallback_hosts; the YAML is the source of truth.
 DEFAULT_FALLBACK_HOSTS = ("192.168.100.107", "192.168.8.107")
 
 #: RoboNation's course networks (Alpha .65 to Delta .68). Vehicles must never
@@ -243,10 +220,9 @@ def parse_beacon(data) -> dict | None:
 def check_fallback_hosts(hosts) -> tuple:
     """(usable hosts in order, [problem strings]) for a configured fallback list.
 
-    Only IPv4 literals outside the course networks are usable: a hostname would
-    make every attempt wait on a resolver, and a course address is the one place
-    this boat must never be pointed. Shared by the link and by check_config, so
-    the file and the code cannot disagree about what a good list is.
+    Only IPv4 literals outside the course networks: a hostname would make every
+    attempt wait on a resolver. Shared with check_config, so the file and the
+    code cannot disagree about what a good list is.
     """
     if isinstance(hosts, str):
         hosts = [hosts]                 # a hand-edited YAML with one bare string
@@ -288,9 +264,9 @@ class ChangeLog:
 class TargetChooser:
     """Which OCS to dial next. Pure: no sockets, and the clock is injectable.
 
-    `hear()` is called from the listener thread, `choose()` from the link thread,
-    and only when the link has no connection -- so a beacon that arrives while
-    connected is recorded but never acted on. That is the no-flapping rule.
+    `hear()` runs on the listener thread, `choose()` on the link thread and only
+    while unconnected -- so a beacon heard while connected is recorded but never
+    acted on. That is the no-flapping rule.
     """
 
     def __init__(self, fallback_hosts, port: int, *,
@@ -376,9 +352,8 @@ class BeaconListener:
         """Bind and listen. False (logged) if the port is taken: the link then
         runs on its fallback hosts alone rather than not at all.
 
-        No SO_REUSEADDR, deliberately: sharing the port would let two listeners
-        split the datagrams between them, and the one that loses sees silence
-        rather than an error.
+        No SO_REUSEADDR, deliberately: two listeners would split the datagrams,
+        and the loser sees silence rather than an error.
         """
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -429,10 +404,9 @@ class OcsLink:
     on_command(dict) is called for every RxCommand that arrives. It runs on the
     link thread, so it must not block -- hand the work to ROS and return.
 
-    `host` is an address to dial (today's behaviour, nothing else happens) or
-    "auto": find the OCS from its beacon, falling back to `fallback_hosts` in
-    turn. Only "auto" looks at `team`, `discovery_port` and `fallback_hosts`;
-    `discovery_port` 0 means do not listen for beacons at all.
+    `host` is an address to dial, or "auto": find the OCS from its beacon,
+    falling back to `fallback_hosts` in turn. Only "auto" uses `team`,
+    `discovery_port` and `fallback_hosts`; `discovery_port` 0 means no listener.
     """
 
     def __init__(self, host: str, port: int, *, on_command=None, log=print,
@@ -524,17 +498,12 @@ class OcsLink:
                     continue
             if not self._pump():
                 self._close()
-                # Straight round the loop: reconnect is attempted on the next
-                # pass after the retry wait, not here, so one code path owns it.
+                # Reconnect happens on the next pass, so one code path owns it.
         self._close()
 
     def _pick_target(self):
         """(host, port) to dial now, or None when there is nowhere to dial yet.
-
-        Called only while NOT connected -- a connected link never looks at the
-        beacons again, which is what stops it flapping between two OCS laptops.
-        An explicit host is returned untouched and logs nothing extra.
-        """
+        Called only while NOT connected (the no-flapping rule)."""
         if self._chooser is None:
             return self.host, self.port
         choice = self._chooser.choose()
@@ -556,8 +525,8 @@ class OcsLink:
         try:
             sock = socket.create_connection((host, port), timeout=5.0)
         except OSError as exc:
-            # Name the address. "connection refused" without it sends people
-            # hunting through config files for which box they were even aiming at.
+            # Name the address: a bare "connection refused" sends people
+            # hunting through config files for which box they were aiming at.
             self.log("OCS link: cannot reach %s:%d -- %s" % (host, port, exc))
             return False
         sock.settimeout(_READ_TIMEOUT_S)
@@ -583,8 +552,7 @@ class OcsLink:
             return False
         else:
             if not chunk:
-                # Clean close by the OCS. NOT "nothing to read": treating it as
-                # that is how a client sits forever on a dead socket.
+                # Clean close by the OCS, NOT "nothing to read" (module docstring).
                 self.log("OCS link: closed by the OCS")
                 return False
 
@@ -672,8 +640,7 @@ def _selftest() -> int:
 
         python3 -m crusader_groundstation.ocs_link --selftest
 
-    coerce_task is the one rule that decides whether a heartbeat survives the
-    OCS at all, so it is worth more than a code read.
+    coerce_task decides whether a heartbeat survives the OCS at all.
     """
     fails = []
 
@@ -693,14 +660,11 @@ def _selftest() -> int:
         chk("%r explains itself" % (bad,), bool(err), True)
     chk("TASK_UNKNOWN is not in RX_TASKS", TASK_UNKNOWN in RX_TASKS, False)
 
-    # json_safe has to let NaN through as the quoted form protobuf wants: it is
-    # real data (unresolved GPS yaw), and the OCS validator exists to refuse it.
     chk("NaN survives as the quoted form",
         json_safe({"heading_deg": float("nan")}), {"heading_deg": "NaN"})
     chk("frames round-trip", FrameReader().feed(encode(b"hi")), [b"hi"])
 
-    # Discovery: what counts as a beacon, and the one place the boat must never
-    # be pointed.
+    # Discovery.
     good = b'{"ocs_beacon":{"team":"ASTA","port":37564,"v":1}}'
     chk("a v1 beacon parses", parse_beacon(good),
         {"team": "ASTA", "port": 37564, "v": 1})

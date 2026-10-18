@@ -4,59 +4,46 @@
     python tools/scripts/gcs_laptop.py            # or double-click BOAT_GUI.cmd
     # then open http://localhost:8150
 
-WHY THIS EXISTS. The page the boat serves (`ground_station` on the Jetson, :8090)
-is only as reachable as the Jetson is: browse to it and a Jetson that is slow,
-rebooting or on the other subnet takes the whole window with it. This program
+WHY THIS EXISTS. Browsing to the Jetson's own page (:8090) means a Jetson that is
+slow, rebooting or on the other subnet takes the whole window with it. This
 serves the SAME page from the laptop, so the window stays up and says plainly
 which half has gone quiet:
 
-    the Jetson's :8090   -> everything the page already shows: nodes, map,
-                            targets, logs, tuning, recording, power. /state is
+    the Jetson's :8090   -> everything the page already shows. /state is
                             fetched from it and every button is forwarded to it.
-    MAVLink on this laptop -> a strip across the top of the page: link (with its
-                            lag), the RC e-stop, five drone-style tiles (Mode,
-                            armed highlighted; GPS fix quality; Heading = GPS
-                            yaw; EKF health; Pre-arm), battery, autopilot
-                            warnings, and a GPS panel under the Telemetry tab.
-                            The Jetson's page reads NO MAVLink at all. The team
-                            logos and the word "Crusader" sit first in the page's
-                            top bar (team_logos.py, from the drone GUI).
+    MAVLink on this laptop -> a strip across the top (link and lag, RC e-stop,
+                            Mode / GPS / Heading / EKF / Pre-arm tiles, battery,
+                            autopilot warnings) and a GPS panel under Telemetry.
+                            The Jetson's page reads NO MAVLink at all.
     the Jetson's viewers -> camera :8080, LiDAR :8081 and the Task 1 panel :8095
-                            stay on the Jetson. The page frames them at the
-                            Jetson's address (window.VIEW_HOST), so no video
-                            ever passes through this program.
+                            are framed at the Jetson's address
+                            (window.VIEW_HOST), so no video passes through here.
 
-It serves the REAL page (`crusader_groundstation.gcs_page`) through the REAL
-server (`gcs_server.GcsServer`), imported rather than copied, so what an
-operator learns here is true of the boat's own page. gcs_page.py is patched in
-memory, never on disk, and the patcher refuses to run if the page no longer
-looks the way the patches expect -- see patch_page.
+It serves the REAL page (`gcs_page`) through the REAL server (`GcsServer`),
+imported rather than copied, so what an operator learns here is true of the
+boat's own page. gcs_page.py is patched in memory, never on disk, and the
+patcher refuses to run if the page no longer matches -- see patch_page.
 
-THIS PROGRAM NEVER TRANSMITS MAVLINK. Not a heartbeat, not a request, not a
+THIS PROGRAM NEVER TRANSMITS MAVLINK -- not a heartbeat, not a request, not a
 SET_MESSAGE_INTERVAL. The autopilot's port-0 stream rates feed the boat's own
-telemetry_bridge, and changing them from a laptop breaks the boat. It is
-enforced structurally: the reader is handed ListenOnly, which exposes
-recv_match and close and nothing else, and test_gcs_laptop.py spies on the
-socket layer to prove that nothing is ever written. Do not add a send.
+telemetry_bridge, and changing them from a laptop breaks the boat. Enforced
+structurally: the reader gets ListenOnly (recv_match and close only), and
+test_gcs_laptop.py spies on the socket layer to prove nothing is written. Do not
+add a send.
 
-WHERE THE MAVLINK COMES FROM. The boat's MAVProxy unicasts the autopilot stream
-to this laptop's UDP 14550. On the lab laptop the OCS fleet router owns 14550 and
-forwards the boat's frames, listen-only, to 127.0.0.1:14554 -- the default here.
-With no router running, `--mav udpin:0.0.0.0:14550` reads the stream directly (and
-STEALS the port from QGroundControl: a udpin bind takes the datagrams, the other
-program sees silence rather than an error).
+WHERE THE MAVLINK COMES FROM. The boat's MAVProxy unicasts to this laptop's UDP
+14550, which the OCS fleet router owns and forwards, listen-only, to
+127.0.0.1:14554 -- the default here. With no router, `--mav udpin:0.0.0.0:14550`
+reads it directly and STEALS the port from QGroundControl, which then sees
+silence rather than an error.
 
 BLANKS OVER GUESSES. A value older than --stale-s is null with its age kept; the
-strip shows a dash. Battery voltage 0 or 65535 is "no sensor", never "0 V"
-(BATT_MONITOR is 0 on this boat). A GPS yaw of 65535 is "configured but
-unavailable", 0 is "not provided". A verdict (/mav gps.quality, gps.heading_quality,
-ekf.quality, prearm.quality) is "unknown" whenever its section is stale, never the last
-grade; satellites 255, eph 0 / 65535, a zero h_acc / v_acc / hdg_acc / alt_ellipsoid, a
-0,0 position and a non-finite EKF variance are blank. The link's lag (/mav link.lag_ms) is
-blank until it has been measured and whenever it has not been refreshed within --stale-s.
-The e-stop keeps the vehicle ARMED, so it is
-invisible in HEARTBEAT and is read from RC_CHANNELS: SB (ch7) below 1200 us is
-e-stop engaged OR RC lost (a lost RC reads 0), and the two cannot be told apart.
+strip shows a dash. Each field's "unknown" sentinels are blank, never a number
+(battery 0 V is "no sensor", not a flat pack), and a verdict is "unknown"
+whenever its section is stale, never the last grade. The e-stop keeps
+the vehicle ARMED, so it is invisible in HEARTBEAT and is read from RC_CHANNELS:
+SB (ch7) below 1200 us is e-stop engaged OR RC lost (a lost RC reads 0), and the
+two cannot be told apart.
 """
 import argparse
 import collections
@@ -88,8 +75,8 @@ from crusader_groundstation.gcs_server import GcsServer, body_limit  # noqa: E40
 from crusader_groundstation.mission_api import LIB_PATHS, MissionLib   # noqa: E402
 
 PARAMS_YAML = os.path.join(REPO, "crusader_bringup", "config", "crusader_params.yaml")
-# The Mission tab's library endpoints are answered HERE, from this checkout, so a mission saved
-# from the laptop lands in the repo (and in git); start / stop / status still go to the Jetson.
+# Mission library endpoints are answered HERE, so a mission saved from the laptop lands in the
+# repo (and git); start / stop / status still go to the Jetson.
 MISSION_BT_DIR = os.path.join(REPO, "crusader_bt", "behavior_trees")
 MISSION_DIR = os.path.join(REPO, "crusader_bt", "missions")
 
@@ -121,9 +108,8 @@ LOOPBACK_BINDS = ("127.0.0.1", "localhost", "::1")
 
 # ---- GPS verdicts ---------------------------------------------------------
 # Mirrors the drone GUI's GPS tile (Drone/rx26_uav/uav_groundstation/uav_groundstation/
-# preflight_core.py), so a "Degraded" means the same thing on both vehicles. Same values, same
-# strict `>` / `<` comparisons; the one thing left out is its Septentrio-only `gnss` source,
-# which the boat's UM982 does not have. Line numbers are preflight_core.py's.
+# preflight_core.py), so "Degraded" means the same on both vehicles: same values, same strict
+# `>` / `<`, minus its Septentrio-only `gnss` source. Line numbers are preflight_core.py's.
 GPS_MIN_FIX = 3                             # :113  `fix < 3` is "no 3D fix", always bad
 GPS_MIN_SATS = 10                           # :33   no accuracy figure: fewer is a warning
 GPS_MAX_HDOP = 1.2                          # :34   no accuracy figure: higher is a warning
@@ -132,21 +118,17 @@ GPS_POOR_ACC_M = 1.5                        # :42   accuracy reported: worse tha
 GPS_WARN_SATS, GPS_POOR_SATS = 9, 6         # :49   accuracy reported: fewer is warn / bad
 RTK_FIXED = mavutil.mavlink.GPS_FIX_TYPE_RTK_FIXED     # :50 (6). Exempt from GPS_WARN_SATS only
 GPS_WARN_HDOP, GPS_POOR_HDOP = 2.0, 3.0     # :51   accuracy reported: higher is warn / bad
-# The boat's heading is dual-antenna GPS yaw (COMPASS_USE=0), so the drone has no equivalent: these
-# two are a FIRST GUESS for a ~1 m baseline, not measured. Nobody has seen the UM982's yaw accuracy
-# on the water yet (the boat has never been driven); revisit once /mav shows real hdg_acc_deg.
+# Heading is dual-antenna GPS yaw (COMPASS_USE=0), with no drone equivalent: these two are a
+# FIRST GUESS for a ~1 m baseline, not measured; revisit against real hdg_acc_deg from /mav.
 HEADING_WARN_ACC_DEG = 1.0
 HEADING_BAD_ACC_DEG = 3.0
 
 # ---- EKF verdict ----------------------------------------------------------
-# Mission Planner's EKF light (ExtLibs/Controls/HUD.cs on master, read 2026-10-10: `if (ekfstatus > 0.8)` red,
-# `else if (ekfstatus > 0.5)` yellow, else green), where ekfstatus is the largest of the five EKF_STATUS_REPORT
-# variances and a missing EKF_ATTITUDE or an EKF_UNINITIALIZED forces it to 1.0 (ExtLibs/ArduPilot/CurrentState.cs).
-# ArduPilot itself defines only the 0.8: Rover's FS_EKF_THRESH defaults to 0.8 ("0.6 Strict, 0.8 Default, 1.0
-# Relaxed", Rover/Parameters.cpp at Rover-4.6.3; the failsafe fires when two of compass, position and velocity
-# exceed it for 1 s); the 0.5 is Mission Planner's own. One edge differs: MP calls exactly 0.5 green, this calls
-# it degraded (`>=`). QGroundControl turned up no variance thresholds (its estimator fact group reads
-# ESTIMATOR_STATUS, a different message; not read further).
+# Mission Planner's EKF light (ExtLibs/Controls/HUD.cs: > 0.8 red, > 0.5 yellow, else green) over the largest
+# of the five EKF_STATUS_REPORT variances, forced to 1.0 by a missing EKF_ATTITUDE or an EKF_UNINITIALIZED
+# (ExtLibs/ArduPilot/CurrentState.cs). ArduPilot defines only the 0.8: Rover's FS_EKF_THRESH default
+# (Rover/Parameters.cpp at Rover-4.6.3; the failsafe fires when two of compass, position and velocity exceed
+# it for 1 s). One edge differs: MP calls exactly 0.5 green, this calls it degraded (`>=`).
 EKF_WARN_VARIANCE = 0.5
 EKF_BAD_VARIANCE = 0.8
 
@@ -173,30 +155,29 @@ EKF_KEY_FLAGS = (
     KeyFlag("uninitialized", mavutil.mavlink.EKF_UNINITIALIZED, "never initialised", False, "bad",
             "the EKF has never been healthy"))
 #: (field in /mav ekf, how a reason names it). compass_variance is the largest of three axes of
-#: sqrt(max(magTestRatio, yawTestRatio)) (AP_NavEKF3_Outputs.cpp, Rover-4.6.3). With the compass disabled
-#: (COMPASS_USE=0, EK3_SRC1_YAW=2) that is taken to be the GPS-yaw innovation: not yet seen on the boat.
+#: sqrt(max(magTestRatio, yawTestRatio)) (AP_NavEKF3_Outputs.cpp, Rover-4.6.3); with the compass disabled
+#: (COMPASS_USE=0, EK3_SRC1_YAW=2) it is taken to be the GPS-yaw innovation (unverified).
 EKF_VARIANCES = (("velocity_variance", "velocity"), ("pos_horiz_variance", "horizontal position"),
                  ("pos_vert_variance", "vertical position"), ("compass_variance", "compass (GPS yaw)"),
                  ("terrain_alt_variance", "terrain"))
 
 # ---- link lag -------------------------------------------------------------
 LAG_WARN_MS = 1500          # the drone page's link tile turns warn above this (gcs_page.py:1447)
-LAG_MIN_SAMPLES = 10        # the first sample IS the floor, so its lag is 0 by construction: not a measurement
+LAG_MIN_SAMPLES = 10        # the first sample IS the floor, so its lag of 0 is not a measurement
 LAG_BACKWARDS_MS = 2000     # a boot clock this far behind its high-water mark is a reboot, not a reordering
 
 # ---- pre-arm --------------------------------------------------------------
 PREARM_BIT = mavutil.mavlink.MAV_SYS_STATUS_PREARM_CHECK
 #: state -> (verdict, reasons). Rover-4.6.3 (libraries/GCS_MAVLink/GCS.cpp) sets `present` always, `enabled`
-#: when ARMING_CHECK is non-zero, and `health` when enabled AND (the vehicle is armed OR the pre-arm checks
-#: pass): so while ARMED the bit says "pass" without having been re-checked, and with checks switched off
-#: `health` is clear, which is "disabled", not a failure.
+#: when ARMING_CHECK != 0, and `health` when enabled AND (armed OR pre-arm passes): so while ARMED "pass" is
+#: not re-checked, and checks switched off is "disabled", not a failure.
 PREARM_VERDICTS = {
     "pass": ("ok", []),
     "fail": ("bad", ["the autopilot's pre-arm checks are failing: see its PreArm: messages"]),
     "disabled": ("warn", ["the autopilot's pre-arm checks are switched off (ARMING_CHECK is 0)"]),
     "not_reported": ("unknown", ["the autopilot does not report pre-arm health"]),
 }
-GPS_FIX_2D = mavutil.mavlink.GPS_FIX_TYPE_2D_FIX    # below this the message's lat/lon may be the last position
+GPS_FIX_2D = mavutil.mavlink.GPS_FIX_TYPE_2D_FIX
 
 
 class ConfigError(RuntimeError):
@@ -248,11 +229,10 @@ def _int_param(block, key, node, path, lo, hi):
 def load_params(path=PARAMS_YAML):
     """The e-stop channel and threshold, and the page's poll period.
 
-    estop_* come from telemetry_bridge's block; pixhawk_led_status_node carries
-    its own copy that the YAML says must equal it, and a disagreement is an
-    error here, not a choice -- the strip would otherwise call a state RUN that
-    the boat's own LED calls e-stopped. A missing key is also an error: the e-stop
-    is the one thing this strip must never guess.
+    estop_* come from telemetry_bridge; pixhawk_led_status_node's copy must equal
+    it, and a disagreement is an error -- the strip would otherwise call a state
+    RUN that the boat's own LED calls e-stopped. A missing key is an error too:
+    the e-stop is the one thing this strip must never guess.
     """
     try:
         with open(path, encoding="utf-8") as f:
@@ -285,12 +265,10 @@ def load_params(path=PARAMS_YAML):
 # The page, patched
 # ===========================================================================
 
-#: Small on purpose -- a line or two on a laptop -- and made only of the page's
-#: own CSS variables, so day mode (html[data-theme="day"]) recolours it with
-#: everything else. A hardcoded colour here is a strip that stays dark in
-#: sunlight. The ONE literal is the logo badge's white: the logos are dark line
-#: art that needs a white ground in both themes, and gcs_page.py (which must not
-#: be edited) has no --logo-bg to borrow.
+#: Only the page's own CSS variables, so day mode (html[data-theme="day"])
+#: recolours it too; a hardcoded colour is a strip that stays dark in sunlight.
+#: The ONE literal is the logo badge's white: dark line-art logos need a white
+#: ground in both themes, and gcs_page.py has no --logo-bg to borrow.
 STRIP_CSS = r"""
  /* team logos: first thing in the page's top bar (the drone page's .logos, same look). */
  .logos{flex:none;display:flex;align-items:center;gap:6px;margin-right:8px;background:#fff;
@@ -338,10 +316,9 @@ STRIP_CSS = r"""
  #mavstrip .mv-sub{font-size:11px;color:var(--dim);white-space:nowrap}
 """
 
-#: Polls GET /mav (served here, not by the Jetson) with one request in flight
-#: at a time -- the page's own poll() explains why. Built with textContent only:
-#: STATUSTEXT is text from another machine. It also hands the page the Jetson's
-#: address, which the viewer frames use in place of location.hostname.
+#: Polls GET /mav (served here) one request in flight at a time, as the page's
+#: poll() does. textContent only: STATUSTEXT is text from another machine. Also
+#: hands the viewer frames the Jetson's address in place of location.hostname.
 STRIP_JS = r"""
 (function(){
 "use strict";
@@ -620,18 +597,17 @@ setInterval(poll, 500);
 })();
 """
 
-#: What the page's red banner says when its /state fetch fails. In this copy that has two
-#: causes the page cannot tell apart: the Jetson is not answering (LaptopServer then serves
-#: an {"error": ...} body, which the page cannot render and treats as a failed fetch), or
-#: this program has stopped. The strip, which is separate, says which. No double quotes in
-#: it: it goes into the page as a JavaScript string.
+#: The page's red banner when /state fails. Here that has two causes the page cannot
+#: tell apart: the Jetson is not answering (an {"error": ...} body, treated as a failed
+#: fetch), or this program has stopped; the separate strip says which. No double
+#: quotes: it goes into the page as a JavaScript string.
 BANNER_TEXT = ("NO CONNECTION TO THE BOAT'S JETSON (ground station API) - or to this laptop copy "
                "of the page. The strip above says which.")
 
 def logos_html():
-    """The team logos as the page's top-bar badge (CSS in STRIP_CSS), or "" if team_logos.py -- the
-    drone GUI's generated file, copied next to this script -- will not import: a page without its
-    logos still works. Names go through escape(): one of them has an ampersand."""
+    """The team logos as the top-bar badge, or "" if team_logos.py (the drone GUI's generated
+    file, copied next to this script) will not import. Names go through escape(): one has an
+    ampersand."""
     try:
         import team_logos
     except ImportError:
@@ -646,8 +622,7 @@ BRAND_HTML = '<div class="brand" title="rx26_asv ground station">Crusader</div>'
 
 
 def bar_head_html():
-    """What goes first in the page's top bar: the team logos, then the vehicle's name. The name stays
-    when the logos cannot be imported."""
+    """The logos, then the vehicle's name (which stays when the logos cannot be imported)."""
     return logos_html() + BRAND_HTML
 
 
@@ -662,32 +637,27 @@ def logos_patch(markup):
             BAR_OPEN + ("\n  " + markup if markup else ""), 1)
 
 
-#: The page's render() draws the Telemetry pane with `if(tab==='tel') renderTel();` -- once, so the count
-#: below is 1. The replacement calls the strip's window.mavTel after it, inside a try so a fault in the GPS
-#: panel can never stop render() before it reaches the viewers and the banner. THE ORDER IN PAGE_PATCHES
-#: MATTERS: this runs before the strip script goes in, and STRIP_JS must not contain the anchor text, or
-#: the replacement would be applied to the script too.
+#: Calls the strip's window.mavTel after the page's renderTel(), inside a try so a fault in the GPS panel
+#: can never stop render() before the viewers and the banner. THE ORDER IN PAGE_PATCHES MATTERS: this runs
+#: before the strip script goes in, and STRIP_JS must not contain the anchor text, or it would be patched too.
 TEL_HOOK = ("if(tab==='tel') renderTel();",
             "if(tab==='tel'){ renderTel(); try{ if(window.mavTel) window.mavTel(); }"
             " catch(e){ console.error('mavTel failed', e); } }")
 
 
 #: (what it is, text in gcs_page.py, replacement, how many times it must occur).
-#: The count is the point. gcs_page.py is shared with the Jetson and changes
-#: upstream; a pattern that stops matching, or starts matching somewhere new
-#: (a third viewer frame using location.hostname would frame the laptop), must be
-#: a loud failure here, not a page that quietly points at the wrong machine.
+#: The count is the point: gcs_page.py changes upstream, and a pattern that stops
+#: matching or matches somewhere new (a third location.hostname frame would frame
+#: the laptop) must fail loudly, not quietly point at the wrong machine.
 PAGE_PATCHES = (
     ("viewer and Task 1 frame host", "location.hostname",
      "(window.VIEW_HOST||location.hostname)", 2),
     ("banner text", "'NO CONNECTION TO THE BOAT'", '"' + BANNER_TEXT + '"', 1),
-    # Before <main>, not after the banner: the banner is absolutely positioned
-    # INSIDE main, and a strip there would overlay the map's scale bar and the
-    # Task 1 frame. Here it is a flex row of #app and main simply gets shorter.
+    # Before <main>: the banner is absolutely positioned INSIDE main, and a strip
+    # there would overlay the map's scale bar and the Task 1 frame.
     ("strip markup", "<main>", '<div id="mavstrip"></div>\n <main>', 1),
     ("strip style", "</style>", STRIP_CSS + "</style>", 1),
-    # First in the top bar, so the logos and the name sit left of the tabs. The anchor is the bar's own
-    # opening tag, which occurs once (the CSS says `#bar{`, never `<div id="bar">`).
+    # Anchored on the bar's opening tag, which occurs once (the CSS says `#bar{`, never `<div id="bar">`).
     logos_patch(BAR_HEAD_HTML),
     ("telemetry GPS panel hook",) + TEL_HOOK + (1,),
     ("strip script", "</script></body></html>",
@@ -729,12 +699,10 @@ def _enum_name(enum, value, prefix):
 
 def _known(raw, unknown, scale=None):
     """`raw` (divided by `scale`, if given), or None when it is one of the field's "unknown"
-    values -- blanks over guesses. The sentinels are the dialect's: GPS_RAW_INT.satellites_visible
-    and .eph say UINT8_MAX / UINT16_MAX when unknown. h_acc, v_acc and hdg_acc (the extension
-    fields) document no sentinel, and 0 is what a sender that does not fill them leaves (MAVLink 2
-    also drops trailing zero bytes, which decode as 0); a measured 0.000 m is not a thing. eph 0 is
-    blanked too, although the dialect names only UINT16_MAX: an HDOP of 0.00 cannot be measured
-    (the drone's gcs_radio.py blanks it as well)."""
+    values. satellites_visible / eph use the dialect's UINT8_MAX / UINT16_MAX. h_acc, v_acc and
+    hdg_acc document no sentinel, but 0 is what an unfilled extension field decodes as (MAVLink 2
+    drops trailing zero bytes), and a measured 0.000 m is not a thing. eph 0 is blanked too: an
+    HDOP of 0.00 cannot be measured (the drone's gcs_radio.py agrees)."""
     if raw in unknown:
         return None
     return raw if scale is None else raw / scale
@@ -749,16 +717,14 @@ def _lat_lon(msg):
 
 
 def _variance(raw):
-    """An EKF variance to 3 places, or None when it is NaN, infinite or negative -- not a variance.
-    The rounding makes float32 0.8 (which decodes as 0.800000011920929) mean 0.8, so the strict `>`
-    in ekf_quality means what it says at the boundary."""
+    """An EKF variance to 3 places, or None when NaN, infinite or negative. The rounding makes
+    float32 0.8 (0.800000011920929) mean 0.8, so ekf_quality's strict `>` holds at the boundary."""
     return round(float(raw), 3) if math.isfinite(raw) and raw >= 0 else None
 
 
 class ListenOnly:
-    """The only door the reader has to the autopilot link: receive, and nothing
-    else. `.mav`, `.write` and every *_send of the underlying connection are
-    unreachable from here on purpose -- see the module docstring."""
+    """The reader's only door to the autopilot link: receive, nothing else
+    (`.mav`, `.write`, *_send unreachable on purpose -- module docstring)."""
 
     def __init__(self, connection):
         self._conn = mavutil.mavlink_connection(connection, robust_parsing=True,
@@ -776,9 +742,7 @@ class ListenOnly:
 # ---------------------------------------------------------------------------
 
 def _gps_reasons(acc, sats, hdop, acc_limit, sats_limit, hdop_limit):
-    """What is wrong with the fix at ONE level of the verdict: the accuracy above `acc_limit`,
-    the satellites below `sats_limit`, the HDOP above `hdop_limit`, each only when it is known
-    (acc / sats / hdop are None when not). Empty means the fix passes that level."""
+    """Why the fix fails ONE level of the verdict; a None input is not judged. Empty: it passes."""
     return [text for text, hit in (
         ("accuracy %.2f m > %.1f m" % (acc or 0, acc_limit or 0), acc is not None and acc > acc_limit),
         ("only %d satellites (< %d)" % (sats or 0, sats_limit), sats is not None and sats < sats_limit),
@@ -787,13 +751,12 @@ def _gps_reasons(acc, sats, hdop, acc_limit, sats_limit, hdop_limit):
 
 def gps_quality(fix_type, sats, hdop, h_acc_m):
     """('ok' | 'warn' | 'bad' | 'unknown', [short reasons]) for the position fix, as the drone's
-    preflight_core.gps() judges it (see the GPS_* constants for the source lines). Unknown
-    inputs are None: an unknown satellite count or HDOP never vetoes, it is simply not counted.
+    preflight_core.gps() judges it. Unknown inputs are None and never veto.
 
-    Without an accuracy figure only satellites and HDOP can be judged, against the strict
-    GPS_MIN_SATS / GPS_MAX_HDOP. With one, that decides first and satellites / HDOP can still
-    veto: GPS_POOR_* make it bad, GPS_WARN_* make it a warning (RTK FIXED is exempt from the
-    satellite warning only -- a good fix on few satellites is normal for the corrections it uses).
+    Without an accuracy figure only satellites and HDOP are judged, against GPS_MIN_SATS /
+    GPS_MAX_HDOP. With one, it decides first and satellites / HDOP can still veto (GPS_POOR_* bad,
+    GPS_WARN_* warn). RTK FIXED is exempt from the satellite warning only: a good fix on few
+    satellites is normal for the corrections it uses.
     """
     if fix_type is None:
         return "unknown", ["no GPS data"]
@@ -813,9 +776,8 @@ def gps_quality(fix_type, sats, hdop, h_acc_m):
 
 def heading_quality(yaw_state, hdg_acc_deg):
     """('ok' | 'warn' | 'bad' | 'unknown', [short reasons]) for the boat's heading. There is no
-    compass (COMPASS_USE=0): the heading IS the dual-antenna GPS yaw, so no yaw is no heading --
-    bad, not a lesser grade. With yaw, the accuracy the GPS reports grades it against the
-    HEADING_* guesses; an accuracy it does not report is ok, and says so."""
+    compass (COMPASS_USE=0), so no GPS yaw is no heading -- bad, not a lesser grade. With yaw,
+    the reported accuracy is graded against HEADING_*; none reported is ok, and says so."""
     if yaw_state == "unavailable":
         return "bad", ["no GPS heading — the boat has no compass"]
     if yaw_state == "not_provided":
@@ -837,9 +799,8 @@ def no_data_reason(sec, what):
 
 
 def quality_block(sec, what, judge):
-    """{"quality", "quality_reasons"} for a /mav section (as _section built it). A section that is
-    not fresh has no values, so it gets no verdict either: "unknown", never a stale grade that
-    could be read as current. A fresh one is judged by `judge(sec)` -> (quality, [reasons])."""
+    """{"quality", "quality_reasons"} for a /mav section. A stale section gets "unknown", never a
+    stale grade that could be read as current; a fresh one `judge(sec)` -> (quality, [reasons])."""
     if not sec["ok"]:
         return {"quality": "unknown", "quality_reasons": [no_data_reason(sec, what)]}
     quality, reasons = judge(sec)
@@ -858,11 +819,9 @@ def gps_verdicts(sec):
 # ---------------------------------------------------------------------------
 
 def ekf_quality(sec):
-    """('ok' | 'warn' | 'bad', [reasons]) for a FRESH /mav `ekf` section. Poor: an uninitialised EKF, no
-    attitude, no absolute horizontal position (or constant-position mode), or any variance above
-    EKF_BAD_VARIANCE. Degraded: GPS glitching, or any variance from EKF_WARN_VARIANCE up to that. A
-    variance the autopilot did not give (None) is not counted; if there is none at all the verdict
-    rests on the flags and says so. The worst reasons come first."""
+    """('ok' | 'warn' | 'bad', [reasons], worst first) for a FRESH /mav `ekf` section, from
+    EKF_KEY_FLAGS and the variance thresholds. A variance not given (None) is not counted; with
+    none at all the verdict rests on the flags and says so."""
     bad, warn = [], []
     for flag in EKF_KEY_FLAGS:
         if sec[flag.name] != flag.good_when_set:
@@ -898,8 +857,8 @@ def ekf_text(sec):
 
 
 def ekf_verdicts(sec):
-    """The `ekf` verdict keys: quality and its reasons, the words for the tile (summary, detail; None
-    and empty while stale) and the two thresholds, which are configuration and so never stale."""
+    """The `ekf` verdict keys: quality, reasons, the tile's summary and detail (None / empty while
+    stale) and the two thresholds (configuration, never stale)."""
     out = quality_block(sec, "EKF", ekf_quality)
     out["summary"], out["detail"] = ekf_text(sec) if sec["ok"] else (None, [])
     out["warn_variance"], out["bad_variance"] = EKF_WARN_VARIANCE, EKF_BAD_VARIANCE
@@ -924,9 +883,8 @@ def prearm_verdicts(sec):
     return quality_block(sec, "pre-arm", prearm_quality)
 
 
-#: section -> the value names it carries. A stale or never-heard section has all
-#: of them null; `ok` and `age` ride beside them. `gps`, `ekf` and `prearm` also get the verdict keys of
-#: gps_verdicts, ekf_verdicts and prearm_verdicts, which are never null: a stale section reads "unknown".
+#: section -> the value names it carries, all null when stale or never heard; `ok` and `age` ride
+#: beside them. `gps`, `ekf` and `prearm` also get verdict keys, never null ("unknown" when stale).
 SECTIONS = {
     "hb": ("mode", "armed", "type"),
     "pos": ("lat", "lon", "heading", "groundspeed"),
@@ -943,16 +901,14 @@ class LagClock:
     """How far behind its own clock the autopilot's data arrives -- the drone GUI's link lag
     (Drone/rx26_uav/tools/scripts/gcs_radio.py:234-246), with one fix.
 
-    A message carries the boot time it was SAMPLED at, so (this laptop's clock - that stamp) is the
-    transport delay plus a fixed offset between the two clocks. The offset is constant, so the
-    smallest value ever seen is the floor, and today's excess over it is how far behind the data is.
-    It is relative to the best the link has done, and it cannot tell slow clock drift from delay.
+    (this laptop's clock - the message's boot-time stamp) is transport delay plus a constant clock
+    offset, so the smallest value seen is the floor and the excess over it is the lag: relative to
+    the best the link has done, and blind to slow clock drift.
 
-    THE FIX: when the autopilot reboots its boot clock restarts near 0, the offset jumps up by the
-    whole time the old floor had been running, and the drone's floor, which only ever goes down, would
-    report that as lag for the rest of the session. A boot clock that goes backwards by more than
-    LAG_BACKWARDS_MS (a reordered frame is milliseconds, a reboot is the old uptime) starts over.
-    Not thread-safe by itself: MavState calls it under its own lock.
+    THE FIX: a reboot restarts the boot clock near 0 and the offset jumps by the old uptime, which a
+    floor that only goes down would report as lag for the rest of the session. A boot clock that
+    goes backwards by more than LAG_BACKWARDS_MS starts over. Not thread-safe by itself: MavState
+    calls it under its own lock.
     """
 
     def __init__(self):
@@ -966,8 +922,7 @@ class LagClock:
         self.at = None              # local time of the last sample
 
     def sample(self, boot_ms, now):
-        """One message's boot-time stamp (ms) and the time it arrived. 0 is not a stamp: a message that
-        does not fill it in leaves 0, and a real 0 is the first millisecond of a boot."""
+        """One message's boot-time stamp (ms) and the time it arrived. 0 is an unfilled field, not a stamp."""
         if not boot_ms:
             return
         if self.high_ms is not None and boot_ms < self.high_ms - LAG_BACKWARDS_MS:
@@ -980,8 +935,8 @@ class LagClock:
         self.samples += 1
 
     def lag_ms(self, now, stale_s):
-        """Whole milliseconds, or None until LAG_MIN_SAMPLES have set the floor (the first sample IS the
-        floor, so its lag is 0 by construction) and whenever no stamp has arrived within `stale_s`."""
+        """Whole milliseconds, or None until LAG_MIN_SAMPLES have set the floor and whenever no stamp
+        has arrived within `stale_s`."""
         if self.samples < LAG_MIN_SAMPLES or now - self.at > stale_s:
             return None
         return int(round(self.lag_s * 1000))
@@ -990,14 +945,13 @@ class LagClock:
 class MavState:
     """What the autopilot last said, with the age of each thing.
 
-    `feed` takes a decoded message and the time it arrived (time.monotonic());
-    `snapshot` takes "now" and returns the /mav body. Both are pure apart from
-    the lock, so the tests drive them with invented clocks and encoded messages.
+    `feed(msg, monotonic arrival)` and `snapshot(now)` -> the /mav body are pure
+    apart from the lock, so tests drive them with invented clocks.
 
-    Only the AUTOPILOT counts for values: system `sysid`, component 1. The link
-    block alone counts every component of that system, so a silent autopilot
-    behind a chatty companion shows a live link and a dead heartbeat, which is
-    the true picture. A HEARTBEAT of type GCS is never an autopilot.
+    Only the AUTOPILOT (system `sysid`, component 1) counts for values. The link
+    block counts every component of that system, so a silent autopilot behind a
+    chatty companion shows a live link and a dead heartbeat -- the true picture.
+    A HEARTBEAT of type GCS is never an autopilot.
     """
 
     def __init__(self, sysid, estop_channel, estop_threshold, stale_s=3.0, source=""):
@@ -1011,8 +965,8 @@ class MavState:
         self._others = {}                    # other sysid -> last time heard
         self._error = None
         self._lag = LagClock()
-        #: message type -> handler. A handler returns None, the values of ONE section (a dict that names
-        #: it in "section"), or a list of those: one message may fill several (SYS_STATUS: battery and pre-arm).
+        #: message type -> handler, returning None, ONE section's values (a dict naming it in "section"),
+        #: or a list of those (SYS_STATUS fills battery and pre-arm).
         self._handlers = {"HEARTBEAT": self._on_heartbeat, "GLOBAL_POSITION_INT": self._on_position,
                           "GPS_RAW_INT": self._on_gps, "RC_CHANNELS": self._on_rc,
                           "SYS_STATUS": self._on_sys_status, "EKF_STATUS_REPORT": self._on_ekf}
@@ -1071,8 +1025,7 @@ class MavState:
                 "groundspeed": math.hypot(msg.vx, msg.vy) / 100.0}
 
     def _on_gps(self, msg):
-        # yaw is cdeg: 0 not provided, 65535 configured but unavailable (the
-        # boat's heading comes from dual-antenna GPS yaw), else 1..36000.
+        # yaw is cdeg: 0 not provided, 65535 configured but unavailable, else 1..36000.
         if msg.yaw == UINT16_MAX:
             state, deg = "unavailable", None
         elif msg.yaw == 0:
@@ -1082,7 +1035,7 @@ class MavState:
         else:
             state, deg = None, None
         # Position and height only from a fix that has them: below a 2D / 3D fix the autopilot may repeat
-        # the last position it had, which would be a stale value wearing a measurement's clothes.
+        # its last position.
         lat, lon = _lat_lon(msg) if msg.fix_type >= GPS_FIX_2D else (None, None)
         alt = _known(msg.alt_ellipsoid, (0,), 1000.0) if msg.fix_type >= GPS_MIN_FIX else None
         return {"section": "gps", "fix_type": msg.fix_type, "lat": lat, "lon": lon, "alt_ellipsoid_m": alt,
@@ -1221,8 +1174,7 @@ class JetsonLink:
     host / host:port, which is used as given and never probed away from.
 
     Health is the outcome of the last REAL call, not a separate poll, so the strip
-    reports exactly what the page's own requests are experiencing. A success
-    older than the staleness limit is "unknown" rather than "ok".
+    reports what the page's own requests experience. A stale success is "unknown".
     """
 
     def __init__(self, spec="auto", candidates=JETSON_CANDIDATES, clock=time.monotonic):
@@ -1249,8 +1201,7 @@ class JetsonLink:
     def probe(self):
         """GET /state on each candidate in order; adopt the first that answers.
         Returns the chosen (host, port), or None if none ever has. A Jetson that
-        stops answering stays 'chosen' (its address is still the best guess for
-        the viewers); only a better answer moves it."""
+        stops answering stays chosen (still the best guess for the viewers)."""
         found = next((c for c in self._candidates if self._answers(*c)), None)
         with self._lock:
             self._last_probe = self._clock()
@@ -1274,9 +1225,8 @@ class JetsonLink:
             conn.close()
 
     def _kick_probe(self):
-        """Re-probe in the background, if auto, none is running and one is due.
-        In the background so the request that just failed fails fast and the
-        page's banner is not held back by a second round of timeouts."""
+        """Re-probe in the background, if auto, none is running and one is due,
+        so the failed request fails fast and the banner is not held back."""
         if not self.auto:
             return
         with self._lock:
@@ -1427,9 +1377,9 @@ def allowed_hosts_for(bind, port):
     """The Host headers this server answers to, or None when bound beyond
     loopback (the operator chose that; the Origin check still applies).
 
-    A page on another site can make the browser POST to localhost -- and these
-    POSTs stop nodes and power the Jetson off. A DNS-rebinding page arrives with
-    a foreign Host header, a cross-site form or fetch with a foreign Origin."""
+    A page on another site can make the browser POST to localhost, and these
+    POSTs stop nodes and power the Jetson off. DNS rebinding arrives with a
+    foreign Host header, a cross-site form or fetch with a foreign Origin."""
     if bind not in LOOPBACK_BINDS:
         return None
     names = {"localhost", "127.0.0.1", "[::1]"}
@@ -1447,10 +1397,9 @@ def request_allowed(host, origin, allowed_hosts):
 
 
 class LaptopServer(GcsServer):
-    """GcsServer plus GET /mav, the same-origin guard and the Mission tab's library endpoints
-    (answered locally by `mission`, a MissionLib; every other POST is forwarded to the Jetson).
-    GcsServer.start() builds its HTTP server from self.handler(), so overriding that is all
-    it takes."""
+    """GcsServer plus GET /mav, the same-origin guard and the Mission library endpoints
+    (answered locally; every other POST is forwarded to the Jetson). GcsServer.start()
+    builds its HTTP server from self.handler(), so overriding that is all it takes."""
 
     def __init__(self, page_bytes, link, mav_fn, allowed_hosts=None, mission=None):
         super().__init__(page_bytes, link.state, self._action, link.download)
@@ -1472,9 +1421,8 @@ class LaptopServer(GcsServer):
                 if request_allowed(self.headers.get("Host"), self.headers.get("Origin"),
                                    outer.allowed_hosts):
                     return True
-                # Read the body we are refusing: closing on unread data can reset
-                # the connection, and the browser would report a network error
-                # instead of the 403.
+                # Read the refused body: closing on unread data can reset the
+                # connection, and the browser shows a network error, not the 403.
                 with contextlib.suppress(ValueError, OSError):
                     self.rfile.read(min(int(self.headers.get("Content-Length") or 0),
                                         body_limit(self.path)))
@@ -1515,10 +1463,9 @@ def port_in_use(host, port):
 
 
 def announce_changes(state, link, stale_s, stop, say=print, every=1.0):
-    """Say, once per change, when MAVLink or the Jetson goes quiet or returns.
-    A window that stops updating must say why; silence reads as 'broken'.
-    An unknown Jetson (no recent call) says nothing, and neither does a first
-    observation that is already fine."""
+    """Say, once per change, when MAVLink or the Jetson goes quiet or returns:
+    silence reads as 'broken'. An unknown Jetson (no recent call) and a first
+    observation that is already fine say nothing."""
     last = {}
     while not stop.wait(every):
         checks = (
