@@ -202,8 +202,9 @@ tuning_applied.yaml` is the exact file the nodes got, and once `bt_runner` is up
 node (`overlay read back from /bt_runner_node: N/N key(s) match`, or which ones did not take). By hand:
 `ros2 param get /bt_runner_node nav_orbit_radius_m`.
 
-Most keys are read once at start: change them by restarting the rig. With the global tree the keys that matter are the
-orbit ones (`nav_orbit_radius_m`: the largest orbit, shrunk to fit the water round each blue buoy); the gate/fence keys are the
+`bt_runner`'s planner knobs (`nav_*`) are re-read whenever a goal is accepted: a `ros2 param set` or the GCS Tuning tab
+applies at the next START (`bt.log`: `nav_*: N changed since the previous goal`). Everything else, Nav2's keys included, is
+read once at start: change it by restarting the rig. With the global tree the keys that matter are the orbit ones (`nav_orbit_radius_m`: the largest orbit, shrunk to fit the water round each blue buoy); the gate/fence keys are the
 per-gate tree's.
 
 ## Pool test

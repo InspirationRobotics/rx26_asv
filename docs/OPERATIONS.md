@@ -292,11 +292,12 @@ change together.
 
 ### Camera
 
-`crusader_perception` owns the OAK-D from inside `asv` (§13). Two nodes, and only
+`crusader_perception` owns the OAK-D from inside `asv` (§13). Three nodes, and only
 one may run — the device admits a single client:
 
 ```bash
 ros2 run crusader_perception buoy_detector    # detections; what the stack wants
+ros2 run crusader_perception oak_detector     # shape + LED colour; needs its TensorRT engines
 ros2 run crusader_perception oakd_publisher   # raw frames; for a human, ~38 MB/s
 ```
 
@@ -312,8 +313,8 @@ It subscribes rather than opening the device, so it cannot take the camera away
 from anything and any number can run at once. It cannot share port 8080 with
 `buoy_detector`'s view, and they are never both useful at once.
 
-> Neither perception node is in `core.launch.py` — they contend for the one
-> camera, so which runs is an operator choice per session. `target_tracker` is
+> No camera node is in `core.launch.py` — they contend for the one camera, so
+> which runs is an operator choice per session. `target_tracker` is
 > not there either.
 
 ### Obstacle avoidance (Nav2)
@@ -805,7 +806,7 @@ timing one.
 may hold other things, and stopping the LiDAR must not take them down.
 
 **The topic contract with the livox container**, now settled: `/livox/lidar`,
-`sensor_msgs/PointCloud2`, `BEST_EFFORT`. A QoS mismatch is silent — a
+`sensor_msgs/PointCloud2`, RELIABLE/VOLATILE (measured on the boat). A QoS mismatch is silent — a
 BEST_EFFORT publisher and a RELIABLE subscriber match nothing, `ros2 topic list`
 looks perfect, and no data flows. A **type** mismatch is equally silent and
 easier to hit: see §13's `xfer_format` note and `tools/lidar_view.py`.

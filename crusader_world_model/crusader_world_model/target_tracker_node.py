@@ -1,8 +1,7 @@
 """target_tracker_node — camera (+ LiDAR) + pose in, earth-anchored targets out.
 
-NOTE: unverified on the boat. Exercised only against
-tools/bench/bench_world_model.py's invented detections. It is deliberately NOT
-in core.launch.py and commands nothing directly, but crusader_bt's
+Not in core.launch.py (crusader_sim/scripts/lake_rig_up.sh starts it) and it
+commands nothing directly, but crusader_bt's
 bt_runner_node subscribes /crsd/world_targets and fills the behaviour tree's
 buoy field from CONFIRMED tracks only, so a confirmed phantom here is a mission
 problem, not just an untidy map.

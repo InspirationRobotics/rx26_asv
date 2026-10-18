@@ -25,6 +25,13 @@ The typed contracts between nodes: 25 messages in `msg/` and one action,
 | `PumpState` | `telemetry_bridge` → `tools/squirt_cal` | the pump output's PWM as the Pixhawk reports it (SERVO_OUTPUT_RAW), the pilot's pump channel, and what happened to the last request |
 | `GuidedHeadingSpeed` | the fire tree (`bt_runner_node`) → `telemetry_bridge` | hold this compass heading at this signed speed, in GUIDED. The bridge sends `SET_ATTITUDE_TARGET` only in GUIDED **and** while the drop latch allows it, clamps the speed, and stops the boat itself if commands go quiet. Astern and a chosen heading: what the fixed-nozzle shot needs and position setpoints cannot give |
 | `WallRange` | `wall_range_node` → `tools/squirt_cal` (later the Task 3 tree) | the vertical wall ahead from the LiDAR: perpendicular range, angle to square up, and the slip fingers either side. One per sweep, valid or not |
+| `GuidedSetpoint` | `bt_runner_node` → `telemetry_bridge` on `/crsd/guided_setpoint` | a GUIDED position setpoint, sent on as `SET_POSITION_TARGET_GLOBAL_INT`. **The only sanctioned GUIDED TX path** |
+| `ObstacleDistance` | `proximity_bridge` → `telemetry_bridge`, ground station | nearest obstacle per sector, ready for MAVLink `OBSTACLE_DISTANCE`; only the bridge puts it on the wire |
+| `Hazard` | inside `HazardArray` | one known hazard in the `map` frame (ENU metres from `/crsd/datum`), drawn LETHAL at its physical size plus `keepout_m` |
+| `HazardArray` | `bt_runner_node` → the costmap's `HazardLayer` | the WHOLE known-hazard set: each message replaces the last, so a hazard that is gone disappears with no delete. `frame_id` must be `map` |
+| `PassagePlan` | `rxl_link_node` → `bt_runner_node` on `/crsd/passage_plan` | the Task 1 passage as the UAV sees it, from `RXL_SAFE_PASSAGE` (42011) |
+| `PassageBuoy` | inside `PassagePlan` | one passage buoy as the UAV reported it. **Not a `TrackedTarget`**: the boat has not seen it itself |
+| `GatePair` | `rxl_link_node` → `bt_runner_node` on `/crsd/next_gate` | the aircraft's acknowledgement of a confirmation request, from `RXL_NEXT_BUOY_SET` (42019) |
 
 Every message carries a `std_msgs/Header`. **The stamp is the time the MAVLink frame was
 RECEIVED**, not the time it was republished — a consumer judging freshness needs the age
@@ -43,10 +50,8 @@ Add the `.msg` file **and** the entry in `CMakeLists.txt` — a file that is not
 silently not generated, and the import failure shows up at node start on the boat rather
 than at build time.
 
-Messages for capabilities this repo does not have are not kept "for later": the v0.5 strip
-removed seven of them (detections, occupancy grid, APF advisory, guided setpoint) along
-with the nodes that used them; they are in git at `8c4ffa5`. Re-add one when the node that
-fills it is landing.
+Messages for capabilities this repo does not have are not kept "for later": re-add one
+when the node that fills it is landing (the v0.5 strip's removals are in git at `8c4ffa5`).
 
 Keep the dependency list at `std_msgs` and nothing more. Nothing outside `asv` builds this
 today — the livox container publishes a stock `PointCloud2` — but the moment one needs to,

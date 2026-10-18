@@ -4,8 +4,8 @@ world model can be driven before the camera and LiDAR are trustworthy.
 
     # on the boat, with core.launch.py already running:
     ros2 run crusader_world_model target_tracker      # terminal 1
-    ros2 run crusader_world_model map_server          # terminal 2
-    python3 tools/bench/bench_world_model.py          # terminal 3
+    python3 tools/bench/bench_world_model.py          # terminal 2
+    # the tracks: the ground station's Map tab, http://<JETSON_IP>:8090
 
 DEFAULT MODE USES THE REAL VESSEL. It subscribes to `/crsd/pose` and `/crsd/attitude` and
 publishes only the two SENSOR topics, computing what the camera and LiDAR would have reported
