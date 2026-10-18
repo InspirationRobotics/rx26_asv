@@ -10,33 +10,27 @@ test framework, no hardware. Run it from CI, from a dev laptop, or on the Jetson
 What it guards, and why each one is here:
 
 1. config/crusader_params.yaml must parse under RCL's rules, which are stricter
-   than PyYAML's and fail CLOSED. An illegal file kills every node in the launch
-   at rclpy.init(), before a single line of node code runs. This happened on the
-   boat on 2026-07-29 and grounded the whole stack, LEDs included — including the
-   LEDs, which meant the boat was dark rather than obviously broken.
+   than PyYAML's and fail CLOSED: an illegal file kills every node in the launch
+   at rclpy.init(), LEDs included, so the boat is dark rather than obviously
+   broken.
 
 2. Every package.xml must be well-formed XML, and every package must be in
-   crusader_bringup's exec_depends. Both are build-time failures that only
-   happen ON THE JETSON, after a copy: rebuild.sh dies with a CMake wall of
-   text (a stray "--" inside an XML comment is illegal and did exactly this on
-   2026-09-05), or worse, the package is silently NOT BUILT by
-   "colcon build (packages-up-to crusader_bringup)" and the failure surfaces
-   much later as `ros2 run` not finding a node. Both are catchable on a laptop
-   in milliseconds.
+   crusader_bringup's exec_depends. Both fail only ON THE JETSON, after a copy:
+   rebuild.sh dies with a CMake wall of text (a stray "--" inside an XML comment
+   is illegal), or worse, "colcon build (packages-up-to crusader_bringup)"
+   silently does NOT BUILD the package and `ros2 run` later cannot find a node.
+   Both are catchable on a laptop in milliseconds.
 
-3. params/working_crusader.params must parse into real parameter names. The
-   parameter dumps the team exports differ in WHERE the name sits (Mission
-   Planner puts it first, QGroundControl puts it third), and a positional parser
-   reads a QGC dump as ~900 copies of a parameter called "1". param_guard would
-   then diff that empty-in-practice map against the live vehicle and report a
-   clean PASS — a preflight gate that cannot fail is worse than no gate.
+3. params/working_crusader.params must parse into real parameter names. Mission
+   Planner dumps put the name first, QGroundControl third, and a positional
+   parser reads a QGC dump as ~900 copies of a parameter called "1". param_guard
+   would then report a clean PASS — a gate that cannot fail is worse than none.
 
-4. The Nav2 avoidance stack's numbers must agree across the three files that each
-   hold one half of them (crusader_params.yaml, crusader_nav's nav2_params.yaml,
-   the autopilot baseline). None of these fail loudly when they drift: the BT
-   plans a 0.8 m clearance the costmap does not enforce, or publishes hazards on
-   a topic the layer is not listening to, and the boat looks healthy throughout.
-   See check_nav.
+4. The Nav2 avoidance numbers must agree across the three files that each hold
+   part of them (crusader_params.yaml, crusader_nav's nav2_params.yaml, the
+   autopilot baseline). Drift fails silently: the BT plans a 0.8 m clearance the
+   costmap does not enforce, or publishes hazards on a topic the layer is not
+   listening to, and the boat looks healthy throughout. See check_nav.
 """
 import importlib.util
 import math
@@ -51,14 +45,12 @@ PARAMS_BASELINE = REPO / "params" / "working_crusader.params"
 NAV2_PARAMS = REPO / "crusader_nav" / "config" / "nav2_params.yaml"
 
 # Every node that reads crusader_params.yaml. A section for a node that no longer
-# exists is a parameter set nobody reviews, and it reads as a capability the boat
-# still has; a node with no section fails at startup instead.
+# exists is a parameter set nobody reviews, reading as a capability the boat still
+# has; a node with no section fails at startup instead.
 #
-# WRITTEN AS ONE STRING, SPLIT ON WHITESPACE, and that is deliberate. As a set
-# literal of quoted names, a single missing comma is not an error: Python joins
-# the two adjacent strings, so {"a" "b", "c"} silently becomes {"ab", "c"}. The
-# check then reports the wrong node as stale and the reader goes looking in the
-# YAML for a bug that is in this file. Splitting a string cannot do that.
+# ONE STRING, SPLIT ON WHITESPACE, deliberately: in a set literal a missing comma
+# silently joins two names ({"a" "b", "c"} == {"ab", "c"}), and the check then
+# blames the YAML for a bug in this file.
 CONFIG_DRIVEN_NODES = set("""
     telemetry_bridge
     led_node
@@ -79,18 +71,15 @@ CONFIG_DRIVEN_NODES = set("""
     squirt_cal
 """.split())
 
-# Packages that are deliberately NOT in crusader_bringup's closure: they run on the
-# laptop (in WSL) and must never be built on the boat. Without this the
-# reachability check below reports them as orphans, which reads as "silently not
-# built" and is exactly what is wanted for these. crusader_sim says so itself:
-# "Sim only: nothing here runs on the boat".
+# Packages deliberately NOT in crusader_bringup's closure: they run on the laptop
+# (in WSL) and must never be built on the boat. Without this the reachability
+# check below reports them as orphans ("silently not built" — wanted here).
 SIM_ONLY_PACKAGES = {"crusader_sim"}
 
-# Topic names that two sections must agree on, as (producer, param) ->
-# (consumer, param). A producer and a consumer that disagree about a topic name
-# do not fail: both start, both look healthy, `ros2 topic list` shows two
-# plausible names, and the consumer simply never receives anything. That is the
-# most expensive kind of green.
+# Topic names two sections must agree on, as (producer, param) -> (consumer,
+# param). A mismatch does not fail: both start healthy, `ros2 topic list` shows
+# two plausible names, and the consumer never receives anything — the most
+# expensive kind of green.
 TOPIC_PAIRS = (
     (("buoy_detector", "detections_topic"),
      ("target_tracker", "detections_topic")),
@@ -98,9 +87,8 @@ TOPIC_PAIRS = (
      ("target_tracker", "detections_topic")),
     (("lidar_cluster_node", "clusters_topic"),
      ("target_tracker", "clusters_topic")),
-    # proximity_bridge is the second consumer of the LiDAR clusters. If it
-    # disagrees with the producer the boat drives with avoidance silently blind
-    # while every node reports healthy — see the paragraph above.
+    # proximity_bridge, the second cluster consumer: a mismatch leaves the
+    # autopilot's avoidance silently blind.
     (("lidar_cluster_node", "clusters_topic"),
      ("proximity_bridge", "clusters_topic")),
     (("target_tracker", "targets_topic"), ("ground_station", "targets_topic")),
@@ -108,35 +96,29 @@ TOPIC_PAIRS = (
      ("ground_station", "clusters_topic")),
     (("proximity_bridge", "output_topic"),
      ("ground_station", "obstacle_topic")),
-    # squirt_cal logs every shot against the wall range; listening to the wrong
-    # topic it would log "no range" forever while the node publishes fine.
+    # squirt_cal on the wrong topic logs "no range" forever while the node
+    # publishes fine.
     (("wall_range_node", "wall_topic"), ("squirt_cal", "wall_range_topic")),
-    # Nav2 avoidance (docs/nav2_avoidance_spec.md). bt_runner draws the leg on
-    # the ground station through this topic; a mismatch is a blank map, not an
-    # error. The datum pair is the frame: bt_runner adopting the wrong topic
-    # waits for a datum nobody sends, and holds every planned leg.
+    # Nav2 avoidance (docs/nav2_avoidance_spec.md). A leg-topic mismatch is a
+    # blank map, not an error; a datum-topic mismatch leaves bt_runner waiting
+    # for a datum nobody sends, holding every planned leg.
     (("bt_runner_node", "nav_leg_topic"), ("ground_station", "nav_leg_topic")),
     (("nav_frames_node", "datum_topic"), ("bt_runner_node", "nav_datum_topic")),
 )
 
-# Ports that must stay distinct: two servers cannot bind one socket, and the
-# loser fails at startup with an address-in-use that reads like a crash. The
-# ground station EMBEDS the viewers rather than proxying them, so it has to
-# avoid their ports rather than share them.
+# Ports that must stay distinct: the loser of a bind fails at startup with an
+# address-in-use that reads like a crash. The ground station EMBEDS the viewers
+# rather than proxying them, so it must avoid their ports.
 PORT_OWNERS = (("buoy_detector", "stream_port"), ("ground_station", "port"),
                ("squirt_cal", "port"))
 
-# The three nodes that each build the SAME OAK-D pipeline (only one runs at a
-# time — the camera admits one client). Depth is aligned to the RGB camera at
-# exactly this geometry, so the RGB intrinsics are only valid on the depth image
-# while all three agree. Let them drift and nothing fails: ranges measured under
-# one node just quietly stop meaning what they meant under another.
+# The three nodes that each build the SAME OAK-D pipeline (the camera admits one
+# client). Depth is aligned to RGB at exactly this geometry, so if they drift
+# nothing fails: ranges under one node just quietly mean something else.
 CAMERA_NODES = ("oakd_publisher", "buoy_detector", "oak_detector")
 
-# sync_threshold_ms, subpixel and lr_check used to be here. They are now module
-# constants in crusader_perception/oak_pipeline.py, shared by all three nodes by
-# construction, so there is nothing left for this check to compare. What remains
-# is the frame geometry, which is still per-node YAML.
+# Only the per-node frame geometry; sync_threshold_ms, subpixel and lr_check are
+# constants in crusader_perception/oak_pipeline.py, equal by construction.
 CAMERA_PARAMS = ("fps", "isp_denominator")
 
 OCS_LINK = (REPO / "crusader_groundstation" / "crusader_groundstation"
@@ -170,11 +152,9 @@ def check_ocs_client(cfg):
     """Where the OCS link may be aimed (docs: OCS/docs/VEHICLE_LINK.md, Discovery).
 
     The boat must never be pointed at RoboCommand's course networks, and a bad
-    fallback list fails quietly: ocs_client starts, drops the entry with one log
-    line, and sits waiting for a beacon that may never come. Both are cheap to
-    catch here and expensive to find at the dock. The rules are ocs_link's own
-    (check_fallback_hosts, on_course_network), so the file and the code cannot
-    disagree about what a good list is.
+    fallback list fails quietly: ocs_client drops the entry with one log line and
+    waits for a beacon that may never come. The rules are ocs_link's own
+    (check_fallback_hosts, on_course_network), so file and code cannot disagree.
     """
     try:
         ocs = cfg["ocs_client"]["ros__parameters"]
@@ -277,12 +257,9 @@ def check_params_yaml():
     # Shared values that must stay equal across sections (rcl forbids anchors,
     # so they are written out literally and pinned here instead).
     #
-    # Checked in BOTH directions: the bridge's own republish budget, and every
-    # consumer that decides when to stop acting on the last pose it saw. The
-    # YAML says "any future consumer must use the same number" — a comment
-    # cannot enforce that, and a consumer trusting a pose for longer than the
-    # bridge vouches for it is the frozen-pose failure the value exists to
-    # prevent. This finds the drift while it is still a diff.
+    # Both directions: the bridge's republish budget and every consumer's
+    # stop-acting age. A comment cannot make a new consumer use the same number;
+    # this finds the drift (the frozen-pose failure) while it is still a diff.
     try:
         want = cfg["shared"]["ros__parameters"]["pose_timeout_s"]
         pinned = [("telemetry_bridge", "stream_timeout_s")]
@@ -302,10 +279,9 @@ def check_params_yaml():
     except KeyError as e:
         fail("shared pose_timeout_s", f"missing key {e}")
 
-    # One camera, one mounting. bt_runner_node places the Task 3 bays with its
-    # own copy of the extrinsic and target_tracker places the buoys with its
-    # own: if they differ, the two worlds disagree about where things are and
-    # neither looks wrong on its own.
+    # One camera, one mounting: bt_runner_node places the Task 3 bays and
+    # target_tracker the buoys, each with its own copy of the extrinsic. If they
+    # differ the two worlds disagree and neither looks wrong on its own.
     try:
         keys = ("cam_x", "cam_y", "cam_yaw_deg", "cam_pitch_deg")
         tt = cfg["target_tracker"]["ros__parameters"]
@@ -334,13 +310,10 @@ def check_params_yaml():
         else:
             ok(f"topic {pn}.{pk} -> {cn}.{ck}", a)
 
-    # UDP port discipline on the MAVLink links.
-    #
-    # The boat owns 1455x so an operator reading a --out line never has to work
-    # out which vehicle it is. Within the boat, the flight stack's port is never
-    # taken by anything else: a udpin bind STEALS datagrams, and the displaced
-    # consumer sees silence rather than an error -- which on this vehicle means
-    # /crsd/pose goes stale and the mission stops for no visible reason.
+    # UDP port discipline on the MAVLink links. The boat owns 1455x so a --out
+    # line names its vehicle. The flight stack's port is never taken by anything
+    # else: a udpin bind STEALS datagrams, and the displaced consumer sees
+    # silence, not an error -- /crsd/pose goes stale and the mission stops.
     def _udp_port(endpoint):
         """Port out of 'udpin:host:port' / 'udp:host:port', or None."""
         m = re.search(r":(\d+)\s*$", str(endpoint))
@@ -352,10 +325,9 @@ def check_params_yaml():
     except KeyError as e:
         fail("mavlink udp ports", f"missing key {e}")
     else:
-        # A NON-UDP endpoint is the RFD900 on its FTDI cable: the link node
-        # owning the radio directly, which is the arrangement the mesh needs.
-        # There is no port to check then, and demanding one would fail a config
-        # that is right -- what matters is that it names a device at all.
+        # A NON-UDP endpoint is the RFD900 on its FTDI cable, owned directly by
+        # the link node as the mesh needs. No port to check then -- only that it
+        # names a device at all.
         net = str(rxl_ep).startswith(("udp:", "udpin:", "udpout:", "tcp:"))
         mav_p, rxl_p = _udp_port(mav_ep), _udp_port(rxl_ep)
         if not net and str(rxl_ep).startswith("/dev/"):
@@ -404,11 +376,9 @@ def check_params_yaml():
         ok("http ports distinct", ", ".join(f"{p}={n}" for p, n in
                                             sorted(seen.items())))
 
-    # The mission's task token must be a name RoboCommand's RxTask enum has.
-    # ParseDict REJECTS THE WHOLE FRAME on an unknown enum name, so a typo here
-    # does not degrade one field -- it stops every heartbeat reaching
-    # RoboCommand for as long as the mission runs, which is exactly the window
-    # that is being scored.
+    # The mission's task token must be in RoboCommand's RxTask enum. ParseDict
+    # REJECTS THE WHOLE FRAME on an unknown enum name, so a typo stops every
+    # heartbeat reaching RoboCommand for the whole mission -- the scored window.
     try:
         link = load_ocs_link()
         token = cfg["bt_runner_node"]["ros__parameters"]["task_token"]
@@ -424,16 +394,11 @@ def check_params_yaml():
 
     check_ocs_client(cfg)
 
-    # The camera profile is generated from oak_controls, so the YAML and the
-    # table can drift in exactly two ways: a control with no value (the node
-    # then refuses to start, with "no declared posture"), or a value outside
-    # the range the node will enforce (it starts and then rejects the first
-    # thing you try to set). Both are cheap to catch here and expensive to
-    # catch on a dock.
-    # Imported off the SOURCE TREE, not off an installed workspace: this check
-    # has to work on the laptop, before anything is built, or it only ever runs
-    # after the mistake has already been deployed. oak_controls imports nothing
-    # but dataclasses precisely so this is possible.
+    # The camera profile is generated from oak_controls, so YAML and table can
+    # drift two ways: a control with no value (the node refuses to start, "no
+    # declared posture"), or a value outside the enforced range (it starts, then
+    # rejects the first set). Imported off the SOURCE TREE so this runs on the
+    # laptop before any build; oak_controls imports only dataclasses for that.
     try:
         sys.path.insert(0, str(REPO / "crusader_perception"))
         from crusader_perception import oak_controls
@@ -460,9 +425,8 @@ def check_params_yaml():
             ok("oak camera profile",
                f"{len(oak_controls.ALL)} controls, every one valued and in range")
 
-    # All three OAK-D nodes must describe the same camera (see CAMERA_NODES).
-    # Compared against the first node in the list rather than pairwise, so the
-    # message names one reference and the odd ones out.
+    # All three OAK-D nodes must describe the same camera (see CAMERA_NODES),
+    # compared against the first so the message names the odd ones out.
     reference = CAMERA_NODES[0]
     try:
         differing = {}
@@ -485,9 +449,9 @@ def check_params_yaml():
 
 # ------------------------------------------------------------------ the pump
 
-# ArduPilot output functions that drive the boat. A pump path pointed at one of
-# these would let a "burst" run a thruster: ArduPilot refuses DO_SET_SERVO on
-# them itself, but that is its check, and this one fires before anyone arms.
+# ArduPilot output functions that drive the boat: a pump path on one would let a
+# "burst" run a thruster. ArduPilot refuses DO_SET_SERVO on them too; this check
+# fires before anyone arms.
 MOTOR_FUNCTIONS = {26, 70, 73, 74} | set(range(33, 41))
 
 
@@ -495,8 +459,7 @@ def check_pump():
     """The water pump's path through telemetry_bridge (docs/G7_pump_bench.md).
 
     * the pump's RC channel is none of: the sticks, the mode switch, the SB
-      e-stop, or the autonomy-drop channel (every squirt on ch9 tripped the drop
-      latch until 2026-09-25);
+      e-stop, or the autonomy-drop channel (every squirt would trip the latch);
     * squirt_cal and the bridge agree on it, and the bridge's e-stop matches the
       LED node's;
     * with a pump output configured, the saved baseline says that output passes
@@ -552,8 +515,7 @@ def check_pump():
             problems.append(f"SERVO{servo}_TRIM is {trim}, not pump_off_pwm {off}: "
                             "a burst would END at TRIM")
     # GUIDED heading+speed: thrust 1.0 means WP_SPEED to the autopilot, so the
-    # bridge's idea of it must be the boat's, or every commanded speed is off by
-    # the ratio -- at the dock, that is the difference between 0.2 and 0.4 m/s.
+    # bridge must agree or every commanded speed is off by the ratio.
     try:
         hs_wp = float(tb["hs_wp_speed_mps"])
     except KeyError as e:
@@ -654,10 +616,9 @@ def check_nav():
         fail("nav2 params readable", f"{NAV2_PARAMS}: {e}")
         return
 
-    # planner_server is launched with this file, so rcl parses it: the same
-    # no-anchors rule as crusader_params.yaml. use_sim_time must not appear: the
-    # sim runs on wall clock, and a stray true here stops every plan waiting for
-    # a /clock that nothing publishes.
+    # rcl parses this file too (planner_server), so: no anchors. And no
+    # use_sim_time: the sim runs on wall clock, and a stray true stops every plan
+    # waiting for a /clock nothing publishes.
     anchored = [n for n, line in enumerate(nav2_text.splitlines(), 1)
                 if "&" in line.split("#", 1)[0] or "*" in line.split("#", 1)[0]]
     uses_sim_time = any("use_sim_time" in line.split("#", 1)[0]
@@ -731,9 +692,8 @@ def check_nav():
           ("stvl_layer.voxel_size", cm["stvl_layer"]["voxel_size"]),
           ("global_costmap.resolution", cm["resolution"]), "a voxel is a cell")
 
-    # bt_runner calls the names Nav2 gives its servers, which come from the node
-    # names nav.launch.py sets. A different one is a planner that "is not
-    # available" forever.
+    # bt_runner calls Nav2's server names (from nav.launch.py's node names); a
+    # different one is a planner that "is not available" forever.
     nav2_names = {"nav_planner_action": "/compute_path_to_pose",
                   "nav_valid_service": "/is_path_valid",
                   "nav_clear_service": "/global_costmap/clear_entirely_global_costmap"}
@@ -806,9 +766,8 @@ def check_param_baseline():
         return
     ok("param baseline parses", f"{len(params)} params")
 
-    # The frame/heading config the boat cannot fly without. These are not tuning
-    # values: FRAME_TYPE=2 is the OmniX mixer, and COMPASS_USE=0 with
-    # EK3_SRC1_YAW=2 is the dual-antenna GPS-yaw setup (there is no compass).
+    # The frame/heading config the boat cannot drive without: FRAME_TYPE=2 is the
+    # OmniX mixer; COMPASS_USE=0 with EK3_SRC1_YAW=2 is dual-antenna GPS yaw.
     expected = {"FRAME_TYPE": 2.0, "COMPASS_USE": 0.0, "EK3_SRC1_YAW": 2.0,
                 "ARMING_CHECK": 1.0, "ARMING_REQUIRE": 1.0}
     for name, want in expected.items():
@@ -858,12 +817,9 @@ def check_packages():
         fail("crusader_bringup manifest", "not found or did not parse")
         return
 
-    # REACHABILITY, not direct declaration. `colcon build (packages-up-to
-    # crusader_bringup)` builds the transitive closure, so crusader_common and
-    # crusader_msgs are built via the packages that depend on them and do NOT
-    # need to be listed in bringup. Checking for direct listing instead would
-    # report those two as broken forever, and a check that cries wolf is a check
-    # people stop reading.
+    # REACHABILITY, not direct declaration: packages-up-to builds the transitive
+    # closure, so crusader_common and crusader_msgs need not be listed in bringup.
+    # A direct-listing check would cry wolf forever, and people stop reading it.
     DEP_TAGS = ("depend", "exec_depend", "build_depend", "buildtool_depend",
                 "build_export_depend", "test_depend")
     deps = {pkg: {e.text.strip() for e in root.iter()
@@ -898,20 +854,16 @@ def check_interfaces():
     RUNTIME, when a goal arrives, which on the boat means at the dock.
 
     rosidl feeds every .msg/.action through an empy IDL template. A trailing
-    backslash in a COMMENT makes that template fail to decode and the build dies
-    with
+    backslash in a COMMENT (a shell command wrapped across two lines) makes it
+    fail to decode, and the build dies with
 
         UnicodeDecodeError processing template 'struct.idl.em'
 
-    which names neither the file nor the line. Cost a full build round trip on
-    2026-09-05, on a shell command wrapped across two lines the way anyone would
-    write it.
+    which names neither the file nor the line.
     """
-    # Behaviour trees are XML and get the XML rules, including the one that
-    # keeps biting: a double hyphen is ILLEGAL inside an <!-- comment -->. It
-    # has now broken a package.xml, a Dockerfile and a behaviour tree in this
-    # repo, each time with an error that names a line and not a cause.
-    # behavior_trees/lib/ holds the task subtrees the missions include.
+    # Behaviour trees get the XML rules, including the one that keeps biting: a
+    # double hyphen is ILLEGAL inside an <!-- comment -->, and the error names a
+    # line, not the cause. behavior_trees/lib/ holds the included task subtrees.
     trees = sorted(REPO.glob("*/behavior_trees/*.xml")) + sorted(REPO.glob("*/behavior_trees/lib/*.xml"))
     for tree in trees:
         base = next(p for p in tree.parents if p.name == "behavior_trees")

@@ -1,92 +1,60 @@
 # ============================================================================
 # Crusader — SINGLE SOURCE OF TRUTH for all ROS-side parameters.
 #
-# Standard ROS 2 parameter-file format: pass to launch via
-#     parameters=[os.path.join(pkg_share, "config", "crusader_params.yaml")]
-# or per-node:  ros2 run ... --ros-args --params-file config/crusader_params.yaml
+# Standard ROS 2 parameter file (launch: parameters=[...]; one node:
+# --ros-args --params-file). Node code also loads it for its declaration
+# defaults (crusader_common/config.py), so a code default cannot drift.
 #
-# Node code loads THIS file for its declaration defaults (api/common/config.py),
-# so a code default can never drift from the file the launch system loads.
-#
-# Parameter posture (enforced in code via ParameterDescriptor):
-#   [RO] read_only — safety/structural; `ros2 param set` is REJECTED; change
-#        here + restart the node (rebuild NOT required, params load at start).
+# Posture, enforced in code via ParameterDescriptor:
+#   [RO]  read_only — `ros2 param set` is REJECTED; change here + restart the
+#         node (no rebuild: params load at start).
 #   [DYN] dynamic — accepted at runtime via `ros2 param set`, range-validated.
-#        Everything here is [RO]: the stack is safety plumbing, and nothing in
-#        it is a test-day tuning knob.
 #
 # ---------------------------------------------------------------------------
 # TWO HARD FORMAT RULES — rcl's parser is stricter than PyYAML. Break either and
 # EVERY node in the launch dies at rclpy.init() with "Couldn't parse params
-# file", before a single line of node code runs (this happened on the boat on
-# 2026-07-29 and grounded the whole stack, LEDs included):
-#
-#   1. NO YAML anchors/aliases (&name / *name). rcl_yaml_param_parser rejects
-#      them outright — it is a token-level parser, not a YAML document loader.
-#      Values that MUST stay equal across sections are therefore written out
-#      LITERALLY and pinned by tests/test_config_shared.py instead. If you
-#      change one, change every copy the test names.
-#   2. EVERY top-level key must be a node name whose only child is
-#      `ros__parameters:`. A bare scalar at top level is what produced
-#      "Cannot have a value before ros__parameters". That is why the `shared`
-#      block below — which is documentation, not a real node — still carries a
-#      `ros__parameters:` level: no node is named `shared`, so rcl parses the
-#      section, matches it to nothing, and ignores it.
-#
-# tests/test_config_shared.py enforces both rules in CI. Do not "tidy" this file
-# back into anchors.
+# file" — the whole stack grounded, LEDs included:
+#   1. NO YAML anchors/aliases (&name / *name): rcl parses tokens, not YAML.
+#      Values that MUST stay equal across sections are written out LITERALLY;
+#      check_config.py pins them — change every copy it names.
+#   2. EVERY top-level key is a node whose only child is `ros__parameters:`
+#      (else "Cannot have a value before ros__parameters"). Hence `shared`
+#      carries that level too; no node is named `shared`, so rcl ignores it.
+# tools/scripts/check_config.py enforces both. Do not "tidy" back into anchors.
 # ============================================================================
 
-# Canonical values for anything duplicated below. NOT a real node (see rule 2) —
-# this section is the single source of truth by convention + test, and is never
-# loaded by any running node.
+# Canonical values for anything duplicated below. NOT a real node (rule 2).
 shared:
   ros__parameters:
-    # age at which a /crsd/pose sample stops being usable. telemetry_bridge uses
-    # it to decide when to STOP republishing a dead MAVLink stream; any future
-    # consumer must use the same number to decide when to stop acting on the
-    # last pose it saw. One value because a consumer trusting a pose longer than
-    # the bridge vouches for it is exactly the frozen-pose failure this guards
-    # against.
+    # Age at which a /crsd/pose sample stops being usable: telemetry_bridge stops
+    # republishing a dead MAVLink stream, and every consumer stops acting on the
+    # last pose it saw. One value: a consumer trusting a pose longer than the
+    # bridge vouches for it is the frozen-pose failure this guards against.
     pose_timeout_s: 1.0
 
-    # THE flight modes that mean "we are driving, not the pilot". One list,
-    # because three separate places used to decide this independently and could
-    # drift apart:
-    #   telemetry_bridge     — whether to forward autonomous commands at all
-    #   pixhawk_led_status   — whether the mast light shows GREEN (5.3.1 makes
-    #                          the visual state a REQUIREMENT, not a nicety)
-    #   ocs_client           — whether RoboCommand is told STATE_AUTO
-    # "What the boat reports", "what the boat shows" and "what the boat obeys"
-    # have to be the same fact. Uppercase: mode_string_v10 returns "GUIDED".
-    #
-    # LOITER and DOCK are listed because they are autonomous, but note they get
-    # ArduPilot's simple avoidance only — BendyRuler/Dijkstra path planning runs
-    # in AUTO, GUIDED and RTL alone. Anything needing routing around an obstacle
-    # has to happen in GUIDED.
+    # THE flight modes that mean "we are driving, not the pilot". One list, so
+    # what the boat obeys (telemetry_bridge, bt_runner), shows (mast GREEN —
+    # mandatory per 5.3.1) and reports (ocs_client STATE_AUTO) stay one fact.
+    # Uppercase: mode_string_v10 returns "GUIDED". LOITER gets ArduPilot's simple
+    # avoidance only; BendyRuler/Dijkstra runs in AUTO, GUIDED and RTL alone.
     autonomous_modes: ["GUIDED", "AUTO", "LOITER", "RTL"]
 
 telemetry_bridge:
   ros__parameters:
     mav_endpoint: "udp:127.0.0.1:14551"   # [RO] MAVProxy rebroadcast, never serial
-    # The AUTONOMY INTERLOCK. = shared.autonomous_modes; the pilot leaving these
-    # modes on SC is the autonomy drop, and ArduPilot enforces the same decision
-    # independently by ignoring SET_POSITION_TARGET_* outside GUIDED/AUTO/RTL.
+    # The AUTONOMY INTERLOCK, = shared.autonomous_modes: the pilot leaving these
+    # modes on SC is the autonomy drop. ArduPilot independently ignores
+    # SET_POSITION_TARGET_* outside GUIDED/AUTO/RTL.
     autonomous_modes: ["GUIDED", "AUTO", "LOITER", "RTL"]   # [RO]
     mode_timeout_s: 1.0                    # [RO] s without HEARTBEAT before the
                                            #      mode counts as UNKNOWN, which
                                            #      is never autonomous. Fails closed.
     # --- RC drop latch: governs the RC-OVERRIDE path only ---
-    # DO NOT set drop_channel back to 7. Channel 7 is the SB arm/e-stop switch
-    # (OPERATIONS.md §6: down ~994 e-stop, up ~1995 arm) and the latch trips at
-    # >= drop_threshold, so ARMING THE BOAT tripped it and blocked every
-    # override. Found 2026-09-05. Channel 9 is the drop channel and NO switch
-    # is mapped to it yet (SE is the water pump; SD is the proposed drop
-    # switch, OPERATIONS.md 6): an unmapped ch9 reads ~1500 and NEVER TRIPS, so
-    # today the latch is not a kill - SC (mode) and SB (e-stop) are. It was not
-    # unused until 2026-09-25: the pump sat on ch9 and every squirt tripped it.
-    # The GUIDED path is gated on the MODE instead and does not depend on this
-    # latch at all.
+    # NOT ch7: that is the SB arm/e-stop switch (OPERATIONS.md §6: up ~1995 =
+    # arm), so arming would trip this >= drop_threshold latch and block every
+    # override. ch9 has no switch yet (SD proposed): it reads ~1500 and NEVER
+    # TRIPS, so today the kills are SC (mode) and SB (e-stop). The GUIDED path
+    # is gated on the MODE, not this latch.
     drop_channel: 9                        # [RO] autonomy-drop RC channel (1..18)
     drop_threshold: 1700                   # [RO] us; crossing trips the latch
     drop_invert: false                     # [RO]
@@ -95,10 +63,9 @@ telemetry_bridge:
                                            #      before a stale MAVLink stream
                                            #      stops being republished
     # --- the water pump: /crsd/pump_cmd -> DO_REPEAT_SERVO (crusader_fcu/pump_core) ---
-    # OFF until docs/G7_pump_bench.md is done: 0 = no pump path, every burst
-    # refused. Then set it to the Pixhawk output whose SERVOn_FUNCTION is
-    # 50 + pump_rc_channel (RCIN10 = 60), with SERVOn_TRIM = pump_off_pwm: the
-    # autopilot ends every burst by returning the output to TRIM.
+    # 0 (no pump path, every burst refused) until docs/G7_pump_bench.md is done;
+    # then the Pixhawk output with SERVOn_FUNCTION = 50 + pump_rc_channel (RCIN10
+    # = 60) and SERVOn_TRIM = pump_off_pwm: the autopilot ends each burst at TRIM.
     pump_servo_channel: 0                  # [RO] Pixhawk output 1..16; 0 = none
     pump_rc_channel: 10                    # [RO] the pilot's pump switch. NOT 9:
                                            #      that is drop_channel above
@@ -116,26 +83,24 @@ telemetry_bridge:
     hs_wp_speed_mps: 1.0                   # [RO] = WP_SPEED: thrust 1.0 means this
                                            #      (check_config pins it to the baseline)
     hs_deadman_s: 0.5                      # [RO] s without a command -> one stop
-    # /crsd/rc_override (software on the sticks, MANUAL - the fixed-nozzle shot
-    # strafes, and only MANUAL strafes on this OmniX hull): forwarded only in
-    # override_modes, only on override_channels (the rest - SB ch7, SC ch8, the
-    # pump - stay the pilot's), clamped, released after override_deadman_s of
-    # silence. crusader_fcu/override_core.py. dp_hold's map: 1 steer, 3 throttle,
-    # 4 lateral.
+    # /crsd/rc_override (software on the sticks; the fixed-nozzle shot strafes,
+    # and only MANUAL strafes on this OmniX hull): forwarded only in
+    # override_modes on override_channels (SB ch7, SC ch8 and the pump stay the
+    # pilot's), clamped, released after override_deadman_s. crusader_fcu/override_core.py.
     override_channels: [1, 3, 4]           # [RO] steer, throttle, lateral
     override_max_us: 150                   # [RO] us about 1500 (dp_hold ran 120)
     override_deadman_s: 0.5                # [RO] s without an override -> release
     override_modes: ["MANUAL"]             # [RO]
     estop_channel: 7                       # [RO] = pixhawk_led_status_node's:
     estop_threshold: 1200                  # [RO]   SB, below = e-stop or RC lost.
-                                           #        The e-stop stops MOTORS, not a
-                                           #        pass-through output: the
-                                           #        bridge sends the pump OFF then
+                                           #        The e-stop stops MOTORS, not
+                                           #        pass-through outputs, so the
+                                           #        bridge sends the pump OFF
 
 # ---- Task 3 fixed nozzle: the wall range (crusader_perception/wall_range_node) ----
 # NOT in core.launch.py until it has run on the boat. The LiDAR extrinsic and the
-# waterline come from lidar_cluster_node's section above, not from here: one
-# sensor, one mounting.
+# waterline come from lidar_cluster_node's section, not from here: one sensor,
+# one mounting.
 wall_range_node:
   ros__parameters:
     cloud_topic: "/livox/lidar"            # [RO] livox container's PointCloud2
@@ -219,14 +184,11 @@ pixhawk_led_status_node:
     rate_hz: 5.0                           # [RO] LED state evaluation rate
 
 # ---- Perception: the OAK-D nodes ----
-# Both run in `asv`, which carries depthai for exactly this reason. They are not
-# in core.launch.py: they contend for the one OAK-D, so which one runs is an
-# operator choice, started by hand.
-#
-# The image geometry is not a preference: depth is aligned to the RGB camera and
-# both are emitted at 1920x1200 / isp_denominator, so consumers may use the RGB
-# intrinsics on the depth image and read depth at an RGB pixel. Changing
-# isp_denominator changes every downstream pixel-space threshold.
+# They run in `asv` (it carries depthai) and are not in core.launch.py: they
+# contend for the one OAK-D, so which one runs is an operator choice.
+# Depth is aligned to RGB and both come out at 1920x1200 / isp_denominator, so
+# consumers use the RGB intrinsics on the depth image. Changing isp_denominator
+# changes every downstream pixel-space threshold.
 oakd_publisher:
   ros__parameters:
     rgb_topic: "oak/rgb"                   # [RO] relative name; namespace/remap moves the pair
@@ -238,13 +200,10 @@ oakd_publisher:
     queue_size: 4                          # [RO] device output queue depth (non-blocking)
     health_period_s: 5.0                   # [RO] warn if no frames arrived since last check
 
-# buoy_detector OWNS THE SAME CAMERA as oakd_publisher — the OAK-D admits one
-# client, so exactly one of the two runs at a time. It publishes detections, not
-# frames: a few hundred bytes per frame instead of 1.28 MB, which is the point.
-# The camera block below is duplicated from oakd_publisher and MUST stay equal to
-# it (rcl forbids YAML anchors; tools/scripts/check_config.py pins the pair) —
-# the two nodes have to produce identical geometry or a range measured under one
-# does not mean the same thing under the other.
+# buoy_detector OWNS THE SAME CAMERA as oakd_publisher (one client at a time).
+# It publishes detections, not frames: a few hundred bytes instead of 1.28 MB.
+# Its camera block MUST equal oakd_publisher's (check_config.py), or a range
+# measured under one means something else under the other.
 buoy_detector:
   ros__parameters:
     engine: "/root/robotx_ws/models/buoy_v16.engine"   # [RO] TensorRT engine
@@ -283,21 +242,16 @@ buoy_detector:
     stream_enable: true                    # [RO] annotated MJPEG view over HTTP;
                                            #      frames are only drawn while a
                                            #      browser is actually connected
-    stream_port: 8080                      # [RO] same default as tools/oak_view.py —
-                                           #      they cannot both bind it, and they
-                                           #      are never both useful at once
+    stream_port: 8080                      # [RO] = tools/oak_view.py's: never
+                                           #      both bound, never both useful
     stream_quality: 60                     # [RO] JPEG quality for that view
 
 # ---- lidar_cluster_node: MID360 point cloud -> 3D object clusters ----
-# Consumes the livox container's /livox/lidar; opens no device itself. Not in
-# core.launch.py — nothing here has run on the boat yet.
+# Consumes the livox container's /livox/lidar; opens no device itself.
 #
-# THE EXTRINSIC IS BENCH-CONFIRMED, NOT ASSUMED (docs/G2_lidar_orientation.md,
-# 2026-08-14). The raw Livox frame is x forward, y STARBOARD, z down — the plain
-# 180-degree roll about the forward axis that mounting it upside down produces.
-# Resources.md first described it as "y left, z down", which is left-handed and
-# cannot describe a rigid sensor. Both signs therefore negate into REP-103, and
-# both are [RO]: a live-tunable mounting geometry silently invalidates every
+# THE EXTRINSIC IS BENCH-CONFIRMED (docs/G2_lidar_orientation.md): mounted
+# upside down, the raw frame is x forward, y STARBOARD, z down, so both signs
+# negate into REP-103. [RO]: a live-tunable mounting silently invalidates every
 # position already on the map. Re-run G2 after any remount.
 lidar_cluster_node:
   ros__parameters:
@@ -310,11 +264,10 @@ lidar_cluster_node:
     lidar_x: 0.32                          # [RO] m forward of geometry centre
     lidar_y: 0.05                          # [RO] m to PORT of centreline
     lidar_z: 0.52                          # [RO] m above the hull-bottom datum.
-                                           #      Draft is 0.24 m (measured
-                                           #      2026-09-05), so the sensor sits
-                                           #      0.28 m ABOVE THE WATERLINE —
-                                           #      low. See Resources.md for what
-                                           #      that costs in wave clearance.
+                                           #      Draft is 0.24 m, so the sensor
+                                           #      sits only 0.28 m ABOVE THE
+                                           #      WATERLINE (wave clearance cost:
+                                           #      Resources.md).
     # -- self-return filters [DYN], applied in the SENSOR frame --
     r_min: 0.5                             # [DYN] clear sphere around the sensor;
                                            #       mount, cabling, deck beneath it
@@ -322,58 +275,30 @@ lidar_cluster_node:
                                            #       blocks the view aft of the beam,
                                            #       so returns behind it are the boat
     # -- levelled-frame gates [DYN] --
-    water_z: 0.24                          # [DYN] MEASURED 2026-09-05: the boat
-                                           #       floats 24 cm above the
-                                           #       hull-bottom datum. This is the
-                                           #       number G2 step 4 asks for.
-                                           #       Was 0.10, a placeholder.
-                                           #
-                                           #       The old value did almost
-                                           #       nothing: 0.10 + water_margin
-                                           #       0.15 = 0.25, i.e. the reject
-                                           #       line sat 1 cm above the real
-                                           #       waterline, so water returns
-                                           #       passed straight through into
-                                           #       clustering. It now sits 15 cm
-                                           #       clear. Most of this mount's FOV
-                                           #       is water, so the threshold does
-                                           #       real work.
-                                           #
-                                           #       Consequence to know: anything
-                                           #       less than water_margin above
-                                           #       the surface is discarded, so
-                                           #       very low debris is invisible by
-                                           #       design. Lower the margin, not
-                                           #       water_z, if that matters.
+    water_z: 0.24                          # [DYN] MEASURED waterline above the
+                                           #       hull-bottom datum (G2 step 4).
+                                           #       Most of the FOV is water: set
+                                           #       too low, water returns reach
+                                           #       clustering. Anything under
+                                           #       water_margin above the surface
+                                           #       is dropped by design — lower the
+                                           #       margin, not water_z, to see
+                                           #       very low debris.
     water_margin: 0.15                     # [DYN] keep points this far above water
     z_ceiling: 4.0                         # [DYN] above this is sky/rain
     r_max: 10.0                            # [DYN] horizontal range ceiling [m].
-                                           #       CUT 40 -> 10 on 2026-09-05 for
-                                           #       pool testing. At 40 m the map
-                                           #       filled with 100+ permanent
-                                           #       tracks at 15-28 m: the pool
-                                           #       walls, the deck and the room
-                                           #       beyond them, all of which are
-                                           #       real returns and none of which
-                                           #       are objects worth tracking.
-                                           #       Measured effect: n_far went to
-                                           #       ~5700 points/cycle discarded and
-                                           #       clusters/cycle 60+ -> 10.
-                                           #
-                                           #       ON OPEN WATER RAISE IT AGAIN.
-                                           #       10 m is well inside the camera
-                                           #       range_max_m of 25, so leaving it
-                                           #       here would make the LiDAR the
-                                           #       shorter-ranged sensor and the
-                                           #       fusion one-sided. 25-40 m is the
-                                           #       competition value. [DYN], so:
+                                           #       POOL VALUE: at 40 m a pool's
+                                           #       walls, deck and room become 100+
+                                           #       permanent tracks at 15-28 m.
+                                           #       ON OPEN WATER RAISE IT to 25-40:
+                                           #       10 m is inside the camera's 25
+                                           #       and makes the fusion one-sided.
                                            #       ros2 param set /lidar_cluster_node
                                            #           r_max 40.0
     # -- voxel-grid DBSCAN [DYN] --
-    # eps stays SMALL and grows only gently with range. Opening it up for distant
-    # objects is the wrong instinct: a buoy is 0.3 m wide at every range, so its
-    # returns are always ~0.3 m apart, while the neighbourhood volume grows as
-    # eps^3 and sweeps in proportionally more scattered noise.
+    # eps stays SMALL, growing only gently with range: a buoy's returns are ~0.3 m
+    # apart at every range, while the neighbourhood volume grows as eps^3 and
+    # sweeps in proportionally more noise.
     leaf_size: 0.15                        # [DYN] voxel edge [m]
     eps_0: 0.30                            # [DYN] neighbourhood radius at eps_r_ref
     eps_r_ref: 15.0                        # [DYN] range where eps_0 applies [m]
@@ -383,10 +308,9 @@ lidar_cluster_node:
     min_points: 5                          # [DYN] points needed to emit a cluster
     max_extent_m: 8.0                      # [DYN] bigger = shoreline, not an object
     # -- accumulation + freshness [DYN] --
-    # A 0.3 m buoy returns ~37 points per sweep at 5 m, 9 at 10 m, 2 at 20 m.
-    # Measured against this core: 1 sweep reaches ~10 m, 5 sweeps reach ~20 m.
-    # Livox's non-repetitive pattern means each sweep adds NEW coverage rather
-    # than resampling the same lines, which is what makes stacking them work.
+    # A 0.3 m buoy returns ~37 points per sweep at 5 m, 9 at 10 m, 2 at 20 m:
+    # 1 sweep reaches ~10 m, 5 reach ~20 m. Stacking works because Livox's
+    # non-repetitive pattern adds NEW coverage each sweep.
     accumulate_sweeps: 5                   # [DYN] 10 Hz sweeps -> ~0.5 s window
     attitude_timeout_s: 1.0                # [DYN] stale -> cluster unlevelled
     pose_timeout_s: 1.0                    # [DYN] stale -> single sweep, no
@@ -394,82 +318,50 @@ lidar_cluster_node:
     health_period_s: 5.0                   # [DYN] JSON stats publish period
     # -- navigation cloud: the Nav2 costmap's LiDAR input (docs/nav2_avoidance_spec.md
     #    section 6). Every point in a cluster of >= min_points, levelled and voxel-
-    #    thinned, INCLUDING clusters over max_extent_m: a dock, a platform or a
-    #    shoreline is not a trackable object but a hull still must not hit it. --
+    #    thinned, INCLUDING clusters over max_extent_m: a dock is not a trackable
+    #    object, but the hull still must not hit it. --
     nav_cloud_enable: true                 # [DYN] THE POOL SWITCH. false publishes
                                            #       EMPTY clouds: the costmap stays
                                            #       current and marks nothing.
-                                           #       POOL / INDOOR PROFILE: set false
-                                           #       together with r_max 10 above.
-                                           #       Pool walls are real returns, so
-                                           #       with the cloud on they are marked
-                                           #       lethal and goals near them become
-                                           #       unreachable (the study's risk).
-                                           #       ros2 param set /lidar_cluster_node
-                                           #           nav_cloud_enable false
-                                           #       (or the GCS Tuning tab). Open
-                                           #       water: true, r_max 25-40.
+                                           #       Pool/indoor: false (with r_max
+                                           #       10) — walls get marked lethal
+                                           #       and goals near them become
+                                           #       unreachable. Open water: true,
+                                           #       r_max 25-40. Live, or the GCS
+                                           #       Tuning tab.
     nav_cloud_topic: "/crsd/nav/obstacle_cloud"  # [RO] PointCloud2 out, sensor-data QoS
-    nav_cloud_frame: "base_footprint"      # [RO] = nav_frames_node.base_frame: levelled
-                                           #      REP-103 axes, origin at the hull-
-                                           #      bottom datum. Stamped with RECEIPT
-                                           #      time, and WITHHELD while
-                                           #      attitude is stale (costmap goes
-                                           #      non-current, planned legs hold)
+    nav_cloud_frame: "base_footprint"      # [RO] = nav_frames_node.base_frame.
+                                           #      Stamped with RECEIPT time;
+                                           #      WITHHELD while attitude is stale
+                                           #      (costmap goes non-current,
+                                           #      planned legs hold)
     nav_cloud_leaf_m: 0.10                 # [DYN] voxel edge, one centroid each;
                                            #       0.05-0.5. Costmap resolution is 0.1
 
-# ---- World model: target_tracker — detections + pose -> earth-anchored targets ----
-# Consumes oak/detections (camera_link), crsd/lidar_clusters (base_link),
-# /crsd/pose and /crsd/attitude; publishes crsd/world_targets. Opens no device
-# and commands nothing. Not in core.launch.py — nothing here has run on the boat.
-#
-# THE CAMERA EXTRINSIC BELOW IS MEASURED, THE ORIENTATION IS NOT BENCH-CONFIRMED.
-# Both come from Resources.md's mounting section. The TRANSLATION (37 cm forward,
-# on the centreline, 65 cm up) is measured against the same hull-bottom datum as
-# the LiDAR's lidar_x/y/z, which is what lets a camera z and a LiDAR z of the
-# same buoy agree. The ORIENTATION is Resources.md's "already REP-103; NOT yet
-# bench-confirmed the way the LiDAR was" — so the two mount ANGLES are zero
-# because the camera is believed to point dead ahead and dead level, not because
-# anyone has proved it. That belief is exactly what got the LiDAR's y-sign wrong
-# for a season until docs/G2 settled it on the bench; run the same check here and
-# the angles stop being an assumption. It is [RO] for the LiDAR's reason —
-# retuning the mounting geometry live silently invalidates every target already
-# on the map.
-# proximity_bridge feeds the AUTOPILOT's avoidance. It is OPTIONAL, and it is NOT the
-# mechanism: the tree's planner is (Nav2 planner_server + costmap, called from
-# bt_runner; docs/nav2_avoidance_spec.md). ArduPilot's simple avoidance is at most a
-# backstop and is off in the baseline (PRX1_TYPE 0, working_crusader.params:544).
-# DO NOT turn it on to "help" the planner: with AVOID_MARGIN 2.0 ArduRover STOPS the
-# boat inside the planner's 0.8-2 m band and in the Task 3 berth. It is the missing
-# half of AVOID_ENABLE=3 / AVOID_MARGIN=2.0, which have been set with PRX1_TYPE=0
-# (no proximity source) — avoidance switched on with nothing feeding it.
+# ---- proximity_bridge: LiDAR clusters -> OBSTACLE_DISTANCE for the autopilot ----
+# OPTIONAL, and NOT the avoidance mechanism: that is the Nav2 planner called
+# from bt_runner (docs/nav2_avoidance_spec.md). ArduPilot's simple avoidance is
+# at most a backstop and is off in the baseline: PRX1_TYPE 0, so the
+# AVOID_ENABLE=3 / AVOID_MARGIN=2.0 that are set have nothing feeding them.
+# DO NOT turn it on to "help" the planner: with AVOID_MARGIN 2.0 ArduRover STOPS
+# the boat inside the planner's 0.8-2 m band and in the Task 3 berth.
 #
 # AUTOPILOT SIDE, which must be set or none of this does anything:
-#   PRX1_TYPE = 2      MAVLink proximity source. At 0 ArduPilot ignores
-#                      OBSTACLE_DISTANCE entirely and the viewer stays empty.
-#   AVOID_BEHAVE       IGNORE IT. It is a COPTER parameter; ArduPilot's own docs
-#                      say Rover "attempts to stop the vehicle before it hits
-#                      objects in all modes except MANUAL" and always stops —
-#                      there is no Slide on this vehicle. An earlier comment
-#                      here told you to set it to Slide "because Stop halts
-#                      mid-course and scores nothing". The observation was right
-#                      and the lever was wrong: what actually routes AROUND an
-#                      obstacle is OA_TYPE below, not AVOID_BEHAVE.
-#   OA_TYPE = 1        BendyRuler path planning — routes AROUND obstacles toward
-#                      the setpoint, and the ONLY thing that does. "Only
-#                      applicable in AUTO, GUIDED, and RTL flight modes", so a
-#                      mission that must not stop dead has to run in GUIDED.
-#                      (OA_BR_TYPE = 1, horizontal, is Rover's only option.)
+#   PRX1_TYPE = 2   MAVLink proximity source; at 0 OBSTACLE_DISTANCE is ignored
+#                   and the viewer stays empty.
+#   AVOID_BEHAVE    IGNORE IT: a COPTER parameter. Rover always stops before
+#                   objects in every mode except MANUAL; there is no Slide.
+#   OA_TYPE = 1     BendyRuler — the ONLY thing that routes AROUND obstacles,
+#                   and only in AUTO, GUIDED and RTL. (OA_BR_TYPE = 1,
+#                   horizontal, is Rover's only option.)
 proximity_bridge:
   ros__parameters:
-    clusters_topic: "crsd/lidar_clusters"  # [RO] = lidar_cluster_node.output
+    clusters_topic: "crsd/lidar_clusters"  # [RO] = lidar_cluster_node.clusters_topic
     output_topic: "crsd/obstacle_distance" # [RO] telemetry_bridge puts it on the wire
     send_rate_hz: 5.0                      # [RO] clusters arrive at 10 Hz; 5 is
-                                           #      plenty for avoidance and halves
-                                           #      the load on the USB link, which
-                                           #      is the same link a param
-                                           #      download is known to saturate
+                                           #      plenty and halves the load on
+                                           #      the USB link a param download
+                                           #      is known to saturate
     fov_deg: 180.0                         # [RO] = lidar_cluster_node.fov_deg.
                                            #      The hull blocks aft; those
                                            #      sectors go out as NO READING,
@@ -478,7 +370,7 @@ proximity_bridge:
                                            #      ArduPilot consolidates to 8
                                            #      sectors of 45 deg anyway
     min_range_m: 0.5                       # [RO] = lidar_cluster_node.r_min
-    max_range_m: 40.0                       # [RO] = lidar_cluster_node.r_max
+    max_range_m: 40.0                       # [RO] lidar_cluster_node.r_max's open-water value
     min_half_deg: 1.0                      # [RO] floor on painted width so a
                                            #      distant buoy still fills a sector
     cluster_timeout_s: 1.0                 # [RO] stale clusters -> emit NOTHING.
@@ -487,17 +379,15 @@ proximity_bridge:
     health_period_s: 5.0                   # [RO]
 
 # ---- Nav2 avoidance: nav_frames_node — the datum, and TF map -> base_footprint ----
-# docs/nav2_avoidance_spec.md section 2. The TF frame `map`, bt_runner's east/north
-# frame and every HazardArray coordinate are ONE equirectangular ENU plane centred
-# on one datum, and this node is the only place the datum is chosen. It publishes
-# /crsd/datum (latched) and bt_runner adopts it. Started by crusader_nav's
-# nav.launch.py, by hand, before bt_runner; NOT in core.launch.py.
-#
-# datum_source "param" is restart-stable: use it in competition and in the sim
-# (nav.launch.py: datum_source:=param datum_lat:=.. datum_lon:=..). "first_fix"
-# pins the first /crsd/pose fix and is NOT respawned, because a restart would
-# pick a different datum and shift the map under a running bt_runner. Which one
-# competition day uses is open decision D1 in the spec.
+# docs/nav2_avoidance_spec.md section 2. TF `map`, bt_runner's east/north frame
+# and every HazardArray coordinate are ONE equirectangular ENU plane on one
+# datum, chosen here alone: published latched on /crsd/datum, adopted by
+# bt_runner. Started by crusader_nav's nav.launch.py before bt_runner; NOT in
+# core.launch.py.
+# "param" is restart-stable: use it in competition and the sim (nav.launch.py
+# datum_source:=param datum_lat:=.. datum_lon:=..). "first_fix" (the first
+# /crsd/pose fix) is NOT respawned: a restart would pick a new datum and shift
+# the map under a running bt_runner. Competition day: open decision D1 in the spec.
 nav_frames_node:
   ros__parameters:
     datum_source: "first_fix"              # [RO] "param" or "first_fix"
@@ -514,6 +404,15 @@ nav_frames_node:
                                            #      datum (REP-120 note in the README)
     health_period_s: 1.0                   # [DYN] /crsd/nav/frames_health JSON
 
+# ---- World model: target_tracker — detections + pose -> earth-anchored targets ----
+# Consumes oak/detections (camera_link), crsd/lidar_clusters (base_link),
+# /crsd/pose and /crsd/attitude; publishes crsd/world_targets. Opens no device
+# and commands nothing. Not in core.launch.py.
+#
+# CAMERA EXTRINSIC (Resources.md): TRANSLATION MEASURED against the LiDAR's
+# hull-bottom datum, so camera and LiDAR z of one buoy agree. ORIENTATION NOT
+# BENCH-CONFIRMED: zero angles are belief, the kind that got the LiDAR's y-sign
+# wrong until G2 — run the same check here. [RO] for the LiDAR's reason.
 target_tracker:
   ros__parameters:
     detections_topic: "crsd/oak/detections"     # [RO] = buoy_detector.detections_topic
@@ -522,29 +421,25 @@ target_tracker:
     health_topic: "crsd/world_model_health"  # [RO] std_msgs/String (JSON)
     update_rate_hz: 10.0                   # [RO] fuse/track cycle. Slower than
                                            #      the camera ON PURPOSE: one
-                                           #      message counts once, and three
-                                           #      frames 33 ms apart are the same
-                                           #      vantage point.
+                                           #      message counts once, and frames
+                                           #      ms apart are one vantage point.
     # -- freshness budgets [RO] --
     pose_timeout_s: 1.0                    # [RO] = shared.pose_timeout_s; stale
                                            #      -> NO observations ingested
-    attitude_timeout_s: 1.0                # [RO] stale -> no observations; a
-                                           #      detection cannot be placed
-                                           #      without roll/pitch/yaw
+    attitude_timeout_s: 1.0                # [RO] stale -> no observations: no
+                                           #      placing without roll/pitch/yaw
     detection_timeout_s: 1.0               # [RO] stale -> LiDAR-only cycles
     cluster_timeout_s: 2.0                 # [RO] stale -> camera-only cycles.
-                                           #      Longer than the others: the
-                                           #      LiDAR window is ~0.5 s, so a
-                                           #      1 s budget would flap.
+                                           #      The LiDAR window is ~0.5 s, so
+                                           #      a 1 s budget would flap.
     # -- camera extrinsic [RO]: camera_link -> base_link. Resources.md, see above --
     cam_x: 0.37                            # [RO] m forward of the body origin
                                            #      (LiDAR is at 0.32 — 5 cm aft)
     cam_y: 0.0                             # [RO] m to PORT; camera is on the
                                            #      centreline, LiDAR is 5 cm port
     cam_z: 0.65                            # [RO] m above the hull-bottom datum
-                                           #      (= 0.41 m above the waterline;
-                                           #      draft 0.24 m, measured 2026-09-05),
-                                           #      the SAME datum as lidar_z=0.52
+                                           #      (0.41 m above the waterline),
+                                           #      the SAME datum as lidar_z
     cam_yaw_deg: 0.0                       # [RO] mount yaw, + = aimed to PORT.
                                            #      ASSUMED, not bench-confirmed.
     cam_pitch_deg: 0.0                     # [RO] mount tilt, + = aimed DOWN.
@@ -552,76 +447,45 @@ target_tracker:
     # -- fusion gates [DYN] --
     use_lidar: false                       # [DYN] FUSE LIDAR CLUSTERS AT ALL.
                                            #       false = camera-only: clusters
-                                           #       are still subscribed and
-                                           #       still counted in the health
-                                           #       topic, then discarded before
-                                           #       fusion. Nothing anonymous can
-                                           #       reach the map, so every track
-                                           #       is a camera detection.
-                                           #
-                                           #       Set false 2026-09-09. An
-                                           #       unlabelled cluster means
-                                           #       different things in different
-                                           #       water: on open water it is
-                                           #       the object you wanted; in a
-                                           #       pool or alongside a dock it
-                                           #       is the wall. The wall
-                                           #       clusters cleanly, arrives
-                                           #       with no label, survives
-                                           #       track_unlabeled, clears
-                                           #       confirm_hits in three
-                                           #       sightings, and with
-                                           #       track_timeout_s at 0 never
-                                           #       leaves the map. See r_max
-                                           #       above for the measurement:
-                                           #       100+ permanent tracks at
-                                           #       15-28 m, all of them the room.
-                                           #
-                                           #       ON OPEN WATER SET IT TRUE,
-                                           #       with lidar_cluster_node.r_max
-                                           #       back at 25-40. Camera-only
-                                           #       range is stereo: ~6%
-                                           #       systematic plus ~4% random,
-                                           #       so a buoy at 25 m sits ~1.5 m
-                                           #       beyond truth and wanders by a
-                                           #       metre. The LiDAR is what
-                                           #       turns that into centimetres.
-                                           #
-                                           #       The five gates below are
-                                           #       INERT while this is false.
-                                           #       [DYN] rather than [RO]: unlike
-                                           #       the extrinsic, flipping it
-                                           #       invalidates nothing already
-                                           #       on the map.
+                                           #       are counted in health, then
+                                           #       discarded before fusion.
+                                           #       Why false: in a pool or beside
+                                           #       a dock an unlabelled cluster is
+                                           #       the WALL; it clusters cleanly,
+                                           #       survives track_unlabeled and
+                                           #       confirm_hits, and with
+                                           #       track_timeout_s 0 never leaves.
+                                           #       ON OPEN WATER SET IT TRUE, with
+                                           #       r_max back at 25-40: stereo
+                                           #       range is ~6% systematic + ~4%
+                                           #       random (a 25 m buoy sits ~1.5 m
+                                           #       long, wanders a metre); LiDAR
+                                           #       makes that centimetres.
+                                           #       The five gates below are INERT
+                                           #       while false. [DYN]: flipping it
+                                           #       invalidates nothing on the map.
     fuse_bearing_deg: 6.0                  # [DYN] camera/LiDAR bearing agreement.
-                                           #       Stays wide for the mount
-                                           #       ANGLES, which are assumed, not
-                                           #       measured. The translations no
-                                           #       longer justify it: the two
-                                           #       sensors are 5 cm apart in x and
-                                           #       y, which is 0.3 deg of parallax
-                                           #       at 10 m. Tighten toward 2-3 deg
-                                           #       once a G2-style bench check
-                                           #       confirms the camera points
-                                           #       where this file says it does.
+                                           #       Wide only for the ASSUMED mount
+                                           #       angles (5 cm sensor offset is
+                                           #       0.3 deg at 10 m). Tighten toward
+                                           #       2-3 deg once a G2-style check
+                                           #       confirms the camera's aim.
     fuse_range_m: 4.0                      # [DYN] absolute range-agreement floor
     fuse_range_frac: 0.25                  # [DYN] ... or this fraction of the
                                            #       camera range, whichever is
                                            #       larger — stereo error grows
-                                           #       with range, so the gate must
+                                           #       with range, so the gate must too
     min_confidence: 0.50                   # [DYN] above buoy_detector's 0.40:
                                            #       the detector publishes what it
                                            #       saw, the map commits to it
-    track_unlabeled: true                  # [RO] keep LiDAR-only clusters. An
+    track_unlabeled: true                  # [RO] keep LiDAR-only clusters: an
                                            #      unnamed obstacle is still an
-                                           #      obstacle (package README).
-                                           #      INERT while use_lidar is
-                                           #      false — there are no
-                                           #      LiDAR-only sightings to keep.
+                                           #      obstacle. INERT while use_lidar
+                                           #      is false.
     # -- tracking gates [DYN] --
     assoc_radius_m: 3.0                    # [DYN] world-frame association radius.
-                                           #       The single most consequential
-                                           #       number here: too wide merges a
+                                           #       The most consequential number
+                                           #       here: too wide merges a
                                            #       red/green gate pair into one
                                            #       object at the midpoint, too
                                            #       narrow splits one buoy into a
@@ -630,42 +494,34 @@ target_tracker:
     pos_alpha: 0.30                        # [DYN] floor on the position EMA gain
     vel_alpha: 0.20                        # [DYN] velocity EMA gain
     confirm_hits: 3                        # [DYN] sightings before CONFIRMED
-    tentative_timeout_s: 3.0               # [DYN] unconfirmed tracks expire fast
-                                           #       — one frame of detector noise
+    tentative_timeout_s: 3.0               # [DYN] unconfirmed tracks expire fast:
+                                           #       one frame of detector noise
                                            #       must not sit on the map
     track_timeout_s: 0.0                   # [DYN] 0 = a CONFIRMED track NEVER
-                                           #       expires: the boat remembers
-                                           #       the whole course for the run,
-                                           #       so a buoy re-entering the FOV
-                                           #       updates the ORIGINAL track
-                                           #       rather than spawning a second
-                                           #       one beside it. Set a positive
-                                           #       number of seconds to go back
-                                           #       to forgetting.
-                                           #       WITH THIS AT 0, confirm_hits
-                                           #       is the ONLY thing between a
-                                           #       wave crest and a permanent
-                                           #       phantom — raise it if
-                                           #       phantoms accumulate.
-    max_tracks: 64                         # [DYN] runaway guard, not a normal
-                                           #       path (a shoreline clustering
-                                           #       into hundreds of objects)
+                                           #       expires, so a buoy re-entering
+                                           #       the FOV updates its ORIGINAL
+                                           #       track, not a second one.
+                                           #       > 0 = forget after that many s.
+                                           #       AT 0, confirm_hits is the ONLY
+                                           #       thing between a wave crest and
+                                           #       a permanent phantom — raise it
+                                           #       if phantoms accumulate.
+    max_tracks: 64                         # [DYN] runaway guard (a shoreline
+                                           #       clustering into hundreds)
     # -- colour voting: ONE buoy, many beacon states --
-    # Task 1 Disruptive: side beacons are OFF (only the top beacon, visible to
-    # the UAV, is lit) and in lower tiers beacons FLASH 1 s on / 1 s off. The
-    # detector names the beacon STATE, so one RoboBuoy arrives as red_buoy on
-    # one frame and black_buoy on the next. Keyed on the label that was two
-    # tracks a metre apart, and the duplicate became a phantom obstacle beside a
-    # gate buoy. Now every label in colour_family_labels associates with every
-    # other, and the colour is decided by VOTES. The UAV's field supplies the
-    # colour when this tracker cannot (bt_runner fusePassage: the UAV wins).
-    colour_vote_enable: true               # [DYN] false = the old behaviour:
-                                           #       same label to associate, plain
-                                           #       majority to report
+    # The detector names the beacon STATE (side beacons OFF in Task 1 Disruptive;
+    # FLASHING 1 s on / 1 s off in lower tiers), so one RoboBuoy is red_buoy one
+    # frame and black_buoy the next. Keyed on the label, that is two tracks a
+    # metre apart — a phantom obstacle beside a gate buoy. So every label in
+    # colour_family_labels associates with every other and colour is decided by
+    # VOTES. The UAV supplies it when this tracker cannot (bt_runner fusePassage).
+    colour_vote_enable: true               # [DYN] false = same label to
+                                           #       associate, plain majority to
+                                           #       report
     colour_family_labels:                  # [RO] ONE object type in different
       - "red_buoy"                         #      beacon states. Labels outside
-      - "green_buoy"                       #      this list keep the old rule
-      - "black_buoy"                       #      (same label, or one side empty).
+      - "green_buoy"                       #      this list need the same label
+      - "black_buoy"                       #      (or one side empty).
       - "flashing_blue_buoy"               #      NOTE the engine's own class is
       - "steady_blue_buoy"                 #      blue_buoy (buoy_detector.labels),
       - "blue_buoy"                        #      listed too so a lit-blue RoboBuoy
@@ -685,25 +541,20 @@ target_tracker:
                                            #      wins. MUST hold no colour word:
                                            #      bt_runner beaconFromLabel()
                                            #      matches the substrings red,
-                                           #      green, blue, off, black. A
-                                           #      track labelled this is still a
-                                           #      track and still an obstacle
+                                           #      green, blue, off, black. Still
+                                           #      a track and an obstacle
     colour_min_votes: 5                    # [DYN] a lit colour needs at least
                                            #       this many votes ...
     colour_min_ratio: 0.6                  # [DYN] ... and this share of the LIT
-                                           #       votes (dark ones excluded);
-                                           #       a dead heat is unknown
+                                           #       votes; a dead heat is unknown
                                            #       whatever this is set to
     health_period_s: 5.0                   # [DYN] JSON stats publish period
 
 # ---- Ground station: the operator's window onto the whole boat ----
-# Read-only over ROS: four subscriptions, no publishers. Its only outward
-# effects are the node processes it spawns and the two power verbs it can hand
-# to the HOST helper (tools/scripts/crsd_power_helper.py). Both are gated in
-# the page AND re-checked server-side, because a rule enforced only in
-# JavaScript is decoration.
-#
-# Replaces crusader_world_model's map_server, which is now this node's map tab.
+# Read-only over ROS: no publishers. Its only outward effects are the node
+# processes it spawns and the two power verbs it hands to the HOST helper
+# (tools/scripts/crsd_power_helper.py), gated in the page AND re-checked
+# server-side: a rule enforced only in JavaScript is decoration.
 ground_station:
   ros__parameters:
     port: 8090                             # [RO] clear of the viewers it embeds:
@@ -713,106 +564,88 @@ ground_station:
                                            #      laptop cannot reach it
     targets_topic: "crsd/world_targets"    # [RO] = target_tracker.targets_topic
     clusters_topic: "crsd/lidar_clusters"  # [RO] = lidar_cluster_node.clusters_topic.
-                                           #      Drawn on the map as the RAW
-                                           #      perception input, beside the
-                                           #      tracks built from it. Sent only
-                                           #      when the page asks for the
-                                           #      layer — see obstacle_topic.
-    obstacle_topic: "crsd/obstacle_distance"  # [RO] = proximity_bridge.output_topic.
-                                           #      The 72 sectors EXACTLY as
-                                           #      telemetry_bridge forwards them
-                                           #      to the autopilot, so the map
-                                           #      can be held against QGC's PRX1
-                                           #      view. If those two disagree,
-                                           #      the fault is between this node
-                                           #      and the FCU; if they agree and
-                                           #      the clusters disagree with
-                                           #      both, it is proximity_bridge.
+                                           #      The RAW input beside the tracks;
+                                           #      sent only when the page asks.
+    obstacle_topic: "crsd/obstacle_distance"  # [RO] = proximity_bridge.output_topic:
+                                           #      the 72 sectors EXACTLY as sent
+                                           #      to the autopilot. Map vs QGC's
+                                           #      PRX1 view differ: the fault is
+                                           #      between here and the FCU. They
+                                           #      agree but the clusters differ:
+                                           #      proximity_bridge.
     clusters_timeout_s: 2.0                # [RO] stale -> the layer greys out.
                                            #      Longer than pose: the LiDAR
                                            #      window is ~0.5 s and a 1 s
                                            #      budget would flap.
     obstacle_timeout_s: 2.0                # [RO] proximity_bridge sends at 5 Hz
-    nav_leg_topic: "/crsd/nav/leg_status"  # [RO] = bt_runner's leg status (String,
-                                           #      JSON, docs/nav2_avoidance_spec.md
-                                           #      4.3). The planned path, carrot and
-                                           #      goal are drawn on the map from it.
+    nav_leg_topic: "/crsd/nav/leg_status"  # [RO] = bt_runner's leg status (JSON,
+                                           #      docs/nav2_avoidance_spec.md 4.3):
+                                           #      the path, carrot and goal drawn.
     nav_leg_timeout_s: 2.0                 # [DYN] stale -> the path is BLANK, never
-                                           #       the last one. bt_runner publishes
-                                           #       at up to 2 Hz while a leg runs and
-                                           #       once per change when idle, so an
-                                           #       idle boat's path disappears here.
-    tools_dir: "/root/robotx_ws/src/rx26_asv/tools"   # [RO] where the viewer
-                                           #      scripts live INSIDE the asv
-                                           #      container. Wrong path = the
-                                           #      viewer tabs fail to start with
-                                           #      a file-not-found, nothing else.
+                                           #       the last one. bt_runner sends up
+                                           #       to 2 Hz during a leg, once per
+                                           #       change when idle, so an idle
+                                           #       boat's path disappears.
+    tools_dir: "/root/robotx_ws/src/rx26_asv/tools"   # [RO] the viewer scripts,
+                                           #      INSIDE the asv container. Wrong
+                                           #      path = viewer tabs fail with a
+                                           #      file-not-found, nothing else.
     power_socket: "/run/crsd-power.sock"   # [RO] host helper socket, bind-mounted
-                                           #      into this container. A container
+                                           #      into this container: a container
                                            #      CANNOT power off the Jetson on
-                                           #      its own; see crsd_power_helper.
+                                           #      its own (crsd_power_helper).
     allow_power: true                      # [RO] master switch for the power tab.
-                                           #      Set false on any machine where
-                                           #      a browser must never be able to
-                                           #      halt the host.
-    disk_path: "/"                         # [RO] filesystem reported as free.
-                                           #      Inside a container this is the
+                                           #      false on any machine where a
+                                           #      browser must never halt the host.
+    disk_path: "/"                         # [RO] filesystem reported as free: the
                                            #      CONTAINER's view, so the tab
                                            #      prints the path it measured.
     pose_timeout_s: 1.0                    # [RO] = shared.pose_timeout_s
     attitude_timeout_s: 1.0                # [RO] stale -> attitude readout greys
     status_timeout_s: 1.0                  # [RO] mode/armed readout. ALSO the
                                            #      power interlock: unknown armed
-                                           #      state locks power, because a
-                                           #      missing FcuStatus usually means
-                                           #      the bridge is down, which is not
+                                           #      state locks power — a missing
+                                           #      FcuStatus usually means the
+                                           #      bridge is down, which is not
                                            #      evidence the boat is safe.
     targets_timeout_s: 3.0                 # [RO] stale -> map says so
     poll_period_s: 0.2                     # [RO] browser -> /state. 5 Hz is
                                            #      ~0.5 Mbps with a full trail
     graph_period_s: 1.0                    # [DYN] how often the ROS node graph is
-                                           #       scanned. Once per browser poll
-                                           #       per client would put discovery
-                                           #       traffic on the wire in
-                                           #       proportion to viewers.
+                                           #       scanned. Per browser poll would
+                                           #       scale discovery traffic with
+                                           #       the number of viewers.
     trail_length: 600                      # [DYN] wake points kept
     trail_min_move_m: 0.5                  # [DYN] distance-gated, not time-gated
     log_capacity: 1500                     # [RO] /rosout lines kept in the ring.
-                                           #      Bounded because a node in a
-                                           #      failure loop emits thousands a
-                                           #      minute, and running the Jetson
-                                           #      out of memory during exactly
-                                           #      that failure helps nobody.
+                                           #      Bounded: a node in a failure
+                                           #      loop emits thousands a minute,
+                                           #      and running the Jetson out of
+                                           #      memory then helps nobody.
     record_dir: "/root/robotx_ws/logs/sessions"   # [RO] session root. Put it on
-                                           #      a BIND MOUNT if you want the
-                                           #      recordings to survive the
-                                           #      container being recreated.
+                                           #      a BIND MOUNT for recordings to
+                                           #      survive the container being
+                                           #      recreated.
     record_telemetry_hz: 2.0               # [DYN] telemetry.jsonl sample rate
-    record_frame_hz: 1.0                   # [DYN] DEFAULT frames saved per second
-                                           #       PER viewer, pulled from the
-                                           #       MJPEG servers rather than
-                                           #       re-encoded. The Record tab
-                                           #       sets camera and lidar
-                                           #       SEPARATELY for one session
-                                           #       without writing this back, so
-                                           #       an afternoon at full rate does
-                                           #       not become the boat's normal.
-                                           #       Range 0.05-60. The camera
-                                           #       pipeline runs at ~30 fps, so
-                                           #       30 saves every frame it sends
-                                           #       - about 1 MB/s, 3.6 GB/hour.
+    record_frame_hz: 1.0                   # [DYN] DEFAULT frames/s saved PER
+                                           #       viewer, pulled from the MJPEG
+                                           #       servers. The Record tab
+                                           #       overrides it per session without
+                                           #       writing back, so a full-rate
+                                           #       afternoon does not become the
+                                           #       normal. 0.05-60; 30 is ~1 MB/s,
+                                           #       3.6 GB/hour.
     record_min_free_gb: 2.0                # [DYN] refuse to start, and stop
-                                           #       mid-run, below this. A full
-                                           #       root filesystem takes down the
-                                           #       whole stack, not just the
-                                           #       recording.
+                                           #       mid-run, below this: a full root
+                                           #       filesystem takes down the whole
+                                           #       stack, not just the recording.
 
 # ---- rc_heartbeat_watchdog: force-disarm on RC-transmitter link loss (safety) ----
-# Consumes telemetry_bridge topics (/crsd/rc_channels, /crsd/fcu_status) and routes
-# a force-disarm back through the bridge (/crsd/force_disarm) — no own MAVLink conn.
-# Complements ArduPilot FS_THR/FS_GCS and the hardware SB e-stop (defense in depth).
-# All params [RO]: safety config, change here + restart. rc_channel/reset_channel
-# share ch7 (the SB switch) with telemetry_bridge/pixhawk_led as read-only inputs.
+# Reads telemetry_bridge's /crsd/rc_channels and /crsd/fcu_status and routes a
+# force-disarm back through it (/crsd/force_disarm) — no MAVLink conn of its own.
+# Defense in depth beside ArduPilot FS_THR/FS_GCS and the hardware SB e-stop.
+# All [RO]. rc_channel/reset_channel read ch7 (SB), as telemetry_bridge and
+# pixhawk_led do.
 rc_heartbeat_watchdog:
   ros__parameters:
     heartbeat_timeout: 1.0                 # [RO] s of stale monitored-channel PWM -> RC link lost
@@ -826,67 +659,56 @@ rc_heartbeat_watchdog:
     reset_high_pwm: 1700                   # [RO] us; reset switch "high" above this
 
 # ---- ocs_client: the heartbeat to the Operator Control Station ----
-# NOT PROVEN ON THE BOAT — started by hand, absent from core.launch.py, same
-# posture as ground_station. Sends an RxReport heartbeat as length-prefixed JSON
-# over one TCP connection that also carries OCS commands back down. Commands are
-# republished to /crsd/ocs_command and NEVER acted on here: the RC e-stop remains
-# the only safety path.
-# All [RO]: none of this is a test-day tuning knob, and ocs_host in particular
-# must not be changeable from a laptop mid-run.
+# NOT PROVEN ON THE BOAT — started by hand, absent from core.launch.py. Sends an
+# RxReport heartbeat as length-prefixed JSON over one TCP connection that also
+# carries OCS commands back down. Commands are republished to /crsd/ocs_command
+# and NEVER acted on here: the RC e-stop remains the only safety path.
+# All [RO]: ocs_host in particular must not be changeable from a laptop mid-run.
 ocs_client:
   ros__parameters:
-    ocs_host: "auto"                       # [RO] "auto" = find the OCS from the
-                                           #      UDP beacon it broadcasts, so no
-                                           #      address is typed here. While not
-                                           #      connected the node dials the
-                                           #      source of the newest beacon (under
-                                           #      5 s old, carrying team_id), at the
-                                           #      port the beacon names; with none,
-                                           #      it tries ocs_fallback_hosts in
-                                           #      turn. Once connected it STAYS: a
-                                           #      later beacon from anywhere else
-                                           #      changes nothing until the link
-                                           #      drops, so two OCS laptops cannot
-                                           #      make it flap. Two laptops: it
-                                           #      keeps whichever it reached first.
-                                           #      Or a fixed IP, dialled and nothing
-                                           #      else (the old behaviour; no
-                                           #      listener). NOT 127.0.0.1 — that is
-                                           #      this Jetson. NEVER 192.168.65-68.x:
-                                           #      those are RoboCommand's course
-                                           #      networks and this boat must not be
-                                           #      pointed at them (check_config
-                                           #      fails it; the OCS never beacons
-                                           #      there either).
+    ocs_host: "auto"                       # [RO] "auto" = while not connected,
+                                           #      dial the source of the newest
+                                           #      OCS UDP beacon (under 5 s old,
+                                           #      carrying team_id) at the port it
+                                           #      names; with none, try
+                                           #      ocs_fallback_hosts in turn. Once
+                                           #      connected it STAYS until the
+                                           #      link drops, so two OCS laptops
+                                           #      cannot make it flap (first
+                                           #      reached wins).
+                                           #      Or a fixed IP, dialled and
+                                           #      nothing else (no listener).
+                                           #      NOT 127.0.0.1 — that is this
+                                           #      Jetson. NEVER 192.168.65-68.x:
+                                           #      RoboCommand's course networks
+                                           #      (check_config fails it; the OCS
+                                           #      never beacons there either).
     ocs_port: 37564                        # [RO] = [tcp] port in the OCS
                                            #      bridge.toml. Clear of 8090
                                            #      (ground_station) and 8080/8081
-                                           #      (the viewers it embeds). With
-                                           #      "auto" this is the port tried on
-                                           #      fallback hosts; a beacon carries
-                                           #      its own.
-    ocs_discovery_port: 37565              # [RO] UDP port the node LISTENS on for
-                                           #      the OCS beacon ("auto" only) =
+                                           #      (its viewers). With "auto" this
+                                           #      is used for fallback hosts; a
+                                           #      beacon carries its own.
+    ocs_discovery_port: 37565              # [RO] UDP port LISTENED on for the
+                                           #      beacon ("auto" only) =
                                            #      [discovery] port in the OCS
                                            #      bridge.toml. 0 = do not listen
                                            #      (fallback hosts only). Bound
                                            #      without SO_REUSEADDR so it cannot
                                            #      steal another process's
-                                           #      datagrams; if the port is taken
-                                           #      the node logs it and runs on the
-                                           #      fallback list. Nothing else on
-                                           #      this repo uses 37565.
+                                           #      datagrams; if taken, the node
+                                           #      logs it and uses the fallback
+                                           #      list.
     ocs_fallback_hosts: ["192.168.100.107", "192.168.8.107"]   # [RO] tried in
                                            #      turn when no beacon is heard
                                            #      (AP drops broadcasts, OCS not
                                            #      beaconing): lab WiFi, then the
                                            #      Rocket network. IPv4 literals
                                            #      only, at least one, none on a
-                                           #      course network. A host that
-                                           #      answered is tried first next
-                                           #      time. A new laptop address that
-                                           #      is not here is still found by
-                                           #      its beacon.
+                                           #      course network. The last host
+                                           #      that answered goes first. A new
+                                           #      laptop is still found by its
+                                           #      beacon.
     vehicle_id: "USV1"                     # [RO] MUST match a [[vehicle]] id in
                                            #      the OCS bridge.toml, or the OCS
                                            #      drops every frame with
@@ -895,83 +717,56 @@ ocs_client:
     rate_hz: 2.0                           # [RO] the handbook mandates 2 Hz per
                                            #      active vehicle; the OCS rate
                                            #      governor reserves budget for it
-    fake_telemetry: false                  # [RO] true = invent a circle instead
-                                           #      of subscribing, for bench work
-                                           #      with no Pixhawk. Logs a warning
-                                           #      the whole time it is on. NEVER
-                                           #      leave true for a scored run.
+    fake_telemetry: false                  # [RO] true = invent a circle, for
+                                           #      bench work with no Pixhawk
+                                           #      (warns the whole time). NEVER
+                                           #      true for a scored run.
     pose_timeout_s: 1.0                    # [RO] = shared.pose_timeout_s; stale
-                                           #      -> no heartbeat at all, rather
-                                           #      than a fabricated position
+                                           #      -> no heartbeat, not a
+                                           #      fabricated position
     attitude_timeout_s: 1.0                # [RO] stale -> roll/pitch omitted, the
                                            #      rest of the heartbeat still goes
     status_timeout_s: 1.0                  # [RO] stale -> no heartbeat: without
-                                           #      armed/mode the vehicle state is
-                                           #      unknowable, and STATE_UNKNOWN is
-                                           #      refused by the OCS validator
+                                           #      armed/mode the state is
+                                           #      unknowable, and the OCS
+                                           #      validator refuses STATE_UNKNOWN
 
 
 # ---- oak_detector: two-stage shape + LED-colour pipeline ----
-# THIRD client for the one OAK-D, alongside oakd_publisher and buoy_detector.
-# Only one of the three may run; which one is an operator choice per session,
-# which is why none of them is in core.launch.py.
-#
-# It publishes to the SAME topic as buoy_detector (oak/detections) on purpose:
-# the two answer the same question about different mission elements, they can
-# never run together, and target_tracker should work behind whichever is up
-# without a remap. check_config.py pins all three names together.
-#
-# It also shares buoy_detector's stream_port 8080 on purpose — same reason, plus
-# the ground station's camera tab then finds whichever is running.
+# THIRD client for the one OAK-D (see buoy_detector). It shares buoy_detector's
+# topic (oak/detections) and stream_port 8080 on purpose: the two never run
+# together, so target_tracker and the camera tab work behind whichever is up
+# without a remap. check_config.py pins the three topic names together.
 #
 # THE CROP PARAMS ARE A CONTRACT WITH THE TRAINING EXPORTER, not tuning knobs.
-# cls_imgsz / crop_pad / crop_top_frac decide the picture the classifier sees,
-# and the exporter that built its training set cuts crops the same way. A few
-# percent of disagreement does not fail — the engine just classifies worse,
-# everywhere, and nothing reports why. Change them in both places or not at all.
-#
-# That contract has now broken twice, both times silently:
-#   * a val folder holding crops from two exporter versions graded 0.97 in
-#     training and 0.55 against freshly cut crops — the gap was entirely
-#     geometry, not the model.
-#   * led_patch cut a full-width top band while the exporter cut buoylib's
-#     led_box (27% buoy vs 69% buoy), so a classifier at 98.6% on held-out crops
-#     underperformed on the water.
-# ae_compensation belongs to the same contract for the same reason: it decides
-# what colour the LED records as.
+# cls_imgsz / crop_pad / crop_top_frac (and ae_compensation: what colour the LED
+# records as) decide the picture the classifier sees, and the exporter cut its
+# training crops the same way. Disagreement does not fail — the engine just
+# classifies worse, everywhere, silently (mixed exporter versions once graded
+# 0.97 in training vs 0.55 on fresh crops, all geometry). Change both or neither.
 oak_detector:
   ros__parameters:
     # -- stage 1: buoy detector --
     det_engine: "/root/robotx_ws/models/buoy_detector.engine"   # [RO] TensorRT
     # -- stage 1b: shape, measured rather than predicted --
     # 'geometry' measures the marking's OUTLINE on the full-resolution crop
-    # (shape_core.marking_shape: 4th harmonic of r(theta) after whitening, plus
-    # the bounding-box fill ratio; the two must agree or it abstains). CPU, no
-    # model, no training set.
-    #
-    # This is what lets det_engine be a SINGLE-CLASS "buoy" detector. At 15 m a
-    # marking is a couple of feature-map cells across and the detector head is
-    # guessing; the ISP crop of that same buoy is 60-200 px and the outline is
-    # right there. Measured on synthetic buoys across 0-66 deg of yaw: 8/8,
-    # where a raw (un-whitened) 4th harmonic confuses the two classes past
-    # 66 deg.
-    #
-    # Abstentions fall back to the detector's own class, so 'detector' is always
-    # a safe thing to switch back to.
+    # (shape_core.marking_shape: whitened 4th harmonic of r(theta) plus bbox fill
+    # ratio; they must agree or it abstains). CPU, no model.
+    # It lets det_engine be a SINGLE-CLASS "buoy" detector: at 15 m a marking is
+    # a couple of feature-map cells and the head is guessing, while the ISP crop
+    # is 60-200 px with the outline right there (8/8 on synthetic buoys over
+    # 0-66 deg of yaw). Abstentions fall back to the detector's own class, so
+    # 'detector' is always safe to switch back to.
     shape_source: "geometry"               # [RO] "geometry" | "detector"
     shape_min_radius: 18.0                 # [RO] marking radius [px] below
-                                           #      WAS 6.0, measured at 640x400.
+                                           #      which it abstains; raise to
+                                           #      abstain more. Renders are
+                                           #      unreliable under ~6 px and
+                                           #      solid by ~10 at 640x400.
                                            #      SCALES WITH rgb_isp_denominator:
-                                           #      the same marking is 3x wider
-                                           #      at 1/1, so a 6 px floor would
-                                           #      stop refusing exactly the
-                                           #      marginal markings it exists to
-                                           #      refuse. Move this whenever
+                                           #      a marking is 3x wider at 1/1
+                                           #      (6 -> 18). Move this whenever
                                            #      rgb_isp_denominator moves.
-                                           #      which it refuses. Synthetic
-                                           #      renders are unreliable under
-                                           #      ~6 px and solid by ~10 —
-                                           #      raise this to abstain more
     shape_min_share: 0.6                   # [RO] share of a track's weighted
                                            #      shape votes one answer needs.
                                            #      Abstentions are never votes
@@ -992,47 +787,34 @@ oak_detector:
                                            #      imgsz the engine was exported
                                            #      at. 64, not 96: the LED crop is
                                            #      ~87x48 px on real footage, so
-                                           #      96 was upsampling, and
-                                           #      4_export.py's default moved
+                                           #      96 was upsampling
     crop_pad: 0.10                         # [RO] = exporter's 1.2x box padding
-    crop_top_frac: 0.25                    # [RO] = exporter --crop-frac. NOTE
-                                           #      the meaning changed with
-                                           #      led_patch: it is the fraction
-                                           #      of the BUOY kept below the LED
-                                           #      (buoylib LED_FRAC), not the
-                                           #      fraction of the crop taken off
-                                           #      the top. 0.40 with the new
-                                           #      led_patch is a band far taller
-                                           #      than the exporter's
+    crop_top_frac: 0.25                    # [RO] = exporter --crop-frac: the
+                                           #      fraction of the BUOY kept below
+                                           #      the LED (buoylib LED_FRAC), NOT
+                                           #      the fraction cut off the crop's
+                                           #      top (0.40 would be a band far
+                                           #      taller than the exporter's)
     iou_match: 0.25                        # [RO] IoU to continue a track
     max_missed: 10                         # [RO] frames a track survives unseen.
                                            #      Losing a track resets its flash
-                                           #      window, so this is now worth
-                                           #      more than it looks
+                                           #      window
     # -- stage 4: colour vote. BYPASSED while flash_enable is true --
     # Set flash_enable false with vote_decay 0.0 and vote_min 0.0 to see the RAW
-    # per-frame classification, unsmoothed — the view you want when judging the
-    # model itself rather than the tracker.
+    # per-frame classification — the view for judging the model, not the tracker.
     vote_decay: 0.85                       # [RO] per-frame forgetting factor
     vote_min: 0.55                         # [RO] share needed to publish
     # -- stage 5: flash detection --
-    # RobotX 2026 Task 1: ten buoys, five light states (OFF, flashing RED /
-    # GREEN / BLUE, solid BLUE), flashing at 1 s ON / 1 s OFF. Task 2 adds SOLID
-    # red and green survey indicators. Flashing blue is the ENTRY buoy and solid
-    # blue the EXIT, so flashing-vs-solid is a course-direction decision, not a
-    # cosmetic label.
-    #
-    # THE GAPS BETWEEN THESE FOUR NUMBERS ARE DELIBERATE. Between off_max and
-    # flash_lo, and between flash_hi and solid_min, the answer is `unknown` and
-    # the label degrades to the bare colour. Reading a solid-blue EXIT as a
-    # flashing-blue ENTRY sends the boat to the wrong end of the course, so
-    # refusing to answer is much cheaper than answering wrongly.
-    #
-    # The values come from tools/bench/bench_flash.py, not from taste. A
-    # confident classifier reports ~0.9 for a lit frame rather than 1.0, so a
-    # SOLID light measures ~0.90 duty before any noise; solid_min at 0.85 would
-    # make a solid buoy unclassifiable the moment the model is wrong one frame
-    # in ten. These survive 10% frame error and abstain at 25%.
+    # Task 1: five light states (OFF, flashing RED / GREEN / BLUE, solid BLUE),
+    # flashing 1 s ON / 1 s OFF; Task 2 adds SOLID red and green indicators.
+    # Flashing blue is ENTRY and solid blue EXIT: a course-direction decision.
+    # THE GAP BETWEEN off_max AND solid_min IS DELIBERATE: a non-periodic signal
+    # in it is `unknown` and the label degrades to the bare colour. Reading EXIT
+    # as ENTRY sends the boat to the wrong end of the course; refusing is cheaper.
+    # Measured, not taste: a confident classifier reports ~0.9 for a lit frame,
+    # so a SOLID light measures ~0.90 duty before noise; solid_min 0.85 would make
+    # a solid buoy unclassifiable if the model is wrong one frame in ten. These
+    # survive 10% frame error and abstain at 25%.
     flash_enable: true                     # [RO] false -> colour only, via voter
     flash_window_s: 6.0                    # [RO] duty window; 3 full periods
     flash_min_span_s: 4.0                  # [RO] observed time before a verdict
@@ -1042,31 +824,22 @@ oak_detector:
     colour_min_share: 0.6                  # [RO] share of LIT frames one colour
                                            #      needs before it is named
     # -- how "flashing" is actually decided --
-    # NOT by duty cycle alone, and that is the point. A 1 s ON / 1 s OFF light
-    # averages 0.5. A classifier hedging at 0.5 on every frame also averages
-    # 0.5. Duty cannot separate them, and hedging is precisely how this
-    # classifier fails — on a held-out session its `off` class scored 27% recall
-    # at 65% precision.
-    #
-    # So the tracker asks whether the signal MOVES LIKE A LIGHT: how strongly
-    # the lit score anti-correlates with itself half a period earlier. A square
-    # wave scores ~1.0 there; noise scores ~0. That test is SCALE-FREE, so a
-    # barely-visible green flash swinging 0.52 to 0.47 passes exactly as well as
-    # a bright red one swinging 1.0 to 0.0 — which matters, because green's
-    # whole margin over an unlit hull is +6 saturation points.
-    #
-    # Measured against 14 synthetic cases including 25% frame error, hedging at
-    # four noise levels, a slow drift and a wrong-period blink: 14/14.
+    # NOT by duty cycle alone: a 1 s / 1 s light averages 0.5, and so does a
+    # classifier hedging at 0.5 every frame — how this one fails (`off`: 27%
+    # recall on a held-out session). So the tracker asks whether the signal MOVES
+    # LIKE A LIGHT: anti-correlation with itself half a period earlier (square
+    # wave ~1.0, noise ~0). SCALE-FREE, so a faint green flash (0.52 to 0.47;
+    # green's whole margin over an unlit hull is +6 saturation points) passes as
+    # well as a bright red one. 14/14 on synthetic cases incl. 25% frame error.
     flash_period_s: 2.0                    # [RO] FULL cycle [s]. Task 1 is
                                            #      1 s ON / 1 s OFF = 2.0
     flash_corr_min: 0.45                   # [RO] anti-correlation at half a
                                            #      period needed to call it
                                            #      flashing
-    flash_debug_path: ""                   # [RO] jsonl of every observation, for
-                                           #      replaying real footage through
-                                           #      the tracker off-boat. Empty =
-                                           #      off; it writes one line per
-                                           #      detection per frame
+    flash_debug_path: ""                   # [RO] jsonl of every observation, to
+                                           #      replay footage through the
+                                           #      tracker off-boat. "" = off; one
+                                           #      line per detection per frame
     # -- ranging --
     range_min_m: 0.30                      # [RO] depth below this is invalid
     range_max_m: 25.0                      # [RO] depth above this is invalid
@@ -1074,71 +847,41 @@ oak_detector:
     # -- output --
     frame_id: "camera_link"                # [RO] REP-103: x fwd, y left, z up
     detections_topic: "crsd/oak/detections"     # [RO] = buoy_detector.detections_topic
-    health_topic: "crsd/oak_detector_health"   # [RO] std_msgs/String JSON;
-                                           #      per-track light state, and the
-                                           #      rate the flash tracker depends
-                                           #      on. Same shape as
-                                           #      crsd/lidar_cluster_health
+    health_topic: "crsd/oak_detector_health"   # [RO] std_msgs/String JSON:
+                                           #      per-track light state and the
+                                           #      rate the flash tracker needs
     # -- camera: fps and isp_denominator MUST equal the other OAK-D nodes.
-    # subpixel / lr_check / sync_threshold_ms used to live here too and are now
-    # constants in oak_pipeline.py — equal by construction, nothing to pin.
-    fps: 15.0                              # [RO] = oakd_publisher.fps.
-                                           #      15, NOT 30, and the reason is
-                                           #      the USB link rather than the
-                                           #      GPU. What crosses XLink is the
-                                           #      colour frame (NV12) plus depth,
-                                           #      EVERY frame, so the load is
-                                           #      size x rate:
+    # subpixel / lr_check / sync_threshold_ms are constants in oak_pipeline.py.
+    fps: 15.0                              # [RO] = oakd_publisher.fps. 15, NOT
+                                           #      30, for the USB link: colour
+                                           #      (NV12) + depth cross XLink EVERY
+                                           #      frame, so load = size x rate:
                                            #        640x400  @30 =  27 MB/s  ok
                                            #        1920x1200@30 = 119 MB/s  DIES
                                            #        1920x1200@15 =  60 MB/s
-                                           #      Measured 2026-09-20: at 30 fps
-                                           #      full res the node ran for ~50
-                                           #      health periods and then took
-                                           #      X_LINK_ERROR on the rgbd
-                                           #      stream and exited; 640x400 in
-                                           #      the same session, same cable,
-                                           #      took none. Full resolution is
-                                           #      worth more here than frames a
-                                           #      hull moving at a few m/s
-                                           #      cannot use -- the flash is 1s
-                                           #      on/off, so even 4 fps clears
-                                           #      Nyquist.
+                                           #      (X_LINK_ERROR, node exits). The
+                                           #      flash is 1 s on/off, so even
+                                           #      4 fps clears Nyquist.
     rgb_isp_denominator: 1                 # [RO] 1/N for the COLOUR camera
-                                           #      ALONE. 1 -> 1920x1200.
-                                           #      Measured 2026-09-20: moving
-                                           #      BOTH paths to 1/2 halved the
-                                           #      frame rate (27.8 -> 13.6 fps)
-                                           #      while inference barely moved
-                                           #      -- the cost was stereo and
-                                           #      USB, not the model. Past
-                                           #      1280px wide the stereo engine
-                                           #      drops EVERY frame, so a full
-                                           #      colour frame is unreachable
-                                           #      while the two share a scale.
-                                           #      The LED classifier cuts a
-                                           #      64x64 crop from the RAW frame,
-                                           #      so pixels kept here are pixels
-                                           #      that crop need not invent.
-                                           #      NOTE the detector engine is
-                                           #      fixed at 640x640, so this
-                                           #      helps the CLASSIFIER at once
-                                           #      and the DETECTOR only after a
-                                           #      re-export at a larger imgsz.
+                                           #      ALONE (1 -> 1920x1200). Both
+                                           #      paths at 1/2 halved the frame
+                                           #      rate with inference barely
+                                           #      moved — the cost is stereo and
+                                           #      USB — and past 1280 px wide the
+                                           #      stereo engine drops EVERY frame.
+                                           #      The 64x64 LED crop is cut from
+                                           #      the RAW frame, so this helps the
+                                           #      CLASSIFIER; the 640x640 DETECTOR
+                                           #      only after a larger re-export.
     isp_denominator: 3                     # [RO] 3 -> 640x400. Raise resolution
                                            #      (2 -> 960x600) if no_crop is
                                            #      high — moves all three nodes
     # ---- camera profile: every one [DYN], tunable from the Tuning tab ----
-    # Ranges here are depthai's own (2.32), and are ENFORCED from the same
-    # table the node generates its parameter spec from -- see oak_controls.py.
-    #
-    # Why this is a tuning surface and not four settled numbers: measured on
-    # the boat at dusk facing a bright sky, the camera chose 2214 us at ISO
-    # 100 -- 1/15th of the shutter available and the gain range entirely
-    # unused -- because the default meters the WHOLE FRAME and the sky
-    # averaged out to something that looked correct. Median luma 12/255 with
-    # 38% of the frame crushed to black and 0.10% clipped. The right profile
-    # depends on the light, so it has to be findable without a rebuild.
+    # Ranges are depthai's own (2.32), ENFORCED from the table the node builds
+    # its parameter spec from (oak_controls.py).
+    # A tuning surface because the right profile depends on the light: at dusk
+    # facing a bright sky, whole-frame metering chose 2214 us at ISO 100 (1/15th
+    # of the shutter, no gain) — median luma 12/255, 38% crushed to black.
     ae_mode: "auto"                        # [DYN] auto | manual. manual pins
                                            #       exposure_us + iso and makes
                                            #       every ae_* setting inert.
@@ -1147,65 +890,47 @@ oak_detector:
                                            #       100..1600 (100 is the floor)
     ae_compensation: -3                    # [DYN] EV steps, -9..9; negative is
                                            #       darker. A TRAINING CONTRACT:
-                                           #       should match the exposure the
-                                           #       classifier's footage was shot
-                                           #       at. oak_record.py defaults to
-                                           #       -3 too. Measured with the
-                                           #       band below: -3 -> median 35,
-                                           #       -1 -> 72, 0 -> 112 with only
-                                           #       0.6% crushed. Moving it means
-                                           #       retraining, or accepting the
-                                           #       classifier sees new colours.
+                                           #       match the classifier footage's
+                                           #       exposure (oak_record.py uses
+                                           #       -3). Moving it means retraining
+                                           #       or accepting new colours.
     ae_max_exposure_us: 8000               # [DYN] shutter cap; AE spends gain
-                                           #       past it. depthai prioritises
-                                           #       exposure over ISO up to frame
-                                           #       time, so uncapped it buys
-                                           #       brightness with smear -- and
-                                           #       a noisy sharp buoy detects
-                                           #       where a smeared one does not.
-                                           #       0 = uncapped.
+                                           #       past it. Uncapped, depthai buys
+                                           #       brightness with smear — a noisy
+                                           #       sharp buoy detects where a
+                                           #       smeared one does not. 0 =
+                                           #       uncapped.
     ae_lock: false                         # [DYN] freeze AE where it is
     ae_region_top: 0.35                    # [DYN] metering band, as fractions
     ae_region_height: 0.45                 # [DYN] of frame height. WHERE the
-                                           #       meter looks, which outdoors
-                                           #       matters more than the bias:
-                                           #       0.35+0.45 is the horizon and
-                                           #       the near water. Measured, at
-                                           #       fixed -3: median 12 -> 41,
-                                           #       crushed 38% -> 16%. height 0
-                                           #       = whole frame. Fractions, not
-                                           #       pixels: the region is against
-                                           #       the SENSOR, before ISP scale,
-                                           #       so isp_denominator must not
-                                           #       enter the calculation.
+                                           #       meter looks matters more than
+                                           #       the bias outdoors: 0.35+0.45 is
+                                           #       the horizon and near water
+                                           #       (median luma 12 -> 41). height
+                                           #       0 = whole frame. Fractions of
+                                           #       the SENSOR, before ISP scale.
     awb_mode: "auto"                       # [DYN] auto | off | daylight |
                                            #       cloudy_daylight | shade |
                                            #       twilight | incandescent |
                                            #       fluorescent | warm_fluorescent
-    wb_temperature_k: 5000                 # [DYN] 1000..12000, used only when
-                                           #       awb_mode is off. Water and
-                                           #       sky are both strongly blue,
-                                           #       which is what auto white
-                                           #       balance is worst at: it
-                                           #       corrects the blue away and
-                                           #       takes the buoys with it.
+    wb_temperature_k: 5000                 # [DYN] 1000..12000, only when
+                                           #       awb_mode is off. Water and sky
+                                           #       are strongly blue, auto WB's
+                                           #       worst case: it corrects the blue
+                                           #       away and the buoys with it.
     brightness: 0                          # [DYN] -10..10, post-ISP. Cannot
                                            #       recover a crushed shadow --
                                            #       fix exposure first.
     contrast: 0                            # [DYN] -10..10
     saturation: 0                          # [DYN] -10..10. Careful: the LED
-                                           #       classifier separates a lit
-                                           #       buoy from its hull ON
-                                           #       saturation, so this moves the
-                                           #       exact quantity it reads.
+                                           #       classifier tells a lit buoy
+                                           #       from its hull BY saturation.
     sharpness: 1                           # [DYN] 0..4, depthai default 1
     luma_denoise: 1                        # [DYN] 0..4, worth raising once high
     chroma_denoise: 1                      # [DYN] 0..4, ISO is in play
     anti_banding: "auto"                   # [DYN] off | mains_50_hz |
                                            #       mains_60_hz | auto. Mains
-                                           #       flicker only -- irrelevant
-                                           #       outdoors, matters under dock
-                                           #       lights.
+                                           #       flicker: dock lights only.
     poll_period_s: 0.01                    # [RO] output-queue poll period [s]
     queue_size: 4                          # [RO] device output queue depth
     health_period_s: 5.0                   # [RO] rate/health log period [s]
@@ -1213,75 +938,58 @@ oak_detector:
     stream_enable: true                    # [RO] MJPEG over HTTP; frames drawn
                                            #      only while a browser is open
     stream_port: 8080                      # [RO] SHARED with buoy_detector and
-                                           #      tools/oak_view.py — all three
-                                           #      contend for the one camera, so
-                                           #      never for the socket
+                                           #      tools/oak_view.py: one camera,
+                                           #      so never contended
     stream_quality: 60                     # [RO] JPEG quality for that view
+
 # ---- Missions: bt_runner_node — one coarse action outside, a tree inside ----
-# Crusader's bt_navigator. It accepts a SafePassage goal, loads the Task 1
-# behaviour tree and ticks it; the tree's leaves are primitives that publish a
-# GuidedSetpoint and poll /crsd/pose for arrival. The runtime XML lives in
-# crusader_bt/behavior_trees/.
-#
-# NOT in core.launch.py. Nothing in this package has run on the water.
+# Crusader's bt_navigator: accepts a SafePassage goal, loads the Task 1
+# behaviour tree and ticks it; the leaves are primitives that publish a
+# GuidedSetpoint and poll /crsd/pose for arrival. Runtime XML:
+# crusader_bt/behavior_trees/. NOT in core.launch.py.
 bt_runner_node:
   ros__parameters:
     tree_file: "/root/robotx_ws/install/crusader_bt/share/crusader_bt/behavior_trees/task1_safe_passage.xml"
-                                            # [DYN] absolute, INSIDE the container.
-                                            #      Read when a goal is accepted.
-                                            #      There is deliberately no
-                                            #      default in code: a runner that
-                                            #      silently ticks the wrong tree
-                                            #      is worse than one that refuses
-                                            #      to start.
+                                            # [DYN] absolute, INSIDE the container,
+                                            #      read per accepted goal. No code
+                                            #      default: silently ticking the
+                                            #      wrong tree is worse than
+                                            #      refusing to start.
     action_name: "/crsd/safe_passage"       # [RO] the coarse mission action
     tick_hz: 10.0                           # [RO] tree tick rate. ALSO the cancel
-                                            #      latency and the rate the
-                                            #      reactive guard band re-checks
-                                            #      the flight mode at.
-    default_timeout_s: 600.0                # [RO] used when the goal sends 0. The
-                                            #      timeout lives in the RUNNER,
-                                            #      not the XML, so a tree that
-                                            #      somehow never terminates still
-                                            #      cannot strand the boat.
-    mode_grace_s: 3.0                       # [RO] how long a missing HEARTBEAT is
-                                            #      tolerated at goal start. At
-                                            #      5 Hz this is 15 heartbeats.
+                                            #      latency and the guard band's
+                                            #      flight-mode re-check rate.
+    default_timeout_s: 600.0                # [RO] used when the goal sends 0. It
+                                            #      lives in the RUNNER, not the
+                                            #      XML, so a tree that never
+                                            #      terminates cannot strand the boat.
+    mode_grace_s: 3.0                       # [RO] missing HEARTBEAT tolerated at
+                                            #      goal start (15 beats at 5 Hz).
     stream_timeout_s: 1.0                   # [RO] = shared.pose_timeout_s. Older
-                                            #      than this and the tree is told
-                                            #      the pose is stale rather than
-                                            #      acting on it.
+                                            #      and the tree is told the pose
+                                            #      is stale rather than acting on it.
     plan_timeout_s: 15.0                    # [RO] the UAV plan arrives at ~0.2 Hz,
-                                            #      so it cannot share the 20 Hz
-                                            #      pose stream's timeout. Older
-                                            #      than this and the tree is told
-                                            #      the plan is stale, which halts
-                                            #      the mission: a dead radio must
-                                            #      STOP the boat, not leave it
-                                            #      driving a passage nobody can
-                                            #      still confirm.
-    assoc_radius_m: 5.0                     # [RO] how near a tracked contact has
-                                            #      to be to count as the same
-                                            #      object as a plan buoy. Too
+                                            #      so it cannot share the pose
+                                            #      timeout. A stale plan halts the
+                                            #      mission: a dead radio must STOP
+                                            #      the boat, not leave it driving a
+                                            #      passage nobody can confirm.
+    assoc_radius_m: 5.0                     # [RO] how near a tracked contact must
+                                            #      be to count as a plan buoy. Too
                                             #      large and two buoys claim one
-                                            #      contact; the fusion is global
-                                            #      greedy so it cannot double-
-                                            #      claim, but it CAN pair the
-                                            #      wrong two.
+                                            #      contact; the global greedy
+                                            #      fusion cannot double-claim, but
+                                            #      CAN pair the wrong two.
     publish_setpoints: false                # [RO] FALSE = this node CANNOT move
                                             #      the boat. Legs still poll for
                                             #      arrival, so a human can drive
-                                            #      the mission and the tree will
-                                            #      follow it — that is the
-                                            #      read-only water test, and it
-                                            #      is worth more than a version
-                                            #      that faked arrival. Turning it
+                                            #      and the tree follows — the
+                                            #      read-only water test. Turning it
                                             #      true is a G1 gate.
-    fire_pump: false                        # [RO] FALSE = the fixed-nozzle shot's
-                                            #      FireBurst runs DRY: it lines up,
-                                            #      logs "FIRE #n (DRY)" and never
-                                            #      asks for the pump. A separate
-                                            #      switch from publish_setpoints:
+    fire_pump: false                        # [RO] FALSE = FireBurst runs DRY: it
+                                            #      lines up, logs "FIRE #n (DRY)"
+                                            #      and never asks for the pump.
+                                            #      Separate from publish_setpoints:
                                             #      moving is G1, water is G7.
     # The sticks for the MANUAL fire tree (StrafeKeep -> /crsd/rc_override), in
     # the order [ahead, lateral, yaw]: dp_hold's map and its measured neutrals.
@@ -1289,20 +997,16 @@ bt_runner_node:
     stick_channels: [3, 4, 1]               # [RO] throttle, lateral, steer
     stick_neutral_us: [1495, 1495, 1489]    # [RO] = RC3/RC4/RC1_TRIM
     stick_reverse: [false, false, false]    # [RO]
-    task_token: "TASK_SAFE_PASSAGE"         # [RO] an RxTask name, gated by
-                                            #      check_config against
-                                            #      ocs_link.RX_TASKS.
+    task_token: "TASK_SAFE_PASSAGE"         # [RO] an RxTask name (check_config
+                                            #      vs ocs_link.RX_TASKS)
     autonomous_modes: ["GUIDED", "AUTO", "LOITER", "RTL"]
-                                            # [RO] = shared.autonomous_modes. The
-                                            #      IsAutonomous leaf at the top of
-                                            #      the guard band reads this, so
-                                            #      what the boat obeys, shows on
-                                            #      the mast and reports to
-                                            #      RoboCommand stay one fact.
+                                            # [RO] = shared.autonomous_modes; read
+                                            #      by the guard band's IsAutonomous
+                                            #      leaf.
     # -- Task 3 (behavior_trees/task3_disruptive.xml) --
-    # The runner places every docking-bay sighting in the world with these.
-    # They MUST equal target_tracker's (check_config enforces it): one camera
-    # placed twice is two worlds that disagree about where things are.
+    # The runner places every docking-bay sighting with these. They MUST equal
+    # target_tracker's (check_config): one camera placed twice is two worlds that
+    # disagree about where things are.
     cam_x: 0.37                             # [RO] = target_tracker.cam_x
     cam_y: 0.0                              # [RO] = target_tracker.cam_y
     cam_yaw_deg: 0.0                        # [RO] = target_tracker.cam_yaw_deg
@@ -1310,37 +1014,31 @@ bt_runner_node:
                                             #      + = aimed DOWN. Task 3 may need
                                             #      it NEGATIVE: level, from inside
                                             #      a slip the camera cannot see the
-                                            #      upper window (docs/T3_...md)
-    dock_face_dz_m: 0.39                    # [RO] face centre above the camera,
-                                            #      for a pitched camera only. Build
-                                            #      guide: ~0.8 m above water; the
-                                            #      camera is 0.41 m up
+                                            #      upper window
+                                            #      (docs/T3_coordinated_logistics.md)
+    dock_face_dz_m: 0.39                    # [RO] face centre above the camera
+                                            #      (pitched camera only): ~0.8 m
+                                            #      above water per the build
+                                            #      guide, camera at 0.41 m
     dock_topic: "dock/observations"         # [RO] DockObservation, from the
                                             #      dock detector (firefighting-cv
                                             #      specs: observations_topic)
     # -- obstacle avoidance (docs/nav2_avoidance_spec.md 5.8; crusader_bt README) --
     # NavigateTo and CircleBuoy plan around every known hazard through Nav2's
-    # planner_server, and hold when they cannot. ArduPilot still flies the boat
-    # (GUIDED position setpoints). Avoidance is not a safety system: the RC
-    # e-stop is.
-    nav_mode: "off"                         # [RO] off | shadow | on. THE BOAT STAYS
-                                            #      "off" until the asv container
-                                            #      has Nav2 and crusader_nav runs:
-                                            #      straight legs, no planner.
-                                            #      "shadow" plans and shows the
-                                            #      path but drives the legacy
-                                            #      legs (the first thing to run on
-                                            #      the water); "on" drives the
-                                            #      planned path. The sim rig
-                                            #      passes -p nav_mode:=on. A build
-                                            #      without nav2_msgs refuses to
-                                            #      start with anything but off.
+    # planner_server and hold when they cannot; ArduPilot still flies the boat
+    # (GUIDED setpoints). Avoidance is not a safety system: the RC e-stop is.
+    nav_mode: "off"                         # [RO] off = straight legs, no planner;
+                                            #      shadow = plans and shows the
+                                            #      path, drives straight legs;
+                                            #      on = drives the planned path.
+                                            #      The sim and lake rigs pass
+                                            #      -p nav_mode:=... A build without
+                                            #      nav2_msgs refuses anything but off.
     nav_map_frame: "map"                    # [RO] = nav2 global_costmap
                                             #      global_frame (check_config)
     nav_datum_topic: "/crsd/datum"          # [RO] = nav_frames_node.datum_topic.
-                                            #      With shadow or on the BT frame
-                                            #      is NOT pinned at the first fix:
-                                            #      it waits for this datum
+                                            #      shadow/on: the BT frame waits
+                                            #      for this datum, not the first fix
     nav_hazards_topic: "/crsd/nav/hazards"  # [RO] HazardArray out = nav2_params
                                             #      hazard_layer.topic (check_config)
     nav_leg_topic: "/crsd/nav/leg_status"   # [RO] leg status JSON out
@@ -1373,17 +1071,14 @@ bt_runner_node:
     nav_max_chord_dev_m: 0.3                # [RO] the carrot's chord may cut the
                                             #      path by this much, no more
     nav_wp_radius_m: 2.0                    # [RO] = the autopilot's WP_RADIUS
-                                            #      (working_crusader.params,
-                                            #      check_config): an intermediate
-                                            #      carrot closer than this counts
-                                            #      as reached
+                                            #      (check_config): an intermediate
+                                            #      carrot this close is reached
     nav_replan_period_s: 0.5                # [RO] plan at most this often
     nav_min_request_gap_s: 0.2              # [RO] ... and never faster than this
     nav_check_period_s: 0.1                 # [RO] is_path_valid at most this often
-    nav_plan_timeout_s: 1.0                 # [RO] no answer by then = the planner
-                                            #      cannot plan (Humble's planner
-                                            #      hangs on a costmap that is not
-                                            #      current)
+    nav_plan_timeout_s: 1.0                 # [RO] no answer by then = cannot plan
+                                            #      (Humble's planner hangs on a
+                                            #      non-current costmap)
     nav_first_plan_wait_s: 1.0              # [RO] no plan yet by then = hold
     nav_invalid_confirm: 2                  # [RO] is_path_valid must say invalid
                                             #      this many times in a row
@@ -1453,15 +1148,14 @@ bt_runner_node:
     nav_dock_finger_w_m: 0.5                # [RO]
     nav_dock_slip_w_m: 1.5                  # [RO]
     nav_dock_deck_depth_m: 1.0              # [RO]
-    nav_fence_len_m: 10.0                   # [RO] SIDE FENCES, nav_mode on only: every
-                                            #      red/green the passage plan colours
-                                            #      gets a wall of hazard circles this
-                                            #      long, running OUTWARD from the buoy
-                                            #      (gate line away from the partner;
-                                            #      a single: red right / green left
-                                            #      of the axis), so the planner can
-                                            #      only pass it on the handbook's side.
-                                            #      0 = no fences
+    nav_fence_len_m: 10.0                   # [RO] SIDE FENCES, nav_mode on only: each
+                                            #      red/green in the passage plan gets a
+                                            #      wall of hazard circles this long,
+                                            #      OUTWARD from the buoy (gate: away
+                                            #      from the partner; single: red right
+                                            #      / green left of the axis), so the
+                                            #      planner passes it only on the
+                                            #      handbook's side. 0 = no fences
     nav_fence_spacing_m: 0.5                # [RO] circle pitch; < 2 x radius = a wall
     nav_fence_radius_m: 0.3                 # [RO] circle radius
     nav_fence_clear_m: 8.0                  # [RO] no circle this close to the ENTRY or
@@ -1471,74 +1165,55 @@ bt_runner_node:
 # ---------------------------------------------------------------------------
 # rxl_link_node — the boat's end of the UAV link.
 #
-# Speaks MAVLink, to the RADIO, never to the Pixhawk. Different endpoint,
-# different dialect, and a message set with no command in it: it cannot arm,
-# set a mode, or move the boat. telemetry_bridge stays the only path to the
-# autopilot and the two never share a socket.
-#
+# Speaks MAVLink to the RADIO, never the Pixhawk: different endpoint, dialect,
+# and a message set with no command in it — it cannot arm, set a mode, or move
+# the boat. telemetry_bridge stays the only path to the autopilot; the two never
+# share a socket.
 # In core.launch.py (respawning), so the Radio tab survives a reboot. Do not
 # also hand-start it: two processes on the radio's serial port each read half.
 rxl_link_node:
   ros__parameters:
     rxl_endpoint: "/dev/crsd-rfd"
-                                            # [RO] THE RFD900, on its FTDI cable.
-                                            #      A udev symlink (tools/udev),
-                                            #      never /dev/ttyUSB0: the number
-                                            #      depends on plug order. Not
-                                            #      by-id either: that names ONE
-                                            #      cable's serial, and a swapped
-                                            #      cable left the node reading a
-                                            #      path that no longer existed.
-                                            #      The link node OWNS this
-                                            #      device; nothing else may open
-                                            #      it, including the test kit's
-                                            #      companion.py.
-                                            #      For SITL or the bench, override
-                                            #      it per run instead of editing
-                                            #      this line:
+                                            # [RO] THE RFD900, on its FTDI cable,
+                                            #      via a udev symlink (tools/udev):
+                                            #      never /dev/ttyUSB0 (plug
+                                            #      order) nor by-id (names ONE
+                                            #      cable; a swapped cable left the
+                                            #      node on a dead path). The link
+                                            #      node OWNS it; nothing else may
+                                            #      open it, including the test
+                                            #      kit's companion.py.
+                                            #      SITL/bench: override per run,
+                                            #      do not edit this line:
                                             #        ros2 run crusader_link \
                                             #          rxl_link_node --ros-args \
                                             #          -p rxl_endpoint:=udpin:127.0.0.1:14555
-                                            #      That udpin form BINDS and
-                                            #      listens; "udp:" is an outbound
-                                            #      client that receives nothing,
-                                            #      silently. 14555 and not 14551:
-                                            #      which pymavlink resolves to an
-                                            #      outbound client that connects
-                                            #      nowhere and receives nothing,
-                                            #      silently.
-                                            #      14555 and not 14551: that one
-                                            #      is telemetry_bridge's, and a
-                                            #      udpin bind STEALS datagrams —
-                                            #      the displaced consumer sees
-                                            #      silence, not an error. 14550
-                                            #      stays free for ad-hoc tooling
-                                            #      and SITL's rover MAVProxy
-                                            #      fans out to 14552.
-    radio_traffic_topic: "crsd/radio/traffic"  # [RO] every frame the link node
-                                            #      sent or heard, for the ground
-                                            #      station's Radio tab. A RECORD:
-                                            #      nothing acts on this topic.
-    uav_sysid: 200                          # [RO] who the Radio tab's test frame
-                                            #      is addressed to. The aircraft's
-                                            #      autopilot is 1 in the Fleet ICD;
-                                            #      its companion answers from 200.
-    rxl_baud: 115200                        # [RO] only used when rxl_endpoint is
-                                            #      a serial device. Every radio in
-                                            #      the mesh runs SERIAL=115.
-    source_system: 42                       # [RO] the boat's MAVLink system id on
-                                            #      the MESH, not on the autopilot
-                                            #      link. Must differ from the
-                                            #      aircraft's or an inspector
-                                            #      files both vehicles' traffic
-                                            #      under one tree.
+                                            #      udpin BINDS and listens; "udp:"
+                                            #      is an outbound client that
+                                            #      receives nothing, silently.
+                                            #      Not 14551: telemetry_bridge's,
+                                            #      and a udpin bind STEALS
+                                            #      datagrams (the displaced
+                                            #      consumer sees silence). 14550
+                                            #      stays free for ad-hoc tooling.
+    radio_traffic_topic: "crsd/radio/traffic"  # [RO] every frame sent or heard,
+                                            #      for the Radio tab. A RECORD:
+                                            #      nothing acts on it.
+    uav_sysid: 200                          # [RO] the Radio tab's test-frame
+                                            #      target: the aircraft's autopilot
+                                            #      is 1 (Fleet ICD), its companion
+                                            #      answers from 200.
+    rxl_baud: 115200                        # [RO] serial endpoints only; every
+                                            #      mesh radio runs SERIAL=115.
+    source_system: 42                       # [RO] the boat's MAVLink sysid on the
+                                            #      MESH, not the autopilot link.
+                                            #      Must differ from the aircraft's
+                                            #      or an inspector files both
+                                            #      vehicles under one tree.
     plan_topic: "crsd/passage_plan"         # [RO] PassagePlan out, ON ARRIVAL.
-                                            #      Never resampled: a timer that
-                                            #      republished the last plan would
-                                            #      defeat the staleness check
-                                            #      downstream, and the boat would
-                                            #      keep driving a passage nobody
-                                            #      can still confirm.
+                                            #      Never resampled: republishing
+                                            #      the last plan would defeat the
+                                            #      staleness check downstream.
     gate_topic: "crsd/next_gate"            # [RO] GatePair out, on arrival.
     gate_reached_topic: "crsd/gate_reached" # [RO] std_msgs/UInt8 IN. The ONLY
                                             #      thing the boat transmits on
