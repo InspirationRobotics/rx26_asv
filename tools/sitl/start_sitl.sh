@@ -59,7 +59,7 @@ status() {
   echo "ardurover : $(pgrep -c -f 'bin/ardurover' 2>/dev/null || echo 0) process(es)"
   echo "mavproxy  : $(pgrep -c -f 'mavproxy' 2>/dev/null || echo 0) process(es)"
   echo "endpoints : udp:127.0.0.1:14551 (ROS)   udp:127.0.0.1:14550 (tooling)"
-  local w; w="$(ip route 2>/dev/null | awk '/^default/ {print $3; exit}')"
+  local w; w="$(ip route 2>/dev/null | awk '/^default/ && !h {print $3; h = 1}')"
   [[ -n "$w" ]] && echo "            udp:$w:14550 (QGC on the Windows host)"
 }
 
@@ -100,7 +100,10 @@ sleep 10
 # gateway — resolved dynamically because that address changes when WSL restarts.
 # QGC listens on UDP 14550 by DEFAULT and auto-connects, so pushing telemetry to
 # it here means nobody has to add a comm link by hand.
-WIN_HOST="$(ip route 2>/dev/null | awk '/^default/ {print $3; exit}')"
+# awk reads ALL of ip's output (no `exit` on the first match): exiting early
+# can kill ip with SIGPIPE, and with pipefail + set -e this line then ended the
+# script silently before MAVProxy started (~1 run in 5; 2026-10-12).
+WIN_HOST="$(ip route 2>/dev/null | awk '/^default/ && !h {print $3; h = 1}')"
 QGC_OUT=""
 if [[ -n "$WIN_HOST" ]]; then
   QGC_OUT="--out udp:${WIN_HOST}:14550"

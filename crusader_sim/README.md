@@ -20,6 +20,10 @@ boat's params file.
   correctly. `check_motion` passes all four checks.
 - **The hull is a placeholder** until the team sends CAD and a weight. See
   [MODEL_REQUEST.md](MODEL_REQUEST.md).
+- **2026-10-18: Task 3's one-click run is `task3_cannon_sim.xml`** (GUIDED to the waypoint,
+  then MANUAL: a slide along the dock to the GREEN bay, dock at 1.25 m, the trim-free aim).
+  Weather that varies (`sim weather rough`) and the cannon's own aim test (`sim aimtest`):
+  [docs/T3_sim_commands.md](../docs/T3_sim_commands.md).
 - **Task 3 runs end to end with the pan/tilt water cannon (2026-10-05).** `task3_cannon.xml`
   passes the referee on `task3` (bay 2), the GREEN bay moved to 1 and 3, and `task3_ul` with
   the camera tilted up 5 deg: docked on the LiDAR 1.1 m from the back wall (the whole hull in

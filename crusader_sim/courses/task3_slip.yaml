@@ -1,0 +1,33 @@
+# task3_slip — the slip tree's course (task3_cannon_slip.xml, docs/T3_slip_test_plan.md):
+# courses/task3.yaml's dock (slips 1.5 m wide, 2 m walls: the measured practice slip)
+# with the GREEN bay on the LEFT (bay 1, which the tree reports), and the boat where
+# the test plan's run 1 starts it: about 4 m out from the back wall, lined up with
+# the slip. The tree is MANUAL from its first tick:
+#
+#     python3 -m crusader_sim.task3_goal --course task3_slip --manual
+#
+# (Bay 1's centreline is x = -2.0: slips 1.5 m wide on a 2.0 m pitch; the slip's
+# back wall, the deck's front edge, is at y ~= 19.0; the walls reach y ~= 17.0.)
+# The sim's dock has three slips and its walls stand 0.3 m above the water; the
+# practice slip is one, about 0.4 m.
+
+name: task3_slip
+origin: {lat: 1.28060, lon: 103.85570}
+draft_m: 0.24
+depth_m: 5.0
+boat_start: {x: -2.0, y: 15.0, yaw_deg: 90.0}
+tier: disruptive
+code: [red, blue]
+extinguish_s: 2.0
+
+elements:
+  - type: dock
+    name: dock
+    x: 0.0
+    y: 20.0
+    facing_deg: -90.0
+    green_bay: 1
+    lit_window: {bay: 1, slot: 1, colour: red}   # the lower-right
+  - {type: platform, name: platform_red,  x: -10.0, y: 12.0, circle: red}
+  - {type: platform, name: platform_blue, x:  10.0, y: 12.0, circle: blue}
+  - {type: launch_pad, name: uav_pad, x: -6.0, y: -4.0}

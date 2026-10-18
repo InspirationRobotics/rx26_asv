@@ -8,7 +8,7 @@
 #
 # The MID360 sits low and upside down, so what it ranges is whatever vertical
 # face is below ~0.4 m ahead: on a raised dock that is the dock's edge, not the
-# target panel above it. squirt_cal calibrates against THIS number, and the tree
+# target panel above it. the cannon's aim (and once squirt_cal) uses THIS number, and the tree
 # must use the same one; the difference to the panel then cancels out.
 std_msgs/Header header       # stamp = the sweep; frame_id = base_link
 bool valid                   # false = no wall found (why in the health topic)

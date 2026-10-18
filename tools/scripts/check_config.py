@@ -77,7 +77,6 @@ CONFIG_DRIVEN_NODES = set("""
     rxl_link_node
     nav_frames_node
     wall_range_node
-    squirt_cal
     dock_slot_node
     cannon_aim_node
 """.split())
@@ -111,9 +110,6 @@ TOPIC_PAIRS = (
      ("ground_station", "clusters_topic")),
     (("proximity_bridge", "output_topic"),
      ("ground_station", "obstacle_topic")),
-    # squirt_cal logs every shot against the wall range; listening to the wrong
-    # topic it would log "no range" forever while the node publishes fine.
-    (("wall_range_node", "wall_topic"), ("squirt_cal", "wall_range_topic")),
     # Nav2 avoidance (docs/nav2_avoidance_spec.md). bt_runner draws the leg on
     # the ground station through this topic; a mismatch is a blank map, not an
     # error. The datum pair is the frame: bt_runner adopting the wrong topic
@@ -131,8 +127,7 @@ TOPIC_PAIRS = (
 # loser fails at startup with an address-in-use that reads like a crash. The
 # ground station EMBEDS the viewers rather than proxying them, so it has to
 # avoid their ports rather than share them.
-PORT_OWNERS = (("buoy_detector", "stream_port"), ("ground_station", "port"),
-               ("squirt_cal", "port"))
+PORT_OWNERS = (("buoy_detector", "stream_port"), ("ground_station", "port"))
 
 # The three nodes that each build the SAME OAK-D pipeline (only one runs at a
 # time — the camera admits one client). Depth is aligned to the RGB camera at
@@ -435,8 +430,7 @@ def check_pump():
     * the pump's RC channel is none of: the sticks, the mode switch, the SB
       e-stop, or the autonomy-drop channel (every squirt on ch9 tripped the drop
       latch until 2026-09-25);
-    * squirt_cal and the bridge agree on it, and the bridge's e-stop matches the
-      LED node's;
+    * the bridge's e-stop matches the LED node's;
     * with a pump output configured, the saved baseline says that output passes
       the pump channel through (SERVOn_FUNCTION = 50 + ch) and rests at the OFF
       value (SERVOn_TRIM = pump_off_pwm): the autopilot ENDS every burst by
@@ -446,7 +440,6 @@ def check_pump():
     try:
         cfg = yaml.safe_load(PARAMS_YAML.read_text(encoding="utf-8"))
         tb = cfg["telemetry_bridge"]["ros__parameters"]
-        sq = cfg["squirt_cal"]["ros__parameters"]
         led = cfg["pixhawk_led_status_node"]["ros__parameters"]
         ch, servo = int(tb["pump_rc_channel"]), int(tb["pump_servo_channel"])
         on, off = int(tb["pump_on_pwm"]), int(tb["pump_off_pwm"])
@@ -459,9 +452,6 @@ def check_pump():
              8: "the mode switch", estop: "the SB e-stop", drop: "autonomy-drop"}
     if ch in taken:
         problems.append(f"pump_rc_channel {ch} is {taken[ch]}")
-    if int(sq["pump_rc_channel"]) != ch:
-        problems.append(f"squirt_cal.pump_rc_channel {sq['pump_rc_channel']} != "
-                        f"telemetry_bridge's {ch}")
     if (estop, int(tb["estop_threshold"])) != (int(led["estop_channel"]),
                                                 int(led["estop_threshold"])):
         problems.append("telemetry_bridge's estop_channel/threshold differ from "

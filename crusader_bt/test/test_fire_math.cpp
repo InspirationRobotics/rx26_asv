@@ -368,6 +368,59 @@ int main()
       c.why == "on the spot" && !c.correcting);
 
     {
+      // the approach speed limit: 1 m out, closing at 0.5 m/s
+      StrafeInputs ia = in;
+      ia.range_m = p.fire_range_m + 1.0; ia.range_rate = -0.5; ia.lat_err_m = 0.0; ia.lat_rate = 0.0;
+      StrafeState s0, s1, s2, s3, s4;
+      const double free_fwd = strafeKeep(p, ia, s0, 1.0).sticks.fwd_us;
+      chk("speed limit off by default: still pushing in", free_fwd > 60.0);
+      StrafeParams q = p; q.max_close_mps = 0.25;
+      const StrafeCmd lim = strafeKeep(q, ia, s1, 1.0);
+      chk("over the limit (0.5 > 0.25 m/s): the push comes off", lim.sticks.fwd_us < q.min_us);
+      chk("...and the log says why", lim.why == "slowing: approach speed limit");
+      StrafeInputs fast = ia; fast.range_rate = -0.7;
+      chk("well over it: reverse (brake)", strafeKeep(q, fast, s2, 1.0).sticks.fwd_us <= -q.min_us);
+      StrafeInputs slow = ia; slow.range_rate = -0.1;
+      StrafeState s5;
+      chk("under the limit: untouched", strafeKeep(q, slow, s3, 1.0).sticks.fwd_us ==
+          strafeKeep(p, slow, s5, 1.0).sticks.fwd_us);
+      StrafeInputs near = ia; near.range_m = p.fire_range_m + 0.2; near.range_rate = -0.2;
+      chk("0.2 m out the limit is 0.1 m/s: 0.2 brakes", strafeKeep(q, near, s4, 1.0).sticks.fwd_us < 0.0);
+      StrafeInputs out = ia; out.range_m = p.fire_range_m - 0.5; out.range_rate = 0.6;
+      StrafeState s6;
+      chk("backing out too fast: pushes forward (brakes the other way)",
+          strafeKeep(q, out, s6, 1.0).sticks.fwd_us >= q.min_us);
+      StrafeParams r = p; StrafeTune tt; tt.max_close_mps = 0.3;
+      const std::string lg = tt.apply(r);
+      chk("strafe.max_close_mps applied and logged", r.max_close_mps == 0.3 && lg.find("max_close 0.3") != std::string::npos);
+      StrafeParams z = q; StrafeTune t0; t0.max_close_mps = 0.0; t0.apply(z);
+      StrafeState s7;
+      chk("strafe.max_close_mps 0 = off", strafeKeep(z, ia, s7, 1.0).sticks.fwd_us == free_fwd);
+    }
+
+    {
+      // centre first: 1 m out, 0.4 m off the centreline (sim 2026-10-18: a hull
+      // went in 0.5 m off the middle of a slip and stuck on a finger)
+      StrafeInputs ic = in;
+      ic.range_m = p.fire_range_m + 1.0; ic.range_rate = 0.0; ic.lat_err_m = 0.4; ic.lat_rate = 0.0;
+      StrafeState s0, s1, s2, s3, s4, s5;
+      chk("centre first off by default: pushing in", strafeKeep(p, ic, s0, 1.0).sticks.fwd_us > 0.0);
+      StrafeParams q = p; q.centre_first_m = 0.2;
+      const StrafeCmd cf = strafeKeep(q, ic, s1, 1.0);
+      chk("0.4 m off with centre_first 0.2: no push in", cf.sticks.fwd_us <= 0.0);
+      chk("...the sideways stick still centres it", cf.sticks.lat_us != 0.0);
+      chk("...and the log says why", cf.why == "centring first");
+      StrafeInputs drift = ic; drift.range_rate = -0.2;               // a current pushing it in
+      chk("drifting in while off the line: brakes (reverse)",
+          strafeKeep(q, drift, s2, 1.0).sticks.fwd_us <= -q.min_us);
+      StrafeInputs centred = ic; centred.lat_err_m = 0.1;
+      chk("within 0.2 m: moves in as before", strafeKeep(q, centred, s3, 1.0).sticks.fwd_us ==
+          strafeKeep(p, centred, s4, 1.0).sticks.fwd_us);
+      StrafeInputs close = ic; close.range_m = p.fire_range_m - 0.3;   // too close: backing out
+      chk("too close: backing out is never held", strafeKeep(q, close, s5, 1.0).sticks.fwd_us < 0.0);
+    }
+
+    {
       // in the band but coasting through it at 15 cm/s: off by default (the
       // fixed-nozzle tune), and with brake_mps the D term stops it
       StrafeInputs ib = in;

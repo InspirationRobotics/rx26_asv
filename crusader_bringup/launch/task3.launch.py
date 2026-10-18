@@ -111,6 +111,13 @@ def _nodes(context):
     setpoints = bool(bt.get("publish_setpoints", False))
     pump = bool(bt.get("fire_pump", False))
     water = bool(cfg.get("cannon_aim_node", {}).get("ros__parameters", {}).get("fire_pump", False))
+    # sim:=true is the Gazebo sim (t3.sh passes it there, crusader_sim/scripts/sim.sh):
+    # the boat and the water are simulated, so the tree may move it and the cannon
+    # may ask for water; the dock detector is the sim's (task3_world publishes
+    # /dock/observations), so no dock_view. Never on the boat.
+    sim = LaunchConfiguration("sim").perform(context).lower() in ("true", "1", "yes")
+    if sim:
+        setpoints, water = True, True
     bays = int(LaunchConfiguration("dock_bays").perform(context))
     if bays not in (1, 2, 3):
         raise ValueError(f"dock_bays:={bays}: 1..3 (3 on the course)")
@@ -124,7 +131,10 @@ def _nodes(context):
     # The cannon tree docks on the slip, not the wall range, and its water goes
     # through cannon_aim_node (whose own fire_pump is this launch's).
     cannon = Node(package="crusader_fcu", executable="cannon_aim_node",
-                  output="screen", parameters=[params])
+                  output="screen", parameters=[params] + (
+                      # the sim's dock: the windows' face 3.5 cm behind the deck edge
+                      # the LiDAR measures (task3_world FACE_U 0.965 vs the edge's 1.0)
+                      [{"fire_pump": True, "face_setback_m": 0.035}] if sim else []))
     wall = Node(package="crusader_perception", executable="wall_range_node",
                 output="screen", parameters=[params])
     slot = Node(package="crusader_perception", executable="dock_slot_node",
@@ -140,18 +150,23 @@ def _nodes(context):
         lidar = [wall, cannon]
     else:
         lidar = [wall]
-    return [
-        LogInfo(msg=f"task3: tree {TREES[tree]} | from crusader_params.yaml: publish_setpoints "
-                    f"{setpoints}, fire_pump {pump} -> {mode}"),
-        *lidar,
+    camera = [] if sim else [
         ExecuteProcess(cmd=["python3", os.path.join(tools_dir, "dock_view.py")],
-                       output="screen"),
+                       output="screen")]
+    runner = {"tree_file": tree_file, "dock_bays": bays}
+    if sim:
+        runner["publish_setpoints"] = True
+    return [
+        LogInfo(msg=f"task3: tree {TREES[tree]} | "
+                    + ("THE GAZEBO SIM (sim:=true): " if sim else "from crusader_params.yaml: ")
+                    + f"publish_setpoints {setpoints}, fire_pump {pump} -> {mode}"),
+        *lidar,
+        *camera,
         # The params file first, then the tree and the bays: a later entry wins,
         # so the file is the source of truth for everything else, the switches too.
         Node(package="crusader_bt", executable="bt_runner_node",
              output="screen",
-             parameters=[params, {"tree_file": tree_file,
-                                  "dock_bays": bays}]),
+             parameters=[params, runner]),
     ]
 
 
@@ -164,5 +179,9 @@ def generate_launch_description():
                                           "approach_test"),
         DeclareLaunchArgument("dock_bays", default_value="3",
                               description="bays in the dock; 1 only to test against one practice bay"),
+        DeclareLaunchArgument("sim", default_value="false",
+                              description="true ONLY in the Gazebo sim: the tree may move the "
+                                          "simulated boat, the cannon may ask for simulated water, "
+                                          "and the sim is the camera (no dock_view)"),
         OpaqueFunction(function=_nodes),
     ])

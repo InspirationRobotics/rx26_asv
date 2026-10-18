@@ -22,7 +22,7 @@ hull:
   beam_m: 0.6                # TEAM   same
   depth_m: 0.45              # GUESS  hull bottom to deck
   draft_m: 0.24              # MEASURED 2026-09-05, Resources.md:71 (= lidar water_z)
-  mass_kg: 30.0              # GUESS  weigh the boat, fully loaded, battery in
+  mass_kg: 60.0              # ESTIMATE Dominick 2026-10-12: "like 60 kg", 4S (was a 30 kg guess). WEIGH IT
   cg_z_m: 0.22               # GUESS  CG height above hull bottom
   # Buoyancy is carried by two pontoon boxes. Their UNDERWATER width is derived
   # so that mass_kg floats at exactly draft_m — the one thing that fixes where

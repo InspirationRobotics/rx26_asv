@@ -1,7 +1,7 @@
 """pump_core — every rule about the water pump, with no ROS and no MAVLink.
 
 telemetry_bridge is the only thing that talks to the Pixhawk, so the pump's
-rules live where the command leaves: anything upstream (squirt_cal, the Task 3
+rules live where the command leaves: anything upstream (cannon_aim_node, the Task 3
 tree, `ros2 topic pub`) can only ASK on /crsd/pump_cmd.
 
 HOW A BURST IS SENT. The pump is on a Pixhawk output that passes the pilot's

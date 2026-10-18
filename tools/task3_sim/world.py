@@ -38,12 +38,12 @@ WHAT IS MODELLED, and how honestly:
 THE FIXED-NOZZLE SHOT (behavior_trees/task3_fire_test.xml) adds:
 
   the nozzle     fixed on the bow at 30 deg, a drag-free parabola
-                 (squirt_cal's nozzle_model) whose exit speed is FITTED so that
+                 (nozzle_model.py, from the old squirt_cal tool) whose exit speed is FITTED so that
                  a level, square-on boat at `nozzle_hit_range_m` puts the
                  stream through the target window's CENTRE (1.4 m: the
                  upper-left goes in from 1.0 to 1.6 m on the boat). The water
                  goes where the boat's TRUE pose, pitch and roll send it.
-  the sea        squirt_cal's fake_boat rocking (a few sines under a slow
+  the sea        the old squirt_cal fake_boat's rocking (a few sines under a slow
                  envelope), plus a pitch kick whenever the boat accelerates.
   the LiDAR      /crsd/wall_range from the true pose: range to the dock edge,
                  the wall's bearing, the offset between the slip fingers, noise,
@@ -87,7 +87,9 @@ from vendor.dock_sequence_core import DockSequence
 # The bridge's rules and the nozzle's arc, imported rather than re-written: the
 # sim refuses exactly what the boat would. All three are stdlib only.
 _REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-for _p in (os.path.join(_REPO, "crusader_fcu"), os.path.join(_REPO, "tools", "squirt_cal")):
+# nozzle_model: the fixed nozzle's drag-free arc, here since tools/squirt_cal was
+# removed (2026-10-18)
+for _p in (os.path.join(_REPO, "crusader_fcu"), os.path.dirname(os.path.abspath(__file__))):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 from crusader_fcu import guided_hs_core, override_core, pump_core   # noqa: E402
@@ -676,7 +678,7 @@ class Lights:
 # ------------------------------------------------------------------ the sea
 
 class Sea:
-    """Roll and pitch: tools/squirt_cal/fake_boat.py's rocking (a few sines
+    """Roll and pitch: the old tools/squirt_cal fake_boat's rocking (a few sines
     under a slow envelope, so there are calm spells and rough ones), and a
     pitch kick that follows the boat's own acceleration - thrust rocks it."""
 

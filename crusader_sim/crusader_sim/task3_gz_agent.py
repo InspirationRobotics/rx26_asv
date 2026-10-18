@@ -12,16 +12,25 @@ JSON datagrams to udp 127.0.0.1:<port> and this does it:
   {"lights": {"bay2_win1": "red", ...}}   -> /world/<w>/visual_config on that visual
                                              (diffuse + emissive): the GUI AND the
                                              rendered OAK-D see it
-  {"stream": {"points": [[x,y,z]...], "hit": bool}}  -> a blue line in the GUI and
-                                             a splash at its end (green on a hit)
-  {"stream": null}                         -> the line is removed
+  {"stream": {"points": [[x,y,z]...], "hit": bool}}  -> droplets flowing along the
+                                             arc in the GUI, and a splash at its end
+                                             (green on a hit)
+  {"stream": null}                         -> the water is removed
 
-Markers live in the GUI only (gz's MarkerManager): with --no-gui there is no
-/marker service and the requests just time out, one at a time, off the main
-loop. The sensors never see the water, as the real camera barely does.
+THE WATER is a train of small glowing spheres, re-spaced along the arc and moved
+along it every frame, so it reads as a jet from any angle. They are real (static,
+visual-only) models, made once and parked under the water, and moved with
+/world/<w>/set_pose_vector: one request a frame. Not GUI markers: the GUI's
+/marker service is ONE-WAY (it answers nothing), which gz-transport's Python
+cannot call - every request timed out, and no water was drawn until 2026-10-12.
+The droplets carry the LiDAR's hidden visibility bit (gen_crusader.LIDAR_HIDDEN),
+have no collision and do not move anything; the rendered cameras see them, as a
+real camera sees the jet. An arc older than STALE_S is parked again, so the water
+stops in the GUI when the pump does even if a "null" is lost.
 """
 import argparse
 import json
+import math
 import socket
 import threading
 import time
@@ -29,14 +38,52 @@ import time
 from gz.transport13 import Node
 from gz.msgs10.boolean_pb2 import Boolean
 from gz.msgs10.empty_pb2 import Empty
-from gz.msgs10.marker_pb2 import Marker
+from gz.msgs10.entity_factory_v_pb2 import EntityFactory_V
+from gz.msgs10.pose_v_pb2 import Pose_V
 from gz.msgs10.scene_pb2 import Scene
 from gz.msgs10.visual_pb2 import Visual
 
 WORLD = "crusader_sim"
 RGB = {"off": (0.03, 0.03, 0.03, 0.0), "red": (0.91, 0.16, 0.17, 1.0),
        "green": (0.05, 0.85, 0.05, 1.0), "blue": (0.0, 0.45, 0.9, 1.0)}
-NS = "crusader_water"
+DROP_M = 0.09        # droplet spacing along the arc [m]
+DROP_R = 0.022       # droplet radius [m]
+N_DROPS = 45         # enough for a 4 m arc
+FLOW_MPS = 2.0       # how fast the droplets move along the arc in the GUI (looks, not physics)
+FRAME_S = 0.066      # redraw period
+STALE_S = 0.4        # an arc older than this is parked
+PARK_Z = -10.0       # under the water: out of sight
+LIDAR_HIDDEN = 2     # = gen_crusader.LIDAR_HIDDEN (the LiDAR's visibility mask skips it)
+DROP = "crusader_water_drop_{}"
+SPLASH, SPLASH_HIT = "crusader_water_splash", "crusader_water_splash_hit"
+
+
+def droplet_sdf(name, radius, rgb, glow):
+    r, g, b = rgb
+    return (f"<sdf version='1.9'><model name='{name}'><static>true</static>"
+            f"<pose>0 0 {PARK_Z} 0 0 0</pose><link name='l'><visual name='v'>"
+            f"<geometry><sphere><radius>{radius}</radius></sphere></geometry>"
+            f"<material><ambient>{r} {g} {b} 1</ambient><diffuse>{r} {g} {b} 1</diffuse>"
+            f"<emissive>{r * glow} {g * glow} {b * glow} 1</emissive></material>"
+            f"<cast_shadows>false</cast_shadows><visibility_flags>{LIDAR_HIDDEN}</visibility_flags>"
+            f"</visual></link></model></sdf>")
+
+
+def resample(points, spacing, offset):
+    """Points every `spacing` metres along a polyline, starting `offset` in."""
+    out = []
+    if len(points) < 2:
+        return out
+    want = offset
+    walked = 0.0
+    for a, b in zip(points, points[1:]):
+        seg = math.dist(a, b)
+        while seg > 1e-9 and want <= walked + seg:
+            f = (want - walked) / seg
+            out.append(tuple(a[i] + f * (b[i] - a[i]) for i in range(3)))
+            want += spacing
+        walked += seg
+    return out
 
 
 class Agent:
@@ -49,7 +96,7 @@ class Agent:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("127.0.0.1", port))
         self.sock.settimeout(0.5)
-        self._marker = None             # the newest marker job; older ones are dropped
+        self._marker = None             # (the newest arc, when it came); older ones are dropped
         self._mlock = threading.Lock()
         threading.Thread(target=self._marker_loop, daemon=True).start()
 
@@ -91,46 +138,57 @@ class Agent:
     # --- the water, in the GUI ---
     def stream(self, s):
         with self._mlock:
-            self._marker = ("del", None) if s is None else ("add", s)
+            self._marker = None if s is None else (s, time.monotonic())
+
+    def _make_droplets(self):
+        """The droplet models, parked; True once they exist (made here or earlier)."""
+        fv = EntityFactory_V()
+        for k in range(N_DROPS):
+            fv.data.add().sdf = droplet_sdf(DROP.format(k), DROP_R, (0.55, 0.82, 1.0), 0.6)
+        fv.data.add().sdf = droplet_sdf(SPLASH, 0.07, (1.0, 1.0, 1.0), 0.8)
+        fv.data.add().sdf = droplet_sdf(SPLASH_HIT, 0.07, (0.1, 1.0, 0.1), 0.8)
+        ok, _ = self.node.request(f"/world/{WORLD}/create_multiple", fv, EntityFactory_V, Boolean, 5000)
+        return ok
+
+    def _place(self, where):
+        """Move droplets: {model name: (x, y, z)}; every other one is parked."""
+        pv = Pose_V()
+        for name in [DROP.format(k) for k in range(N_DROPS)] + [SPLASH, SPLASH_HIT]:
+            x, y, z = where.get(name, (0.0, 0.0, PARK_Z))
+            p = pv.pose.add()
+            p.name = name
+            p.position.x, p.position.y, p.position.z = x, y, z
+            p.orientation.w = 1.0
+        ok, _ = self.node.request(f"/world/{WORLD}/set_pose_vector", pv, Pose_V, Boolean, 300)
+        return ok
 
     def _marker_loop(self):
+        while not self.ids:                    # the world first (find_visuals)
+            time.sleep(0.5)
+        while not self._make_droplets():
+            print("[gz_agent] could not make the water droplets yet; retrying", flush=True)
+            time.sleep(3.0)
+        print(f"[gz_agent] water: {N_DROPS} droplets ready", flush=True)
+        shown = False
         while True:
+            t0 = time.monotonic()
             with self._mlock:
-                job, self._marker = self._marker, None
-            if job is None:
-                time.sleep(0.05)
-                continue
-            kind, s = job
+                job = self._marker
             try:
-                if kind == "del":
-                    for mid in (1, 2):
-                        m = Marker()
-                        m.ns, m.id, m.action = NS, mid, Marker.DELETE_MARKER
-                        self.node.request("/marker", m, Marker, Boolean, 300)
-                    continue
-                pts = s.get("points") or []
+                pts = [] if job is None or t0 - job[1] > STALE_S else                     [tuple(p) for p in (job[0].get("points") or [])]
                 if len(pts) < 2:
+                    if shown:
+                        self._place({})
+                        shown = False
+                    time.sleep(0.05)
                     continue
-                line = Marker()
-                line.ns, line.id, line.action, line.type = NS, 1, Marker.ADD_MODIFY, Marker.LINE_STRIP
-                line.lifetime.sec = 1
-                for c in (line.material.ambient, line.material.diffuse):
-                    c.r, c.g, c.b, c.a = 0.2, 0.55, 1.0, 1.0
-                for x, y, z in pts:
-                    p = line.point.add()
-                    p.x, p.y, p.z = x, y, z
-                self.node.request("/marker", line, Marker, Boolean, 300)
-                dot = Marker()
-                dot.ns, dot.id, dot.action, dot.type = NS, 2, Marker.ADD_MODIFY, Marker.SPHERE
-                dot.lifetime.sec = 1
-                dot.pose.position.x, dot.pose.position.y, dot.pose.position.z = pts[-1]
-                dot.scale.x = dot.scale.y = dot.scale.z = 0.08
-                hit = bool(s.get("hit"))
-                for c in (dot.material.ambient, dot.material.diffuse):
-                    c.r, c.g, c.b, c.a = (0.1, 1.0, 0.1, 1.0) if hit else (1.0, 1.0, 1.0, 1.0)
-                self.node.request("/marker", dot, Marker, Boolean, 300)
-            except Exception as e:           # a GUI that is not there must not stop the lights
-                print(f"[gz_agent] marker: {e}", flush=True)
+                drops = resample(pts, DROP_M, (t0 * FLOW_MPS) % DROP_M)[:N_DROPS]
+                where = {DROP.format(k): q for k, q in enumerate(drops)}
+                where[SPLASH_HIT if job[0].get("hit") else SPLASH] = pts[-1]
+                shown = self._place(where)
+                time.sleep(max(0.0, FRAME_S - (time.monotonic() - t0)))
+            except Exception as e:           # the water must never stop the lights
+                print(f"[gz_agent] water: {e}", flush=True)
                 time.sleep(1.0)
 
     def run(self):

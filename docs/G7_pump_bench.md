@@ -103,6 +103,9 @@ Pixhawk.**
 
 ## 3. squirt_cal on the dock
 
+> **Removed 2026-10-18:** `tools/squirt_cal` is gone. The pan/tilt cannon is
+> calibrated with `cal` ([T3_cannon_cal.md](T3_cannon_cal.md)). This section is the record.
+
 ```bash
 python3 tools/squirt_cal/squirt_cal.py
 ```

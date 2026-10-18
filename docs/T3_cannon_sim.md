@@ -5,6 +5,14 @@ aim theirs: the boat docks on the **LiDAR** and holds still, and the **camera** 
 cannon at the burning window every frame while the water runs. Branch `task3-gazebo`
 (Chase's `sim/gazebo` + `task3-disruptive`), 2026-10-05.
 
+> **2026-10-18:** the one-click run (`TASK3_SIM.cmd`) now uses `task3_cannon_sim.xml`:
+> GUIDED only to a point 5 m off the dock, then the tree's own switch to MANUAL, a slide
+> along the dock to the GREEN bay, a square approach, the dock at 1.25 m, and the cannon
+> aimed with no trims (the LiDAR's distance, the window's known height). The tree below,
+> `task3_cannon.xml`, lined up in GUIDED and circled any bay but the middle one; it's
+> kept for comparison (`TREE=task3_cannon.xml`). See
+> [T3_sim_commands.md](T3_sim_commands.md).
+
 ## Run it
 
 **In the sim (Windows):** double-click `crusader_sim/scripts/TASK3_SIM.cmd`. It brings up
@@ -125,8 +133,8 @@ camera point --(cam_x/y/z, cam_pitch)--> body --(minus the pivot)--> level by ro
 
 **Assumed until measured** (all in `crusader_params.yaml`, `cannon_aim_node`):
 
-- the pivot at (0.47, 0.30, 0.75) m in the body frame: the camera + 10 cm ahead, 30 cm
-  left, 10 cm up;
+- the pivot at (0.37, 0.279, 0.75) m in the body frame: the camera + 0.0 ahead, 28 cm left,
+  10 cm up (measured 2026-10-11/12; first assumed 10 cm ahead, 30 cm left);
 - 1000-2000 us = -90..+90 deg on both servos, signs +1;
 - the exit speed.
 

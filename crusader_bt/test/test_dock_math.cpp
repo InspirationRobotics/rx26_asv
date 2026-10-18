@@ -264,6 +264,36 @@ int main()
     chk("no bays: none", pickHoldBay(Frame{}, {}, -1) == -1);
   }
 
+  // ------------------------------------------------- bearingFromCamera
+  //
+  // Where a bay in the book is in the picture now (CommittedBayInView). By
+  // hand: the boat at the origin facing north, the camera 0.37 m ahead of it.
+  {
+    std::printf("bearingFromCamera\n");
+    const Mount m;                                   // x 0.37, level, facing ahead
+    chk_near("dead ahead: 0", bearingFromCamera({0.0, 5.0}, {0.0, 0.0}, 0.0, m), 0.0, 1e-9);
+    chk_near("1 m to port, 1 m ahead of the camera: +45",
+      bearingFromCamera({-1.0, 1.37}, {0.0, 0.0}, 0.0, m), 45.0, 1e-9);
+    chk_near("to starboard: negative",
+      bearingFromCamera({1.0, 1.37}, {0.0, 0.0}, 0.0, m), -45.0, 1e-9);
+    // facing EAST: a point to the north is to port
+    chk_near("facing east, north of the camera: +90",
+      bearingFromCamera({0.37, 3.0}, {0.0, 0.0}, 90.0, m), 90.0, 1e-9);
+    // the case that stalled the approach (sim, 2026-10-17): 3 m out from the
+    // faces in front of bay 3, the committed bay 1 is 4 m to port
+    const double far_bay = bearingFromCamera({-2.0, 19.035}, {2.0, 16.035 - 0.37}, 0.0, m);
+    chk_near("bay 1 from 3 m off bay 3: 53 deg to port, out of an 82 deg picture",
+      far_bay, std::atan2(4.0, 3.0) / nav::kDeg, 1e-9);
+    Mount yawed;
+    yawed.yaw_deg = 10.0;                            // aimed 10 deg to port
+    chk_near("a camera aimed 10 deg to port sees dead ahead at -10",
+      bearingFromCamera({0.0, 50.0}, {0.0, 0.0}, 0.0, yawed), -10.0, 0.1);
+    // and the sightings the book is built from agree with it
+    const BaySighting s = see({1.0, 2.0}, 30.0, m, {4.0, 9.0}, {0.0, -1.0});
+    chk_near("agrees with a sighting's bearing",
+      bearingFromCamera({4.0, 9.0}, {1.0, 2.0}, 30.0, m), s.bearing_deg, 1e-9);
+  }
+
   // --------------------------------------------------------------- the book
   //
   // THE COURSE USED FROM HERE ON: three faces on the line y = 20, facing SOUTH

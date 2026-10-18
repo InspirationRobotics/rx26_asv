@@ -89,6 +89,11 @@ FACE_U = 0.965              # gen_world.dock(): the face's front, out from the d
 DECK_EDGE_U = 1.0           # ...and the deck's front edge (the LiDAR's back wall)
 DECK_Z = 0.3                # gen_world.dock() dz: the deck's top above the water
 HULL_L, HULL_B = 1.0, 0.6   # crusader_hull.yaml
+# The CV's hull band (occluded_top_rows) as the Gazebo sim's camera sees it. 0, not
+# world.py's 188 (~19 deg above the axis): on the water the real camera, ~0.22 m above
+# it, saw the fire window from the docked spot (the user, 2026-10-18), which the 188
+# rows rule out. tools/task3_sim keeps its own.
+HULL_BAND_ROWS = 0
 TIER_OF = {"core": 0, "advanced": 1, "disruptive": 2}
 COLOUR_NAME = {T3.OFF: "off", T3.RED: "red", T3.GREEN: "green", T3.BLUE: "blue"}
 
@@ -146,6 +151,12 @@ class TruthBoat:
         return out
 
 
+def _green_bay(dock):
+    if str(dock.get("green_bay", "")).lower() == "random":
+        raise SystemExit("task3_world: green_bay: random has to be picked first, once for the world AND the referee: python3 -m crusader_sim.course_random COURSE.yaml (gz_sim_up.sh does it)")
+    return int(dock.get("green_bay", 2))
+
+
 def scenario(course, cp: ca.CannonParams, seed):
     """world.py's Scenario for this course, in Gazebo's world frame."""
     d = next(e for e in course["elements"] if e.get("type") == "dock")
@@ -156,13 +167,40 @@ def scenario(course, cp: ca.CannonParams, seed):
         seed=seed, origin=(course["origin"]["lat"], course["origin"]["lon"]),
         dock_e=float(d["x"]) + FACE_U * out[0], dock_n=float(d["y"]) + FACE_U * out[1],
         facing_deg=(90.0 - math.degrees(psi)) % 360.0, deck_z=DECK_Z,
-        green_bay=int(d.get("green_bay", 2)),
+        green_bay=_green_bay(d),
         tier=TIER_OF.get(str(course.get("tier", "disruptive")), 2),
         target_window=int(lit.get("slot", 0)),
         code=tuple(course.get("code", ("red", "blue"))),
         extinguish_s=float(course.get("extinguish_s", 2.0)),
-        cam_pitch_deg=cp.cam_pitch_deg)
+        cam_pitch_deg=cp.cam_pitch_deg,
+        hull_band_rows=int(course.get("hull_band_rows", HULL_BAND_ROWS)))
     return sc
+
+
+class GzCamera(T3.Camera):
+    """world.py's camera with the hull's whole attitude. world.py turns a world
+    point into the camera's frame from the heading alone (its boats do not roll
+    or pitch); the aim (cannon_aim_node) takes the camera's point as fixed to
+    the hull and levels it with the autopilot's roll and pitch. On a rocking
+    Gazebo hull that mismatch was a miss the sim made, not the boat: here the
+    point goes through the hull's own rotation and the camera's mount."""
+
+    def __init__(self, sc, rnd, boat, cp):
+        super().__init__(sc, rnd)
+        self.boat = boat
+        self.cp = cp
+
+    def to_cam(self, cam, f, lft, pt):
+        R = self.boat.R                                     # body -> world
+        d = (pt[0] - cam[0], pt[1] - cam[1], pt[2] - cam[2])
+        xb = R[0][0] * d[0] + R[1][0] * d[1] + R[2][0] * d[2]   # R^T d: into the body
+        yb = R[0][1] * d[0] + R[1][1] * d[1] + R[2][1] * d[2]
+        zb = R[0][2] * d[0] + R[1][2] * d[1] + R[2][2] * d[2]
+        yr = math.radians(self.cp.cam_yaw_deg)              # the mount: yaw (+ left) ...
+        xm = xb * math.cos(yr) + yb * math.sin(yr)
+        ym = -xb * math.sin(yr) + yb * math.cos(yr)
+        pr = math.radians(self.cp.cam_pitch_deg)            # ... then pitch (+ down)
+        return (xm * math.cos(pr) - zb * math.sin(pr), ym, xm * math.sin(pr) + zb * math.cos(pr))
 
 
 def _nan(v):
@@ -235,9 +273,9 @@ class Task3World(Node):
         self.dock = T3.Dock(self.sc)
         self.lights = T3.Lights(self.sc)
         self.rnd = random.Random(seed)
-        self.camera = T3.Camera(self.sc, self.rnd)
-        self.judge = T3.Judge(self.sc)
         self.boat = TruthBoat(self.cp, self.lidar[:2])
+        self.camera = GzCamera(self.sc, self.rnd, self.boat, self.cp)
+        self.judge = T3.Judge(self.sc)
         self.pan_deg = 0.0
         self.tilt_deg = 0.0
         self.pump = 0.0

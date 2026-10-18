@@ -17,6 +17,11 @@
 #   point the survey has nowhere to look from and fails at once. Start with the
 #   boat facing the dock - with nothing seen, the first look is from here and
 #   the next ones are a 4 m ring search around it.
+# wp: put the autopilot's MISSION WAYPOINT in the goal as the approach point (the
+#   first waypoint uploaded from QGC's Plan view; mission_wp.py reads it back).
+#   task3_cannon_slip.xml started in GUIDED drives there, then switches to
+#   MANUAL itself (RequestMode). With wp the slip tree runs from GUIDED, and the
+#   dock need not be in view yet.
 # tier=N: the goal's tier, 0 Core (default), 1 Advanced, 2 Disruptive. The Task 3
 #   trees read the resource request (TierAtLeast) only at 1 or 2. --tier=N works too.
 # -d: detach (the goal keeps running after this returns); otherwise this stays
@@ -45,10 +50,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/env.sh"
 set -u
 
-TIMEOUT_S=600; HERE=0; DETACH=0; TIER=0; SHADOW=0
+TIMEOUT_S=600; HERE=0; DETACH=0; TIER=0; SHADOW=0; WP=0
 for a in "$@"; do
   case "$a" in
     --here) HERE=1 ;;
+    wp|--wp) WP=1 ;;
     shadow) SHADOW=1 ;;
     -d) DETACH=1 ;;
     tier=[012]|--tier=[012]) TIER="${a##*=}" ;;
@@ -110,7 +116,16 @@ for i in 1 2 3; do
   [ -n "$FCU_MODE" ] && break
 done
 case "$TREE" in
-  task3_fire_manual*|task3_part2_*|task3_cannon_hold*|task3_cannon_fire*|task3_cannon_slip*)
+  task3_cannon_slip*)
+    if [ "$WP" = 1 ]; then
+      [ "$FCU_MODE" = "GUIDED" ] || fail "flight mode is '${FCU_MODE:-unknown}'; with wp this tree
+       drives to the waypoint in GUIDED first (GUIDED from QGC or the ground station; tx guided in the sim)"
+    else
+      [ "$FCU_MODE" = "MANUAL" ] || fail "flight mode is '${FCU_MODE:-unknown}'; this tree needs MANUAL (SC),
+       or GUIDED with a waypoint: t3 go wp"
+    fi
+    ;;
+  task3_fire_manual*|task3_part2_*|task3_cannon_hold*|task3_cannon_fire*)
     [ "$FCU_MODE" = "MANUAL" ] || fail "flight mode is '${FCU_MODE:-unknown}'; this tree strafes on the sticks and needs MANUAL (SC)"
     ;;
   *)
@@ -134,6 +149,8 @@ case "$TREE" in
        task3.launch.py starts it; by hand, docs/T3_running.md"
     [ "$n" -eq 1 ] || fail "$n wall_range_nodes are running: pkill -f crusader_perception/wall_range_node, then start ONE"
     n=$(count "[d]ock_view.py")
+    # the Gazebo sim's camera is task3_world (CRSD_SIM=1: crusader_sim/scripts/sim_aliases.sh)
+    [ "${CRSD_SIM:-0}" = 1 ] && n=$(count "[c]rusader_sim/task3_world")
     [ "$n" -ge 1 ] || fail "dock_view is not running (the camera): ground station Nodes tab, or task3.launch.py"
     [ "$n" -eq 1 ] || fail "$n dock_views are running and only one can have the camera: stop the extra"
     W=""; for i in 1 2 3; do W=$(timeout 4 ros2 topic echo --once /crsd/wall_range 2>/dev/null | awk '/^valid:/{print $2}'); [ "$W" = "true" ] && break; done
@@ -144,9 +161,14 @@ case "$TREE" in
         task3_cannon_hold*|task3_cannon_fire*|task3_cannon_slip*)
           # these range on the camera's face until the LiDAR has the wall
           B=0; for i in 1 2 3; do B=$(timeout 4 ros2 topic echo --once /dock/observations 2>/dev/null | grep -c "bay_index"); [ "${B:-0}" -gt 0 ] && break; done
-          [ "${B:-0}" -gt 0 ] || fail "neither the LiDAR (no wall) nor the camera (no bay) sees the dock:
+          if [ "${B:-0}" -gt 0 ]; then
+            say "inputs: the LiDAR has no wall yet - the camera brings the boat in until it does"
+          elif [ "$WP" = 1 ]; then
+            say "inputs: no dock in view yet - fine: the waypoint leg comes first"
+          else
+            fail "neither the LiDAR (no wall) nor the camera (no bay) sees the dock:
        point the bow at the bay"
-          say "inputs: the LiDAR has no wall yet - the camera brings the boat in until it does"
+          fi
           ;;
         *)
           fail "the LiDAR sees no wall (/crsd/wall_range valid: ${W:-no message}):
@@ -217,15 +239,40 @@ if [ "$HERE" = 1 ]; then
   GOAL="$GOAL, approach_latitude: $LAT, approach_longitude: $LON"
   say "approach point: here ($LAT, $LON)"
 fi
+if [ "$WP" = 1 ]; then
+  [ "$HERE" = 0 ] || fail "wp and --here both set the approach point: pick one"
+  W=$(python3 "$SCRIPT_DIR/mission_wp.py" 2>/tmp/mission_wp.err)     || fail "wp: $(cat /tmp/mission_wp.err)"
+  LAT=${W% *}; LON=${W#* }
+  GOAL="$GOAL, approach_latitude: $LAT, approach_longitude: $LON"
+  say "approach point: the mission waypoint ($LAT, $LON)"
+fi
 say "sending the SafePassage goal (tier ${TIER}, timeout ${TIMEOUT_S}s)."
-say "to take the boat back: SC to MANUAL (GUIDED trees) or out of MANUAL (fire trees)"
+if [ "$WP" = 1 ]; then
+  say "at the waypoint the TREE switches to MANUAL itself (leave the transmitter as it is)."
+  say "to take the boat back: move SC (any position change takes the mode back),"
+else
+  say "to take the boat back: SC to MANUAL (GUIDED trees) or out of MANUAL (fire trees)"
+fi
 say "ends the run; SD up (drop latch); SB (e-stop). Ctrl+C here does NOT stop the tree."
-if [ "$DETACH" = 1 ]; then
+# The runner's reply to a goal can be LOST on a loaded machine ("Failed to send
+# goal response ... (timeout)" in its log). The runner then never had the goal,
+# and send_goal would wait for that reply for ever. So: no reply in 15 s, send
+# it again, up to 3 times. (The sim, 2026-10-17.)
+answered() { grep -q -E "Goal (accepted|was rejected)" "$GOLOG"; }
+for try in 1 2 3; do
   nohup ros2 action send_goal --feedback /crsd/safe_passage crusader_msgs/action/SafePassage \
     "{$GOAL}" > "$GOLOG" 2>&1 < /dev/null &
-  sleep 3
-  grep -E "Goal (accepted|rejected)|Waiting" "$GOLOG"
+  PID=$!
+  for _ in $(seq 1 30); do answered && break; sleep 0.5; done
+  answered && break
+  kill "$PID" 2>/dev/null
+  [ "$try" -lt 3 ] && say "no reply to the goal in 15 s (lost on the way back?): sending it again"
+done
+answered || fail "the runner never replied to the goal (3 tries): is it overloaded? t3 log"
+grep -E "Goal (accepted|was rejected)" "$GOLOG"
+grep -q "Goal was rejected" "$GOLOG" && fail "the runner REJECTED the goal: a run is already going (t3 steps), or see t3 log"
+if [ "$DETACH" = 1 ]; then
   say "detached: feedback in $GOLOG, tree log in $LOG (watch.sh)"
 else
-  ros2 action send_goal --feedback /crsd/safe_passage crusader_msgs/action/SafePassage "{$GOAL}"
+  tail -n +1 -f --pid="$PID" "$GOLOG"
 fi

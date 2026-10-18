@@ -1,0 +1,31 @@
+# task3_slip_angle — task3_slip.yaml (GREEN bay 1, the lower-right lit) with a harder
+# start: 5.3 m out on a line 20 deg off bay 1's slip axis (to the right, facing the
+# dock), and the bow turned 18 deg further right, so that bay 1's face centre and its
+# GREEN indicator sit just past the LEFT edge of the camera's picture (40 deg off the
+# bow; the half field of view is 39) while the two RED bays are in full view. The
+# tree has to turn toward the slip to see which bay is the GREEN one.
+#
+#     sim up task3_slip_angle      then: tx arm, tx manual, t3 start, t3 go
+#
+# (Bay 1's face centre is x = -2.0, y = 19.035; slips 1.5 m wide on a 2.0 m pitch.)
+
+name: task3_slip_angle
+origin: {lat: 1.28060, lon: 103.85570}
+draft_m: 0.24
+depth_m: 5.0
+boat_start: {x: -0.19, y: 14.05, yaw_deg: 72.3}
+tier: disruptive
+code: [red, blue]
+extinguish_s: 2.0
+
+elements:
+  - type: dock
+    name: dock
+    x: 0.0
+    y: 20.0
+    facing_deg: -90.0
+    green_bay: 1
+    lit_window: {bay: 1, slot: 1, colour: red}   # the lower-right
+  - {type: platform, name: platform_red,  x: -10.0, y: 12.0, circle: red}
+  - {type: platform, name: platform_blue, x:  10.0, y: 12.0, circle: blue}
+  - {type: launch_pad, name: uav_pad, x: -6.0, y: -4.0}

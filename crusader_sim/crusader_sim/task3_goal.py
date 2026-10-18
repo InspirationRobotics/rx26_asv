@@ -1,9 +1,9 @@
 """task3_goal — the operator's Task 3 run in Gazebo: arm, GUIDED, go; MANUAL when the tree asks.
 
-    python3 -m crusader_sim.task3_goal --course task3 [--tier disruptive] [--timeout-s 600]
+    python3 -m crusader_sim.task3_goal --course task3 [--tier disruptive] [--timeout-s 600] [--wp]
 
 Runs in: the crsd-sim container, after gz_rig_up.sh brought up a dock course
-(task3_cannon.xml, dock_slot_node, cannon_aim_node, task3_world).
+(task3_cannon_sim.xml, dock_slot_node, cannon_aim_node, task3_world).
 
 What a person does for a Task 3 attempt, in order:
   1. ARM on the tooling port (operator_tools.arm, as task1_goal).
@@ -14,12 +14,13 @@ What a person does for a Task 3 attempt, in order:
      (/crsd/autonomy_drop_reset, as go.sh does on the boat): telemetry_bridge
      starts with it TRIPPED until a person says "I have the sticks", and the
      MANUAL part's guard band (NotDropped) ends the run on its first tick if not.
-  4. The goal: the course's tier, and an approach point - the course's `approach`
-     if it has one, else 7 m out in front of the dock's middle (tools/task3_sim's
-     approach_m): "the dock is over there".
-  5. THE HAND-OVER: when the tree says "WAITING FOR MANUAL" (AwaitMode, after the
-     GUIDED approach), MANUAL through /crsd/set_mode - the pilot's SC flip, done
-     here because nobody holds a transmitter in the sim.
+  4. The goal: the course's tier, and an approach point - with --wp the waypoint
+     uploaded to the autopilot (QGC's Plan view, or `sim wp`), else the course's
+     `approach` if it has one, else 5 m off the middle bay's face: the GUIDED leg's end.
+  5. THE HAND-OVER: task3_cannon_sim.xml switches to MANUAL itself (RequestMode).
+     A tree that says "WAITING FOR MANUAL" instead (AwaitMode: task3_cannon.xml) gets
+     MANUAL through /crsd/set_mode here - the pilot's SC flip, since nobody holds a
+     transmitter in the sim.
 Then the result, and the referee's verdict (task3_world, /sim/task3/verdict).
 Exit status 0 only for SUCCESS and a PASS.
 
@@ -45,7 +46,10 @@ from crusader_sim.goal_client import TIERS, install_stop, run_goal
 from crusader_sim.operator_tools import arm, set_mode
 from crusader_sim.sitl_param_set import set_param
 
-APPROACH_M = 7.0           # out in front of the deck edge (tools/task3_sim Scenario.approach_m)
+# out in front of the deck edge: 5 m off the faces, the GUIDED leg's end for
+# task3_cannon_sim.xml (it coasts ~0.7 m on, and the fingers stand 2 m out). Was 7.0,
+# task3_cannon.xml's first survey look (tools/task3_sim Scenario.approach_m).
+APPROACH_M = 5.0
 DECK_M = 1.0               # gen_world.dock(): the deck's depth, back edge to front
 
 
@@ -126,11 +130,25 @@ def main():
     ap.add_argument("--tier", choices=sorted(TIERS), default=None,
                     help="default: the course's `tier`")
     ap.add_argument("--timeout-s", type=float, default=600.0)
+    ap.add_argument("--manual", action="store_true",
+                    help="start in MANUAL, not GUIDED: the MANUAL-only trees (task3_slot_hold.xml, "
+                         "task3_slot_fire.xml, task3_cannon_fire.xml) need it from their first tick")
+    ap.add_argument("--wp", action="store_true",
+                    help="the approach point = the waypoint uploaded to the autopilot (QGC's Plan "
+                         "view, or `sim wp`), not the course's")
     a = ap.parse_args()
 
     course = C.load(a.course)
     tier = TIERS[a.tier or course.get("tier", "disruptive")]
     lat, lon = approach_point(course)
+    if a.wp:
+        from crusader_sim.upload_wp import read_waypoint
+        got, why = read_waypoint()
+        if got is None:
+            print(f"[operator] --wp: {why}", flush=True)
+            return 2
+        lat, lon = got
+        print(f"[operator] approach point: {why} ({lat:.7f} {lon:.7f})", flush=True)
 
     ok, why = arm()
     print(f"[operator] {why}", flush=True)
@@ -141,10 +159,11 @@ def main():
 
     rclpy.init()
     op = Operator()
-    if not set_mode(op, op.mode_pub, "GUIDED"):
-        print("[operator] GUIDED never confirmed on /crsd/fcu_status — is telemetry_bridge up?")
+    mode = "MANUAL" if a.manual else "GUIDED"
+    if not set_mode(op, op.mode_pub, mode):
+        print(f"[operator] {mode} never confirmed on /crsd/fcu_status — is telemetry_bridge up?")
         return 2
-    print("[operator] mode GUIDED (confirmed by the autopilot)", flush=True)
+    print(f"[operator] mode {mode} (confirmed by the autopilot)", flush=True)
     ok, why = op.reset_latch()
     print(f"[operator] autonomy-drop latch reset: {why}", flush=True)
     if not ok:

@@ -8,14 +8,14 @@ of returns on a wall.
 THE WALL IS FITTED AS A VERTICAL PLANE after levelling, i.e. a line in the
 horizontal plane. Its perpendicular distance from the boat does not depend on
 roll or pitch (rocking moves the points, not the plane), which is the property
-squirt_cal needs from a range it calibrates against. Attitude only matters for
+a range the boat positions and aims by needs. Attitude only matters for
 picking the height band, and a stale one costs a little band, not the range.
 
 WHAT IT RANGES. The MID360 sits ~0.28 m above the water, upside down, seeing from
 ~7 deg above horizontal downwards. On a raised dock that is the dock's EDGE below
 the target panel, not the panel. Calibration against this number absorbs the
-offset, as long as the tree later positions by the same number (face_setback in
-squirt_cal is only for the starting guess).
+offset, as long as the tree later positions by the same number (cannon_aim_node's
+face_setback_m moves it onto the windows' face).
 
 A WALL YOU CAN SEE THROUGH IS NOT THE WALL. From OUTSIDE a slip (the nozzle
 fires from ~3.2 m, 1.2 m beyond the 2 m fingers) the four fingers' tip faces are

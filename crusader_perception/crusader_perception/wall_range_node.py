@@ -11,7 +11,7 @@ The geometry is wall_fit_core (no ROS, tested against synthetic clouds). This
 file is I/O only.
 
 ONE SWEEP, NO ACCUMULATION. At 0.5-3 m a wall gives hundreds of returns per
-sweep, and the answer has to be what the wall is doing NOW: squirt_cal takes the
+sweep, and the answer has to be what the wall is doing NOW: the old squirt_cal took the
 median over the 0.5 s before each shot, and averaging over a moving boat here
 would blur exactly that.
 

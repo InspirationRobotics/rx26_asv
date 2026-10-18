@@ -239,6 +239,108 @@ class TestFireGate(unittest.TestCase):
             ca.FireGate(ca.FireParams(burst_s=1.0, resend_s=1.0))
 
 
+class TestGeometricTarget(unittest.TestCase):
+    """The no-trim aim point (2026-10-18): the camera's bearing, the LiDAR's face
+    plane, the window's known height."""
+
+    def setUp(self):
+        self.cp = ca.CannonParams(nozzle_x=0.37, nozzle_y=0.279, nozzle_z=0.75,
+                                  cam_x=0.37, cam_y=0.0, cam_z=0.465,
+                                  exit_speed_mps=ca.exit_speed_from_range(2.74, 30.0, 0.51))
+
+    def cam_of(self, body, scale=1.0, dz=0.0):
+        """What the camera would report for a body point: the exact point
+        (camera_link), its range scaled (stereo error) and its height moved
+        (the visible part of a cut-off window)."""
+        x, y, z = (body[0] - self.cp.cam_x, body[1] - self.cp.cam_y, body[2] - self.cp.cam_z)
+        return (x * scale, y * scale, z * scale + dz)
+
+    def assertNear(self, a, b, tol=1e-6):
+        for u, v in zip(a, b):
+            self.assertAlmostEqual(u, v, delta=tol)
+
+    def test_square_to_the_face(self):
+        # the face 1.6 m ahead of the body origin, the LR window 0.3 m left, 0.81 up
+        truth = (1.6, 0.3, 0.24 + 0.81)
+        cam = self.cam_of(truth, scale=1.10, dz=-0.06)   # 10 % long, 6 cm low
+        got, used = ca.geometric_target(cam, self.cp, plane=ca.plane_from_wall(1.6, 0.0),
+                                        height_above_water=0.81, waterline_z=0.24)
+        self.assertEqual(used, "lidar+height")
+        self.assertNear(got, truth, 0.005)               # the low height moves the bearing a hair
+
+    def test_turned_off_the_face(self):
+        a = math.radians(-8.0)                           # the wall's perpendicular 8 deg right
+        n = (math.cos(a), math.sin(a))
+        d = 1.5
+        foot = (d * n[0], d * n[1])
+        along = (-n[1], n[0])                            # along the wall, + left
+        truth = (foot[0] + 0.25 * along[0], foot[1] + 0.25 * along[1], 0.24 + 1.05)
+        cam = self.cam_of(truth, scale=0.93)
+        got, used = ca.geometric_target(cam, self.cp, plane=ca.plane_from_wall(d, -8.0),
+                                        height_above_water=1.05)
+        self.assertEqual(used, "lidar+height")
+        self.assertNear(got, truth)
+
+    def test_rolled_and_pitched(self):
+        roll, pitch = math.radians(4.0), math.radians(-3.0)
+        lev = (1.4, -0.2, 0.24 + 0.81)                   # the window in the levelled frame
+        body = ca.unlevel(lev, roll, pitch)              # where the hull-fixed camera sees it
+        cam = self.cam_of(body, scale=1.08)
+        got, used = ca.geometric_target(cam, self.cp, roll, pitch,
+                                        plane=ca.plane_from_wall(1.4, 0.0),
+                                        height_above_water=0.81)
+        self.assertEqual(used, "lidar+height")
+        self.assertNear(got, body)
+
+    def test_the_setback(self):
+        truth = (1.635, 0.0, 0.24 + 0.81)
+        got, _ = ca.geometric_target(self.cam_of(truth, scale=1.05), self.cp,
+                                     plane=ca.plane_from_wall(1.6, 0.0),
+                                     height_above_water=0.81, setback_m=0.035)
+        self.assertNear(got, truth)
+
+    def test_the_slip_plane_is_the_lidars(self):
+        n, d = ca.plane_from_slot(1.25, 0.0, (0.32, 0.05))
+        self.assertEqual(n, (1.0, 0.0))
+        self.assertAlmostEqual(d, 1.57)
+
+    def test_a_plane_on_the_finger_tips_is_refused(self):
+        truth = (2.2, 0.1, 0.24 + 0.81)
+        cam = self.cam_of(truth)
+        got, used = ca.geometric_target(cam, self.cp, plane=ca.plane_from_wall(0.4, 0.0),
+                                        height_above_water=0.81)
+        self.assertEqual(used, "height")                 # the camera's range kept
+        self.assertNear(got, truth)
+
+    def test_nothing_known_is_the_camera(self):
+        truth = (1.6, 0.3, 1.0)
+        got, used = ca.geometric_target(self.cam_of(truth), self.cp)
+        self.assertEqual(used, "camera")
+        self.assertNear(got, truth)
+
+    def test_the_water_goes_through_the_window_centre(self):
+        """The whole chain: a wrong stereo range and a low height in, the stream
+        through the window's centre out (within 1 cm), from several places."""
+        for d, lat, h in ((1.57, 0.0, 0.81), (1.9, 0.3, 0.81), (1.6, -0.3, 1.05)):
+            truth = (d, lat, 0.24 + h)
+            cam = self.cam_of(truth, scale=1.12, dz=-0.05)
+            tgt, _ = ca.geometric_target(cam, self.cp, plane=ca.plane_from_wall(d, 0.0),
+                                         height_above_water=h)
+            sol = ca.solve(tgt, self.cp)
+            self.assertTrue(sol.reachable and not sol.clipped, (d, lat, h, sol.why))
+            self.assertLess(fly_to_plane_x(self.cp, sol, truth, 0.0, 0.0), 0.01, (d, lat, h))
+
+    def test_the_upper_left_from_2_3_m_is_out_of_reach(self):
+        """At the measured 4.85 m/s the upper-left window (1.05 m up) is beyond the
+        stream from 2.3 m: it must be marked so (and FireGate refuses), not fired at."""
+        truth = (2.3, -0.3, 0.24 + 1.05)
+        tgt, _ = ca.geometric_target(self.cam_of(truth), self.cp,
+                                     plane=ca.plane_from_wall(2.3, 0.0), height_above_water=1.05)
+        sol = ca.solve(tgt, self.cp)
+        self.assertFalse(sol.reachable)
+        self.assertIn("out of reach", sol.why)
+
+
 class TestServoLimiter(unittest.TestCase):
 
     def test_clamp_rate_and_step(self):

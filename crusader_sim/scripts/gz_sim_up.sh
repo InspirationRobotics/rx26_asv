@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # gz_sim_up.sh — the whole Gazebo sim, in order. Runs in: WSL2 Ubuntu-22.04.
 #
-#     bash crusader_sim/scripts/gz_sim_up.sh [course | --course-file PATH] [--tuning FILE] [--no-gui] [--no-uav] [--no-rig]
+#     bash crusader_sim/scripts/gz_sim_up.sh [course | --course-file PATH] [--tuning FILE] [--no-gui] [--no-uav] [--no-rig] [--boat]
 #                                            [--recreate-container] [--detector truth|yolo]
 #
 #     NAV_MODE=off|shadow|on  (environment) the tree's Nav2 planning; default on
@@ -49,13 +49,14 @@
 #   7. rig        the boat's nodes + sim shims in the crsd-sim container
 set -uo pipefail
 
-COURSE=task1_core; COURSE_FILE=""; TUNING_FILE=""; GUI=1; UAV_ARG=""; RIG=1; RECREATE=0
+COURSE=task1_core; COURSE_FILE=""; TUNING_FILE=""; GUI=1; UAV_ARG=""; RIG=1; RECREATE=0; BOAT=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --recreate-container) RECREATE=1 ;;
     --no-gui) GUI=0 ;;
     --no-uav) UAV_ARG="--no-uav" ;;
     --no-rig) RIG=0 ;;
+    --boat) BOAT=1 ;;
     --detector)
       [ $# -ge 2 ] || { echo "--detector needs truth or yolo" >&2; exit 2; }
       SIM_DETECTOR="$2"; shift ;;
@@ -194,6 +195,16 @@ fi
 
 step "2/7  generate  (course: $COURSE)"
 cd /tmp
+# the course's random choices (green_bay: random), made ONCE, into this run's copy
+# of the course, so the world and the referee agree. The number goes to a file,
+# not the screen: finding the GREEN bay is the boat's job (sim verdict says it).
+mkdir -p "$GEN"
+PICKED="$(python3 -m crusader_sim.course_random "$SIM/courses/$COURSE.yaml")" || die "course_random"
+if [ -n "$PICKED" ]; then
+  echo "$PICKED" > "$GEN/random_choices.txt"
+  echo "  GREEN bay: random this run (picked; $GEN/random_choices.txt, or sim verdict, says which)"
+fi
+echo "$COURSE" > "$GEN/current_course"
 python3 -m crusader_sim.gen_crusader --out "$GEN/models" | sed 's/^/  /' || die "gen_crusader"
 WORLD_INFO="$(python3 -m crusader_sim.gen_world "$SIM/courses/$COURSE.yaml" --out "$GEN/worlds")" \
   || die "gen_world (is there a courses/$COURSE.yaml?)"
@@ -220,6 +231,9 @@ if python3 -c "import sys; from crusader_sim import course as C; sys.exit(0 if a
   nohup python3 -u -m crusader_sim.task3_gz_agent > /tmp/task3_gz_agent.log 2>&1 &
   echo "  task3_gz_agent: the dock's lights and the water (log /tmp/task3_gz_agent.log)"
 fi
+# wind and water current (crusader_sim.weather): calm until `sim wind` / `sim current`
+nohup python3 -u -m crusader_sim.weather run > /tmp/weather.log 2>&1 &
+echo "  weather: calm (sim wind / sim current; log /tmp/weather.log)"
 
 step "4/7  transmitter"
 nohup python3 -m crusader_sim.sim_transmitter > /tmp/sim_tx.log 2>&1 &
@@ -262,15 +276,17 @@ else
   # 2026-10-01). Unchanged packages cost seconds; a changed crusader_bt about 40 s.
   # crusader_world_model/_bringup/_common are here since 2026-10-02: a stale target_tracker install crashed on the YAML's colour-vote
   # keys ('no declared posture for params') and the sim ran with no camera tracks at all.
+  # crusader_fcu since 2026-10-12: the same with cannon_aim_node and telemetry_bridge, on the cannon's new keys
+  # (per-window trims, throw_drop_m, resend_s) - no aim, and the referee died with it.
   # Only the packages the checkout has: --packages-select refuses an unknown name.
   # --base-paths src: colcon crawls /root/robotx_ws otherwise, and a second workspace under it (gcs_ws/src/rx26_asv, made
   # 2026-10-02 for the ground-station work) is a "duplicate package names" failure; so are venvs/ and yolo_dev/ for the crawl itself.
   docker exec "$CONTAINER" bash -lc \
-    "set -o pipefail; cd /root/robotx_ws && source install/setup.bash && P=''; for p in crusader_msgs crusader_common crusader_bringup crusader_world_model crusader_bt crusader_perception crusader_sim crusader_nav crusader_nav_layers crusader_groundstation; do [ -d src/rx26_asv/\$p ] && P=\"\$P \$p\"; done; flock /root/robotx_ws/.colcon.lock colcon build --base-paths src --packages-select \$P 2>&1 | tail -2" \
+    "set -o pipefail; cd /root/robotx_ws && source install/setup.bash && P=''; for p in crusader_msgs crusader_common crusader_bringup crusader_world_model crusader_fcu crusader_bt crusader_perception crusader_sim crusader_nav crusader_nav_layers crusader_groundstation; do [ -d src/rx26_asv/\$p ] && P=\"\$P \$p\"; done; flock /root/robotx_ws/.colcon.lock colcon build --base-paths src --packages-select \$P 2>&1 | tail -2" \
     | sed 's/^/  /' || die "colcon build failed (a crusader_* package did not build): not starting the sim on the previous build"
 fi
 # docker exec does not inherit this shell's environment: TREE, NAV_MODE and SIM_* (SIM_TUNING too) cross explicitly
-docker exec -e TREE="${TREE:-}" -e NAV_MODE="${NAV_MODE:-}" -e SIM_DETECTOR="${SIM_DETECTOR:-}" \
+docker exec -e TREE="${TREE:-}" -e NAV_MODE="${NAV_MODE:-}" -e SIM_DETECTOR="${SIM_DETECTOR:-}" -e BOAT_ONLY="$BOAT" \
   -e SIM_CAMERA_ARGS="${SIM_CAMERA_ARGS:-}" -e SIM_TUNING="$SIM_TUNING_C" "$CONTAINER" bash -lc \
   "bash /root/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_rig_up.sh $COURSE $UAV_ARG" 2>&1 | sed 's/^/  /'
 
@@ -293,16 +309,41 @@ if [ "$GUI" = 1 ]; then
     sleep 12
   done
   pgrep -f "gz sim -g" >/dev/null || echo "  *** no GUI (see /tmp/gz_gui.log); the sim runs on without it"
-  # lock the GUI camera onto the boat: the course is ~50 m long and a 1 m boat
-  # leaves the default view within seconds of GUIDED
+  # The GUI camera. Task 1's course is ~50 m long and a 1 m boat leaves the default
+  # view within seconds of GUIDED, so there it is locked onto the boat. A dock course
+  # is small, and /gui/follow re-centres every frame (a zoom snapped straight back
+  # out, 2026-10-12): it starts on one view of the slips and the approach
+  # (crusader_sim.gui_view) and is left free. GZ_FOLLOW=1 / 0 overrides either.
   for _ in $(seq 1 30); do gz service -l 2>/dev/null | grep -qx /gui/follow && break; sleep 1; done
-  gz service -s /gui/follow --reqtype gz.msgs.StringMsg --reptype gz.msgs.Boolean \
-    --timeout 3000 --req 'data: "crusader"' >/dev/null 2>&1 \
-  && gz service -s /gui/follow/offset --reqtype gz.msgs.Vector3d --reptype gz.msgs.Boolean \
-    --timeout 3000 --req 'x: -6, y: -5, z: 4' >/dev/null 2>&1 \
-  && echo "  GUI camera following crusader"
+  FOLLOW="${GZ_FOLLOW:-$([ "$TASK3" = 1 ] && echo 0 || echo 1)}"
+  VIEW=""
+  [ "$FOLLOW" = 1 ] || VIEW="$(python3 -m crusader_sim.gui_view "$SIM/courses/$COURSE.yaml" 2>/dev/null)"
+  if [ -n "$VIEW" ]; then
+    gz service -s /gui/move_to/pose --reqtype gz.msgs.GUICamera --reptype gz.msgs.Boolean \
+      --timeout 3000 --req "$VIEW" >/dev/null 2>&1 \
+    && echo "  GUI camera: a view of the dock, free to zoom and turn (GZ_FOLLOW=1 locks it on the boat)"
+  else
+    gz service -s /gui/follow --reqtype gz.msgs.StringMsg --reptype gz.msgs.Boolean \
+      --timeout 3000 --req 'data: "crusader"' >/dev/null 2>&1 \
+    && gz service -s /gui/follow/offset --reqtype gz.msgs.Vector3d --reptype gz.msgs.Boolean \
+      --timeout 3000 --req 'x: -6, y: -5, z: 4' >/dev/null 2>&1 \
+    && echo "  GUI camera following crusader"
+  fi
 fi
 
+if [ "$BOAT" = 1 ] && [ "$TASK3" = 1 ]; then
+cat <<EOF
+
+=== ready: the boat is on the water (--boat) ===
+  Gazebo GUI      on the desktop      ground station  http://localhost:8090
+  Now, as on the Jetson (aliases: crusader_sim/scripts/sim_aliases.sh, docs/T3_sim_commands.md):
+    tx arm            the pilot arms        tx manual    SC to MANUAL
+    t3 start          the Task 3 launch (leave it running)
+    t3 go             start the run         t3 steps     the TASK3 step lines
+    sim wind 6 90     wind / current / calm  sim verdict  the referee
+  stop:           sim down
+EOF
+else
 cat <<EOF
 
 === ready ===
@@ -313,3 +354,4 @@ cat <<EOF
   drive MANUAL:   ros2 topic pub /crsd/rc_override ... (in $CONTAINER), mode MANUAL
   stop:           bash $SIM/scripts/gz_sim_down.sh
 EOF
+fi

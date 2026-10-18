@@ -104,7 +104,7 @@ telemetry_bridge:
                                            #      that is drop_channel above
     pump_on_pwm: 2000                      # [RO] us; MEASURE on the bench (G7)
     pump_off_pwm: 1000                     # [RO] us; MUST equal SERVOn_TRIM
-    pump_max_burst_s: 1.0                  # [RO] squirt_cal fires 0.2-0.5 s
+    pump_max_burst_s: 1.0                  # [RO]
     pump_min_gap_s: 1.0                    # [RO] s from one burst's end to the next
     pump_allow_disarmed: false             # [RO] bench only, and only by a -p
                                            #      override on the command line
@@ -223,9 +223,12 @@ dock_slot_node:
 # and the servo map from HERE too, so the sim's nozzle is where this says it is.
 cannon_aim_node:
   ros__parameters:
-    # the pivot, body frame, hull-bottom datum. ASSUMED from the camera's mount
-    # (0.37, 0.0, 0.65) + the nozzle ~0.10 ahead, 0.30 left, 0.10 above it. MEASURE.
-    nozzle_x: 0.47                         # [DYN] m forward of the body origin
+    # the pivot, body frame, hull-bottom datum. Only its place RELATIVE TO THE
+    # CAMERA matters to the aim: nozzle = the camera's mount (target_tracker
+    # cam_x/y/z = 0.37, 0.0, 0.65) + the measured offset. 2026-10-12 (Dominick):
+    # level with the camera fore/aft, so nozzle_x = cam_x + 0.0 = 0.37. NOT 0.0:
+    # that is the body origin, 0.37 m BEHIND the camera.
+    nozzle_x: 0.37                         # [DYN] m forward of the body origin (= cam_x + 0.0)
     nozzle_y: 0.279                        # [DYN] m to PORT: 11 in left of the camera's centre (2026-10-11)
     nozzle_z: 0.75                         # [DYN] m above the hull-bottom datum (0.51 above water)
     # the stream: 0 = derive from one measured throw (3.0 m at 45 deg on the
@@ -254,10 +257,30 @@ cannon_aim_node:
     # each WINDOW's own trim, added to its solution: one trim does not hit both
     # (2026-10-09, on the water). From the hold at 1.2 m; at another distance
     # they will be off. An aim naming no window (cal point / deg) is untrimmed.
+    # NOT USED FOR NOW (the user, 2026-10-18): the aim from geometry below; keep
+    # them 0, and zero any saved in the Tuning tab.
     pan_trim_ul_deg: 0.0                   # [DYN] upper-left, deg (+ = left)
     tilt_trim_ul_deg: 0.0                  # [DYN] upper-left, deg (+ = up); was 25 / 15 on the old model
     pan_trim_lr_deg: 0.0                   # [DYN] lower-right, deg (+ = left)
     tilt_trim_lr_deg: 0.0                  # [DYN] lower-right, deg (+ = up); was 35 on the old model
+    # THE AIM POINT (2026-10-18, no trims): the camera's BEARING to the window,
+    # the LiDAR's face plane for the DISTANCE (/crsd/dock_slot's back wall when
+    # docked, else /crsd/wall_range), the window's KNOWN centre height for the
+    # HEIGHT (cannon_aim_core.geometric_target). "camera" = the stereo point as is.
+    aim_point_source: "geometry"           # [DYN] geometry | camera
+    # The windows' centres above the water: the build guide's dock as the sim
+    # models it (face centre 0.8 m up; UL +0.25, LR +0.01). MEASURE THE REAL DOCK'S
+    # and set them; 0 = unknown = that window's height from the camera.
+    window_height_ul_m: 1.05               # [DYN] upper-left, m above the water
+    window_height_lr_m: 0.81               # [DYN] lower-right, m above the water
+    waterline_z_m: 0.24                    # [RO] the water above the hull-bottom datum (the draft)
+    face_setback_m: 0.0                    # [DYN] the windows' face stands this far beyond
+                                           #      the wall the LiDAR measures, m (the sim's
+                                           #      dock: 0.035, set by its launch)
+    lidar_max_age_s: 0.5                   # [RO] an older LiDAR plane is not used
+    aim_smooth_s: 0.4                      # [DYN] the aim point = the median of the camera's
+                                           #      frames this recent (docked, the window
+                                           #      holds still; 0 = the newest frame)
     # firing (cannon_aim_core.FireGate)
     aim_rate_hz: 20.0                      # [RO] solve + command this often
     settle_s: 0.4                          # [RO] servos on the command this long, then water
@@ -274,52 +297,6 @@ cannon_aim_node:
     cannon_timeout_s: 0.6                  # [RO] no /crsd/water_cannon this long: stop
     fire_pump: false                       # [RO] G7: false = aim only, bursts DRY (logged)
     status_period_s: 0.2                   # [RO] /crsd/cannon_status
-
-# ---- Task 3 fixed nozzle: the calibration tool (tools/squirt_cal) ----
-# A bench tool, not a node in the launch file: python3 tools/squirt_cal/squirt_cal.py
-# Every key must be here (squirt_core.load_config refuses unknown and missing).
-squirt_cal:
-  ros__parameters:
-    port: 8094                             # the phone opens http://<jetson>:8094
-    log_dir: "/root/robotx_ws/logs/squirt_cal"   # bind-mounted: one dir per session
-    snapshot_url: "http://127.0.0.1:8080/stream/raw"   # "" = no camera frames
-    wall_range_topic: "/crsd/wall_range"   # = wall_range_node.wall_topic
-    pump_rc_channel: 10                    # = telemetry_bridge.pump_rc_channel
-    pump_on_threshold_us: 1700             # pilot switch reads ON above this
-    burst_choices_s: [0.2, 0.3, 0.5]
-    burst_default_s: 0.3
-    arm_timeout_s: 15.0                    # give up waiting for steady
-    min_gap_s: 2.0                         # between shots
-    verdict_after_s: 0.8                   # the water's flight + a look
-    pilot_burst_max_s: 3.0
-    range_window_s: 0.5                    # pre-fire range = median over this
-    range_max_age_s: 0.5
-    step_m: 0.1                            # search step until bracketed
-    on_range_tol_m: 0.02
-    min_hits_for_band: 3
-    square_tol_deg: 3.0
-    steady_rate_max_dps: 4.0               # "steady": rates, band, hands off
-    steady_band_deg: 1.5
-    steady_hold_s: 0.5
-    steady_mean_s: 5.0
-    sticks_quiet_s: 1.5
-    stick_tol_us: 25
-    att_min_hz: 10.0                       # needs SR0_EXTRA1 >= 10 (30 intended)
-    # The starting guess only. MEASURE these (docs/G7_pump_bench.md, Phase 0):
-    nozzle_x_m: 0.45                       # nozzle ahead of the body origin
-    nozzle_height_m: 0.4                   # above the water
-    nozzle_elev_deg: 30.0                  # the 30 deg nozzle (2026-09-28); was 45
-    nozzle_range_m: 3.5                    # level range at nozzle_elev_deg: ~6.3 m/s,
-                                           # inferred from the upper-left going in at
-                                           # 1.0-1.6 m and the lower-right at 0.7-0.8 m
-    deck_height_m: 0.05                    # face panel bottom above the water (practice
-                                           # dock: window centres ~0.80 / ~0.56 m up)
-    face_setback_m: 0.0                    # panel behind the edge the LiDAR ranges
-    branch: "near"                         # near = rising part of the arc
-    target_ids: ["ul_top", "lr_top"]
-    target_labels: ["Upper-left window, top edge", "Lower-right window, top edge"]
-    target_edge_mm: [895.0, 645.0]         # above the face panel's bottom edge
-    target_lat_m: [0.22, -0.23]            # window centre from face centre, + left
 
 # ---- LED status stack ----
 led_node:
@@ -658,10 +635,12 @@ target_tracker:
                                            #      (LiDAR is at 0.32 — 5 cm aft)
     cam_y: 0.0                             # [RO] m to PORT; camera is on the
                                            #      centreline, LiDAR is 5 cm port
-    cam_z: 0.65                            # [RO] m above the hull-bottom datum
-                                           #      (= 0.41 m above the waterline;
-                                           #      draft 0.24 m, measured 2026-09-05),
-                                           #      the SAME datum as lidar_z=0.52
+    cam_z: 0.465                           # [RO] m above the hull-bottom datum
+                                           #      (= ~0.225 m above the waterline: the
+                                           #      user, 2026-10-18, "around 0.2-0.25 m";
+                                           #      was 0.65 = 0.41 up; draft 0.24 m,
+                                           #      measured 2026-09-05), the SAME datum
+                                           #      as lidar_z=0.52
     cam_yaw_deg: 0.0                       # [RO] mount yaw, + = aimed to PORT.
                                            #      ASSUMED, not bench-confirmed.
     cam_pitch_deg: 0.0                     # [RO] mount tilt, + = aimed DOWN.
@@ -1486,10 +1465,10 @@ bt_runner_node:
                                             #      it NEGATIVE: level, from inside
                                             #      a slip the camera cannot see the
                                             #      upper window (docs/T3_...md)
-    dock_face_dz_m: 0.39                    # [RO] face centre above the camera,
+    dock_face_dz_m: 0.575                   # [RO] face centre above the camera,
                                             #      for a pitched camera only. Build
                                             #      guide: ~0.8 m above water; the
-                                            #      camera is 0.41 m up
+                                            #      camera ~0.225 m up (2026-10-18)
     dock_topic: "dock/observations"         # [RO] DockObservation, from the
                                             #      dock detector (firefighting-cv
                                             #      specs: observations_topic)

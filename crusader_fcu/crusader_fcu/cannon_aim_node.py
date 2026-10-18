@@ -10,6 +10,11 @@ Subscribes:
                       in the world and not in the hull
   /crsd/cannon_state  crusader_msgs/CannonState the two servos' real outputs
   /crsd/pump_state    crusader_msgs/PumpState   for the log
+  /crsd/dock_slot     crusader_msgs/DockSlot    the slip's back wall, and
+  /crsd/wall_range    crusader_msgs/WallRange   the wall in front: the face's plane,
+                      for the distance (aim_point_source geometry, the default:
+                      the camera's bearing, the LiDAR's distance, the window's
+                      known height - cannon_aim_core.geometric_target)
 Publishes:
   /crsd/cannon_cmd    crusader_msgs/CannonCommand  pan/tilt PWM -> telemetry_bridge
   /crsd/pump_cmd      crusader_msgs/PumpCommand    water, ONLY with fire_pump (G7)
@@ -33,13 +38,16 @@ bursts are logged as DRY, nothing goes to the pump. The servos move either way.
 """
 import json
 import math
+import statistics
 import time
+from collections import deque
 
 from rclpy.node import Node
 from rcl_interfaces.msg import SetParametersResult
 from std_msgs.msg import String
 
-from crusader_msgs.msg import Attitude, CannonCommand, CannonState, PumpCommand, PumpState
+from crusader_msgs.msg import (Attitude, CannonCommand, CannonState, DockSlot, PumpCommand,
+                               PumpState, WallRange)
 
 from crusader_common import config as crsd_config
 from crusader_common.node_main import run_node
@@ -82,6 +90,27 @@ PARAM_SPEC = {
                             description="LOWER-RIGHT window: added to the pan, deg (+ = left)"),
     "tilt_trim_lr_deg": dict(read_only=False, lo=-45.0, hi=45.0,
                              description="LOWER-RIGHT window: added to the tilt, deg (+ = up)"),
+    # THE AIM POINT (2026-10-18, no trims): "geometry" = the camera's bearing, the
+    # LiDAR's face plane for the distance, the window's known height for the
+    # height (cannon_aim_core.geometric_target); "camera" = the stereo point as is
+    "aim_point_source": dict(read_only=False,
+                             description="geometry | camera: where the aim point comes from"),
+    "window_height_ul_m": dict(read_only=False, lo=0.0, hi=3.0,
+                               description="UPPER-LEFT window's centre above the water, m "
+                                           "(0 = unknown: the camera's height)"),
+    "window_height_lr_m": dict(read_only=False, lo=0.0, hi=3.0,
+                               description="LOWER-RIGHT window's centre above the water, m "
+                                           "(0 = unknown: the camera's height)"),
+    "waterline_z_m": dict(read_only=True, lo=0.0, hi=1.0,
+                          description="the water above the hull-bottom datum, m (the draft)"),
+    "face_setback_m": dict(read_only=False, lo=-0.5, hi=0.5,
+                           description="the windows' face stands this far beyond the wall "
+                                       "the LiDAR measures, m"),
+    "lidar_max_age_s": dict(read_only=True, lo=0.05, hi=5.0,
+                            description="an older LiDAR plane is not used"),
+    "aim_smooth_s": dict(read_only=False, lo=0.0, hi=2.0,
+                         description="the aim point: the median of the camera frames this "
+                                     "recent, s (0 = the newest alone)"),
     "aim_rate_hz": dict(read_only=True, lo=1.0, hi=100.0),
     "settle_s": dict(read_only=True, lo=0.0, hi=5.0),
     "servo_tol_us": dict(read_only=True, lo=1.0, hi=200.0),
@@ -118,6 +147,24 @@ class CannonAimNode(Node):
             resend_s=p["resend_s"]))
         self.fire_pump = bool(p["fire_pump"])
         self.timeout_s = float(p["cannon_timeout_s"])
+        # the aim point's sources (geometric_target)
+        self.aim_source = str(p.get("aim_point_source", "geometry")).strip().lower()
+        self.win_height = {"UL": float(p.get("window_height_ul_m", 0.0)),
+                           "LR": float(p.get("window_height_lr_m", 0.0))}
+        self.waterline_z = float(p.get("waterline_z_m", 0.24))
+        self.setback = float(p.get("face_setback_m", 0.0))
+        self.lidar_max_age = float(p.get("lidar_max_age_s", 0.5))
+        lid = crsd_config.node_params("lidar_cluster_node")
+        self.lidar_xy = (float(lid.get("lidar_x", 0.32)), float(lid.get("lidar_y", 0.0)))
+        self._slot = None            # (plane, t) from /crsd/dock_slot
+        self._wall = None            # (plane, t) from /crsd/wall_range
+        self._aim_from = "camera"
+        self._target = None          # the body-frame aim point last solved for
+        # the camera's ~2 cm of noise a frame made the pan chase it (the sim, 2026-10-18):
+        # docked, the window does not move, so a short median of the frames
+        self.smooth_s = float(p.get("aim_smooth_s", 0.4))
+        self._hist = deque(maxlen=64)   # (t, target_body), one per camera frame
+        self._hist_key = None
 
         self._want = False
         self._aim = None             # (x, y, z) camera_link
@@ -141,6 +188,8 @@ class CannonAimNode(Node):
         self.create_subscription(Attitude, "/crsd/attitude", self._on_att, 10)
         self.create_subscription(CannonState, "/crsd/cannon_state", self._on_servo, 10)
         self.create_subscription(PumpState, "/crsd/pump_state", self._on_pump, 10)
+        self.create_subscription(DockSlot, "/crsd/dock_slot", self._on_slot, 10)
+        self.create_subscription(WallRange, "/crsd/wall_range", self._on_wall, 10)
         self.add_on_set_parameters_callback(self._on_set)
         self.create_timer(1.0 / p["aim_rate_hz"], self._tick)
         self.create_timer(p["status_period_s"], self._status)
@@ -176,6 +225,18 @@ class CannonAimNode(Node):
                 for i, axis in enumerate(("pan", "tilt")):
                     if prm.name == f"{axis}_trim_{s.lower()}_deg":
                         self.win_trim[s][i] = float(prm.value)
+                if prm.name == f"window_height_{s.lower()}_m":
+                    self.win_height[s] = float(prm.value)
+            if prm.name == "aim_point_source":
+                v = str(prm.value).strip().lower()
+                if v not in ("geometry", "camera"):
+                    return SetParametersResult(successful=False,
+                                               reason="aim_point_source: geometry | camera")
+                self.aim_source = v
+            elif prm.name == "face_setback_m":
+                self.setback = float(prm.value)
+            elif prm.name == "aim_smooth_s":
+                self.smooth_s = float(prm.value)
         return SetParametersResult(successful=True)
 
     def _on_cannon(self, msg: String):
@@ -208,6 +269,24 @@ class CannonAimNode(Node):
         self._att = (float(msg.roll), float(msg.pitch))
         self._att_t = time.monotonic()
 
+    def _on_slot(self, msg: DockSlot):
+        if msg.valid and msg.has_back and math.isfinite(msg.back_range_m) \
+                and math.isfinite(msg.angle_deg):
+            self._slot = (ca.plane_from_slot(msg.back_range_m, msg.angle_deg, self.lidar_xy),
+                          time.monotonic())
+
+    def _on_wall(self, msg: WallRange):
+        if msg.valid and math.isfinite(msg.range_m) and math.isfinite(msg.angle_deg):
+            self._wall = (ca.plane_from_wall(msg.range_m, msg.angle_deg), time.monotonic())
+
+    def _face_plane(self, now):
+        """The face's plane from the LiDAR: the slip's back wall when the slip is
+        seen (docked), else the wall in front; None when neither is fresh."""
+        for got in (self._slot, self._wall):
+            if got is not None and now - got[1] <= self.lidar_max_age:
+                return got[0]
+        return None
+
     def _on_servo(self, msg: CannonState):
         self._servo = msg
 
@@ -230,6 +309,7 @@ class CannonAimNode(Node):
         self._firing = False
         self._bursts = 0
         self.gate.reset()
+        self._hist.clear()
 
     def _tick(self):
         now = time.monotonic()
@@ -240,7 +320,26 @@ class CannonAimNode(Node):
             return
         roll, pitch = self._att if now - self._att_t <= 0.5 else (0.0, 0.0)
         trim = self.win_trim.get(self._aim_win, (0.0, 0.0))
-        sol = ca.solve_from_camera(self._aim, ca.with_trims(self.cp, *trim), roll, pitch)
+        if self.aim_source == "geometry":
+            h = self.win_height.get(self._aim_win, 0.0)
+            target, self._aim_from = ca.geometric_target(
+                self._aim, self.cp, roll, pitch, plane=self._face_plane(now),
+                height_above_water=h if h > 0.0 else None,
+                waterline_z=self.waterline_z, setback_m=self.setback)
+        else:
+            target, self._aim_from = ca.cam_to_body(self._aim, self.cp), "camera"
+        if self.smooth_s > 0.0:
+            key = (self._aim_t, self._aim_win)
+            if key != self._hist_key:            # a new camera frame
+                if self._hist_key is not None and key[1] != self._hist_key[1]:
+                    self._hist.clear()           # another window: start again
+                self._hist_key = key
+                self._hist.append((now, target))
+            recent = [tg for (t, tg) in self._hist if now - t <= self.smooth_s]
+            if recent:
+                target = tuple(statistics.median(v[k] for v in recent) for k in range(3))
+        self._target = target
+        sol = ca.solve(target, ca.with_trims(self.cp, *trim), roll, pitch)
         self._sol = sol
         m = CannonCommand()
         m.header.stamp = self.get_clock().now().to_msg()
@@ -273,7 +372,7 @@ class CannonAimNode(Node):
             f"cannon: {what}{'' if self.fire_pump else ' (DRY: fire_pump is off)'}"
             f" | {self._aim_win or 'point'}: pan {sol.pan_deg:+.1f} tilt {sol.tilt_deg:+.1f} deg "
             f"(trims {trim[0]:+.1f} {trim[1]:+.1f}), target {sol.dist_m:.2f} m "
-            f"away {sol.height_m:+.2f} m up, throw {sol.elev_deg:.1f} deg"
+            f"away {sol.height_m:+.2f} m up ({self._aim_from}), throw {sol.elev_deg:.1f} deg"
             + (" CLIPPED" if sol.clipped else ""))
 
     def _status(self):
@@ -284,6 +383,8 @@ class CannonAimNode(Node):
             aim_cam=None if self._aim is None else [round(v, 3) for v in self._aim],
             aim_age_s=None if self._aim is None else round(time.monotonic() - self._aim_t, 2),
             window=self._aim_win,
+            aim_from=self._aim_from,
+            target_body=None if self._target is None else [round(v, 3) for v in self._target],
             trims=list(self.win_trim.get(self._aim_win, (0.0, 0.0))),
             pan_deg=round(sol.pan_deg, 2), tilt_deg=round(sol.tilt_deg, 2),
             pan_pwm=sol.pan_pwm, tilt_pwm=sol.tilt_pwm,

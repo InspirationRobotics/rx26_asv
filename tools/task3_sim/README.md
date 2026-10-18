@@ -73,7 +73,7 @@ version, instead. What it adds to the world:
 - **The nozzle**: a drag-free 45° arc, fitted so a level, square-on boat at `nozzle_hit_range_m`
   (3.22, the pool's answer) puts the stream on the window's top edge. The water goes where the
   boat's true pose, pitch and roll send it; a shot is IN if it crosses the opening (±3 cm).
-- **The sea**: `tools/squirt_cal/fake_boat.py`'s rocking (`sea` 0–3), plus a pitch kick when the
+- **The sea**: the old squirt_cal fake boat's rocking (`sea` 0–3), plus a pitch kick when the
   boat accelerates.
 - **The LiDAR**: `/crsd/wall_range` from the true pose with `wall_range_node`'s limits (r_max
   4 m, ±35°), the fingers' offset, noise, spray returns; `wall_on_fingers` fits the tips instead.

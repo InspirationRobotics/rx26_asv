@@ -7,6 +7,11 @@
 #   alias cal='docker exec -it asv /root/robotx_ws/src/rx26_asv/tools/scripts/task3/cal.sh'
 #
 # so:  t3 start | t3 go | t3 steps | t3 log | slip | cal ...   (t3 alone: this list)
+#
+# THE SAME COMMANDS IN THE GAZEBO SIM (crusader_sim/scripts/sim_aliases.sh): the
+# aliases there run these scripts in the crsd-sim container with CRSD_SIM=1, and
+# `t3 start` then adds sim:=true to the launch (no dock_view: the sim is the
+# camera; the tree may move the simulated boat and the cannon may ask for water).
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/env.sh"
@@ -17,7 +22,8 @@ t3 start [TREE]  start the Task 3 launch (leave it running; Ctrl-C ends it)
                  TREE: slip (the default: dock in the slip on the LiDAR)
                        fire (cannon_fire: no slip, the wall and the camera)
                        hold (cannon_hold), cannon (the full Gazebo tree)
-t3 go            start the run (checks, resets the autonomy drop, sends the goal)
+t3 go [wp]       start the run (checks, resets the autonomy drop, sends the goal);
+                 wp: from GUIDED, to the waypoint uploaded from QGC first
 t3 steps         the TASK3 step lines: APPROACHING, IN THE SLIP, DOCKED, ...
 t3 log           the tree's log, live: the useful lines only
 slip             what the LiDAR makes of the slip, once a second (no tree)
@@ -36,10 +42,13 @@ case "$cmd" in
       fire) tree=cannon_fire ;;
       hold) tree=cannon_hold ;;
     esac
-    exec ros2 launch crusader_bringup task3.launch.py tree:="$tree" "$@"
+    sim=()
+    [ "${CRSD_SIM:-0}" = 1 ] && sim=(sim:=true)
+    exec ros2 launch crusader_bringup task3.launch.py tree:="$tree" "${sim[@]}" "$@"
     ;;
   go)
-    exec "$SCRIPT_DIR/go.sh" "${@:-86400}"
+    # 86400 first: no practical time limit unless a number is given (the last one wins)
+    exec bash "$SCRIPT_DIR/go.sh" 86400 "$@"
     ;;
   steps)
     exec ros2 topic echo /crsd/task3_events --qos-durability transient_local \
@@ -52,7 +61,7 @@ case "$cmd" in
     tail -n 40 -F "$f" | grep --line-buffered -E \
       "TASK3|slot:|strafe:|the LiDAR has the slip|waiting for the LiDAR|code, window|decoded|FIRE|HIT|REFUSED|WARN|ERROR"
     ;;
-  slip) exec "$SCRIPT_DIR/slip.sh" "$@" ;;
-  cal) exec "$SCRIPT_DIR/cal.sh" "$@" ;;
+  slip) exec bash "$SCRIPT_DIR/slip.sh" "$@" ;;
+  cal) exec bash "$SCRIPT_DIR/cal.sh" "$@" ;;
   *) usage ;;
 esac

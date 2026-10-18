@@ -1,0 +1,33 @@
+# task3_wp — Task 3 from a GPS waypoint (task3_cannon_slip.xml started in GUIDED):
+# the boat starts 20 m south of the dock facing it; YOU put one waypoint about 5 m
+# off the dock (QGC: Plan view, one waypoint, Upload; or `sim wp right`), and the
+# run goes there in GUIDED, waits for MANUAL (SC), slides sideways along the dock
+# until the camera has the GREEN indicator, then docks in that slip on the LiDAR,
+# fires, reads the code. The GREEN bay is RANDOM at every bring-up.
+#
+#     sim up task3_wp; tx arm; tx guided; sim wp right (or QGC); t3 start; t3 go wp
+#     ... "AT THE WAYPOINT: WAITING FOR MANUAL (SC)" ...  tx manual
+#
+# 5 m off the bays' faces (y = 19.035): left (bay 1) x = -2, middle x = 0, right
+# (bay 3) x = +2, all at y = 14.0. docs/T3_sim_commands.md.
+
+name: task3_wp
+origin: {lat: 1.28060, lon: 103.85570}
+draft_m: 0.24
+depth_m: 5.0
+boat_start: {x: 0.0, y: 0.0, yaw_deg: 90.0}
+tier: disruptive
+code: [red, blue]
+extinguish_s: 2.0
+
+elements:
+  - type: dock
+    name: dock
+    x: 0.0
+    y: 20.0
+    facing_deg: -90.0
+    green_bay: random          # picked at each bring-up; SIM_GREEN_BAY=N forces one
+    lit_window: {bay: 2, slot: 1, colour: red}   # the lower-right; the bay follows green_bay
+  - {type: platform, name: platform_red,  x: -10.0, y: 12.0, circle: red}
+  - {type: platform, name: platform_blue, x:  10.0, y: 12.0, circle: blue}
+  - {type: launch_pad, name: uav_pad, x: -6.0, y: -4.0}

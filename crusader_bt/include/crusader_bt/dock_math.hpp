@@ -181,6 +181,16 @@ inline Vec2 bodyToWorld(Vec2 boat, double heading_deg, double bx, double by)
   return boat + f * bx + nav::portOf(f) * by;
 }
 
+/// Bearing of a world point from the CAMERA's boresight, deg, + to port (the
+/// CV's convention): where in the picture a bay in the book would be now.
+inline double bearingFromCamera(Vec2 p, Vec2 boat, double heading_deg, const Mount & m)
+{
+  const Vec2 cam = bodyToWorld(boat, heading_deg, m.x, m.y);
+  const Vec2 f = nav::headingVec(heading_deg - m.yaw_deg);
+  const Vec2 d = p - cam;
+  return std::atan2(nav::dot(d, nav::portOf(f)), nav::dot(d, f)) / nav::kDeg;
+}
+
 /// A DIRECTION in the camera frame (x forward, y left) as a world unit vector.
 /// The mount yaw is + to port (counter-clockwise) and compass is clockwise,
 /// hence the subtraction.

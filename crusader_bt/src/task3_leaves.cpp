@@ -249,6 +249,66 @@ public:
   }
 };
 
+/// The committed bay is in the camera's picture NOW: seen within max_age_s of
+/// the latest frame (itself that fresh), and no more than max_bearing_deg off
+/// the camera's line - the bow, for a camera facing ahead - from its place in
+/// the book and the boat's pose (dock::bearingFromCamera). The camera
+/// approach steers on the bay it can see; a bay committed from far off - on
+/// the GUIDED leg, say - can be out of the picture once the boat is in close:
+/// 4 m along the dock from a waypoint 3 m out is 53 deg off the bow, outside
+/// the 82 deg camera, and the approach just held there (the sim, 2026-10-17).
+class CommittedBayInView : public CrusaderCondition
+{
+public:
+  CommittedBayInView(const std::string & n, const BT::NodeConfig & c)
+  : CrusaderCondition(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<double>("max_age_s", 1.0, "seen this recently (s, the camera's clock)"),
+      BT::InputPort<double>("max_bearing_deg", 20.0, "this far off the camera's line at most"),
+      BT::InputPort<double>("max_lateral_m", 0.0,
+        "> 0: LINED UP too - the body origin this close to the bay's centreline, along "
+        "the dock (its layout in the book)"),
+      BT::InputPort<double>("max_yaw_off_deg", 0.0,
+        "> 0: and the bow this close to square to the faces")};
+  }
+
+  BT::NodeStatus tick() override
+  {
+    const double max_age = getInput<double>("max_age_s").value_or(1.0);
+    const double max_brg = getInput<double>("max_bearing_deg").value_or(20.0);
+    const double max_lat = getInput<double>("max_lateral_m").value_or(0.0);
+    const double max_yaw = getInput<double>("max_yaw_off_deg").value_or(0.0);
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    const dock::BayTrack * t = ctx_->dock.find(ctx_->chosen_track);
+    if (t == nullptr || ctx_->dock_obs_age_s > max_age || ctx_->dock_t - t->last_seen > max_age ||
+      !ctx_->pose_fresh || !std::isfinite(ctx_->heading_deg))
+    {
+      return BT::NodeStatus::FAILURE;
+    }
+    const double brg = dock::bearingFromCamera(t->p, ctx_->boat, ctx_->heading_deg, ctx_->cam_mount);
+    if (std::fabs(brg) > max_brg) {return BT::NodeStatus::FAILURE;}
+    // In the picture is not lined up: a boat TURNING sweeps the bay through the
+    // middle of the picture from 2-3 m to the side, and the approach then lost it
+    // (the sim, rough weather, 2026-10-18). Lined up = on its centreline, square.
+    if (max_lat > 0.0 || max_yaw > 0.0) {
+      const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs, ctx_->dock_bays);
+      if (!L.ok) {return BT::NodeStatus::FAILURE;}
+      if (max_lat > 0.0 && std::fabs(nav::dot(t->p - ctx_->boat, L.right)) > max_lat) {
+        return BT::NodeStatus::FAILURE;
+      }
+      const double square = nav::bearingDeg({0.0, 0.0}, L.out * -1.0);
+      if (max_yaw > 0.0 &&
+        std::fabs(fire::wrap180(ctx_->heading_deg - square)) > max_yaw)
+      {
+        return BT::NodeStatus::FAILURE;
+      }
+    }
+    return BT::NodeStatus::SUCCESS;
+  }
+};
+
 /// The goal's tier is at least `tier` (0 Core, 1 Advanced, 2 Disruptive), so
 /// one tree serves all three and Core simply stops after the fire is out.
 class TierAtLeast : public CrusaderCondition
@@ -980,6 +1040,7 @@ void registerTask3Nodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<DockedInBay>("DockedInBay");
   factory.registerNodeType<LinedUp>("LinedUp");
   factory.registerNodeType<BayChosen>("BayChosen");
+  factory.registerNodeType<CommittedBayInView>("CommittedBayInView");
   factory.registerNodeType<TierAtLeast>("TierAtLeast");
   factory.registerNodeType<UpdateDockBook>("UpdateDockBook");
   factory.registerNodeType<PickVantage>("PickVantage");

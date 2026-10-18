@@ -1,0 +1,29 @@
+# task3_aim_lr — the cannon's AIM TEST on the lower-right window (`sim aimtest lr`).
+#
+# The boat is pinned at a grid of places and headings in front of the middle bay
+# (crusader_sim.aim_pin), the cannon aims at the LOWER-RIGHT window the camera
+# sees (cannon_aim_node: the camera's bearing, the LiDAR's distance, the window's
+# known height; NO trims) and fires, and the referee measures where the water
+# crosses the face against the window's centre (crusader_sim.aim_test).
+# docs/T3_sim_commands.md, "The cannon's aim test".
+#
+# The dock is the Task 3 courses': faces at y = 19.035, the deck edge (the back
+# wall the LiDAR measures) at y = 19.0, bay 2 on x = 0.
+
+name: task3_aim_lr
+origin: {lat: 1.28060, lon: 103.85570}
+draft_m: 0.24
+depth_m: 5.0
+boat_start: {x: 0.0, y: 17.0, yaw_deg: 90.0}
+tier: core
+code: [red, blue]
+extinguish_s: 1000.0        # the window stays lit: every shot aims at a burning window
+
+elements:
+  - type: dock
+    name: dock
+    x: 0.0
+    y: 20.0
+    facing_deg: -90.0
+    green_bay: 2
+    lit_window: {bay: 2, slot: 1, colour: red}   # the lower-right

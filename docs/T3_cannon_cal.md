@@ -12,6 +12,38 @@ copy, `t3tools/cannon_cal.yaml`; it is no longer read.)
 The trims are **per window**: `pan_trim_ul_deg`, `tilt_trim_ul_deg`, `pan_trim_lr_deg`,
 `tilt_trim_lr_deg` (Tuning tab: `/cannon_aim_node`). One trim did not hit both windows.
 
+## No trims for now (2026-10-18)
+
+Keep all four trims at **0**, and zero any saved in the Tuning tab. The aim is calculated
+instead (`aim_point_source: geometry`, `cannon_aim_core.geometric_target`):
+
+| | from |
+|---|---|
+| side to side | the camera: where the window is in the picture |
+| distance | the LiDAR: the slip's back wall when docked (`/crsd/dock_slot`), else the wall ahead (`/crsd/wall_range`) |
+| height | the window's **known** height above the water: `window_height_lr_m`, `window_height_ul_m` |
+| the water's speed | the measured throw (`throw_*`, 4.85 m/s), or `cal speed` below |
+| the nozzle | `nozzle_x/y/z`: 0.279 m left of the camera, 0.51 m above the water (confirmed) |
+
+**Measure the windows' heights on the dock**, the centre of each window above the water,
+and set them:
+
+```bash
+cal set window_height_lr_m 0.81
+```
+
+```bash
+cal set window_height_ul_m 1.05
+```
+
+(0.81 and 1.05 are the build guide's dock, as the sim has it.) If the LiDAR plane and the
+camera's distance disagree by more than 0.3 m (a wall fitted on the finger tips), the
+camera's distance is used for that frame. `ros2 param set /cannon_aim_node
+aim_point_source camera` goes back to the camera's 3D point.
+
+**Reach:** at 4.85 m/s the water reaches the lower-right window's centre (0.81 m up) from
+up to ~2.1 m (LiDAR to the back wall), the upper-left's (1.05 m up) only from ~1.8 m.
+
 ## Before you go
 
 1. On the Jetson host, get this branch and rebuild:
@@ -54,8 +86,9 @@ It prints `cannon_aim_node up ... (pump DRY)`. Then:
 
 After any `cal set`, run `cal node` again.
 
-**Is the nozzle where we assumed?** That's about 10 cm ahead of the camera's middle lens,
-30 cm to its left and 10 cm above it. If it's more than ~5 cm off, set the real position.
+**Is the nozzle where we think?** As measured (2026-10-12): level with the camera's middle
+lens fore/aft, 28 cm (11 in) to its left and 10 cm above it. If it has moved by more than
+~5 cm, set the real position.
 The numbers are the lens's position plus your tape measurements:
 
 ```bash

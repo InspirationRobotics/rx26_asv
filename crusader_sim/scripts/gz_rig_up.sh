@@ -61,7 +61,9 @@ fi
 SIMSHARE=$WS/install/crusader_sim/share/crusader_sim
 BT=$WS/install/crusader_bt/share/crusader_bt/behavior_trees
 TREE_DEFAULT=task1_global.xml      # the whole-field planner; TREE=task1_disruptive.xml = the per-gate tree
-[ "$TASK3" = 1 ] && TREE_DEFAULT=task3_cannon.xml
+# Task 3: the sim's own tree (GUIDED to the waypoint, then MANUAL: slide, dock, fire,
+# the reports). TREE=task3_cannon.xml = the older all-GUIDED line-up.
+[ "$TASK3" = 1 ] && TREE_DEFAULT=task3_cannon_sim.xml
 TREE="${TREE:-$TREE_DEFAULT}"
 case "$TREE" in */*) ;; *) TREE="$BT/$TREE" ;; esac     # a bare name means crusader_bt's
 export GZ_PARTITION=crusader_sim
@@ -110,9 +112,16 @@ PUMP_ARGS=()
 # real time (with the Gazebo window open on a GTX 1080 Ti it runs at ~0.45x: a 1 s
 # burst on the autopilot's clock is ~2.2 s of the bridge's)
 [ "$TASK3" = 1 ] && PUMP_ARGS=(-p pump_servo_channel:=10 -p pump_return_timeout_s:=3.0)
+# The autopilot's HEARTBEAT is 1 Hz on ITS clock, and the bridge calls a stream
+# stale after stream_timeout_s of WALL time (1.0 on the boat). Below real time -
+# 0.45x with the GUI, 0.2-0.8x headless on a busy PC (2026-10-12) - every
+# heartbeat looked late: the mode read "unknown" and the GUIDED setpoint that
+# starts Task 3 was DROPPED, so the boat sat still until the mission timed out.
+# 3 s rides out down to ~0.35x. The sim only; the boat keeps 1.0.
+SIM_BRIDGE_ARGS=(-p stream_timeout_s:=3.0)
 up telemetry_bridge /tmp/tb.log \
   ros2 run crusader_fcu telemetry_bridge --ros-args --params-file "$CFG" \
-  -p mav_endpoint:=udp:127.0.0.1:14551 "${PUMP_ARGS[@]}"
+  -p mav_endpoint:=udp:127.0.0.1:14551 "${SIM_BRIDGE_ARGS[@]}" "${PUMP_ARGS[@]}"
 up lidar_cluster_node /tmp/lidar_cluster.log \
   ros2 run crusader_perception lidar_cluster_node --ros-args --params-file "$CFG"
 # rxl_endpoint on this branch is the RFD900 (/dev/crsd-rfd); the params file's
@@ -127,13 +136,28 @@ else
 fi
 up target_tracker /tmp/tt.log \
   ros2 run crusader_world_model target_tracker --ros-args --params-file "$CFG"
-if [ "$TASK3" = 1 ]; then
+if [ "$TASK3" = 1 ] && [ "${BOAT_ONLY:-0}" = 1 ]; then
+  # --boat (gz_sim_up.sh): the simulated BOAT only, as it is on the water before
+  # anyone types `t3 start`. The Task 3 nodes and the tree come from task3.launch.py
+  # (t3 start, sim:=true), the same launch as on the Jetson. task3_world is the
+  # sim's RoboCommand and dock camera, which the water has for real.
+  echo "=== Task 3: the sim's RoboCommand and camera only (--boat: t3 start does the rest) ==="
+  up task3_world /tmp/task3_world.log \
+    ros2 run crusader_sim task3_world --ros-args -p course:="$COURSE"
+elif [ "$TASK3" = 1 ]; then
   echo "=== Task 3 (the pan/tilt cannon) ==="
   up dock_slot_node /tmp/dock_slot.log \
     ros2 run crusader_perception dock_slot_node --ros-args --params-file "$CFG"
-  # the water is simulated, so the cannon may ask for it (on the boat: run.sh live)
+  # the LiDAR's wall range: the practice-dock trees' forward axis, and the approach
+  # of task3_cannon_slip.xml before the slip is seen (task3.launch.py starts it for
+  # cannon_fire / cannon_slip on the boat)
+  up wall_range_node /tmp/wall_range.log \
+    ros2 run crusader_perception wall_range_node --ros-args --params-file "$CFG"
+  # the water is simulated, so the cannon may ask for it (on the boat: run.sh live);
+  # the sim dock's windows stand 3.5 cm behind the deck edge the LiDAR measures
   up cannon_aim_node /tmp/cannon.log \
-    ros2 run crusader_fcu cannon_aim_node --ros-args --params-file "$CFG" -p fire_pump:=true
+    ros2 run crusader_fcu cannon_aim_node --ros-args --params-file "$CFG" -p fire_pump:=true \
+      -p face_setback_m:=0.035
   up task3_world /tmp/task3_world.log \
     ros2 run crusader_sim task3_world --ros-args -p course:="$COURSE"
 fi
@@ -184,10 +208,15 @@ up ground_station /tmp/gcs.log \
 # bt_runner so it hears the first leg status; nothing breaks if the panel is not running
 up panel_feed /tmp/panel_feed.log ros2 run crusader_sim panel_feed --ros-args -p course:="$COURSE"
 sleep 6
+if [ "$TASK3" = 1 ] && [ "${BOAT_ONLY:-0}" = 1 ]; then
+  echo "  bt_runner            -- not started (--boat: t3 start starts the tree, as on the water)"
+  TREE="(t3 start)"
+else
 up bt_runner /tmp/bt.log \
   ros2 run crusader_bt bt_runner_node --ros-args --params-file "$CFG" "${BT_TUNE[@]}" \
   -p tree_file:="$TREE" -p publish_setpoints:=true -p default_timeout_s:=400.0 \
   -p nav_mode:="$NAV_MODE"
+fi
 sleep 6
 
 # planner_server leaves 'activating' only once TF map -> base_footprint exists,

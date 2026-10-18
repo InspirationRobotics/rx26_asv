@@ -14,7 +14,10 @@ THE CHAIN, one frame:
   1. camera -> body   the aim point through the camera's mount (cam_x/y/z,
                       cam_yaw_deg, cam_pitch_deg: target_tracker's numbers, the
                       same ones bt_runner places bays with). Same rotation as
-                      crusader_bt fire::camToBody.
+                      crusader_bt fire::camToBody. With aim_point_source
+                      geometry (geometric_target, 2026-10-18) only the camera's
+                      BEARING is kept: the LiDAR's face plane gives the distance
+                      and the window's known height the height.
   2. body -> nozzle   minus the pan/tilt PIVOT's position in the body frame.
                       The camera is fixed to the hull and so is the pivot, so
                       this is one constant offset (ASSUMED until measured: the
@@ -235,6 +238,63 @@ def solve(target_body, cp: CannonParams, roll=0.0, pitch=0.0):
 def solve_from_camera(p_cam, cp: CannonParams, roll=0.0, pitch=0.0):
     """solve() for a camera_link aim point (the dock detector's DockWindow x, y, z)."""
     return solve(cam_to_body(p_cam, cp), cp, roll, pitch)
+
+
+# ------------------------------------------------------------------ the aim point, from geometry
+#
+# NO TRIMS (the user's call, 2026-10-18): the aim from what is measured better than
+# the camera's stereo point. The camera keeps only its BEARING to the window (where
+# in the picture it is: side to side); the DISTANCE comes from the LiDAR's face
+# plane, and the HEIGHT is the window's known height above the water. A window cut
+# off by the top of the picture reports the centre of the part it sees (low), and
+# stereo depth at 1-2 m is a few cm noisy; the LiDAR plane and a tape-measured
+# height are neither.
+
+def plane_from_wall(range_m, angle_deg):
+    """The wall plane n.p = d (levelled body frame, n horizontal, toward the wall)
+    from WallRange: range_m body origin -> wall, perpendicular; angle_deg the
+    perpendicular's bearing, + left."""
+    a = math.radians(angle_deg)
+    return (math.cos(a), math.sin(a)), float(range_m)
+
+
+def plane_from_slot(back_range_m, angle_deg, lidar_xy):
+    """The back wall n.p = d from DockSlot: back_range_m from the LiDAR, along the
+    slip's axis (angle_deg, + left); lidar_xy the LiDAR in the body frame."""
+    a = math.radians(angle_deg)
+    n = (math.cos(a), math.sin(a))
+    return n, float(back_range_m) + n[0] * lidar_xy[0] + n[1] * lidar_xy[1]
+
+
+def geometric_target(p_cam, cp: CannonParams, roll=0.0, pitch=0.0, plane=None,
+                     height_above_water=None, waterline_z=0.24, setback_m=0.0,
+                     max_disagree_m=0.3):
+    """(target_body, what was used): the aim point (body frame, hull datum) built
+    from the camera's bearing to the window, the face plane `plane` = (n, d) in
+    the levelled body frame (moved setback_m further: the face's windows stand
+    that far behind what the LiDAR measured) and the window's centre
+    `height_above_water` (the water `waterline_z` above the hull datum, when
+    level). Whatever is missing (None) comes from the camera's own point. `used`
+    says which: "lidar+height", "lidar", "height" or "camera". A plane putting
+    the window more than max_disagree_m from where the camera ranges it is not
+    the face's (a wall fitted on the finger tips): the camera's range then."""
+    pl = level(cam_to_body(p_cam, cp), roll, pitch)
+    cl = level((cp.cam_x, cp.cam_y, cp.cam_z), roll, pitch)
+    tx, ty, tz = pl
+    used = []
+    if plane is not None:
+        (nx, ny), d = plane
+        rx, ry = pl[0] - cl[0], pl[1] - cl[1]
+        den = nx * rx + ny * ry
+        if math.isfinite(d) and den > 1e-6:
+            t = (d + setback_m - (nx * cl[0] + ny * cl[1])) / den
+            if t > 0.0 and abs(t - 1.0) * math.hypot(rx, ry) <= max_disagree_m:
+                tx, ty = cl[0] + t * rx, cl[1] + t * ry
+                used.append("lidar")
+    if height_above_water is not None and math.isfinite(height_above_water):
+        tz = waterline_z + float(height_above_water)
+        used.append("height")
+    return unlevel((tx, ty, tz), roll, pitch), "+".join(used) or "camera"
 
 
 # ------------------------------------------------------------------ per-window trim

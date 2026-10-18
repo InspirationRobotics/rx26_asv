@@ -288,6 +288,9 @@ public:
       "/crsd/resource_delivery_request", 10);
     uav_request_pub_ = create_publisher<std_msgs::msg::String>("/crsd/uav_resource_request", 10);
     cannon_pub_ = create_publisher<std_msgs::msg::String>("/crsd/water_cannon", 10);
+    // the waypoint run's own GUIDED -> MANUAL (RequestMode); telemetry_bridge
+    // takes it, and the pilot's SC outranks it
+    set_mode_pub_ = create_publisher<std_msgs::msg::String>("/crsd/set_mode", 10);
     // The fixed-nozzle shot: GUIDED heading+speed and pump bursts, both through
     // telemetry_bridge, which gates each (mode + drop latch; pump_core).
     hs_pub_ = create_publisher<crusader_msgs::msg::GuidedHeadingSpeed>(
@@ -367,7 +370,14 @@ public:
     server_ = rclcpp_action::create_server<SafePassage>(
       this, action_name_,
       [this](const rclcpp_action::GoalUUID &, std::shared_ptr<const SafePassage::Goal>) {
-        if (busy_.exchange(true)) {
+        // busy_ is only LOOKED AT here; the accepted callback below takes it.
+        // rclcpp_action (Humble) calls this, sends the reply, and only if the
+        // reply went out makes the goal and calls accepted. A reply that times
+        // out ("Failed to send goal response ... (timeout)": a client not yet
+        // discovered, a loaded machine) drops the goal right there. Taken here,
+        // busy_ stayed set by a goal that never ran, and every later goal was
+        // REJECTED until the runner was restarted (the sim, 2026-10-17).
+        if (busy_.load()) {
           RCLCPP_WARN(
             get_logger(),
             "REJECTING a second goal — one mission at a time. Cancel the "
@@ -391,6 +401,20 @@ public:
         // mission, which is exactly when someone is already having a bad day.
         // The previous goal is always finished by the time a new one is
         // accepted (busy_ gates that), so this join is instant.
+        if (busy_.exchange(true)) {
+          // two goals let through together, before either took busy_
+          RCLCPP_WARN(
+            get_logger(),
+            "REJECTING a second goal — one mission at a time (it came in with "
+            "the first).");
+          auto r = std::make_shared<SafePassage::Result>();
+          r->outcome = SafePassage::Result::OUTCOME_FAULT;
+          r->detail = "a mission is already running: one at a time";
+          r->entry_latitude = r->entry_longitude = std::nan("");
+          r->exit_latitude = r->exit_longitude = std::nan("");
+          gh->abort(r);
+          return;
+        }
         if (worker_.joinable()) {worker_.join();}
         worker_ = std::thread([this, gh] {execute(gh);});
       },
@@ -451,6 +475,9 @@ private:
         "sideways coasting window, s - stop pushing when arrival is this close (tree: 1.5; 0 = never)"},
       {"lat_min_us", &fire::StrafeTune::lat_min_us, 120.0,
         "sideways deadband offset added to every correction, us (tree: = min_us, 30)"},
+      {"max_close_mps", &fire::StrafeTune::max_close_mps, 2.0,
+        "approach speed limit, m/s: never close on the range faster than this (it shrinks to "
+        "0.5 x the remaining distance per s); 0 = off (tree: the slip hold 0.25, others off)"},
       {"est_enable", &fire::StrafeTune::est_enable, 1.0,
         "1 = the lateral ESTIMATOR on (camera + compass Kalman filter, yaw taken out); -1/0 = off"},
       {"est_q", &fire::StrafeTune::est_q, 10.0,
@@ -842,6 +869,11 @@ private:
         pump_pub_->publish(m);
       };
     ctx_->set_avoidance = [this](bool on) {publishAvoidance(on);};
+    ctx_->request_mode = [this](const std::string & mode) {
+        std_msgs::msg::String m;
+        m.data = mode;
+        set_mode_pub_->publish(m);
+      };
     ctx_->sticks = [this](double fwd, double lat, double yaw) {
         const double v[3] = {fwd, lat, yaw};
         crusader_msgs::msg::RcChannels m;
@@ -1391,6 +1423,7 @@ private:
       ctx_->approach_lon = goal->approach_longitude;
       ctx_->has_approach = goal->approach_latitude != 0.0 || goal->approach_longitude != 0.0;
       ctx_->have_waypoint = false;
+      ctx_->handed_mode.clear();         // no planned switch yet: the goal's mode
       // THE GATE HANDSHAKE IS PER-MISSION STATE AND MUST START EMPTY.
       //
       // passage_complete latches when the aircraft answers 255/255, and it used
@@ -1535,10 +1568,13 @@ private:
             // The pilot took it back = the MODE CHANGED during the run. A tree
             // that drives in MANUAL (task3_fire_manual.xml) is never
             // "autonomous", so "not autonomous" alone is not the pilot.
-            if (ctx_->mode != goal_mode_ || (!ctx_->autonomous && goal_mode_ != "MANUAL")) {
+            // A mode the tree waited for (AwaitMode: the waypoint run's MANUAL)
+            // is the one it now runs in, not the pilot taking over.
+            const std::string want = ctx_->handed_mode.empty() ? goal_mode_ : ctx_->handed_mode;
+            if (ctx_->mode != want || (!ctx_->autonomous && want != "MANUAL")) {
               outcome = SafePassage::Result::OUTCOME_NOT_AUTONOMOUS;
-              detail = "flight mode " + (ctx_->mode != goal_mode_ ?
-                goal_mode_ + " -> " + ctx_->mode : ctx_->mode + " is not autonomous") +
+              detail = "flight mode " + (ctx_->mode != want ?
+                want + " -> " + ctx_->mode : ctx_->mode + " is not autonomous") +
                 " — the pilot took control; not fighting for it";
             } else {
               outcome = SafePassage::Result::OUTCOME_NO_ENTRY;
@@ -1698,7 +1734,7 @@ private:
   rclcpp_action::Server<SafePassage>::SharedPtr server_;
   rclcpp::Publisher<crusader_msgs::msg::GuidedSetpoint>::SharedPtr setpoint_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr gate_reached_pub_;
-  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr task_pub_, report_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr task_pub_, report_pub_, set_mode_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr bt_status_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr avoid_pub_, autonomy_pub_;
   rclcpp::Subscription<crusader_msgs::msg::FcuStatus>::SharedPtr status_sub_;

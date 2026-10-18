@@ -6,7 +6,31 @@
   centres the boat, sets the distance and squares the bow (SlotKeep on
   dock_slot_node), not the camera's face:
 
-    APPROACHING   bow pointed AT the bay on the camera (StrafeKeep, as in
+    TO THE WAYPOINT  (only when the run starts in GUIDED) the waypoint in the
+                  goal (go.sh `wp`: the first mission waypoint uploaded from
+                  QGC), on GUIDED position setpoints; there the TREE switches
+                  to MANUAL itself (RequestMode, /crsd/set_mode; the user's
+                  call, 2026-10-18): the transmitter stays as set for GUIDED,
+                  SD still drops the tree's sticks, and moving SC takes the
+                  mode back and ends the run. GUIDED cannot strafe (the OmniX
+                  frame): everything after the waypoint is MANUAL RC override,
+                  like dp_hold. Started in MANUAL, as at the practice slip, it
+                  skips this.
+    SEARCHING     which bay is the GREEN one, before anything drives in: if
+                  none is committed yet, the boat SLIDES SIDEWAYS along the dock
+                  (StrafeSearch: 4 m left, then back to 4 m right of where it
+                  started, the bow square to the faces and at least 3.5 m out
+                  from them, clear of the 2 m fingers) until the camera has the GREEN
+                  indicator and the two RED ones (one bay: dock_bays:=1, a lone
+                  GREEN); after a whole search a lone GREEN will do. Then
+                  CommitSafeBay. Without it the approach took the bay nearest
+                  the bow - a RED one from a start where the GREEN indicator was
+                  out of the picture (the sim, 2026-10-17, task3_slip_angle).
+                  The camera often knows already (it sees the whole dock from
+                  the GUIDED leg); then no slide, unless the committed bay is
+                  out of the picture in close: SLIDING (StrafeSearch toward it)
+                  until it is within 20 deg of the bow (CommittedBayInView)
+    APPROACHING   bow pointed AT the committed bay on the camera (StrafeKeep, as in
                   cannon_fire), heading for the slip's mouth (2.4 m from the
                   wall, body origin): it does not drive into the slip on the
                   camera alone
@@ -19,12 +43,19 @@
 
   THE DISTANCES ARE NOT THE CANNON_FIRE ONES. SlotKeep's standoff is the LiDAR
   to the BACK WALL along the slip; cannon_fire's wall range is the BODY ORIGIN
-  to the wall. The LiDAR is 0.32 m ahead of the body origin, so standoff 1.1
-  here = wall range ~1.42 there (where the fire was sprayed and seen GREEN on
-  2026-10-11), and watch 1.4 here = 1.72 there. Live: strafe.fire_range_m (dock
+  to the wall. The LiDAR is 0.32 m ahead of the body origin, so standoff 1.25
+  here (the user's, 2026-10-18; it was 1.1) = wall range ~1.57 there (the fire
+  was sprayed and seen GREEN from ~1.42 on 2026-10-11), and watch 1.4 here =
+  1.72 there. Live: strafe.fire_range_m (dock
   and spray) and strafe.watch_range_m, in these units while this tree's slip
   hold runs; -1 = the values below. A value saved from cannon_fire applies here
   too, in the other units: check them in the Tuning tab before a run.
+
+  THE APPROACH SPEED LIMIT (max_close_mps; strafe.max_close_mps live, 0 = off):
+  never closing on the target range faster than 0.4 m/s on the camera's approach
+  and 0.25 m/s in the slip, less as the range closes (half the remaining distance
+  per second). Without it, the sim's boat came into the slip at 0.5 m/s and
+  stopped 0.39 m past the 1.1 m standoff, 0.71 m from the back wall (2026-10-17).
 
   The slip lost for 2 s (DockSlotAlive): back to the camera approach, which
   backs the boat out to the mouth and lets the LiDAR find the slip again; three
@@ -36,6 +67,61 @@
 -->
 <root BTCPP_format="4" main_tree_to_execute="CannonSlip">
   <BehaviorTree ID="CannonSlip">
+   <Sequence name="cannon_slip">
+
+    <!-- 0. started in GUIDED: to the waypoint, then the pilot's MANUAL -->
+    <Fallback name="to_the_waypoint">
+      <ModeIs mode="MANUAL"/>
+      <Sequence>
+        <ReactiveSequence name="guided_leg">
+          <IsAutonomous/>
+          <UpdateDockBook/>
+          <Sequence>
+            <SetTask token="TASK_COORDINATED_LOGISTICS"/>
+            <Announce text="TO THE WAYPOINT in GUIDED"/>
+            <NavigateTo target="approach" tolerance="1.0"/>
+          </Sequence>
+        </ReactiveSequence>
+        <Announce text="AT THE WAYPOINT: SWITCHING TO MANUAL"/>
+        <RequestMode mode="MANUAL" from="GUIDED" timeout_s="10.0"/>
+      </Sequence>
+    </Fallback>
+
+    <!-- 1. which bay is the GREEN one: slide along the dock until it is known -->
+    <ReactiveSequence name="which_bay">
+      <ModeIs mode="MANUAL"/>
+      <NotDropped/>
+      <AttitudeAlive max_age_s="0.5"/>
+      <DockCameraAlive max_age_s="3.0"/>
+      <UpdateDockBook/>
+      <Fallback>
+        <BayChosen/>
+        <Sequence>
+          <ForceSuccess>
+            <ReactiveFallback name="search_until_known">
+              <SafeBayKnown need_others_red="true"/>
+              <Sequence>
+                <Announce text="SEARCHING for the GREEN bay, sliding along the dock"/>
+                <StrafeSearch first="left" leg_m="4.0" lat_us="70" min_out_m="3.5"/>
+              </Sequence>
+            </ReactiveFallback>
+          </ForceSuccess>
+          <SafeBayKnown need_others_red="false"/>
+          <CommitSafeBay/>
+        </Sequence>
+      </Fallback>
+      <!-- and that bay in the camera's picture: one committed from far off
+           (on the GUIDED leg) can be out of it in close, and the camera
+           approach only steers on a bay it can see -->
+      <ReactiveFallback name="bay_in_view">
+        <CommittedBayInView max_age_s="1.0" max_bearing_deg="20.0" max_yaw_off_deg="15.0"/>
+        <Sequence>
+          <Announce text="SLIDING to bring the GREEN bay into view"/>
+          <StrafeSearch first="committed" leg_m="6.0" lat_us="70" min_out_m="3.5"/>
+        </Sequence>
+      </ReactiveFallback>
+    </ReactiveSequence>
+
     <RetryUntilSuccessful num_attempts="3" name="find_the_slip_again">
       <Sequence>
         <Script code="watching := false"/>
@@ -47,6 +133,7 @@
           <WallRangeAlive max_age_s="1.0" face_max_age_s="1.0"/>
           <AttitudeAlive max_age_s="0.5"/>
           <DockCameraAlive max_age_s="3.0"/>
+          <UpdateDockBook/>
           <StrafeKeep fire_range_m="2.4" lateral_ref="face" range_fallback="face"
                       approach_m="0.8" watch="false"
                       lateral_bias_m="0.0" nozzle_y_m="0.0"
@@ -56,7 +143,7 @@
                       kp_fwd="90" kd_fwd="60" kp_lat="100" kd_lat="200" kp_yaw="5" kd_yaw="0.5"
                       ki_fwd="40" ki_lat="10" i_max_us="100"
                       min_us="30" max_us="120" slew_us_s="200"
-                      min_range_m="0.6" square_first_deg="10"/>
+                      min_range_m="0.6" square_first_deg="10" max_close_mps="0.4"/>
           <Sequence>
             <Announce text="APPROACHING the bay, bow on it"/>
             <AwaitDockSlot hold_s="1.0" gap_s="0.5"/>
@@ -70,19 +157,22 @@
           <DockSlotAlive max_age_s="2.0"/>
           <AttitudeAlive max_age_s="0.5"/>
           <DockCameraAlive max_age_s="3.0"/>
-          <SlotKeep standoff_m="1.1" watch="{watching}" watch_range_m="1.4"
+          <UpdateDockBook/>
+          <SlotKeep standoff_m="1.25" watch="{watching}" watch_range_m="1.4"
                     lateral_bias_m="0.0" slot_timeout_s="0.6" min_range_m="0.8"
-                    max_us="90"/>
+                    max_us="90" max_close_mps="0.25" centre_first_m="0.25"/>
           <Sequence name="mission">
             <Announce text="IN THE SLIP: the LiDAR has it"/>
-            <AwaitStrafeSolution fire_range_m="1.1" range_tol_m="0.30" lat_tol_m="0.20"
+            <AwaitStrafeSolution fire_range_m="1.25" range_tol_m="0.30" lat_tol_m="0.20"
                                  yaw_tol_deg="10.0" hold_s="0.5" gap_s="0.0" timeout_s="1000000"
                                  steady="false"/>
             <Announce text="DOCKING: lining up %RANGE% m from the back wall"/>
-            <AwaitStrafeSolution fire_range_m="1.1" range_tol_m="0.08" lat_tol_m="0.10"
+            <AwaitStrafeSolution fire_range_m="1.25" range_tol_m="0.08" lat_tol_m="0.10"
                                  yaw_tol_deg="6.0" hold_s="2.0" gap_s="0.0" timeout_s="1000000"
                                  steady="false"/>
-            <ReportDocking bay="1"/>
+            <!-- the committed bay (0 = CommitSafeBay's): at the practice slip
+                 there is one, and no RoboCommand to judge the number -->
+            <ReportDocking bay="0"/>
 
             <!-- back to watch the lights, still in the slip -->
             <Script code="watching := true"/>
@@ -111,5 +201,6 @@
         </ReactiveSequence>
       </Sequence>
     </RetryUntilSuccessful>
+   </Sequence>
   </BehaviorTree>
 </root>

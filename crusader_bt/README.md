@@ -269,6 +269,9 @@ being ticked".
 | `WallRangeAlive` / `AttitudeAlive` | condition | the streams the shot stands on |
 | `StrafeKeep` | compute | MANUAL. **always SUCCESS**: surge to the range (LiDAR), sway onto the window and yaw square (camera); P+D with the ESC deadband compensated, I near the target, capped; zero while the LiDAR and camera disagree or water is in the air |
 | `AwaitStrafeSolution` | action | MANUAL. RUNNING until range, window on the line, square, camera fresh, steady and not being moved all hold 1 s |
+| `StrafeSearch` | action | MANUAL. slide sideways on the lateral stick along the dock (its layout in the book; else across the start's bow), the bow square to the faces and at least `min_out_m` out from them: `leg_m` toward `first` (left / right / `committed` = toward the committed bay in the book), then back past the start; FAILURE after both legs or `timeout_s`. Ended from outside: under a ReactiveFallback with `SafeBayKnown` or `CommittedBayInView` first |
+| `RequestMode` | action | the run's own mode switch (the waypoint run: GUIDED -> MANUAL) on `/crsd/set_mode`; only from `from`, twice a second until the autopilot reports it; FAILURE on timeout or another mode. Shadow: asks nothing |
+| `CommittedBayInView` | condition | the committed bay was seen within `max_age_s` and is within `max_bearing_deg` of the camera's line; with `max_lateral_m` / `max_yaw_off_deg`, LINED UP too: the body origin that close to its centreline along the dock, the bow that close to square |
 | `StationKeep` | compute | GUIDED. **always SUCCESS**: square to the wall until close, then the aim heading; banded speed; zero while the LiDAR and camera disagree or water is in the air |
 | `SetAvoidance` | action | the autopilot's 2 m avoidance off for the shot, on after |
 | `AwaitFiringSolution` | action | GUIDED. RUNNING until range, heading, steady, quiet and the gap all hold 1 s; FAILURE on timeout, saying which never held |

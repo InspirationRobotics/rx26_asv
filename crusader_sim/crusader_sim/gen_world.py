@@ -201,6 +201,8 @@ def dock(e):
     face_yaw = math.radians(e.get("facing_deg", 180.0))
     slip, fing, flen, deck_d, dz = 1.5, 0.5, 2.0, 1.0, 0.3
     width = 4 * fing + 3 * slip
+    if str(e.get("green_bay", "")).lower() == "random":
+        raise SystemExit("gen_world: green_bay: random has to be picked first, once for the world AND the referee: python3 -m crusader_sim.course_random COURSE.yaml (gz_sim_up.sh does it)")
     green_bay = int(e.get("green_bay", 2))
     lit = e.get("lit_window", {"bay": green_bay, "slot": 0, "colour": "red"})
 
@@ -323,6 +325,10 @@ def world_sdf(course, buoy_mesh, world_name="crusader_sim"):
     <render_engine>ogre2</render_engine>
   </plugin>
   <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+  <!-- the wind: crusader_sim.weather pushes the hull with a persistent wrench on
+       /world/{world_name}/wrench/persistent (the water current goes to the hull's
+       Hydrodynamics system on /ocean_current instead) -->
+  <plugin filename="gz-sim-apply-link-wrench-system" name="gz::sim::systems::ApplyLinkWrench"/>
   <plugin filename="gz-sim-buoyancy-system" name="gz::sim::systems::Buoyancy">
     <graded_buoyancy>
       <default_density>1000</default_density>

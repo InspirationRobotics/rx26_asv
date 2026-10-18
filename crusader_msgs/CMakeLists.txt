@@ -33,7 +33,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DockBay.msg"
   "msg/DockObservation.msg"
   # Task 3's fixed nozzle: the pump path through telemetry_bridge, and the wall
-  # range the boat positions itself by (tools/squirt_cal calibrates against it).
+  # range the boat positions itself by (the Task 3 trees and the cannon's aim use it).
   "msg/PumpCommand.msg"
   "msg/PumpState.msg"
   "msg/WallRange.msg"

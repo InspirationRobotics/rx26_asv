@@ -13,4 +13,4 @@
 std_msgs/Header header
 float32 duration_s     # burst length [s]; 0 = pump OFF now (never refused)
 uint32 seq             # echoed back in PumpState.last_seq
-string source          # who asked, for the log (e.g. "squirt_cal")
+string source          # who asked, for the log (e.g. "cannon_aim")

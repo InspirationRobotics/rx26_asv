@@ -403,7 +403,7 @@ struct SteadyStatus
   double att_hz = 0.0;
 };
 
-// The hull, still enough to shoot. A port of tools/squirt_cal/steady_core.py,
+// The hull, still enough to shoot. A port of the old tools/squirt_cal/steady_core.py (removed 2026-10-18),
 // with one change: "the pilot's sticks are quiet" becomes "WE have not asked
 // for thrust", because the tree is the pilot now and thrust is what sets the
 // hull rocking.
@@ -791,6 +791,23 @@ struct StrafeParams
   // than this, the D term alone brakes (deadband-compensated). NaN = never, the
   // fixed-nozzle trees' tune; SlotKeep sets it.
   double brake_mps = kNaN;
+  // Surge only: the APPROACH SPEED LIMIT. Never close on the target range faster
+  // than min(max_close_mps, close_gain * |range error|): over it, the forward stick
+  // is taken off and then reversed, kv_close us per m/s of overspeed. Without it the
+  // law coasts toward the target (axisLaw) and only brakes once kd*speed beats
+  // kp*error - from 3.6 m out the sim's boat came in at 0.5 m/s and stopped 0.39 m
+  // past a 1.1 m standoff, 0.71 m from the back wall (2026-10-17). NaN or <= 0 =
+  // off: the practice-dock trees' water-tuned behaviour is unchanged.
+  double max_close_mps = kNaN;
+  double close_gain = 0.5;       // 1/s: the limit shrinks with the error (0.5 m out -> 0.25 m/s)
+  double kv_close = 300.0;       // us per m/s over the limit
+  // Centre first: further than this off the centreline (the lateral error), do not
+  // close on the target range - hold it, braking any drift in at kv_close, and let
+  // the sideways stick centre the boat first. Going in 0.5 m off the middle of a
+  // 1.5 m slip put a 0.6 m hull on a finger, where the sideways stick could not
+  // free it (the sim, rough weather, 2026-10-18). NaN or <= 0 = off. Backing out
+  // (too close) is never held.
+  double centre_first_m = kNaN;
 };
 
 // The brake for one axis inside its band: -kd * rate, deadband-compensated and
@@ -824,6 +841,7 @@ struct StrafeTune
   double rate_window_s = -1.0;     // tree default 0.8 s
   double coast_s = -1.0;           // lateral coasting window, tree default 1.5 s
   double lat_min_us = -1.0;        // lateral deadband offset, tree default = min_us
+  double max_close_mps = -1.0;     // approach speed limit, m/s (0 = off); tree default
   // The lateral estimator (LateralEstimator): est_enable >= 0.5 switches the
   // window's sideways position and rate from the camera median/slope to it.
   double est_enable = -1.0;        // off unless set
@@ -845,6 +863,7 @@ struct StrafeTune
       {"kp_yaw", {kp_yaw, &sp.kp_yaw}}, {"kd_yaw", {kd_yaw, &sp.kd_yaw}},
       {"i_max_us", {i_max_us, &sp.i_max_us}}, {"coast_s", {coast_s, &sp.coast_lat_s}},
       {"lat_min_us", {lat_min_us, &sp.lat_min_us}},
+      {"max_close", {max_close_mps, &sp.max_close_mps}},
     };
     std::string out;
     char buf[40];
@@ -948,10 +967,45 @@ inline StrafeCmd strafeKeep(
       pd_lat = -bandBrake(in.lat_rate, p.kd_lat, p.brake_mps,
           p.lat_min_us >= 0.0 ? p.lat_min_us : p.min_us, p.max_us);
     }
+    // the approach speed limit (StrafeParams::max_close_mps)
+    bool speed_limited = false;
+    if (std::isfinite(p.max_close_mps) && p.max_close_mps > 0.0 && std::isfinite(rerr) &&
+      std::isfinite(in.range_rate) && rerr != 0.0)
+    {
+      const double dir = rerr > 0.0 ? 1.0 : -1.0;      // the stick that closes on the target
+      const double closing = -dir * in.range_rate;      // + = moving toward the target range
+      const double limit = std::min(p.max_close_mps, p.close_gain * std::fabs(rerr));
+      const double over = closing - limit;
+      if (over > 0.0) {
+        double u = pd_fwd_b - dir * p.kv_close * over;  // thrust off first, then reverse
+        if (u * dir < 0.0) {                            // reversing: jump the ESC deadband
+          u = -dir * std::min(p.min_us + std::fabs(u), p.max_us);
+        }
+        pd_fwd_b = std::clamp(u, -p.max_us, p.max_us);
+        speed_limited = true;
+      }
+    }
+    // centre first (StrafeParams::centre_first_m): off the line, hold the range
+    bool centring = false;
+    if (std::isfinite(p.centre_first_m) && p.centre_first_m > 0.0 &&
+      std::isfinite(in.lat_err_m) && std::fabs(in.lat_err_m) > p.centre_first_m &&
+      std::isfinite(rerr) && rerr > 0.0)
+    {
+      const double moving_in = std::isfinite(in.range_rate) ? -in.range_rate : 0.0;
+      const double drift = std::isfinite(p.brake_mps) ? p.brake_mps : 0.03;
+      double u = std::min(pd_fwd_b, 0.0);                // no stick that closes
+      if (moving_in > drift) {                           // drifting in: brake, past the deadband
+        u = -std::min(p.min_us + std::fabs(u) + p.kv_close * moving_in, p.max_us);
+      }
+      pd_fwd_b = u;
+      centring = true;
+    }
     c.correcting = yawing || pd_fwd_b != 0.0 || pd_lat != 0.0;
     const double h = std::max(0.0, dt);
     auto still = [&p](double r) {return !std::isfinite(r) || std::fabs(r) < p.i_rate_mps;};
-    if (std::isfinite(rerr) && std::fabs(rerr) < p.i_zone_m && still(in.range_rate)) {
+    if (!speed_limited && !centring && std::isfinite(rerr) && std::fabs(rerr) < p.i_zone_m &&
+      still(in.range_rate))
+    {
       st.i_fwd = std::clamp(st.i_fwd + p.ki_fwd * rerr * h, -p.i_max_us, p.i_max_us);
     }
     if (std::isfinite(in.lat_err_m) && std::fabs(in.lat_err_m) < p.i_zone_m && still(in.lat_rate)) {
@@ -970,6 +1024,8 @@ inline StrafeCmd strafeKeep(
       else if (!std::isfinite(in.lat_err_m)) {c.why = "window not seen: holding sideways";}
       else if (!std::isfinite(in.yaw_err_deg)) {c.why = "no face angle yet";}
       else if (c.range_ok && c.lat_ok && c.yaw_ok) {c.why = "on the spot";}
+      else if (centring) {c.why = "centring first";}
+      else if (speed_limited) {c.why = "slowing: approach speed limit";}
       else {c.why = "moving in";}
     }
   }
