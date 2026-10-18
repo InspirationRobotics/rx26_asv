@@ -111,8 +111,10 @@ drive the planner's paths.
 It starts only what `core.launch.py` does not run: `rxl_link_node` (loopback), `target_tracker`, `nav` (not with
 `nav_mode off`), `bt_view`, `ground_station` (only if none is up), `panel_feed`, `bt_runner`, `task1_panel --lake`. **`rxl_link_node`**: core runs one
 with respawn on the RFD900's serial port. `LAKE_RXL=replace` stops it once and starts the loopback one; core respawns its serial
-one 5 s later (harmless noise if the RFD900 is not on USB; if it is, it runs beside ours and hears nothing: unplug
-the RFD900 for a cleaner day). Stop everything it started: `bash .../lake_rig_down.sh` (by pid, never by name).
+one 5 s later (harmless noise if the RFD900 is not on USB; if it is, it runs beside ours and, with the panel as the UAV, hears
+nothing: unplug the RFD900 for a cleaner day, **panel-as-UAV days only**. With Ekko as the UAV the RFD900 stays plugged in: that
+respawned serial node is the boat's only receiver, see [Ekko sends the field](#ekko-sends-the-field-the-drone---boat-link-without-detection)).
+Stop everything it started: `bash .../lake_rig_down.sh` (by pid, never by name).
 
 **3. Start `oak_detector` from the GCS Nodes tab** (`http://<jetson>:8090`). It owns the OAK-D (one client only), so the
 rig cannot start it. No detector, no camera tracks to click.
@@ -193,7 +195,8 @@ When Ekko flies but cannot map the buoys well, the field you build here can stil
 aircraft**, over the real radio path (Ekko's TUNNEL v3 frames, the format `crusader_link/ekko_map.py` decodes):
 
 1. Build the field as usual (pin, click, type, load), then **SAVE JSON**. `<name>.json` downloads to the computer
-   running the browser; a copy stays on the boat in `~/.cache/crusader_lake/layouts/`. It is Ekko's own map-export
+   running the browser; a copy stays inside `asv` at `/root/.cache/crusader_lake/layouts/` (on the Jetson host:
+   `docker cp asv:/root/.cache/crusader_lake/layouts/<name>.json .`). It is Ekko's own map-export
    shape (buoy_mapper's `<stem>_buoys.json`), with each buoy's label in Ekko's vocabulary (`FLASHING_BLUE` = ENTRY,
    `SOLID_BLUE` = EXIT, `FLASHING_RED`, `FLASHING_GREEN`, `OFF`).
 2. **Do not COMMIT FIELD.** The panel would become a second UAV and the boat would get two plans.
@@ -204,9 +207,30 @@ aircraft**, over the real radio path (Ekko's TUNNEL v3 frames, the format `crusa
 4. The boat hears Ekko only through an `rxl_link_node` on the RFD900 (`/dev/crsd-rfd`, core's) **built from a branch
    that has `ekko_map.py`**. Check `ls install/crusader_link/lib/python3*/site-packages/crusader_link/ekko_map.py` in
    `asv`: on 2026-10-17 the boat's `task3-gazebo` did not have it. The rig's loopback node hears only this panel.
-5. START needs a COMMITted field, so with Ekko as the UAV start the goal from a shell in `asv` instead:
-   `python3 -m crusader_sim.lake_goal --approach none --tier advanced --timeout-s 600` (it refuses unless ARMED + GUIDED).
+   **The RFD900 must stay plugged in**: `ls /dev/crsd-rfd` on the Jetson host. Do not follow the rig section's "unplug it for a
+   cleaner day" here, that is for a panel-as-UAV day. Start the rig before the sender: `LAKE_RXL=replace` restarts core's serial
+   node, which is deaf for ~5 s and then takes up to ~15 s to hold Ekko's map again.
+5. START needs a COMMITted field, so with Ekko as the UAV start the goal from a plain shell in `asv` instead. Source ROS and
+   the install and put `crusader_sim` on the path first (it is not built on the boat, see "Before the day"), then take
+   `<lat>,<lon>` from the JSON's `"approach"` (`approach.lat`, `approach.lon`: the point the panel's START would drive to; write
+   `none` only when `"approach"` is `null`):
+
+       source /opt/ros/humble/setup.bash; source /root/robotx_ws/install/setup.bash
+       export PYTHONPATH=/root/robotx_ws/src/rx26_asv/crusader_sim${PYTHONPATH:+:$PYTHONPATH}
+       python3 -m crusader_sim.lake_goal --approach <lat>,<lon> --tier advanced --timeout-s 600
+
+   It refuses unless the boat reports ARMED + GUIDED.
    Ctrl+C on the sender clears the map: Disruptive then aborts ~15 s later, **Advanced keeps driving**. The RC stops the boat.
+
+**A GCS must be TRANSMITTING on the mesh, or the field never leaves Ekko.** Ekko's TUNNELs are broadcasts, and ArduCopter
+forwards a broadcast only to a radio channel where it has already heard some system; the boat's `rxl_link_node` sends nothing
+until it hears Ekko. With only Ekko and the boat on the radio nobody speaks first and the field is dropped inside the
+autopilot (measured in SITL 2026-10-17: 58 TUNNELs sent, 0 on the mesh, while `send_buoy_field.py` kept publishing). Keep the
+laptop's base radio plugged in with QGC connected, so a GCS heartbeat goes out every second; once one is on the mesh the
+field flowed end to end within a second (0.85 s measured). Quick check: `send_buoy_field.py` prints `boat heard N s ago`
+within ~10 s of starting. `boat NOT heard yet` after ~15 s means the field may not be on the radio at all: look at the GCS
+first (is QGC connected to the base radio?). The boat's side: `journalctl -u crsd-ros --since "2 min ago" | grep "Ekko's map is now"`
+on the Jetson host shows whether the boat's serial node has heard the map.
 
 ## Planner tuning overlay (`LAKE_TUNING`)
 

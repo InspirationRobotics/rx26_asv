@@ -58,8 +58,10 @@
 # rxl_link_node: core.launch.py runs one WITH RESPAWN on /dev/crsd-rfd (the RFD900). The panel needs it on
 # loopback instead, so with LAKE_RXL=replace (default) this script stops the running one ONCE and starts its own.
 # core.launch.py then respawns its serial one after 5 s: without the RFD900 on USB it exits at startup (harmless
-# noise in `journalctl -u crsd-ros`); with the radio plugged in it runs beside ours and, hearing no UAV, publishes
-# nothing. For a cleaner lake day unplug the RFD900. To put the radio back to normal, run lake_rig_down.sh: it
+# noise in `journalctl -u crsd-ros`); with the radio plugged in it runs beside ours and, with the panel as the UAV,
+# hears no UAV and publishes nothing. For a cleaner PANEL-AS-UAV lake day unplug the RFD900. When EKKO is the UAV
+# (send_buoy_field.py, LAKE_MODE.md "Ekko sends the field") keep it PLUGGED IN: that respawned serial node on
+# /dev/crsd-rfd is the boat's only receiver. To put the radio back to normal, run lake_rig_down.sh: it
 # stops only what this script started (pids in $LAKE_LOGDIR/pids) and never touches core's nodes.
 # LAKE_RXL=keep leaves core's node alone and starts none (then the panel has no loopback peer: bench use only).
 #
