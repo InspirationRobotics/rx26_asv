@@ -231,7 +231,8 @@ SENSOR_RE = re.compile(r"^/api/sensor/(\w+)\.jpg$")
 COMMON = {"/panel_common.js": "text/javascript; charset=utf-8",      # what the sim page and the lake page share,
           "/panel_common.css": "text/css; charset=utf-8"}            # served from beside this file
 GZIP_MIN = 2048                 # bytes: below this a response is sent as it is
-DOWNLOAD_RE = re.compile(r"^/api/course/([A-Za-z0-9_-]{1,40})\.yaml$")
+DOWNLOAD_RE = re.compile(r"^/api/course/([A-Za-z0-9_-]{1,40})\.(yaml|json)$")
+DOWNLOAD_TYPE = {"yaml": "text/yaml; charset=utf-8", "json": "application/json"}
 TREE_RE = re.compile(r"^\[tree\]\s+(\S+)\s+([\d.]+)%\s+buoys\s+(\d+)/(\d+)\s+plan v(\d+)\s*(.*)$")
 # = courses/task1_core.yaml's header; origin = tools/sitl/start_sitl.sh SITL_HOME
 COURSE_HEAD = {"origin": {"lat": 1.28060, "lon": 103.85570}, "draft_m": 0.24,
@@ -1668,8 +1669,8 @@ class Panel:
                 **self._field_state(self.launched is not None and self.sim in ("up", "stopping")),
             }
 
-    def download(self, name):
-        """(bytes, filename) for GET /api/course/<name>.yaml, or None. The sim's panel has none."""
+    def download(self, name, ext="yaml"):
+        """(bytes, filename) for GET /api/course/<name>.<ext>, or None. The sim's panel has none."""
         return None
 
     def sensor_frame(self, name):
@@ -1732,11 +1733,11 @@ def make_handler(panel):
                 return self._send(json.dumps(panel.tuning_view()).encode(), "application/json")
             m = DOWNLOAD_RE.match(u.path)
             if m:
-                got = panel.download(m.group(1))
+                got = panel.download(m.group(1), m.group(2))
                 if got is None:
                     return self.send_error(404)
                 data, name = got
-                return self._send(data, "text/yaml; charset=utf-8",
+                return self._send(data, DOWNLOAD_TYPE[m.group(2)],
                                   {"Content-Disposition": 'attachment; filename="%s"' % name})
             m = SENSOR_RE.match(u.path)
             if m:

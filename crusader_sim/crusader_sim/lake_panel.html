@@ -134,9 +134,12 @@ button.big{padding:9px 16px;font-weight:700}
         <button id="clear" onclick="post('/api/clear')">Clear</button></div>
       <div class="row"><select id="lays"></select><button id="laygo" onclick="post('/api/load',{name:val('lays')})">Load saved</button></div>
       <div class="row"><input id="saveName" placeholder="course name" size="14">
-        <button onclick="saveCourse()">SAVE AS COURSE</button><a id="dl" style="display:none" download>download</a></div>
-      <div class="sub" id="saveInfo">Saves the field as a crusader_sim course YAML (origin = the datum, metres east/north of it): copy it into
-        crusader_sim/courses/ on the laptop to replay the same layout in Gazebo. A loaded course is placed from the datum, whatever its own origin.</div>
+        <button onclick="saveCourse()">SAVE AS COURSE</button><button onclick="saveJson()">SAVE JSON</button>
+        <a id="dl" style="display:none" download>download</a></div>
+      <div class="sub" id="saveInfo">SAVE AS COURSE: the field as a crusader_sim course YAML (origin = the datum, metres east/north of it): copy it into
+        crusader_sim/courses/ on the laptop to replay the same layout in Gazebo. A loaded course is placed from the datum, whatever its own origin.
+        SAVE JSON: the field as a buoy map in Ekko's own format, downloaded to this computer, for Ekko to send to the boat
+        (rx26_uav tools/scripts/send_buoy_field.py). Do not COMMIT FIELD while Ekko sends it: the boat would get two plans.</div>
     </div>
     <div class="card"><h3>Boat</h3><div id="boatinfo" class="sub"></div></div>
   </section>
@@ -228,8 +231,12 @@ function renderPin(){
 function addLatLon(){var la=parseFloat(val('llat')),lo=parseFloat(val('llon'));
   if(!isFinite(la)||!isFinite(lo)){alert('lat and lon must be numbers');return}
   post('/api/add_latlon',{lat:la,lon:lo,state:pick}).then(function(d){if(d&&d.ok){$('llat').value='';$('llon').value=''}poll1()})}
-function saveCourse(){var n=val('saveName');post('/api/save',{name:n}).then(function(d){
-  if(d&&d.ok){var a=$('dl');a.href=d.download;a.textContent='download '+n+'.yaml';a.style.display='';$('saveInfo').textContent='saved '+d.path}poll1()})}
+function saveAs(route,ext,fetchNow){var n=val('saveName');post(route,{name:n}).then(function(d){
+  if(d&&d.ok){var a=$('dl');a.href=d.download;a.textContent='download '+n+'.'+ext;a.style.display='';
+    $('saveInfo').textContent='saved '+d.n+' buoys on the boat: '+d.path+(fetchNow?' (and downloaded to this computer)':'');
+    if(fetchNow)a.click()}poll1()})}
+function saveCourse(){saveAs('/api/save','yaml',false)}
+function saveJson(){saveAs('/api/save_json','json',true)}
 // ---- render
 function pill(id,text,cls){var p=$(id);p.textContent=text;p.className='pill'+(cls?' '+cls:'')}
 // ---- the tier. Only the whole-field tree (task1_global.xml) has an Advanced behaviour; the per-gate tree is always Disruptive.
