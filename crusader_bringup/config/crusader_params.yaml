@@ -1217,109 +1217,10 @@ oak_detector:
                                            #      contend for the one camera, so
                                            #      never for the socket
     stream_quality: 60                     # [RO] JPEG quality for that view
-# ---- Missions: safe_passage_server — Task 1 Safe Passage, as a ROS action ----
-# One action = one mission. Standalone-testable with `ros2 action send_goal`,
-# and a behaviour-tree leaf later with no change to the server. The tree that
-# calls it is crusader_mission/tree/mission_spec.py; render it with
-# `python3 tools/scripts/print_tree.py`.
-#
-# THE MISSION IS CURRENTLY EMPTY. Every phase is a dwell and publish_setpoints
-# is false, so this node CANNOT move the boat. What it does exercise, on the
-# real vehicle with real HEARTBEAT, is the workflow everything else depends on:
-# goal accepted, feedback streaming, cancel honoured promptly, result returned,
-# tree advances — plus the three ways a run ends badly (pilot takes the mode,
-# operator cancels, clock expires).
-safe_passage_server:
-  ros__parameters:
-    action_name: "/crsd/safe_passage_dwell"  # [RO] SUPERSEDED by bt_runner_node,
-                                            #      which owns "/crsd/safe_passage"
-                                            #      and ticks the real behaviour
-                                            #      tree. This Python server walks
-                                            #      a fixed list of DWELL phases
-                                            #      and cannot move the boat. It is
-                                            #      kept, on its own action name,
-                                            #      because it is still the
-                                            #      cheapest way to exercise the
-                                            #      action WORKFLOW — accept,
-                                            #      feedback, cancel, result — with
-                                            #      no perception and no tree at
-                                            #      all. Two servers on ONE action
-                                            #      name is the collision this
-                                            #      avoids: the second to start
-                                            #      simply never gets a goal.
-                                            #      Was the tree leaf's
-                                            #      action= in mission_spec.py.
-                                            #      A mismatch is a leaf waiting
-                                            #      forever for a server that
-                                            #      never appears, which looks
-                                            #      exactly like a slow mission.
-                                            #      print_tree.py --check --live
-                                            #      catches it.
-    tick_hz: 10.0                           # [RO] mission tick. ALSO the cancel
-                                            #      latency: the loop tests for a
-                                            #      cancel once per tick, so this
-                                            #      is the worst case between the
-                                            #      operator asking and the
-                                            #      mission stopping.
-    default_timeout_s: 120.0                # [RO] used when the goal sends 0.
-                                            #      There is no "run forever"
-                                            #      value anywhere in this stack
-                                            #      — a goal that cannot time out
-                                            #      leaves the boat sitting there
-                                            #      with the tree blocked behind
-                                            #      it.
-    mode_grace_s: 3.0                       # [RO] how long an UNKNOWN flight
-                                            #      mode is tolerated at goal
-                                            #      start before FAULT. Unknown
-                                            #      is not the same as manual:
-                                            #      at goal start it usually just
-                                            #      means HEARTBEAT has not
-                                            #      landed yet. At 5 Hz this is
-                                            #      15 heartbeats of slack.
-    publish_setpoints: false                # [RO] FALSE = this node cannot move
-                                            #      the boat at all. That is the
-                                            #      read-only posture for Stage 4
-                                            #      (server running on the water,
-                                            #      no setpoints), NOT a fault.
-                                            #      Turning it true is a G1 gate.
-    orbit_radius_m: 6.0                     # [RO] default when the goal sends 0
-    task_token: "TASK_SAFE_PASSAGE"         # [RO] published on
-                                            #      /crsd/current_task while a
-                                            #      goal runs; ocs_client puts it
-                                            #      in the heartbeat, which is
-                                            #      what STARTS the task attempt
-                                            #      (handbook 3.4.11) and what
-                                            #      activates the beacons.
-                                            #
-                                            #      CONFIRMED against RxTask in
-                                            #      robonation/robocommand,
-                                            #      RobotX_2026/proto/robotx/
-                                            #      rx_common.proto. It was
-                                            #      TASK_NONE until 2026-09-05
-                                            #      because the handbook mirror
-                                            #      names only TASK_NONE and
-                                            #      TASK_UNKNOWN, and a token the
-                                            #      OCS cannot parse costs EVERY
-                                            #      heartbeat sent while it is
-                                            #      set, not just the field.
-                                            #      check_config gates this value
-                                            #      against ocs_link.RX_TASKS.
-    phase_dwell_s: ["IDLE:0.5", "APPROACH:5.0", "OBSERVE:5.0",
-                    "ORBIT_ENTRY:4.0", "TRANSIT:6.0", "ORBIT_EXIT:4.0",
-                    "COMPLETE:0.5"]         # [RO] seconds per phase, ~25 s total.
-                                            #      While a phase is a dwell this
-                                            #      is how long it takes; once it
-                                            #      gets a `done` predicate the
-                                            #      same number becomes its
-                                            #      DEADLINE. Only OBSERVE's
-                                            #      deadline is fatal (NO_ENTRY)
-                                            #      — see safe_passage_core.
-
 # ---- Missions: bt_runner_node — one coarse action outside, a tree inside ----
 # Crusader's bt_navigator. It accepts a SafePassage goal, loads the Task 1
 # behaviour tree and ticks it; the tree's leaves are primitives that publish a
-# GuidedSetpoint and poll /crsd/pose for arrival. Render the tree with
-# `python3 tools/scripts/print_tree.py`; the runtime XML lives in
+# GuidedSetpoint and poll /crsd/pose for arrival. The runtime XML lives in
 # crusader_bt/behavior_trees/.
 #
 # NOT in core.launch.py. Nothing in this package has run on the water.
@@ -1388,8 +1289,7 @@ bt_runner_node:
     stick_channels: [3, 4, 1]               # [RO] throttle, lateral, steer
     stick_neutral_us: [1495, 1495, 1489]    # [RO] = RC3/RC4/RC1_TRIM
     stick_reverse: [false, false, false]    # [RO]
-    task_token: "TASK_SAFE_PASSAGE"         # [RO] = safe_passage_server.task_token;
-                                            #      an RxTask name, gated by
+    task_token: "TASK_SAFE_PASSAGE"         # [RO] an RxTask name, gated by
                                             #      check_config against
                                             #      ocs_link.RX_TASKS.
     autonomous_modes: ["GUIDED", "AUTO", "LOITER", "RTL"]

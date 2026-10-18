@@ -24,17 +24,10 @@
   <exec_depend>crusader_perception</exec_depend>
   <exec_depend>crusader_world_model</exec_depend>
   <exec_depend>crusader_groundstation</exec_depend>
-  <!-- Missions + the behaviour tree. Not in core.launch.py (nothing here
-       has run on the water), but exec_depended for the same reason as the
-       others: a package missing from this list is silently NOT BUILT by
-       rebuild.sh's colcon build (packages-up-to crusader_bringup), and
-       the failure surfaces as `ros2 run` not finding the node.
-       NOTE: no double hyphen anywhere in this comment. XML forbids it inside
-       a comment, and writing the colcon flag out in full here is what broke
-       this file's parse once already. -->
-  <exec_depend>crusader_mission</exec_depend>
-  <!-- The behaviour-tree runner and its leaves. Same reason as the rest:
-       a package nothing depends on is silently not built. -->
+  <!-- The behaviour-tree runner and its leaves. Exec_depended for the same
+       reason as the rest: a package missing from this list is silently NOT
+       BUILT by rebuild.sh's colcon build (packages-up-to crusader_bringup).
+       NOTE: no double hyphen anywhere in this comment; XML forbids it. -->
   <exec_depend>crusader_bt</exec_depend>
   <!-- The UAV link. Not in core.launch.py either: it is only useful above Core
        tier, and nothing has carried an RXL frame over a real radio yet. Listed

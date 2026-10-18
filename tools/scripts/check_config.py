@@ -72,7 +72,6 @@ CONFIG_DRIVEN_NODES = set("""
     proximity_bridge
     target_tracker
     ground_station
-    safe_passage_server
     bt_runner_node
     rxl_link_node
     nav_frames_node
@@ -412,19 +411,14 @@ def check_params_yaml():
     # that is being scored.
     try:
         link = load_ocs_link()
-        bad = {}
-        for who in ("safe_passage_server", "bt_runner_node"):
-            token = cfg[who]["ros__parameters"]["task_token"]
-            if token not in link.RX_TASKS:
-                bad[who] = token
-        if bad:
+        token = cfg["bt_runner_node"]["ros__parameters"]["task_token"]
+        if token not in link.RX_TASKS:
             fail("task_token is a real RxTask",
-                 f"{bad} not in {sorted(link.RX_TASKS)} — protobuf's ParseDict "
+                 f"{token!r} not in {sorted(link.RX_TASKS)} — protobuf's ParseDict "
                  "rejects the whole frame, so every heartbeat sent during the "
                  "mission is lost, not just this field")
         else:
-            ok("task_token is a real RxTask",
-               cfg["bt_runner_node"]["ros__parameters"]["task_token"])
+            ok("task_token is a real RxTask", token)
     except KeyError as e:
         fail("task_token is a real RxTask", f"missing key {e}")
 
