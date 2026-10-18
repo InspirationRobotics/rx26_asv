@@ -36,6 +36,9 @@ This file adds only what the water changes:
   SAVE AS COURSE the field as a crusader_sim course YAML (origin = the datum, metres east/north of
                  it, the same schema as courses/*.yaml) so the same layout can be replayed in
                  Gazebo; loading one (template / load) is the reverse.
+  SAVE JSON      the same field as a buoy map in Ekko's own export shape (map_export.to_json: stem +
+                 buoys with id, lat, lon, label), downloaded to the browser's computer, for
+                 rx26_uav tools/scripts/send_buoy_field.py to put on the air FROM THE AIRCRAFT.
 
 SAFETY BOUNDARY, kept by construction and by test/test_lake.py (which reads this file's code):
 this process never arms, disarms, sets a mode, publishes /crsd/set_mode or /crsd/rc_override,
@@ -55,6 +58,7 @@ import threading
 import time
 
 from crusader_sim import course as C
+from crusader_sim.ekko_fake_map import UAV_STATE
 from crusader_sim.panel_feed import latlon_to_enu
 from crusader_sim.paths import courses_dir
 from crusader_sim.task1_panel import (
@@ -81,7 +85,7 @@ MAX_BOW_OFFSET_M = 10.0
 GUIDED = "GUIDED"
 LAKE_TIERS = ("advanced", "disruptive")     # goal_client.TIERS minus core: with no UAV there is nothing to play
 DEFAULT_TIER = "disruptive"
-ACTIONS = ("layout", "template", "load", "clear", "save", "pin", "add_latlon", "approach", "commit",
+ACTIONS = ("layout", "template", "load", "clear", "save", "save_json", "pin", "add_latlon", "approach", "commit",
            "stop_uav", "stage", "discard", "send", "ack", "send_ack", "auto_ack", "uav_error", "reroll",
            "start", "abort", "clear_trail")
 AUTOSAVE = "autosave"          # layouts/autosave.yaml: the field in progress, kept across a panel restart
@@ -224,6 +228,37 @@ def start_problem(fcu, committed, radio_up, running, operator_here):
     if str(d.get("mode")).upper() != GUIDED:
         return "the autopilot is in %s, not GUIDED: the pilot selects GUIDED with the RC" % d.get("mode")
     return None
+
+
+def uav_label(state):
+    """A field role (flash_red, ..., off) as the label Ekko's buoy_mapper gives a buoy showing it, the
+    vocabulary of its boat link (uav_perception.buoy_tracker.label(): state_colour, or the state alone)."""
+    s, colour = UAV_STATE[state]
+    return "%s_%s" % (s, colour) if colour else s
+
+
+def field_json(name, buoys, origin, approach=None, committed=False, saved_at=None):
+    """The field as a buoy-map JSON text in Ekko's own export shape (rx26_uav map_export.to_json: "stem" +
+    "buoys" of id, lat, lon, state, colour, label, locked), so the aircraft can replay it, plus what only the
+    panel knows: each buoy's role and metres from `origin`, the datum, the approach point, and whether the
+    colours are the COMMITTED ones (as last sent) or the field still being built."""
+    out = []
+    for i, b in enumerate(buoys):
+        lat, lon = C.enu_to_latlon(b["x"], b["y"], origin)
+        s, colour = UAV_STATE[b["state"]]
+        out.append({"id": i, "lat": round(lat, 7), "lon": round(lon, 7), "state": s, "colour": colour,
+                    "label": uav_label(b["state"]), "locked": True,
+                    "role": LABEL[b["state"]], "x": b["x"], "y": b["y"]})
+    ap = None
+    if approach is not None:
+        la, lo = C.enu_to_latlon(approach["x"], approach["y"], origin)
+        ap = dict(approach, lat=round(la, 7), lon=round(lo, 7))
+    return json.dumps({
+        "stem": name, "buoys": out,
+        "source": "crusader lake panel (Task 1 tab)",
+        "saved_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(saved_at)),
+        "datum": dict(origin), "approach": ap, "committed": bool(committed),
+    }, indent=2) + "\n"
 
 
 class LakePanel(Panel):
@@ -594,36 +629,57 @@ class LakePanel(Panel):
         return {"ok": True}
 
     # ---------------------------------------------------------- courses
+    def _field_now(self):
+        """(buoys, approach, committed): the committed field in the colours last SENT, or, before COMMIT,
+        the one being built. One reading for both saves, so the YAML and the JSON cannot disagree."""
+        with self.lock:
+            committed = self.sim == "up" and self.launched is not None
+            if committed:
+                buoys = [{"x": e["x"], "y": e["y"], "state": s}
+                         for e, s in zip(self.launched["elements"], self.sent)]
+            else:
+                buoys = list(self.layout)
+            return buoys, self.approach, committed
+
     def _course_text(self, name, feed):
         """The committed field (or, before COMMIT, the one being built) as a course YAML."""
         boat = self._boat(feed)
         start = None if boat is None else {"x": round(boat[0], 2), "y": round(boat[1], 2),
                                            "yaw_deg": round(math.degrees(boat[2] or 0.0), 1)}
-        with self.lock:
-            if self.sim == "up" and self.launched is not None:
-                buoys = [{"x": e["x"], "y": e["y"], "state": s}
-                         for e, s in zip(self.launched["elements"], self.sent)]
-            else:
-                buoys = list(self.layout)
-            ap = self.approach
+        buoys, ap, _ = self._field_now()
         return course_yaml(course_of(name, buoys, origin=self.origin, boat_start=start, approach=ap))
 
-    def act_save(self, body):
-        """SAVE AS COURSE: <dir>/layouts/<name>.yaml, in crusader_sim's course schema; the page
-        offers it as a download (GET /api/course/<name>.yaml)."""
+    def _save_as(self, body, ext, text_of):
+        """Write <dir>/layouts/<name>.<ext> from text_of(name) -> (text, n buoys); the page offers it as a
+        download (GET /api/course/<name>.<ext>)."""
         name = body.get("name")
         if not (isinstance(name, str) and NAME_RE.match(name)):
             return {"ok": False, "error": "name: letters, digits, - and _ (max 40)"}
-        text = self._course_text(name, self.feed.view())
-        path = os.path.join(self.dir, "layouts", name + ".yaml")
+        text, n = text_of(name)
+        path = os.path.join(self.dir, "layouts", "%s.%s" % (name, ext))
         write_atomic(path, text)
-        self.logs["radio"].add("saved course %s (%d buoys): %s" % (name, text.count("type: robobuoy"), path))
-        return {"ok": True, "path": path, "download": "/api/course/%s.yaml" % name}
+        self.logs["radio"].add("saved %s %s (%d buoys): %s" % ("course" if ext == "yaml" else "buoy map",
+                                                               name, n, path))
+        return {"ok": True, "path": path, "n": n, "download": "/api/course/%s.%s" % (name, ext)}
 
-    def download(self, name):
+    def act_save(self, body):
+        """SAVE AS COURSE: <dir>/layouts/<name>.yaml."""
+        def text_of(name):
+            text = self._course_text(name, self.feed.view())
+            return text, text.count("type: robobuoy")
+        return self._save_as(body, "yaml", text_of)
+
+    def act_save_json(self, body):
+        """SAVE JSON: <dir>/layouts/<name>.json, the field as a buoy map Ekko can replay (field_json)."""
+        def text_of(name):
+            buoys, ap, committed = self._field_now()
+            return field_json(name, buoys, self.origin, ap, committed), len(buoys)
+        return self._save_as(body, "json", text_of)
+
+    def download(self, name, ext="yaml"):
         try:
-            with open(os.path.join(self.dir, "layouts", name + ".yaml"), "rb") as f:
-                return f.read(), name + ".yaml"
+            with open(os.path.join(self.dir, "layouts", "%s.%s" % (name, ext)), "rb") as f:
+                return f.read(), "%s.%s" % (name, ext)
         except OSError:
             return None
 

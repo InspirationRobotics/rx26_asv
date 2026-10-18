@@ -627,6 +627,47 @@ class FieldAndCourseTest(PanelCase):
         self.assertEqual(self.panel.download("lake_b")[1], "lake_b.yaml")
         self.assertIsNone(self.panel.download("nope"))
 
+    # Ekko's boat-link vocabulary (rx26_uav boat_link.STATES, = buoy_tracker.label()): the contract with the
+    # aircraft, so it is spelled out here rather than read back from the table under test.
+    UAV_LABELS = {"flash_blue": "FLASHING_BLUE", "steady_blue": "SOLID_BLUE", "flash_red": "FLASHING_RED",
+                  "flash_green": "FLASHING_GREEN", "off": "OFF"}
+
+    def test_buoy_map_json_is_in_ekkos_export_shape(self):
+        self.panel.act_layout({"buoys": K.FIELD})
+        self.panel.act_approach({"x": 5.5, "y": -1.25})
+        r = self.panel.act_save_json({"name": "lake_j"})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual((r["n"], r["download"]), (len(K.FIELD), "/api/course/lake_j.json"))
+        with open(r["path"], encoding="utf-8") as f:
+            m = json.load(f)
+        self.assertEqual(m["stem"], "lake_j")
+        self.assertFalse(m["committed"])
+        self.assertEqual(m["datum"], K.DATUM)
+        self.assertEqual((m["approach"]["x"], m["approach"]["y"]), (5.5, -1.25))
+        self.assertEqual(len(m["buoys"]), len(K.FIELD))
+        for i, (got, want) in enumerate(zip(m["buoys"], K.FIELD)):
+            la, lo = C.enu_to_latlon(want["x"], want["y"], K.DATUM)
+            self.assertEqual(got["id"], i)
+            self.assertEqual(got["label"], self.UAV_LABELS[want["state"]])
+            self.assertEqual(got["role"], T.LABEL[want["state"]])
+            self.assertTrue(got["locked"])
+            self.assertAlmostEqual(got["lat"], la, delta=1e-7)
+            self.assertAlmostEqual(got["lon"], lo, delta=1e-7)
+        self.assertEqual(self.panel.download("lake_j", "json")[1], "lake_j.json")
+        self.assertIsNone(self.panel.download("lake_j"), "a JSON save writes no YAML")
+
+    def test_buoy_map_json_after_commit_holds_the_sent_colours(self):
+        self.commit_field()
+        self.panel.act_stage({"id": 1, "state": "flash_green"})
+        self.panel.act_send({})
+        self.assertTrue(self.panel.act_save_json({"name": "lake_k"})["ok"])
+        m = json.loads(self.panel.download("lake_k", "json")[0])
+        self.assertTrue(m["committed"])
+        self.assertEqual(m["buoys"][1]["label"], "FLASHING_GREEN")
+
+    def test_every_field_role_has_an_aircraft_label(self):
+        self.assertEqual({s: LP.uav_label(s) for s in T.STATES}, self.UAV_LABELS)
+
     def test_a_course_from_the_sims_directory_loads_from_the_datum(self):
         r = self.panel.act_template({"name": "task1_core"})
         self.assertTrue(r["ok"], r)
@@ -1254,6 +1295,13 @@ class HttpTest(PanelCase):
         self.assertFalse(self.post("/api/save", {"name": "../x"})["ok"])
         with self.assertRaises(urllib.error.HTTPError):
             self.get("/api/course/missing.yaml")
+        r = self.post("/api/save_json", {"name": "dl_test"})
+        self.assertTrue(r["ok"], r)
+        st, h, body = self.get(r["download"])
+        self.assertEqual(h["Content-Type"], "application/json")
+        self.assertIn("attachment", h["Content-Disposition"])
+        self.assertEqual(len(json.loads(body)["buoys"]), len(K.FIELD))
+        self.assertFalse(self.post("/api/save_json", {"name": "../x"})["ok"])
 
 
 class SimPanelUnchangedTest(unittest.TestCase):

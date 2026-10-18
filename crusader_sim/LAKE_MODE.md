@@ -187,6 +187,27 @@ Only the whole-field tree has an Advanced behaviour. A rig running `TREE=task1_d
 behaviour: the page then disables Advanced (and the panel refuses it) rather than let you expect no checkpoints.
 A real ask is never hidden by the tier: the ask card follows what the boat asked.
 
+## Ekko sends the field (the drone -> boat link, without detection)
+
+When Ekko flies but cannot map the buoys well, the field you build here can still reach the boat **from the
+aircraft**, over the real radio path (Ekko's TUNNEL v3 frames, the format `crusader_link/ekko_map.py` decodes):
+
+1. Build the field as usual (pin, click, type, load), then **SAVE JSON**. `<name>.json` downloads to the computer
+   running the browser; a copy stays on the boat in `~/.cache/crusader_lake/layouts/`. It is Ekko's own map-export
+   shape (buoy_mapper's `<stem>_buoys.json`), with each buoy's label in Ekko's vocabulary (`FLASHING_BLUE` = ENTRY,
+   `SOLID_BLUE` = EXIT, `FLASHING_RED`, `FLASHING_GREEN`, `OFF`).
+2. **Do not COMMIT FIELD.** The panel would become a second UAV and the boat would get two plans.
+3. Copy the file to Ekko (team WiFi) and run, inside `uav_ekko`, with telemetry_bridge running and buoy_mapper stopped:
+   `python3 /root/robotx_ws/src/rx26_uav/tools/scripts/send_buoy_field.py <file>`. It prints the field, refuses one
+   without exactly one entry and one exit, and every 5 s says whether the boat answers. `--dry-run` checks a file
+   anywhere, without ROS or a radio.
+4. The boat hears Ekko only through an `rxl_link_node` on the RFD900 (`/dev/crsd-rfd`, core's) **built from a branch
+   that has `ekko_map.py`**. Check `ls install/crusader_link/lib/python3*/site-packages/crusader_link/ekko_map.py` in
+   `asv`: on 2026-10-17 the boat's `task3-gazebo` did not have it. The rig's loopback node hears only this panel.
+5. START needs a COMMITted field, so with Ekko as the UAV start the goal from a shell in `asv` instead:
+   `python3 -m crusader_sim.lake_goal --approach none --tier advanced --timeout-s 600` (it refuses unless ARMED + GUIDED).
+   Ctrl+C on the sender clears the map: Disruptive then aborts ~15 s later, **Advanced keeps driving**. The RC stops the boat.
+
 ## Planner tuning overlay (`LAKE_TUNING`)
 
 `LAKE_TUNING=<yaml>` layers a planner-tuning file on the boat's own params for this rig run. The format is the sim's
