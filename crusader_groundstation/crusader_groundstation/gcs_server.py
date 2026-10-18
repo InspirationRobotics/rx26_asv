@@ -19,6 +19,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 MAX_BODY = 8192          # an action payload is a few dozen bytes; cap the rest
+# /mission/* carries a whole mission file (a few subtrees inlined is tens of KB).
+MAX_MISSION_BODY = 1 << 20
+
+
+def body_limit(path):
+    return MAX_MISSION_BODY if path.startswith("/mission/") else MAX_BODY
 
 
 class GcsServer:
@@ -121,7 +127,7 @@ class GcsServer:
                     n = int(self.headers.get("Content-Length") or 0)
                 except ValueError:
                     n = 0
-                if n > MAX_BODY:
+                if n > body_limit(self.path):
                     return self.send_error(413)
                 raw = self.rfile.read(n) if n else b"{}"
                 try:

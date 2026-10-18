@@ -48,15 +48,18 @@ import json
 import math
 import os
 import socket
+import threading
 import time
 from collections import deque
 
+from rclpy.action import ActionClient
 from rclpy.node import Node
 
 from rcl_interfaces.msg import Log
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
+from crusader_msgs.action import SafePassage
 from crusader_msgs.msg import (Attitude, Cluster3DArray, FcuStatus,
                                LatLonHead, ObstacleDistance, RadioFrame,
                                TrackedTargetArray)
@@ -70,6 +73,7 @@ from crusader_common.stream_cache import StreamCache
 
 from crusader_groundstation import node_registry as reg
 from crusader_groundstation import bag_recorder, camera_profiles, lake_rig, param_client
+from crusader_groundstation import mission_api
 from crusader_groundstation import planner_profiles
 from crusader_groundstation import power_client, proc_scan, radio_core
 from crusader_groundstation import system_info
@@ -151,8 +155,28 @@ PARAM_SPEC = {
 CODE_DEFAULTS = {
     "planner_profiles_dir": planner_profiles.DEFAULT_SHIPPED_DIR,
     "planner_profiles_save_dir": planner_profiles.DEFAULT_SAVE_DIR,
+    "mission_runner_node": "/bt_runner_node",
+    "mission_action": "/crsd/safe_passage",
+    "mission_bt_dir": "",
+    "mission_saved_dir": "~/.ros/crusader_missions/saved",
+    "mission_run_dir": "~/.ros/crusader_missions/run",
 }
 PARAM_SPEC.update({
+    "mission_runner_node": dict(
+        read_only=True,
+        description="the BT runner node the Mission tab points at: it sets this node's tree_file "
+                    "parameter, then sends the goal"),
+    "mission_action": dict(
+        read_only=True, description="the SafePassage action the Mission tab's Start sends"),
+    "mission_bt_dir": dict(
+        read_only=True,
+        description="behavior_trees directory the Mission tab reads subtrees and pre-built "
+                    "missions from; blank = the installed crusader_bt share"),
+    "mission_saved_dir": dict(
+        read_only=True, description="where the Mission tab saves missions (~ is the user's home)"),
+    "mission_run_dir": dict(
+        read_only=True,
+        description="where Start writes the XML that the runner loads (~ is the user's home)"),
     "planner_profiles_dir": dict(
         read_only=True,
         description="*.yaml planner-tuning profiles the Tuning tab can load "
@@ -173,6 +197,63 @@ FRAME_SOURCES = (("camera", reg.CAMERA_TAB_SOURCES),
                  ("lidar", reg.LIDAR_TAB_SOURCES))
 
 FRAME_KEYS = [k for k, _ in FRAME_SOURCES]
+
+
+class SafePassagePort:
+    """The SafePassage action as mission_api.MissionRun's goal port.
+
+    Called from an HTTP thread while the node spins on the main one, so every wait is a
+    done-callback plus an Event with a short timeout, never a second executor.
+    """
+
+    def __init__(self, node, action_name, wait_s=2.0):
+        self._name, self._wait_s = action_name, wait_s
+        self._client = ActionClient(node, SafePassage, action_name)
+        self._handle = None
+
+    def _wait(self, future):
+        done = threading.Event()
+        future.add_done_callback(lambda _f: done.set())
+        return done.wait(self._wait_s)
+
+    def send(self, tier, timeout_s, on_feedback, on_result):
+        if not self._client.wait_for_server(timeout_sec=1.0):
+            return False, f"nothing serves {self._name}: is the BT runner up?"
+        goal = SafePassage.Goal()
+        goal.tier = int(tier)
+        goal.timeout_s = float(timeout_s)
+        sent = self._client.send_goal_async(
+            goal, feedback_callback=lambda m: on_feedback(_feedback_dict(m.feedback)))
+        if not self._wait(sent):
+            sent.cancel()
+            return False, f"{self._name} did not answer the goal within {self._wait_s:.0f} s"
+        handle = sent.result()
+        if not handle.accepted:
+            return False, (f"{self._name} rejected the goal (a mission may already be "
+                           "running there)")
+        self._handle = handle
+        handle.get_result_async().add_done_callback(
+            lambda f: on_result(_result_dict(f.result().result)))
+        return True, ""
+
+    def cancel(self):
+        if self._handle is None:
+            return False, "no goal to cancel"
+        fut = self._handle.cancel_goal_async()
+        if not self._wait(fut):
+            return False, f"{self._name} did not answer the cancel within {self._wait_s:.0f} s"
+        return True, ""
+
+
+def _feedback_dict(fb):
+    return {"phase": fb.phase, "progress": _round(float(fb.progress), 3),
+            "buoys_known": int(fb.buoys_known), "buoys_resolved": int(fb.buoys_resolved),
+            "plan_version": int(fb.plan_version), "warning": fb.warning}
+
+
+def _result_dict(res):
+    return {"code": int(res.outcome), "detail": res.detail,
+            "elapsed_s": _round(float(res.elapsed_s), 1)}
 
 
 class GroundStation(Node):
@@ -226,6 +307,16 @@ class GroundStation(Node):
         # first use, so a session that never opens the Tuning tab adds no graph
         # entities at all.
         self.tuning = param_client.ParamBridge(self)
+
+        # The Mission tab. Library endpoints read the installed crusader_bt share unless
+        # mission_bt_dir says otherwise; Start writes the run file, points the BT runner at it
+        # and sends the SafePassage goal (mission_api.MissionRun owns the rules).
+        self.mission = mission_api.MissionLib(
+            self._mission_bt_dir(), os.path.expanduser(p["mission_saved_dir"]))
+        self.mission_run = mission_api.MissionRun(
+            self.mission, os.path.expanduser(p["mission_run_dir"]),
+            self._mission_set_tree_file, SafePassagePort(self, p["mission_action"]),
+            logger=lambda m: self.get_logger().info(m))
 
         # /rosout rather than journalctl: we are inside a container and the
         # host journal is on the other side of that boundary, while /rosout
@@ -796,6 +887,10 @@ class GroundStation(Node):
             return self._lake_start(payload)
         if path == "/lake/stop":
             return self._lake_stop(payload)
+        if path in mission_api.LIB_PATHS:
+            return self.mission.handle(path, payload)
+        if path in mission_api.RUN_PATHS:
+            return self.mission_run.handle(path, payload)
         if path == "/trail/clear":
             self._trail.clear()
             return {"ok": True, "message": "trail cleared"}
@@ -1308,6 +1403,38 @@ class GroundStation(Node):
             lat, lon, chosen = lake_rig.choose_datum(pose[:2], self.rig.field())
             state["next"] = {"lat": lat, "lon": lon, "why": chosen}
         return state
+
+    # ---------- the Mission tab ----------
+
+    def _mission_bt_dir(self):
+        """The behavior_trees directory: the param if set, else crusader_bt's installed share."""
+        if self.p["mission_bt_dir"]:
+            return os.path.expanduser(self.p["mission_bt_dir"])
+        from ament_index_python.packages import (PackageNotFoundError,
+                                                 get_package_share_directory)
+        try:
+            return os.path.join(get_package_share_directory("crusader_bt"), "behavior_trees")
+        except PackageNotFoundError:
+            # The Mission tab then reports it per request; the whole ground station must not
+            # fail to start because one tab's package is not built here.
+            self.get_logger().warn("crusader_bt is not installed: the Mission tab has no "
+                                   "subtrees or pre-built missions (set mission_bt_dir)")
+            return ""
+
+    def _mission_set_tree_file(self, path):
+        """(ok, reason): the BT runner's tree_file parameter <- path. The runner reads it when
+        it accepts the next goal, so it is set before the goal is sent."""
+        name = self.p["mission_runner_node"]
+        if name not in self._graph_full:
+            return False, f"{name} is not in the ROS graph (is the BT runner running?)"
+        try:
+            results = self.tuning.set(name, {"tree_file": path})
+        except (TimeoutError, RuntimeError) as exc:
+            return False, str(exc)
+        bad = [r for r in results if not r["ok"]]
+        if bad:
+            return False, "; ".join(f"{r['name']}: {r['reason'] or 'refused'}" for r in bad)
+        return True, ""
 
     # ---------- teardown ----------
 

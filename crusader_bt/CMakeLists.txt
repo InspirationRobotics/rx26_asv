@@ -42,23 +42,35 @@ else()
     "(image without Nav2): bt_runner_node must run with nav_mode off")
 endif()
 
-# task3_leaves.cpp is NOT optional: leaves.cpp's registerCrusaderNodes() calls
-# registerTask3Nodes(), so leaving it out is a link error, not a missing tree.
-# fire_leaves.cpp likewise (registerFireNodes). ros_planner_port.cpp is always
+# The leaves and the planner port, shared by bt_runner_node and bt_tree_check as a static
+# library so each file compiles once. task3_leaves.cpp is NOT optional: leaves.cpp's
+# registerCrusaderNodes() calls registerTask3Nodes(), so leaving it out is a link error, not a
+# missing tree. fire_leaves.cpp likewise (registerFireNodes). ros_planner_port.cpp is always
 # compiled: with Nav2 it is the planner port, without it a stub.
-add_executable(bt_runner_node src/bt_runner_node.cpp src/leaves.cpp src/task3_leaves.cpp
-  src/fire_leaves.cpp src/global_leaves.cpp src/ros_planner_port.cpp)
+add_library(crusader_bt_leaves STATIC src/leaves.cpp src/task3_leaves.cpp src/fire_leaves.cpp
+  src/global_leaves.cpp src/ros_planner_port.cpp)
+target_include_directories(crusader_bt_leaves PUBLIC include)
+add_executable(bt_runner_node src/bt_runner_node.cpp)
 target_include_directories(bt_runner_node PRIVATE include)
+# Loads each tree file the way the runner does and says OK or FAIL per file; nothing is ticked.
+# Run it on a mission file before it goes near a boat: bt_tree_check behavior_trees/*.xml
+add_executable(bt_tree_check src/bt_tree_check.cpp)
+target_include_directories(bt_tree_check PRIVATE include)
 # The whole-field Task 1 planner (global_passage.hpp, instantiated in global_leaves.cpp) is a
 # grid A* run inside the tick: ~50 ms optimised, ~10x that at the default -O0 (SITL
 # 2026-10-02: 300-700 ms per plan). Optimise that one file whatever the build type says.
 set_source_files_properties(src/global_leaves.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+ament_target_dependencies(crusader_bt_leaves ${DEPS})
 ament_target_dependencies(bt_runner_node ${DEPS})
+ament_target_dependencies(bt_tree_check ${DEPS})
+target_link_libraries(bt_runner_node crusader_bt_leaves)
+target_link_libraries(bt_tree_check crusader_bt_leaves)
 if(CRSD_HAVE_NAV2)
-  target_compile_definitions(bt_runner_node PRIVATE CRSD_HAVE_NAV2)
+  target_compile_definitions(crusader_bt_leaves PUBLIC CRSD_HAVE_NAV2)
 endif()
 
-install(TARGETS bt_runner_node DESTINATION lib/${PROJECT_NAME})
+install(TARGETS bt_runner_node bt_tree_check DESTINATION lib/${PROJECT_NAME})
+# behavior_trees/ and everything under it: the missions, and lib/ with the task subtrees they include.
 install(DIRECTORY behavior_trees DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
 
@@ -113,6 +125,16 @@ if(BUILD_TESTING)
   add_executable(test_nav_params test/test_nav_params.cpp)
   target_include_directories(test_nav_params PRIVATE include)
   add_test(NAME nav_params COMMAND test_nav_params)
+  # run_start: what the runner recognises as RoboCommand's RunStart, and what WaitForRunStart counts.
+  add_executable(test_run_start test/test_run_start.cpp)
+  target_include_directories(test_run_start PRIVATE include)
+  add_test(NAME run_start COMMAND test_run_start)
+  # mission_nodes: WaitForRunStart, TaskAttempt and SetTier ticked against a Context. Links the leaves.
+  add_executable(test_mission_nodes test/test_mission_nodes.cpp)
+  target_include_directories(test_mission_nodes PRIVATE include)
+  ament_target_dependencies(test_mission_nodes ${DEPS})
+  target_link_libraries(test_mission_nodes crusader_bt_leaves)
+  add_test(NAME mission_nodes COMMAND test_mission_nodes)
 endif()
 
 ament_package()

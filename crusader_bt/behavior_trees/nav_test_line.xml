@@ -1,4 +1,5 @@
 <?xml version="1.0"?>
+<!-- MISSION: Test - one planned leg to the approach point, for obstacle avoidance. -->
 <!--
   nav_test_line.xml - ONE planned leg to the team's approach point, for testing
   obstacle avoidance on its own.

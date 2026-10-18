@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- MISSION: Bench Task 1 - whole-field Task 1 only, no RoboCommand wait and no Task 3. -->
+<!--
+  Bench Task 1: the competition mission's Task 1 half, with no RoboCommand (no WaitForRunStart)
+  and no Task 3. Use it to run Task 1 from the sim, a pool or the lake.
+-->
+<root BTCPP_format="4" main_tree_to_execute="Main">
+  <include path="lib/task1_global.xml"/>
+
+  <BehaviorTree ID="Main">
+    <ReactiveSequence name="guard">
+      <IsAutonomous/>
+      <Sequence name="mission">
+        <TaskAttempt token="TASK_SAFE_PASSAGE">
+          <SubTree ID="Task1Global" _autoremap="true"
+                 orbit_radius_m=""
+                 orbit_min_m="1.5"
+                 overshoot_deg="45.0"
+                 lookahead_m="2.5"
+                 blocked_timeout_s="15.0"
+                 plan_attempts="4"
+                 plan_max_age_s="15.0"
+                 confirm_timeout_s="120.0"/>
+        </TaskAttempt>
+      </Sequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

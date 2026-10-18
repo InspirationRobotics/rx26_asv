@@ -30,6 +30,13 @@ _on_task/_current_task:
     mission node would otherwise leave us telling RoboCommand a task is under way
     on behalf of a process that no longer exists.
 
+FINDING THE OCS. `ocs_host: "auto"` (the shipped value) listens for the OCS's UDP
+beacon on `ocs_discovery_port` and dials the sender, falling back to
+`ocs_fallback_hosts` in turn when none is heard; a fixed IP is dialled and nothing
+else, as before. The beacon must carry this node's `team_id`. Once connected the
+node stays put until the link drops. The rules live in ocs_link.py; the
+OCS's half, and where it never broadcasts, in OCS/rx_bridge/beacon.py.
+
 TELEMETRY IT WILL NOT INVENT. If /crsd/pose or /crsd/fcu_status has gone stale,
 no heartbeat is sent at all. A fabricated position is worse than a gap: the gap is
 visible on the OCS as rising silence, while a made-up fix is indistinguishable
@@ -52,19 +59,36 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, String
 
-from crusader_groundstation.ocs_link import (TASK_NONE, OcsLink,
-                                             coerce_task, fake_report,
+from crusader_groundstation.ocs_link import (DEFAULT_DISCOVERY_PORT,
+                                             DEFAULT_FALLBACK_HOSTS, TASK_NONE,
+                                             OcsLink, coerce_task, fake_report,
                                              rfc3339)
 
 PARAM_SPEC = {
     "ocs_host": dict(read_only=True,
-                     description="the OCS on the TEAM subnet. No discovery: "
-                                 "give the OCS a static address or a DHCP "
-                                 "reservation. NOT 127.0.0.1, which is this "
-                                 "Jetson."),
+                     description="'auto' = find the OCS from its UDP beacon, "
+                                 "falling back to ocs_fallback_hosts; or a "
+                                 "fixed IP of the OCS on the TEAM subnet, "
+                                 "dialled and nothing else. NOT 127.0.0.1, "
+                                 "which is this Jetson. Never a RoboCommand "
+                                 "course address (192.168.65-68.x)."),
     "ocs_port": dict(read_only=True, lo=1024, hi=65535,
                      description="clear of 8090 ground_station and 8080/8081 "
-                                 "the viewers"),
+                                 "the viewers. With 'auto' it is the port tried "
+                                 "on fallback hosts; a beacon names its own."),
+    "ocs_discovery_port": dict(read_only=True, lo=0, hi=65535,
+                               description="UDP port this node listens on for "
+                                           "the OCS beacon (ocs_host 'auto' "
+                                           "only); = [discovery] port in the "
+                                           "OCS bridge.toml. 0 = do not "
+                                           "listen, use the fallback hosts "
+                                           "alone."),
+    "ocs_fallback_hosts": dict(read_only=True,
+                               description="OCS addresses tried in turn when "
+                                           "no beacon is heard (ocs_host "
+                                           "'auto' only). IPv4 literals, "
+                                           "none on a RoboCommand course "
+                                           "network."),
     "vehicle_id": dict(read_only=True,
                        description="must match a [[vehicle]] id in the OCS "
                                    "bridge.toml, or every frame is dropped"),
@@ -140,13 +164,21 @@ class OcsClient(Node):
                 QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                            durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
-        self.link = OcsLink(p["ocs_host"], int(p["ocs_port"]),
-                            on_command=self._inbox.append,
-                            log=lambda m: self.get_logger().info(str(m)))
+        # .get with a default for the two discovery keys only so an older params
+        # file (no such keys, a fixed ocs_host) still starts; they are ignored
+        # unless ocs_host is "auto".
+        self.link = OcsLink(
+            str(p["ocs_host"]).strip(), int(p["ocs_port"]),
+            on_command=self._inbox.append,
+            log=lambda m: self.get_logger().info(str(m)),
+            team=str(p["team_id"]),
+            discovery_port=int(p.get("ocs_discovery_port", DEFAULT_DISCOVERY_PORT)),
+            fallback_hosts=list(p.get("ocs_fallback_hosts",
+                                      DEFAULT_FALLBACK_HOSTS)))
         self.link.start()
         self.get_logger().info(
-            "ocs_client: %s -> %s:%d at %.1f Hz"
-            % (p["vehicle_id"], p["ocs_host"], int(p["ocs_port"]), p["rate_hz"]))
+            "ocs_client: %s -> %s at %.1f Hz"
+            % (p["vehicle_id"], self.link.describe(), p["rate_hz"]))
 
         self.create_timer(1.0 / float(p["rate_hz"]), self._tick)
 

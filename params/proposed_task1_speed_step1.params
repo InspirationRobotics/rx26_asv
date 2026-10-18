@@ -1,0 +1,20 @@
+# PROPOSAL, not policy and not a dump. Task 1 speed, step 1 (2026-10-12).
+# Load in QGC (Parameters > Tools > Load from file) or type the five values by hand.
+# Evidence: lake log 00000045.BIN, runs at 14:40 / 14:56 / 15:07 PDT, 190-239 s for 70-73 m.
+#
+# WP_PIVOT_ANGLE 30 -> 60  Omni frames pivot (Rover.cpp passes have_skid_steering(), true
+#                          for omni), and GUIDED re-checks the pivot on EVERY setpoint we
+#                          stream. Each pivot brakes desired speed to 0. That happened 40-52%
+#                          of every lake run, the main time sink. Try 0 (off) if 60 still shows it.
+# WP_SPEED      3.0 -> 1.0  Top speed measured 1.25-1.33 m/s at ~100% throttle. A cap near it
+#                          leaves no thrust headroom for yaw on a 4-thruster omni. 1.0 also
+#                          equals the baseline and hs_wp_speed_mps, so check_config stays green.
+# CRUISE_SPEED  2.0 -> 1.0  Throttle feed-forward was 15% at 2 m/s. Manual runs needed 52-57%
+# CRUISE_THROTTLE 15 -> 55  for 1.0 m/s, so commanded 1.0 m/s delivered ~0.7 m/s.
+# WP_JERK       5 (keep)   With ATC_ACCEL_MAX 1, the 2.5 m lookahead allows ~1.5 m/s, so it
+#                          is not the limit. WP_ACCEL 2 is inert: min(WP_ACCEL, ATC_ACCEL_MAX).
+2	1	WP_PIVOT_ANGLE	60	4
+2	1	WP_SPEED	1.0	9
+2	1	CRUISE_SPEED	1.0	9
+2	1	CRUISE_THROTTLE	55	2
+2	1	WP_JERK	5.0	9

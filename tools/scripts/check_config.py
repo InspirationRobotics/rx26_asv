@@ -140,6 +140,19 @@ CAMERA_NODES = ("oakd_publisher", "buoy_detector", "oak_detector")
 # is the frame geometry, which is still per-node YAML.
 CAMERA_PARAMS = ("fps", "isp_denominator")
 
+OCS_LINK = (REPO / "crusader_groundstation" / "crusader_groundstation"
+            / "ocs_link.py")
+
+
+def load_ocs_link():
+    """ocs_link.py as a module, straight off the source tree. It imports nothing
+    but the standard library, which is what lets this run before any build."""
+    spec = importlib.util.spec_from_file_location("ocs_link", OCS_LINK)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 failures = []
 
 
@@ -150,6 +163,70 @@ def fail(check, detail):
 
 def ok(check, detail=""):
     print(f"[ ok ] {check}" + (f": {detail}" if detail else ""))
+
+
+# ------------------------------------------------------------- ocs_client
+
+def check_ocs_client(cfg):
+    """Where the OCS link may be aimed (docs: OCS/docs/VEHICLE_LINK.md, Discovery).
+
+    The boat must never be pointed at RoboCommand's course networks, and a bad
+    fallback list fails quietly: ocs_client starts, drops the entry with one log
+    line, and sits waiting for a beacon that may never come. Both are cheap to
+    catch here and expensive to find at the dock. The rules are ocs_link's own
+    (check_fallback_hosts, on_course_network), so the file and the code cannot
+    disagree about what a good list is.
+    """
+    try:
+        ocs = cfg["ocs_client"]["ros__parameters"]
+        host, port = ocs["ocs_host"], ocs["ocs_port"]
+    except KeyError as e:
+        fail("ocs_client target", f"missing key {e}")
+        return
+    try:
+        link = load_ocs_link()
+    except Exception as e:
+        fail("ocs_client target", f"could not import ocs_link: {e}")
+        return
+
+    problems = []
+    auto = str(host).strip().lower() == link.AUTO_HOST
+    if not auto:
+        kept, bad = link.check_fallback_hosts([host])
+        problems += [f"ocs_host: {b}" for b in bad]
+    else:
+        disc = ocs.get("ocs_discovery_port")
+        fallback = ocs.get("ocs_fallback_hosts")
+        if isinstance(disc, bool) or not isinstance(disc, int) or not (
+                disc == 0 or 1024 <= disc <= 65535):
+            problems.append(f"ocs_discovery_port {disc!r} must be 0 (off) or "
+                            "1024-65535")
+        elif disc == port:
+            problems.append(f"ocs_discovery_port equals ocs_port ({port})")
+        elif 14540 <= disc <= 14559:
+            problems.append(f"ocs_discovery_port {disc} is inside the MAVLink "
+                            "UDP block (1454x aircraft, 1455x boat)")
+        if not isinstance(fallback, list):
+            problems.append("ocs_fallback_hosts must be a list of addresses")
+            fallback = []
+        kept, bad = link.check_fallback_hosts(fallback)
+        problems += [f"ocs_fallback_hosts: {b}" for b in bad]
+        if len(kept) != len(fallback) and not bad:
+            problems.append("ocs_fallback_hosts repeats an address")
+        if not kept and disc == 0:
+            problems.append("ocs_discovery_port is 0 and ocs_fallback_hosts is "
+                            "empty -- the link has nowhere to look and never "
+                            "connects")
+        elif not kept:
+            problems.append("ocs_fallback_hosts is empty -- if the beacon is "
+                            "not heard (an access point that drops broadcasts) "
+                            "the link never connects")
+    if problems:
+        fail("ocs_client target", "; ".join(problems))
+    else:
+        ok("ocs_client target",
+           "auto: beacon UDP %s, fallback %s" % (disc, ", ".join(kept)) if auto
+           else f"fixed {host}:{port}")
 
 
 # ---------------------------------------------------------------- params YAML
@@ -334,11 +411,7 @@ def check_params_yaml():
     # RoboCommand for as long as the mission runs, which is exactly the window
     # that is being scored.
     try:
-        spec2 = importlib.util.spec_from_file_location(
-            "ocs_link", REPO / "crusader_groundstation" /
-            "crusader_groundstation" / "ocs_link.py")
-        link = importlib.util.module_from_spec(spec2)
-        spec2.loader.exec_module(link)
+        link = load_ocs_link()
         bad = {}
         for who in ("safe_passage_server", "bt_runner_node"):
             token = cfg[who]["ros__parameters"]["task_token"]
@@ -354,6 +427,8 @@ def check_params_yaml():
                cfg["bt_runner_node"]["ros__parameters"]["task_token"])
     except KeyError as e:
         fail("task_token is a real RxTask", f"missing key {e}")
+
+    check_ocs_client(cfg)
 
     # The camera profile is generated from oak_controls, so the YAML and the
     # table can drift in exactly two ways: a control with no value (the node
@@ -842,15 +917,19 @@ def check_interfaces():
     # keeps biting: a double hyphen is ILLEGAL inside an <!-- comment -->. It
     # has now broken a package.xml, a Dockerfile and a behaviour tree in this
     # repo, each time with an error that names a line and not a cause.
-    for tree in sorted(REPO.glob("*/behavior_trees/*.xml")):
+    # behavior_trees/lib/ holds the task subtrees the missions include.
+    trees = sorted(REPO.glob("*/behavior_trees/*.xml")) + sorted(REPO.glob("*/behavior_trees/lib/*.xml"))
+    for tree in trees:
+        base = next(p for p in tree.parents if p.name == "behavior_trees")
+        label = f"{base.parent.name}/{tree.relative_to(base).as_posix()}"
         try:
             ET.parse(tree)
         except ET.ParseError as e:
-            fail(f"{tree.parent.parent.name}/{tree.name} parses",
+            fail(f"{label} parses",
                  f"{e} — if this is inside a comment, a DOUBLE HYPHEN is "
                  "illegal there; XML forbids it")
         else:
-            ok(f"{tree.parent.parent.name}/{tree.name} parses")
+            ok(f"{label} parses")
 
     files = [f for pattern in ("*/msg/*.msg", "*/action/*.action", "*/srv/*.srv")
              for f in sorted(REPO.glob(pattern))]

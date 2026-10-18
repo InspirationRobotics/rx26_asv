@@ -17,6 +17,7 @@ header and is not in `core.launch.py`.
 | LiDAR | whether `lidar_view` is up on :8081 | **show/stop the stream**, start it |
 | Map | vessel, wake, `crsd/world_targets`, and optionally raw clusters and the PRX1 sectors | pan, zoom, follow, **bow-up**, **layer toggles**, clear trail |
 | Task 1 | the lake panel (`task1_panel --lake`, :8095) in a frame, with a URL field | drive a Task 1 run from the same page. **Leaving the tab removes the frame, which stops the UAV heartbeat: the boat aborts a running mission about 15 s later** |
+| Mission | the BT.CPP mission being edited as Scratch-style blocks, the BT runner's state, an offline map | build, validate, save and download missions; **Start** a mission on the boat (tier, timeout) and **Stop** it |
 | Tuning | any running node's parameters, with its own descriptions and ranges | set a dynamic value live; revert one to the YAML; on `bt_runner_node`, the **Planner** group (applies at the next START) with **Load profile** / **Save as profile** |
 | Record | sessions on disk, sizes, live capture state, **live bag growth rate** | tick topics, **set camera and LiDAR fps for the session**, start/stop a session **with a rosbag**, download a `.tar.gz`, delete |
 | Logs | every node's `/rosout` output, filterable by level and node | clear the buffer |
@@ -281,6 +282,45 @@ convenience: do not "fix" it by keeping the frame mounted.
 a poll counter) for browser checks by DOM reads; `test/test_gcs_page.py` covers the markup and the
 couplings.
 
+### The Mission tab
+
+A block editor for BehaviorTree.CPP missions (design: `docs/mission_planner.md`). Palette on the left
+(category colours and descriptions come from `/mission/catalogue`, so a new BT node or lib subtree
+appears with no change here), the open tree in the middle, the selected block's ports and an offline map
+on the right. Six lines to use it:
+
+1. Pick a mission (Pre-built are read-only; Save on one asks for a new name) and **Load**, or **New**.
+2. Drag blocks from the palette, or click one to add it after the selected block. Drag a block to move it;
+   drop it on the bin, or press Delete, to remove it. Dropping a decorator or control on the middle of a
+   block **wraps** it. Ctrl+Z / Ctrl+Shift+Z undo and redo.
+3. Click a block to edit its ports on the right. Tasks (Task 1, Task 3...) are blocks whose tunables, such
+   as the orbit points, are on the inspector; a dropped task brings its tree along into the mission.
+4. Click the map: with a GPS waypoint or orbit selected it moves that point, otherwise it adds a GPS
+   waypoint after the selected block (Shift+click, or "click: add", always adds).
+5. **Validate** (it also runs after every edit) lists problems under the toolbar; click one to jump to the block.
+6. **Save** / **Save as**, **XML** to read or edit the text, **Download** / **Upload** for a file. **Start**
+   asks for tier and timeout and says whether the mission waits for RoboCommand.
+
+The file IS the model: the page parses the XML into plain nodes and writes it back itself, so a block the
+catalogue does not know shows grey and survives a load and a save unchanged.
+
+| Endpoint (POST, JSON) | Served by | Does |
+|---|---|---|
+| `/mission/catalogue` `list` `load` `validate` `save` | the server the page came from, through `mission_lib`: the Jetson node from its installed `crusader_bt`, the laptop script from this checkout (`crusader_bt/behavior_trees`, `crusader_bt/missions`) | read and write the library; a mission saved from the laptop lands in the repo |
+| `/mission/start` `{xml, name, tier, timeout_s}` | the laptop **forwards** it; `ground_station` validates, writes `~/.ros/crusader_missions/run/<name>.xml`, sets `tree_file` on `mission_runner_node`, then sends the `SafePassage` goal | refused if a mission is already starting, running or cancelling |
+| `/mission/stop`, `/mission/status` | forwarded the same way | cancel the goal; active, state, last feedback, last result |
+
+Parameters of `ground_station` (defaults in code, none in the YAML): `mission_runner_node`
+(`/bt_runner_node`), `mission_action` (`/crsd/safe_passage`), `mission_bt_dir` (blank = the installed
+`crusader_bt` share), `mission_saved_dir`, `mission_run_dir`. `/mission/*` bodies may be up to 1 MiB
+(`gcs_server.MAX_MISSION_BODY`); every other action stays at 8 KiB. The `/mission/start` HTTP call waits at
+most about 3 s for the boat; a slower launch answers "starting" and the status line follows it.
+
+Tests: `test/test_mission_tab.py` (page, `mission_api`, laptop routing, with a fake goal port and
+`test/fake_mission_lib.py`). The editor itself is checked in a browser: `python test/fake_gcs.py` (real
+`mission_lib` when importable, `--fake-lib` otherwise; a fake runner "runs" for 12 s) and `window.MIS` in the
+console.
+
 ## Why this is its own package
 
 It is the one package allowed to **know about** every other package — it names their nodes
@@ -540,7 +580,7 @@ extra arguments go through to the program. Options (`--help`): `--port` (8150), 
 | the page, `gcs_page.py` + `gcs_server.py`, imported unchanged and patched in memory | laptop, **8150** (`--port`) |
 | `/state` and every button (POST) | the Jetson's `ground_station`, **8090**: fetched and forwarded by the laptop program, which adds no rules of its own |
 | camera, LiDAR, Task 1 panel | still served by the Jetson on **8080 / 8081 / 8095**; the browser frames them at the Jetson's address directly (the patch swaps `location.hostname` for the Jetson's), so no video passes through the laptop |
-| the autopilot strip (link, mode, armed, **RC e-stop**, GPS and GPS yaw, position, battery, last warnings) | MAVLink read on the laptop from **`127.0.0.1:14554`**, which the OCS `fleet_link` router forwards from the boat's unicast to 14550. No router: `--mav udpin:0.0.0.0:14550` (that bind steals the port from QGroundControl) |
+| the autopilot strip (link and its **lag**, the **Mode**, **GPS**, **Heading**, **EKF** and **Pre-arm** tiles, **RC e-stop**, position, battery, last warnings) and the **GPS panel** on the Telemetry tab | MAVLink read on the laptop from **`127.0.0.1:14554`**, which the OCS `fleet_link` router forwards from the boat's unicast to 14550. No router: `--mav udpin:0.0.0.0:14550` (that bind steals the port from QGroundControl) |
 
 **It never transmits MAVLink** — no heartbeat, no request, no `SET_MESSAGE_INTERVAL`. The autopilot's
 port-0 stream rates feed `telemetry_bridge`; a laptop that changed them would break the boat. The reader is
@@ -553,6 +593,101 @@ The strip shows which one it is on. The page's red banner reads `NO CONNECTION T
 API) - or to this laptop copy of the page. The strip above says which.` — the page cannot tell those two apart, the
 strip can: `Jetson API <host> UNREACHABLE` means the Jetson, and the MAVLink half keeps updating without it;
 `NO ANSWER FROM THE LAPTOP SERVER` means this program has stopped.
+
+**The GPS and Heading tiles** are the drone GUI's GPS tile in miniature: a 4 px coloured edge, a dot and a word
+(Good / Degraded / Poor / No data), a sub line, a tooltip. Colour is never the only signal, the colours are the page's
+own `--ok` / `--warn` / `--bad` (so day mode recolours them), and the laptop program decides the verdict, not the
+browser: `/mav` carries `gps.quality` and `gps.heading_quality` (`ok` / `warn` / `bad` / `unknown`) with
+`gps.quality_reasons` and `gps.heading_reasons`, next to `hdop`, `h_acc_m`, `v_acc_m`, `hdg_acc_deg`.
+
+- **GPS** is the drone's rule (`preflight_core.py`), same thresholds, minus the Septentrio-only receiver source.
+  Below a 3D fix: Poor. With an accuracy figure: Poor above 1.5 m, fewer than 6 satellites or HDOP above 3.0;
+  Degraded above 0.5 m, fewer than 9 satellites (RTK FIXED is exempt down to 6) or HDOP above 2.0. Without one,
+  only satellites and HDOP can be judged: Degraded under 10 satellites or HDOP above 1.2, never Poor, and the
+  reasons say "accuracy not reported". A test loads the drone's file, when it is checked out beside the boat, and
+  compares the two over thousands of inputs, so they cannot drift apart unnoticed.
+- **Heading** is the dual-antenna GPS yaw, because the compass is disabled (`COMPASS_USE=0`): yaw unavailable
+  (65535) or not provided (0) is Poor, "UNAVAILABLE — no compass", not a lesser grade. With yaw, the accuracy the
+  GPS reports (`hdg_acc`) grades it: Degraded above 1.0°, Poor above 3.0°. **Those two numbers are a first guess
+  for a ~1 m baseline, not measured** (`HEADING_WARN_ACC_DEG` / `HEADING_BAD_ACC_DEG`); a yaw with no reported
+  accuracy is Good, with "accuracy not reported" in the tooltip. Whether ArduRover 4.6.3 fills `hdg_acc` and
+  `v_acc` for the UM982 is **not known until it is seen on the boat**.
+- **Blanks, not guesses.** Satellites 255, `eph` 65535 (and 0: an HDOP of 0.00 cannot be measured) and a zero
+  `h_acc` / `v_acc` / `hdg_acc` are blank and left off the sub line. A GPS section older than `--stale-s` has every
+  value null and both verdicts `unknown` ("No data", with its age) — never the last grade shown as current.
+
+**The Mode, EKF and Pre-arm tiles** use the same tile and the same rule: the laptop program decides, a stale or
+never-heard section reads "No data" with its age and no values, and `/mav` carries the verdict as `<section>.quality`
+(`ok` / `warn` / `bad` / `unknown`) with `quality_reasons`.
+
+- **Mode** is the flight mode as the headline, with `ARMED` / `disarmed` under it. Armed wears the same `warn` class as a
+  Degraded tile, so the page's `--warn` colour; disarmed is a plain tile. (The page's own `armed` pill in the top bar
+  comes from the Jetson; this one is the autopilot's HEARTBEAT, read here.)
+- **EKF** is `EKF_STATUS_REPORT` (the boat streams it at 4 Hz, `SR0_EXTRA3`). The verdict is on the **largest of the five
+  variances** (velocity, horizontal position, vertical position, compass, terrain): **Good below 0.5, Degraded from 0.5
+  to 0.8, Poor above 0.8**. The flags decide too: **Poor** if there is no attitude estimate, no absolute horizontal
+  position, constant-position mode, or the EKF has never initialised; **Degraded** if it flags the GPS as glitching. A
+  variance that is NaN, infinite or negative is blank and not counted; with none at all the verdict rests on the flags
+  and says "variances not reported". The tooltip lists every variance and flag. *Where the numbers come from:* Mission
+  Planner's HUD EKF light (`HUD.cs`: red above 0.8, yellow above 0.5, on the maximum of the same five variances, with a
+  missing attitude or an uninitialised EKF forced to 1.0 — `CurrentState.cs`) and ArduPilot's `FS_EKF_THRESH`, which
+  defaults to **0.8** in Rover 4.6.3 (the EKF failsafe fires when two of compass, position and velocity exceed it for
+  1 s; this boat's baseline sets exactly that). The 0.5 is Mission Planner's alone; ArduPilot does not define a
+  lower line. One edge differs: Mission Planner calls exactly 0.5 green, this calls it Degraded. QGroundControl showed no
+  variance thresholds. **On this boat the "compass" variance is the GPS-yaw innovation** (ArduPilot reports
+  `sqrt(max(magTestRatio, yawTestRatio))` there; the compass is disabled, `COMPASS_USE=0`) — taken from the source and
+  the design, not yet seen on the boat. The tile only reports; it changes nothing on the boat.
+- **Pre-arm** is the `MAV_SYS_STATUS_PREARM_CHECK` bit of `SYS_STATUS`'s present / enabled / health masks: **PASS**,
+  **FAIL**, **CHECKS OFF** (the bit is present but not enabled: `ARMING_CHECK` is 0, so it is not a failure) or **not
+  reported** (the bit is absent). Per ArduPilot's source (`GCS.cpp`, Rover-4.6.3) the health bit is also set **while armed**
+  without the checks being run again, so an armed PASS says "armed: not re-checked" rather than claiming a fresh pass.
+  The reason for a FAIL is in the autopilot's `PreArm:` STATUSTEXT, which the strip's warning line shows.
+- **Battery** is unchanged except that a voltage reads `12.60 V (unverified)`, and says why in its tooltip:
+  `BATT_VOLT_MULT` is disputed and the cell count is unsettled (see the `crusader-battery` skill). 0 V and 65535 are
+  "no sensor", never a number.
+
+**The link's lag** is the drone GUI's (`gcs_radio.py`): every autopilot message carries the boot time it was sampled
+at, so *this laptop's clock minus that stamp* is the transport delay plus a constant offset between the two clocks; the
+smallest value ever seen is the floor, and the excess over it is how far behind the data is. It reads `lag N ms` in the
+link item, and turns to the warn colour above 1500 ms (the drone's limit). It is **relative to the best the link has
+done**, so it understates a link that has never been good, and it cannot tell slow clock drift (tens of ppm, i.e. a
+fraction of a second per hour at worst) from delay. Two differences from the drone's: only the autopilot's own
+messages count (not a companion computer's clock), and **the floor starts again when the boot clock goes backwards**
+(an autopilot reboot) — the drone's never does, and would call the whole old uptime "lag" until the GUI was
+restarted. Blank (`lag —`) until ten stamps have set the floor, and whenever no stamp has arrived within `--stale-s`.
+
+**The GPS panel** under the **Telemetry** tab (below the page's own cards and latency table) shows what the Jetson's
+page cannot, from the same `GPS_RAW_INT`: fix / RTK state, satellites, HDOP, horizontal and vertical accuracy, GPS yaw
+and its accuracy, latitude and longitude to 1e-7°, and the ellipsoid altitude (`alt_ellipsoid`; 0 = not provided). It
+is built by the strip script and attached by a one-line hook in the patched page's `render()`; the strip also refreshes
+it itself after each answer, so it keeps updating while the Jetson is down. Cards use the page's own `.grid` / `.card`
+classes, so day mode recolours them. A stale section is a red dash in every card with its age; a value the autopilot
+did not report is a plain dash with a tooltip; a failed `/mav` poll blanks the panel (no remembered body). Position
+and height are blank below a 2D / 3D fix, in case the autopilot repeats its last position there.
+
+**The team logos** (Team Inspiration and ASTA) sit first in the page's top bar, on the same white badge as the drone
+page, followed by the word **Crusader** (the drone page's `.brand`, in the page's `--strong`). The logos are embedded in the page (`tools/scripts/team_logos.py`, copied verbatim from the drone GUI, which
+generates it with `Drone/rx26_uav/tools/scripts/make_team_logos.py`), so nothing is fetched. The badge's white is the
+one literal colour in the strip's CSS, because `gcs_page.py` has no `--logo-bg`. If `team_logos.py` is missing the
+page just has no logos (the name stays).
+
+**Not verified without the live boat** (everything above is tested against encoded frames and the page's own code,
+not against the autopilot):
+
+- *Heading thresholds.* 1.0° / 3.0° are a first guess for a ~1 m baseline. **And ArduPilot's `AP_GPS.cpp` at Rover-4.6.3
+  sends `hdg_acc` as a literal 0** (a `TODO` in the `GPS_RAW_INT` sender; read from the source, not seen on the wire),
+  so unless the firmware differs the Heading
+  tile is never graded on accuracy — it reads Good with "accuracy not reported" whenever yaw is present — and the panel's
+  *Yaw accuracy* card is always a dash.
+- *Whether Rover 4.6.3 fills `h_acc` / `v_acc` for the UM982.* The sender copies them from the GPS driver and leaves 0
+  where the driver has none; the GPS tile degrades to "accuracy not reported" and grades on satellites and HDOP.
+  `alt_ellipsoid` is filled only when the driver knows the geoid undulation, else 0 (blank here).
+- *The pre-arm health bit* on this boat (source-derived: set when `ARMING_CHECK` is non-zero and either the checks pass or
+  the vehicle is armed), and that `SYS_STATUS` and `EKF_STATUS_REPORT` really reach `14554` through MAVProxy and the
+  router at the baseline's 2 Hz / 4 Hz.
+- *The EKF "compass" variance being the GPS-yaw innovation*, and what the variances read on a healthy boat (the boat has
+  never been driven, so Mission Planner's 0.5 / 0.8 are an inherited convention, not a calibrated one).
+- *Lag numbers:* only that the method works, not what the boat's WiFi + router chain gives.
 
 **E-stop** is RC channel 7 (SB) below 1200 µs — read from `crusader_params.yaml` at startup, and a missing or
 inconsistent value stops the program rather than guessing. It keeps the boat ARMED, so it cannot be seen in the

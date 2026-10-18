@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- MISSION: Demo - drive to a target a perception leaf places (the goal wire); needs no buoys. -->
 <!--
   demo_perception.xml — how perception tells an action where to go.
 

@@ -9,8 +9,8 @@ crusader_msgs/action/SafePassage        the interface. Unchanged by any of this.
         |
 bt_runner_node                          accepts the goal, owns the TIMEOUT and
         |                               CANCEL, ticks the tree at 10 Hz
-behavior_trees/task1_safe_passage.xml   the mission. Editable without a compiler
-        |                               (task3_disruptive.xml: Task 3, below)
+behavior_trees/*.xml, lib/*.xml         the mission. Editable without a compiler
+        |                               (missions and subtrees, below)
 src/leaves.cpp                          11 primitives: read a port, call
         |                               nav_math, publish, poll
 include/crusader_bt/nav_math.hpp        ALL the geometry. stdlib only.
@@ -59,6 +59,9 @@ asserts against hand-worked cases with the compass directions spelled out.
 | `EntryResolved` / `ExitResolved` | condition | SUCCESS once that buoy is classified |
 | `NearExit` | condition | SUCCESS within `radius` of the exit — **ends the transit** |
 | `SetTask` | action | publishes the task token; the course lights its beacons on this |
+| `TaskAttempt` | decorator | one task attempt (handbook 3.4.11): `current_task` = `token` on the first tick, `TASK_NONE` when the child returns SUCCESS or FAILURE or is halted; returns the child's status. `TASK_NONE` is held `none_dwell_s` (1.5) before the next attempt is claimed (child not ticked meanwhile), so the 2 Hz heartbeat carries it |
+| `WaitForRunStart` | action | holds station (`hold`), RUNNING until RoboCommand's RunStart has reached the boat; one received up to `max_age_s` before the node started still counts; FAILURE only after `timeout_s` > 0; out `run_id` |
+| `SetTier` | action | sets the tier `TierIs` / `TierAtLeast` read: `core`, `advanced` or `disruptive` |
 | `NavigateTo` | action | drive to a target and poll for arrival: planned around hazards, or straight (`avoid`), see *Planned legs* |
 | `CircleBuoy` | action | one explicit hop onto the ring, then `points` waypoints once around, `cw` or `ccw`; each hop is a leg |
 | `AvoidObstacles` | compute | **deprecated pass-through**: `out` = `in`. `NavigateTo` avoids by itself |
@@ -179,7 +182,7 @@ One tree for all three tiers, run by the same `bt_runner_node` under the same
 how far it goes). Same split as Task 1:
 
 ```
-behavior_trees/task3_disruptive.xml     find the GREEN bay, dock, fire, decode
+behavior_trees/lib/task3_disruptive.xml  find the GREEN bay, dock, fire, decode
 src/task3_leaves.cpp                    15 leaves: read the Context, call dock_math
 include/crusader_bt/dock_math.hpp       ALL of it: placing, the bay book, numbering,
                                         choice, berthing, the code, report JSON
@@ -277,24 +280,86 @@ being ticked".
 | `ShotsFired` | condition | at least N bursts went out (dry ones count) |
 | `StopBoat` | action | speed 0, heading held |
 
-## Subtrees need `_autoremap="true"`
+## Missions and subtrees
 
-A `<SubTree>` gets its **own blackboard** and does not inherit the parent's
-entries. Every leaf here reads the shared `Context` from the blackboard key
-`ctx`, so without remapping, every leaf inside a subtree throws at tree-load:
+A mission is a `Main` tree that calls task subtrees. The task trees live in `behavior_trees/lib/`,
+one `<BehaviorTree>` each; the files in `behavior_trees/` are missions the runner (or the ground
+station's mission picker) loads by name.
+
+```
+lib/task1_safe_passage.xml   Task1Core         Task 1, Core tier (no aircraft)
+lib/task1_disruptive.xml     Task1Disruptive   Task 1, Advanced/Disruptive, gate by gate
+lib/task1_global.xml         Task1Global       Task 1, Advanced/Disruptive, whole-field planner
+lib/task3_disruptive.xml     Task3Disruptive   Task 3, all three tiers
+task1_safe_passage.xml, task1_disruptive.xml,  thin mains: IsAutonomous + TaskAttempt + one subtree,
+  task1_global.xml, task3_disruptive.xml       so TREE=<name>.xml in the sim and lake rigs is unchanged
+bench_task1.xml              Task 1 (Task1Global) with no RoboCommand wait and no Task 3
+competition.xml              WaitForRunStart, then Task 1 and Task 3, each its own TaskAttempt
+```
+
+A main is `ReactiveSequence[IsAutonomous, TaskAttempt[SubTree]]`. The autonomy guard and the task
+heartbeat sit there, so every task attempt is a clean `TASK_NONE -> task -> TASK_NONE` however it
+ends, a pilot take-over included. The task-specific guard band (`PassagePlanFresh`,
+`ResolveBuoyStates`, `PublishSafePassageReport`) stays inside the subtree. To bench-test without
+RoboCommand, drop `WaitForRunStart` or load `bench_task1.xml`.
+
+**Subtrees need `_autoremap="true"`.** A `<SubTree>` gets its **own blackboard** and does not
+inherit the parent's entries. Every leaf reads the shared `Context` from the blackboard key `ctx`,
+so without remapping every leaf inside a subtree throws at tree-load:
 
     tree raised: IsAutonomous: no 'ctx' on the blackboard
-
-Tested both ways against BT.CPP 4.9 on 2026-09-07:
 
 | | |
 |---|---|
 | `<SubTree ID="Leg"/>` | `OUTCOME_FAULT`, no 'ctx' on the blackboard |
 | `<SubTree ID="Leg" _autoremap="true"/>` | runs |
 
-This matters the moment the run-level tree wraps each mission as a subtree,
-which is the plan. The error message in `context.hpp` names the fix, because
-this is not a thing anyone guesses.
+**Tunables** are `<SubTree>` attributes, declared in the lib file's `<TreeNodesModel>`
+(name, default, one line each) and read inside as `{name}`. Defaults equal the values the trees
+had before the split:
+
+| Subtree | Tunables (default) |
+|---|---|
+| `Task1Core` | `orbit_radius_m` (6.0), `orbit_points` (8), `entry_direction` (cw), `exit_direction` (ccw), `approach_tolerance_m` (4.0), `exit_near_m` (8.0), `waypoint_offset_m` (4.0), `transit_tolerance_m` (2.5) |
+| `Task1Disruptive` | `orbit_points` (empty), `orbit_radius_m` (empty), `entry_direction` (cw), `exit_direction` (ccw), `confirm_timeout_s` (120.0), `plan_max_age_s` (15.0), `gate_max_width_m` (20.0), `gate_min_width_m` (2.0) |
+| `Task1Global` | `orbit_radius_m` (empty), `orbit_min_m` (1.5), `overshoot_deg` (45.0), `lookahead_m` (2.5), `blocked_timeout_s` (15.0), `plan_attempts` (4), `plan_max_age_s` (15.0), `confirm_timeout_s` (120.0) |
+| `Task3Disruptive` | `vantage_standoff_m` (5.0), `predock_m` (3.0), `berth_m` (1.25), `lead_m` (2.0), `berth_tolerance_m` (0.25), `spray_timeout_s` (60.0), `decode_timeout_s` (80.0), `camera_max_age_s` (3.0) |
+
+Rules BT.CPP imposes (checked against 4.10.0, the sim container's):
+
+* **BT.CPP does not apply the model's defaults.** A missing attribute is a missing blackboard
+  entry, so a writer (a main, the GUI) writes every tunable explicitly.
+* **A written number is typed by its text and must match the leaf's port type.** A real needs a
+  decimal point (`6.0`; `6` is an int and the load fails with "initially created with type
+  [int]"), an int none. Ports BT.CPP types unsigned (`Timeout msec`, `Sleep msec`) cannot take
+  a number from a subtree attribute at all, so those stay literals in the lib file.
+* **Empty means "the nav_* parameter".** Where a leaf port is absent today and falls back to a
+  nav parameter (`CircleBuoy` `points` -> `nav_orbit_points`, `radius` -> `nav_orbit_radius_m`,
+  `PlanGlobalPassage` `orbit_radius_m`), the tunable's default is empty: `getInput` fails on an
+  empty or absent entry and the leaf's own fallback applies, so a Tuning-tab change still
+  reaches those trees. Direction tunables are never empty (empty reads as cw).
+* `<include path="lib/x.xml"/>` resolves against the including file's directory; a file loaded
+  from a bare name (no directory) throws in BT.CPP, so pass an absolute path.
+
+**Conventions the ground station's parser reads.** The first XML comment of a lib file starts
+`<ID>: <one-line description>`. The first XML comment of a mission file is
+`MISSION: <description>`. A mission saved by the ground station inlines its subtrees, with no
+`<include>`.
+
+**Checking a file.** `bt_tree_check` loads each file the way the runner does (every node
+registered, `ctx` on the blackboard), prints `OK <file>` or `FAIL <file>: <error>` and exits
+non-zero on a failure. It catches an unknown node, a bad port, a missing include, a SubTree without
+`_autoremap`, a mistyped tunable. Nothing is ticked.
+
+    ros2 run crusader_bt bt_tree_check behavior_trees/*.xml behavior_trees/lib/*.xml
+
+**In the runner.** `tree_file` is read when a goal is accepted (like the `nav_*` knobs): set it,
+then send the goal; a change is logged, and a file that does not exist fails the goal with
+`OUTCOME_FAULT`. RoboCommand's RunStart arrives on `/crsd/ocs_command` as JSON with a `run_start`
+key (`runStart` also accepted; `run_id` / `runId` if present, else -1) and is latched with its
+receive time. The latch is **not** reset per goal: a RunStart that beats the operator's START
+still counts (`max_age_s`). Tests: `test_run_start` (stdlib only) and `test_mission_nodes` (ticks
+the three nodes and the tunables against a Context; needs ROS, run it from the colcon build dir).
 
 ## Read-only posture
 

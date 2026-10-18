@@ -10,6 +10,11 @@ against invented state"). Then open http://localhost:8190 and read the DOM -- no
     profile picker, Load profile and Save as profile. --stale makes the node look like an OLD build
     (its descriptors lack the "applies at the next START" mark) so the red warning can be checked;
     --no-shipped-dir points the shipped directory at one that does not exist (blank list + reason).
+  * the Mission tab works end to end: the library endpoints read --bt-dir (default crusader_bt/behavior_trees)
+    and save into --missions-dir (default a temp directory), through the REAL mission_lib when it is importable
+    and test/fake_mission_lib.py otherwise (--fake-lib forces the stand-in). Start / Stop / status go through a
+    fake goal port that "runs" for ~12 s, with feedback, so the status line moves. The boat is at 1.2818 N,
+    103.8557 E (heading 45), with three buoys around it, so the map has something to draw.
   * the Task 1 tab frames http://<host>:8095/ by default. A stand-in lake panel is served on
     --panel-port (8195): type http://localhost:8195/ into the tab's URL field. Its page polls
     /api/state four times a second like the real one, and GET /polls on it returns how many polls it
@@ -32,6 +37,8 @@ sys.path.insert(0, os.path.join(HERE, ".."))
 
 from crusader_groundstation.gcs_page import render  # noqa: E402
 from crusader_groundstation.gcs_server import GcsServer  # noqa: E402
+from crusader_groundstation import mission_api  # noqa: E402
+import fake_mission_lib  # noqa: E402
 
 try:
     from crusader_groundstation import planner_profiles as pp
@@ -56,8 +63,51 @@ def fixed(name, value, kind="double"):
                                           "from it once): change it in crusader_params.yaml and restart"}
 
 
+class FakePort:
+    """mission_api.MissionRun's goal port with no ROS: accepts a goal, reports progress, finishes."""
+
+    def __init__(self, run_s=12.0, accept=True):
+        self.run_s, self.accept, self.goals = run_s, accept, []
+        self._cancel = threading.Event()
+
+    def set_tree_file(self, path):
+        self.tree_file = path
+        return True, ""
+
+    def send(self, tier, timeout_s, on_feedback, on_result):
+        if not self.accept:
+            return False, "fake runner rejected the goal"
+        self.goals.append((tier, timeout_s))
+        self._cancel.clear()
+
+        def run():
+            t0, phases = time.monotonic(), ("APPROACH", "OBSERVE", "ORBIT_ENTRY", "TRANSIT", "ORBIT_EXIT")
+            while time.monotonic() - t0 < self.run_s:
+                if self._cancel.wait(0.4):
+                    on_result({"code": 3, "detail": "cancelled from the page", "elapsed_s": time.monotonic() - t0})
+                    return
+                f = (time.monotonic() - t0) / self.run_s
+                on_feedback({"phase": phases[min(int(f * len(phases)), len(phases) - 1)], "progress": f,
+                             "buoys_known": 4, "buoys_resolved": int(f * 4), "plan_version": 1, "warning": ""})
+            on_result({"code": 0, "detail": "fake mission complete", "elapsed_s": self.run_s})
+        threading.Thread(target=run, daemon=True).start()
+        return True, ""
+
+    def cancel(self):
+        self._cancel.set()
+        return True, ""
+
+
 class Fake:
-    def __init__(self, stale, shipped_dir, save_dir):
+    def __init__(self, stale, shipped_dir, save_dir, mission_lib=None, bt_dir=None, missions_dir=None,
+                 port=None):
+        self.port = port or FakePort()
+        self.mission = mission_api.MissionLib(bt_dir or os.path.join(HERE, "..", "..", "crusader_bt", "behavior_trees"),
+                                              missions_dir or tempfile.mkdtemp(prefix="fake_gcs_missions_"),
+                                              lib=mission_lib or fake_mission_lib)
+        self.mission_run = mission_api.MissionRun(
+            self.mission, tempfile.mkdtemp(prefix="fake_gcs_run_"), self.port.set_tree_file, self.port,
+            wait_s=3.0)
         self.rows = {
             "nav_hard_m": knob("nav_hard_m", 0.8, 0.8),
             "nav_soft_m": knob("nav_soft_m", 2.0, 2.0),
@@ -96,6 +146,10 @@ class Fake:
 
     def action(self, path, payload):
         self.log.append((path, payload))
+        if path in mission_api.LIB_PATHS:
+            return self.mission.handle(path, payload)
+        if path in mission_api.RUN_PATHS:
+            return self.mission_run.handle(path, payload)
         if path == "/params/list":
             node = payload.get("node")
             rows = list(self.rows.values()) if node == "/bt_runner_node" else [
@@ -139,10 +193,15 @@ class Fake:
 
     def snapshot(self, layers):
         return {
-            "boat": {"ok": True, "att_ok": True, "lat": 1.3, "lon": 103.85, "x": 0.0, "y": 0.0,
-                     "speed": 0.0, "heading": 0.0, "roll": 0.0, "pitch": 0.0, "yaw": 0.0, "age": 0.1},
+            "boat": {"ok": True, "att_ok": True, "lat": 1.2818, "lon": 103.8557, "x": 0.0, "y": 0.0,
+                     "speed": 0.0, "heading": 45.0, "roll": 0.0, "pitch": 0.0, "yaw": 0.0, "age": 0.1},
             "fcu": {"ok": True, "age": 0.1, "mode": "HOLD", "armed": False},
-            "targets": {"ok": True, "age": 0.1, "items": []},
+            "targets": {"ok": True, "age": 0.1, "items": [
+                {"id": i, "label": label, "lat": 1.2818 + dy, "lon": 103.8557 + dx, "x": 0, "y": 0, "range": 20.0,
+                 "bearing": 0.0, "stddev": 1.0, "hits": 5, "unseen": 0.0, "confirmed": True, "sources": 1,
+                 "conf": 0.9}
+                for i, (label, dx, dy) in enumerate((("red", 0.00015, 0.00020), ("green", 0.00030, 0.00020),
+                                                     ("yellow", 0.00022, 0.00045)))]},
             "trail": [], "nav": {"ok": False},
             "nodes": {"groups": [], "items": [], "up": 0}, "profiles": [],
             "tuning": {"nodes": ["/bt_runner_node", "/target_tracker"]},
@@ -206,16 +265,27 @@ def main():
     ap.add_argument("--panel-port", type=int, default=8195)
     ap.add_argument("--stale", action="store_true", help="bt_runner_node looks like an old build")
     ap.add_argument("--no-shipped-dir", action="store_true")
+    ap.add_argument("--bt-dir", default=os.path.join(HERE, "..", "..", "crusader_bt", "behavior_trees"),
+                    help="the Mission tab's pre-built missions and subtrees")
+    ap.add_argument("--missions-dir", default=None, help="where the Mission tab saves (default: a temp dir)")
+    ap.add_argument("--fake-lib", action="store_true", help="use test/fake_mission_lib.py even if mission_lib exists")
     ap.add_argument("--shipped-dir", default=os.path.join(HERE, "..", "..", "crusader_sim", "config",
                                                           "tuning_profiles"))
     a = ap.parse_args()
     save_dir = os.path.join(tempfile.mkdtemp(prefix="fake_gcs_"), "tuning")
     shipped = os.path.join(save_dir, "..", "no_such_dir") if a.no_shipped_dir else os.path.abspath(a.shipped_dir)
-    fake = Fake(a.stale, shipped, save_dir)
+    lib = fake_mission_lib
+    if not a.fake_lib:
+        try:
+            from crusader_groundstation import mission_lib as lib
+        except ImportError:
+            print("no mission_lib yet: using test/fake_mission_lib.py", flush=True)
+    missions_dir = a.missions_dir or os.path.join(save_dir, "..", "missions")
+    fake = Fake(a.stale, shipped, save_dir, lib, os.path.abspath(a.bt_dir), os.path.abspath(missions_dir))
     GcsServer(render(200), fake.snapshot, fake.action).start(a.port)
     panel_server(a.panel_port, {"n": 0})
     print("page  http://localhost:%d   fake lake panel http://localhost:%d/   saved profiles -> %s"
-          % (a.port, a.panel_port, save_dir), flush=True)
+          "   missions -> %s" % (a.port, a.panel_port, save_dir, os.path.abspath(missions_dir)), flush=True)
     while True:
         time.sleep(3600)
 

@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Task1Disruptive: Task 1 Safe Passage, Advanced/Disruptive tier, driven gate by gate.
+
+  The aircraft owns the colours and the ENTRY/EXIT (handbook 3.3.2); the boat owns the plan:
+  PlanPassage pairs buoys into gates over the fused field, and a reds-to-starboard pair that cannot
+  be crossed forwards is a single, held to its side by a side fence in the costmap (nav_mode on).
+  The entry orbit and every gate end in a confirmation: the boat asks the aircraft whether the
+  field moved, and the retransmitted field re-plans on the next tick. The boat counts its own
+  gates (PassageComplete over cleared_gates, keyed on buoy ids), so the exit is not a proximity guess.
+
+  PassagePlanFresh is the "UAV reports before the USV transits" gate and the dead-link stop.
+  A failed gate leg restarts on the SAME gate (MarkGateCleared is its last step). The mission
+  timeout and cancel are in bt_runner_node.
+-->
+<root BTCPP_format="4">
+
+  <BehaviorTree ID="Task1Disruptive">
+    <ReactiveSequence name="guard_band">
+      <PassagePlanFresh max_age_s="{plan_max_age_s}"/>
+      <ResolveBuoyStates/>
+      <PublishSafePassageReport min_period_s="1.0"/>
+
+      <Sequence name="passage">
+
+        <!-- Plan once before the entry orbit so the side fences are in the costmap before the
+             first planned leg asks for a path. ForceSuccess: no entry yet is the orbit's problem. -->
+        <ForceSuccess>
+          <PlanPassage max_width="{gate_max_width_m}" min_width="{gate_min_width_m}"
+                       max_cross_angle="60.0"/>
+        </ForceSuccess>
+
+        <!-- A hop blocked for 15 s FAILS; the Retry restarts the orbit from where the boat is. -->
+        <RetryUntilSuccessful num_attempts="3">
+          <CircleBuoy anchor="entry" direction="{entry_direction}" radius="{orbit_radius_m}"
+                      points="{orbit_points}"/>
+        </RetryUntilSuccessful>
+
+        <!-- Confirm before the transit too, so the first gate is driven against a field confirmed
+             seconds ago. seq 1 is the entry orbit, seq 2 gate 1: cleared_gates is keyed on ids. -->
+        <RequestConfirmation what="entry orbit"/>
+        <ForceSuccess>
+          <AwaitConfirmation timeout_s="{confirm_timeout_s}" retry_s="3.0"/>
+        </ForceSuccess>
+
+        <ForceSuccess>
+          <KeepRunningUntilFailure name="transit">
+            <ReactiveSequence>
+
+              <!-- Re-planned at 10 Hz against the fused field: a confirmation with new colours or
+                   positions is picked up on the next tick. -->
+              <PlanPassage max_width="{gate_max_width_m}" min_width="{gate_min_width_m}"
+                           max_cross_angle="60.0"/>
+
+              <!-- One gate; anything failing inside restarts the leg. -->
+              <ForceSuccess>
+                <ReactiveSequence name="leg">
+                  <Inverter>
+                    <PlanChanged/>
+                  </Inverter>
+                  <Sequence>
+                    <SelectNextGate/>
+
+                    <!-- A planned leg round everything known. tolerance 1.0, not 3: the crossing
+                         starts where this leg stopped, and GateWaypoint cleared the line from
+                         this point. -->
+                    <GateWaypoint point="approach" out="{goal}"/>
+                    <NavigateTo target="port" goal="{goal}" tolerance="1.0"/>
+
+                    <!-- The crossing is STRAIGHT on purpose: a planned path between two buoys
+                         could take the wrong side of one, and the pair itself would block the gap.
+                         avoid="false" never asks the planner; exempt="gate" exempts only this
+                         pair, so anything else on the line still holds the boat (and 15 s of that
+                         fails the leg). tolerance 1.0: arriving must mean being past the gate line. -->
+                    <GateWaypoint point="through" out="{goal}"/>
+                    <NavigateTo target="port" goal="{goal}" tolerance="1.0"
+                                avoid="false" exempt="gate"/>
+                    <MarkGateCleared/>
+
+                    <!-- "Is the next pair still where you said it was?" ForceSuccess is the
+                         deliberate give-up. The window is long (the operator standing in for the
+                         aircraft recolours buoys first); a dead radio is PassagePlanFresh's job. -->
+                    <RequestConfirmation what="gate"/>
+                    <ForceSuccess>
+                      <AwaitConfirmation timeout_s="{confirm_timeout_s}" retry_s="3.0"/>
+                    </ForceSuccess>
+                  </Sequence>
+                </ReactiveSequence>
+              </ForceSuccess>
+
+              <!-- AFTER the leg, on purpose: a ReactiveSequence re-ticks what is above the running
+                   child, and above it this turned true while AwaitConfirmation was still waiting
+                   on the last gate and ended the transit before the answer. Here it is reached
+                   only between legs. -->
+              <Inverter>
+                <PassageComplete/>
+              </Inverter>
+
+            </ReactiveSequence>
+          </KeepRunningUntilFailure>
+        </ForceSuccess>
+
+        <!-- From the aircraft's field; fails only if it never sent an exit. -->
+        <ExitResolved/>
+        <RetryUntilSuccessful num_attempts="3">
+          <CircleBuoy anchor="exit" direction="{exit_direction}" radius="{orbit_radius_m}"
+                      points="{orbit_points}"/>
+        </RetryUntilSuccessful>
+
+      </Sequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <TreeNodesModel>
+    <SubTree ID="Task1Disruptive">
+      <input_port name="orbit_points" default="">waypoints on each orbit (a whole number); empty = the nav_orbit_points parameter</input_port>
+      <input_port name="orbit_radius_m" default="">orbit radius, metres (a real: write it with a decimal point); empty = the nav_orbit_radius_m parameter</input_port>
+      <input_port name="entry_direction" default="cw">entry orbit direction: cw or ccw</input_port>
+      <input_port name="exit_direction" default="ccw">exit orbit direction: cw or ccw</input_port>
+      <input_port name="confirm_timeout_s" default="120.0">wait this long for the aircraft's answer at each checkpoint, then drive on, seconds</input_port>
+      <input_port name="plan_max_age_s" default="15.0">stop the mission when the aircraft's field is older than this, seconds</input_port>
+      <input_port name="gate_max_width_m" default="20.0">widest a real gate can be, metres</input_port>
+      <input_port name="gate_min_width_m" default="2.0">narrowest a real gate can be, metres</input_port>
+    </SubTree>
+  </TreeNodesModel>
+
+</root>

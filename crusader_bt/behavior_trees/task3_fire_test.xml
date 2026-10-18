@@ -1,4 +1,5 @@
 <?xml version="1.0"?>
+<!-- MISSION: Test - fixed-nozzle shot in GUIDED: aim by heading, fire. -->
 <!--
   task3_fire_test.xml - the fixed-nozzle shot on its own: stand off the wall at
   the calibrated range, point at the upper-left window, wait until the hull is

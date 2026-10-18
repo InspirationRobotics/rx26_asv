@@ -45,6 +45,7 @@
 //   datum         {lat, lon}                              /crsd/datum
 //   dock_obs      DockObservation's fields, stamp in s    dock/observations
 //   ocs_command   {data: {...}}                           /crsd/ocs_command
+//                 ({data: {run_start: {run_id}}} releases WaitForRunStart)
 //   mount         {x, y, yaw_deg, pitch_deg, face_dz}     bt_runner_node params
 //   wall_range    {valid, range_m, angle_deg, lat_m}      /crsd/wall_range
 //   attitude      {roll, pitch, rollspeed, pitchspeed}    /crsd/attitude (rad)
@@ -399,12 +400,22 @@ private:
 
   double nowS() const {return std::chrono::duration<double>(Clock::now() - t0_).count();}
 
-  /// /crsd/ocs_command: RoboCommand's RxCommand as JSON. Only the readiness
-  /// confirmation matters to Task 3, and the tree does not wait on it - it
-  /// waits on the light. It only stops the docking report being re-sent.
+  /// /crsd/ocs_command: RoboCommand's RxCommand as JSON. The RunStart is what WaitForRunStart
+  /// waits for (ingestRunStart, as in bt_runner_node). The readiness confirmation matters to
+  /// Task 3, and the tree does not wait on it - it waits on the light. It only stops the
+  /// docking report being re-sent.
   void onOcsCommand(const json & j)
   {
     const json d = j.value("data", json::object());
+    int run_id = -1;
+    bool run_start;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      run_start = ingestRunStart(*ctx_, nowS(), d.dump(), &run_id);
+    }
+    if (run_start) {
+      RCLCPP_INFO(node_.get_logger(), "RoboCommand RunStart received (run_id %d)", run_id);
+    }
     if (d.contains("readiness_confirm")) {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       ctx_->readiness_confirmed = true;

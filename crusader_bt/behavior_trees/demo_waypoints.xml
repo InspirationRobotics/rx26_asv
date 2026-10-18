@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- MISSION: Demo - two waypoints, a full circle round a fixed point, then home; no perception. -->
 <!--
   demo_waypoints.xml — the whole mission shape, with NO perception at all.
 

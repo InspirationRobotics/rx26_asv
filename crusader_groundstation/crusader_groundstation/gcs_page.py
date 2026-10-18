@@ -25,6 +25,8 @@ something says what is missing. A convincing dashboard of a lie is worse than
 a blank one, and this page has six tabs' worth of opportunity to tell one.
 """
 
+from crusader_groundstation import mission_tab
+
 PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 <title>Crusader — ground station</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -160,6 +162,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
  #toast{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);
    background:var(--panel);border:1px solid var(--line);color:var(--fg);
    border-radius:4px;padding:7px 14px;display:none;z-index:6;max-width:80%}
+__MISSION_CSS__
 </style>
 <script>
 /* Applied BEFORE the body renders. Doing it from the main script at the end of
@@ -179,6 +182,7 @@ try{ if(localStorage.getItem('crsd-theme') === 'day')
   <button class="tab" data-t="lidar">LiDAR</button>
   <button class="tab" data-t="map">Map</button>
   <button class="tab" data-t="task1">Task 1</button>
+  <button class="tab" data-t="mission">Mission</button>
   <button class="tab" data-t="tune">Tuning</button>
   <button class="tab" data-t="rec">Record</button>
   <button class="tab" data-t="logs">Logs</button>
@@ -211,6 +215,7 @@ try{ if(localStorage.getItem('crsd-theme') === 'day')
     <div id="maplegend"><div id="navbadge"></div><span id="maplegendtxt"></span></div></div>
   </div>
   <div class="pane" id="p-task1"></div>
+  <div class="pane" id="p-mission">__MISSION_PANE__</div>
   <div class="pane" id="p-tune"></div>
   <div class="pane" id="p-rec"></div>
   <div class="pane" id="p-logs"></div>
@@ -293,7 +298,7 @@ function setTheme(mode){
 
 function show(t){
   tab = t;
-  ['nodes','tel','cam','lidar','map','task1','tune','rec','logs','radio','sys'].forEach(function(p){
+  ['nodes','tel','cam','lidar','map','task1','tune','rec','logs','radio','sys','mission'].forEach(function(p){
     el('p-'+p).className = 'pane' + (p===t ? ' on' : ''); });
   document.querySelectorAll('#bar button.tab').forEach(function(b){
     b.className = 'tab' + (b.dataset.t===t ? ' on' : ''); });
@@ -305,6 +310,7 @@ function show(t){
   if(t!=='radio') el('p-radio').innerHTML = '';  /* same: fresh system list */
   /* The Task 1 frame exists only while its tab is in front: see task1Leave. */
   if(t==='task1') task1Enter(); else task1Leave();
+  if(t==='mission') misEnter(); else misLeave();
   render();
   if(t==='map') resize();
   /* Values are re-read on every entry to the tab. A parameter panel that shows
@@ -2482,6 +2488,7 @@ function render(){
   if(tab==='sys' && !document.activeElement.matches('#confirm')) renderSys();
   if(tab==='map') draw();
   if(tab==='task1') renderT1Rig();
+  if(tab==='mission') misTick();
 
   var msg = '';
   if(!S.boat.ok) msg = 'POSE STALE — vessel position is NOT current';
@@ -2527,6 +2534,7 @@ el('theme').onclick = function(){
            ? 'night' : 'day'); };
 setTheme(document.documentElement.getAttribute('data-theme') === 'day'
          ? 'day' : 'night');
+__MISSION_JS__
 el('b_follow').className = 'go';
 show('nodes');
 poll();
@@ -2541,4 +2549,7 @@ def render(poll_ms: int) -> bytes:
     so in the Content-Type — degree signs and em-dashes render as mojibake
     under a browser's latin-1 fallback, and a readout that looks broken is a
     readout nobody trusts."""
-    return PAGE.replace("__POLL_MS__", str(int(poll_ms))).encode("utf-8")
+    page = (PAGE.replace("__MISSION_CSS__", mission_tab.CSS)
+            .replace("__MISSION_PANE__", mission_tab.PANE)
+            .replace("__MISSION_JS__", mission_tab.JS))
+    return page.replace("__POLL_MS__", str(int(poll_ms))).encode("utf-8")

@@ -84,11 +84,13 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <atomic>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 #include <string>
 #include <vector>
@@ -134,6 +136,12 @@ using namespace std::chrono_literals;
 /// The idle task token. TASK_UNKNOWN is never sent — RoboCommand's schema says
 /// it means "unset or unparsed, NOT a stand-down signal".
 static constexpr const char * kTaskNone = "TASK_NONE";
+
+/// The goal cannot run because its tree file is unusable; the message is the whole result detail.
+struct TreeFileError : std::runtime_error
+{
+  using std::runtime_error::runtime_error;
+};
 
 /// Maps a tracked target's label to a beacon state.
 ///
@@ -806,16 +814,23 @@ private:
     have_dock_ = true;
   }
 
-  /// ocs_client republishes RoboCommand's commands here as JSON and acts on
-  /// none of them. The one Task 3 cares about is the ReadinessConfirm that
-  /// answers the docking report; a key test is enough for one key and keeps a
-  /// JSON library out of this node.
+  /// ocs_client republishes RoboCommand's commands here as JSON and acts on none of them. Two
+  /// matter: the RunStart WaitForRunStart waits for, and Task 3's ReadinessConfirm that answers
+  /// the docking report. A key test is enough for each and keeps a JSON library out of this node.
   void onOcsCommand(const std_msgs::msg::String::SharedPtr m)
   {
-    if (m->data.find("\"readiness_confirm\"") == std::string::npos) {return;}
-    std::lock_guard<std::mutex> lk(ctx_->mu);
-    ctx_->readiness_confirmed = true;
-    RCLCPP_INFO(get_logger(), "RoboCommand confirmed the docking report");
+    int run_id = -1;
+    bool run_start;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      run_start = ingestRunStart(*ctx_, nowS(), m->data, &run_id);
+    }
+    if (run_start) {RCLCPP_INFO(get_logger(), "RoboCommand RunStart received (run_id %d)", run_id);}
+    if (m->data.find("\"readiness_confirm\"") != std::string::npos) {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      ctx_->readiness_confirmed = true;
+      RCLCPP_INFO(get_logger(), "RoboCommand confirmed the docking report");
+    }
   }
 
   void publishTask(const std::string & token)
@@ -971,6 +986,24 @@ private:
       }
     }
     return r;
+  }
+
+  /// Re-reads `tree_file` when a goal is accepted, so the ground station can set it and then send
+  /// the goal. Logs a change. Returns "" when the file exists, else why the goal cannot run.
+  /// Startup still requires a non-empty tree_file; this only follows later sets.
+  std::string reloadTreeFile()
+  {
+    const std::string wanted = get_parameter("tree_file").as_string();
+    if (wanted != tree_file_) {
+      RCLCPP_INFO(get_logger(), "tree_file: %s -> %s", tree_file_.c_str(), wanted.c_str());
+      tree_file_ = wanted;
+    }
+    if (tree_file_.empty()) {return "tree_file is empty";}
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(tree_file_, ec)) {
+      return "tree_file '" + tree_file_ + "' does not exist (set the tree_file parameter)";
+    }
+    return "";
   }
 
   /// Re-reads every planner knob into ctx_->nav and logs the ones that changed since the
@@ -1213,6 +1246,7 @@ private:
     // The planner knobs as they are NOW, before the tree is built: a change made since the last
     // goal applies to this one, and none can apply to it once it runs.
     reloadNavParams();
+    const std::string tree_error = reloadTreeFile();
     // BEFORE reading pose_fresh below. It is computed by refreshFreshness(),
     // which otherwise only runs inside the tick loop — so at goal start it
     // still holds whatever the last mission left, which on a freshly started
@@ -1271,6 +1305,7 @@ private:
     uint8_t outcome = SafePassage::Result::OUTCOME_FAULT;
     std::string detail;
     try {
+      if (!tree_error.empty()) {throw TreeFileError(tree_error);}
       BT::BehaviorTreeFactory factory;
       registerCrusaderNodes(factory);
       auto bb = BT::Blackboard::create();
@@ -1378,6 +1413,10 @@ private:
         rate.sleep();
       }
       fillResult(result);
+    } catch (const TreeFileError & e) {
+      outcome = SafePassage::Result::OUTCOME_FAULT;
+      detail = e.what();
+      RCLCPP_ERROR(get_logger(), "%s", detail.c_str());
     } catch (const std::exception & e) {
       // NEVER let this reach rclcpp_action: an unset Result has outcome 0,
       // which is OUTCOME_SUCCESS. A crash that reports success is the worst

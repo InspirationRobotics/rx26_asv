@@ -340,9 +340,173 @@ public:
 
   BT::NodeStatus tick() override
   {
-    const std::string t = getInput<std::string>("token").value_or("TASK_NONE");
-    if (ctx_->set_task) {ctx_->set_task(t);}
-    RCLCPP_INFO(log(), "current_task -> %s", t.c_str());
+    announceTask(*ctx_, getInput<std::string>("token").value_or("TASK_NONE"));
+    return BT::NodeStatus::SUCCESS;
+  }
+};
+
+/// One task attempt as the heartbeat reports it (handbook 3.4.11). `token` goes out on the first
+/// tick; TASK_NONE goes out when the child returns SUCCESS or FAILURE and when this is halted, so
+/// every attempt is a clean NONE -> task -> NONE. Returns the child's status.
+///
+/// TASK_NONE is held `none_dwell_s` before the next attempt is claimed: back to back, NONE would
+/// be replaced within one 100 ms tick and the 2 Hz heartbeat would never carry it. Until then the
+/// first tick returns RUNNING and the child is not ticked.
+class TaskAttempt : public BT::DecoratorNode
+{
+public:
+  TaskAttempt(const std::string & n, const BT::NodeConfig & c)
+  : BT::DecoratorNode(n, c), ctx_(contextFrom(c, n)) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<std::string>("token", "TASK_SAFE_PASSAGE", "an RxTask name"),
+      BT::InputPort<double>("none_dwell_s", 1.5,
+        "TASK_NONE is held this long before a new attempt is claimed, so the 2 Hz heartbeat "
+        "carries it")};
+  }
+
+  BT::NodeStatus tick() override
+  {
+    setStatus(BT::NodeStatus::RUNNING);
+    if (!active_) {
+      double none_age_s;
+      {
+        std::lock_guard<std::mutex> lk(ctx_->mu);
+        none_age_s = ctx_->now_s - ctx_->none_since_s;
+      }
+      const double dwell_s = getInput<double>("none_dwell_s").value_or(1.5);
+      if (none_age_s < dwell_s) {return BT::NodeStatus::RUNNING;}
+      active_ = true;
+      announceTask(*ctx_, getInput<std::string>("token").value_or("TASK_SAFE_PASSAGE"));
+    }
+    const BT::NodeStatus st = child_node_->executeTick();
+    if (st != BT::NodeStatus::RUNNING) {
+      end();
+      resetChild();
+    }
+    return st;
+  }
+
+  void halt() override
+  {
+    end();
+    BT::DecoratorNode::halt();
+  }
+
+private:
+  void end()
+  {
+    if (!active_) {return;}
+    active_ = false;
+    announceTask(*ctx_, "TASK_NONE");
+  }
+
+  ContextPtr ctx_;
+  bool active_ = false;
+};
+
+/// Holds station until RoboCommand's RunStart has reached the boat (handbook 3.4.10: position-hold
+/// after switching to autonomous, begin once the run has started). A RunStart that arrived up to
+/// `max_age_s` before this node started still counts, so one that beat the START button is not
+/// lost. RUNNING until then; FAILURE only after `timeout_s` > 0.
+class WaitForRunStart : public CrusaderAction
+{
+public:
+  WaitForRunStart(const std::string & n, const BT::NodeConfig & c)
+  : CrusaderAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<double>("max_age_s", 30.0,
+        "a run_start received up to this long before the node started still counts"),
+      BT::InputPort<double>("timeout_s", 0.0, "0 = wait forever; >0 = FAILURE after this long"),
+      BT::InputPort<bool>("hold", true, "hold station while waiting"),
+      BT::OutputPort<int>("run_id", "RoboCommand's run id; -1 when the message carried none")};
+  }
+
+  BT::NodeStatus onStart() override
+  {
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      since_s_ = ctx_->now_s;
+    }
+    held_ = false;
+    const BT::NodeStatus st = poll();
+    if (st == BT::NodeStatus::RUNNING) {
+      RCLCPP_INFO(
+        log(), "WaitForRunStart: waiting for RoboCommand's RunStart (max_age %.0f s, timeout %.0f s)",
+        maxAgeS(), timeoutS());
+    }
+    return st;
+  }
+
+  BT::NodeStatus onRunning() override {return poll();}
+
+  void onHalted() override {}
+
+private:
+  double maxAgeS() const {return getInput<double>("max_age_s").value_or(30.0);}
+  double timeoutS() const {return getInput<double>("timeout_s").value_or(0.0);}
+
+  BT::NodeStatus poll()
+  {
+    double now_s;
+    runstart::Latch latch;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      now_s = ctx_->now_s;
+      latch = ctx_->run_start;
+    }
+    if (latch.counts(since_s_, maxAgeS())) {
+      (void)setOutput("run_id", latch.id);
+      RCLCPP_INFO(
+        log(), "WaitForRunStart: RunStart accepted (run_id %d, received %.1f s ago)", latch.id,
+        std::max(0.0, now_s - latch.t_s));
+      return BT::NodeStatus::SUCCESS;
+    }
+    if (timeoutS() > 0.0 && now_s - since_s_ >= timeoutS()) {
+      RCLCPP_WARN(log(), "WaitForRunStart: no RunStart within %.0f s", timeoutS());
+      return BT::NodeStatus::FAILURE;
+    }
+    // Once, like HoldStation; retried only until the first send, because the wait can begin
+    // before the first pose.
+    if (!held_ && getInput<bool>("hold").value_or(true)) {
+      held_ = sendHold(*ctx_, log(), "WaitForRunStart hold at");
+    }
+    return BT::NodeStatus::RUNNING;
+  }
+
+  double since_s_ = 0.0;      ///< Context::now_s when the wait began
+  bool held_ = false;
+};
+
+/// Sets the tier TierIs and TierAtLeast read, for a mission that runs its tasks at different tiers.
+class SetTier : public CrusaderSyncAction
+{
+public:
+  SetTier(const std::string & n, const BT::NodeConfig & c)
+  : CrusaderSyncAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {BT::InputPort<std::string>("tier", "core | advanced | disruptive")};
+  }
+
+  BT::NodeStatus tick() override
+  {
+    const auto want = getInput<std::string>("tier");
+    int tier = 0;
+    if (!want || !parseTier(want.value(), &tier)) {
+      RCLCPP_ERROR(
+        log(), "SetTier: '%s' is not a tier (core | advanced | disruptive)",
+        want ? want.value().c_str() : "<no tier port>");
+      return BT::NodeStatus::FAILURE;
+    }
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      ctx_->tier = tier;
+    }
+    RCLCPP_INFO(log(), "SetTier: tier -> %s", tierName(tier));
     return BT::NodeStatus::SUCCESS;
   }
 };
@@ -769,13 +933,7 @@ public:
 
   BT::NodeStatus onStart() override
   {
-    Vec2 here;
-    {
-      std::lock_guard<std::mutex> lk(ctx_->mu);
-      if (!ctx_->pose_fresh) {return BT::NodeStatus::RUNNING;}
-      here = ctx_->boat;
-    }
-    sendSetpoint(*ctx_, log(), here, "HoldStation at");
+    sendHold(*ctx_, log(), "HoldStation at");
     return BT::NodeStatus::RUNNING;
   }
 
@@ -1353,6 +1511,9 @@ void registerCrusaderNodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<ResolveBuoyStates>("ResolveBuoyStates");
   factory.registerNodeType<PublishSafePassageReport>("PublishSafePassageReport");
   factory.registerNodeType<SetTask>("SetTask");
+  factory.registerNodeType<TaskAttempt>("TaskAttempt");
+  factory.registerNodeType<WaitForRunStart>("WaitForRunStart");
+  factory.registerNodeType<SetTier>("SetTier");
   factory.registerNodeType<NavigateTo>("NavigateTo");
   factory.registerNodeType<CircleBuoy>("CircleBuoy");
   factory.registerNodeType<HoldStation>("HoldStation");

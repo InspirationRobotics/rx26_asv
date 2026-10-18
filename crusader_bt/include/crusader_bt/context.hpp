@@ -43,6 +43,7 @@
 #include "crusader_bt/nav_math.hpp"
 #include "crusader_bt/path_math.hpp"
 #include "crusader_bt/planned_leg.hpp"
+#include "crusader_bt/run_start.hpp"
 
 namespace crusader_bt
 {
@@ -55,6 +56,12 @@ struct Context
 {
   std::mutex mu;
   rclcpp::Node * node = nullptr;              ///< borrowed; the runner owns it
+
+  /// The node's logger, or a generic one before the runner has set `node`.
+  rclcpp::Logger logger() const
+  {
+    return node ? node->get_logger() : rclcpp::get_logger("crusader_bt");
+  }
 
   // ---- fixed for the whole mission ----
   nav::LatLon origin;                         ///< local frame origin, set ONCE
@@ -148,7 +155,10 @@ struct Context
   // ingestDockObservation() below - the ONE function both runners call, so
   // the ROS node and the off-ROS sim runner cannot disagree about what a frame
   // means. Everything after it is written by the Task 3 leaves.
-  int tier = 0;                               ///< goal tier: 0 Core, 1 Adv, 2 Disr
+  int tier = 0;                               ///< goal tier: 0 Core, 1 Adv, 2 Disr (SetTier changes it)
+  /// RoboCommand's newest RunStart, on `now_s`'s clock. NOT reset per goal: a RunStart that
+  /// arrives before the operator presses START must still count (WaitForRunStart).
+  runstart::Latch run_start;
   dock::DockBook dock;                        ///< the bays, world-anchored
   dock::Mount cam_mount;                      ///< camera_link in base_link
   /// Face centre above the camera, m: places sightings from a PITCHED camera
@@ -315,6 +325,9 @@ struct Context
   // ---- outputs the runner wires up ----
   std::function<void(nav::LatLon)> send_setpoint;
   std::function<void(const std::string &)> set_task;
+  /// When current_task last became TASK_NONE (announceTask), on now_s's clock; far in the past
+  /// until it has, so the first attempt of a run never waits.
+  double none_since_s = -1e9;
   std::function<void()> publish_report;
   std::function<void(int)> consume_buoy;      ///< mark a buoy dealt with
   /// Tell the aircraft a gate is cleared and ask for the next pair. Publishes
@@ -492,6 +505,29 @@ inline const char * navModeName(path::Mode m)
   return "off";
 }
 
+// ---------------------------------------------------------------------- tier
+
+/// "core" | "advanced" | "disruptive" (or "0" | "1" | "2") as 0 | 1 | 2; false for anything else.
+/// TierIs and SetTier share it, so the two cannot disagree about a spelling.
+inline bool parseTier(const std::string & s, int * out)
+{
+  if (s == "core" || s == "0") {
+    *out = 0;
+  } else if (s == "advanced" || s == "1") {
+    *out = 1;
+  } else if (s == "disruptive" || s == "2") {
+    *out = 2;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+inline const char * tierName(int tier)
+{
+  return tier <= 0 ? "core" : tier == 1 ? "advanced" : "disruptive";
+}
+
 // ----------------------------------------------------------------- leg status
 //
 // /crsd/nav/leg_status (spec 4.3) is JSON, built here once so the ROS runner and
@@ -618,6 +654,42 @@ inline void clearLeg(Context & c)
 {
   c.leg = Context::LegStatus{};
   ++c.leg_seq;
+}
+
+/// Hold station: send the boat's own position as the setpoint. False, and nothing sent, without
+/// a fresh pose. TAKES ctx.mu ITSELF. HoldStation, WaitForRunStart and the whole-field holds.
+inline bool sendHold(Context & c, const rclcpp::Logger & lg, const std::string & what)
+{
+  nav::Vec2 here;
+  {
+    std::lock_guard<std::mutex> lk(c.mu);
+    if (!c.pose_fresh) {return false;}
+    here = c.boat;
+  }
+  sendSetpoint(c, lg, here, what);
+  return true;
+}
+
+/// One /crsd/ocs_command message. True when it was RoboCommand's RunStart: latched with `now_s`
+/// (Context::now_s's clock), `*run_id` its id. Both runners call it, so they cannot disagree
+/// about what a RunStart is. CALL UNDER ctx.mu.
+inline bool ingestRunStart(Context & c, double now_s, const std::string & json, int * run_id)
+{
+  if (!runstart::parse(json, run_id)) {return false;}
+  c.run_start.set(now_s, *run_id);
+  return true;
+}
+
+/// Announce current_task (handbook 3.4.11) and log it. TASK_NONE is stamped, so TaskAttempt can
+/// hold it long enough for the 2 Hz heartbeat to carry it. TAKES ctx.mu ITSELF.
+inline void announceTask(Context & c, const std::string & token)
+{
+  if (c.set_task) {c.set_task(token);}
+  if (token == "TASK_NONE") {
+    std::lock_guard<std::mutex> lk(c.mu);
+    c.none_since_s = c.now_s;
+  }
+  RCLCPP_INFO(c.logger(), "current_task -> %s", token.c_str());
 }
 
 /// Fold one DockObservation into the context. CALL UNDER ctx.mu.
@@ -807,10 +879,7 @@ public:
 protected:
   ContextPtr ctx_;
 
-  rclcpp::Logger log() const
-  {
-    return ctx_->node ? ctx_->node->get_logger() : rclcpp::get_logger("crusader_bt");
-  }
+  rclcpp::Logger log() const {return ctx_->logger();}
 };
 
 /// Base for a leaf that DOES something but finishes within one tick.
@@ -832,10 +901,7 @@ public:
 protected:
   ContextPtr ctx_;
 
-  rclcpp::Logger log() const
-  {
-    return ctx_->node ? ctx_->node->get_logger() : rclcpp::get_logger("crusader_bt");
-  }
+  rclcpp::Logger log() const {return ctx_->logger();}
 };
 
 /// Base for leaves that answer in one tick and have NO side effects.
@@ -848,10 +914,7 @@ public:
 protected:
   ContextPtr ctx_;
 
-  rclcpp::Logger log() const
-  {
-    return ctx_->node ? ctx_->node->get_logger() : rclcpp::get_logger("crusader_bt");
-  }
+  rclcpp::Logger log() const {return ctx_->logger();}
 };
 
 /// Register every Crusader leaf with `factory`.

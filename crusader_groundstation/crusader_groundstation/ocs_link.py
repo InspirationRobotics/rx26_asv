@@ -32,9 +32,22 @@ TWO THINGS THIS GETS RIGHT THAT THE OBVIOUS TCP CLIENT DOES NOT:
     problem, and the survivors are re-stamped with the current time, so a
     position from ten seconds ago reaches RoboNation labelled as current. The
     newest fix is the only one worth sending, so it is the only one kept.
+
+FINDING THE OCS. `OcsLink("192.168.8.107", 37564)` dials that address and nothing
+else, exactly as it always did. `OcsLink("auto", 37564, team=..., discovery_port=
+37565, fallback_hosts=[...])` instead listens for the OCS's UDP beacon (the other
+half, and the full account of where the OCS does and never broadcasts, is
+OCS/rx_bridge/beacon.py). While it has no connection it dials the newest matching
+beacon's source IP, at the port the beacon names, if that beacon is under 5 s old;
+otherwise it tries each fallback host in turn. Once connected it stays: a beacon
+from elsewhere changes nothing until the connection drops, so two OCS laptops
+cannot make the boat flap between them. A beacon from, or a fallback host on, one
+of RoboNation's course networks is refused outright -- the boat must never be
+pointed at it.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import math
 import socket
@@ -164,6 +177,250 @@ def rfc3339(when: float | None = None) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
 
+# ---- discovery: finding the OCS without being told its address ---------------
+
+#: UDP port the OCS beacons on. = [discovery] port in the OCS bridge.toml.
+DEFAULT_DISCOVERY_PORT = 37565
+
+#: Mirror of OCS/rx_bridge/beacon.py. A COPY, with the usual obligation: change
+#: one, change the other. OCS/tests/test_beacon.py imports this file and fails if
+#: the two stop agreeing.
+BEACON_KEY = "ocs_beacon"
+BEACON_VERSION = 1
+
+#: A beacon older than this is a past address, not a present one. The OCS sends
+#: one a second, so this survives four lost datagrams.
+BEACON_FRESH_S = 5.0
+
+#: `ocs_host` value that means "find it from the beacon".
+AUTO_HOST = "auto"
+
+#: Where the OCS has been seen on the team networks (lab WiFi, Rocket). Tried in
+#: turn when no beacon arrives. ocs_client falls back to this only when the params
+#: file omits ocs_fallback_hosts; the YAML is the real source of truth.
+DEFAULT_FALLBACK_HOSTS = ("192.168.100.107", "192.168.8.107")
+
+#: RoboNation's course networks (Alpha .65 to Delta .68). Vehicles must never
+#: reach RoboCommand, so nothing here dials, or believes a beacon from, these.
+COURSE_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
+    "192.168.65.0/24", "192.168.66.0/24", "192.168.67.0/24", "192.168.68.0/24"))
+
+
+def on_course_network(host) -> bool:
+    """True if `host` is an IPv4 address inside a RoboCommand course network."""
+    try:
+        ip = ipaddress.IPv4Address(str(host).strip())
+    except ValueError:
+        return False
+    return any(ip in net for net in COURSE_NETWORKS)
+
+
+def parse_beacon(data) -> dict | None:
+    """{"team", "port", "v"} for a well-formed v1 beacon, else None.
+
+    Strict, like the OCS's own parse: anything not exactly this shape is not a
+    beacon, and acting on a guess means dialling an address on a stray packet.
+    """
+    if not isinstance(data, (bytes, bytearray)) or len(data) > 512:
+        return None
+    try:
+        obj = json.loads(bytes(data).decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    inner = obj.get(BEACON_KEY) if isinstance(obj, dict) else None
+    if not isinstance(inner, dict) or len(obj) != 1:
+        return None
+    team, port, ver = inner.get("team"), inner.get("port"), inner.get("v")
+    if not isinstance(team, str) or not team:
+        return None
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        return None
+    if isinstance(ver, bool) or ver != BEACON_VERSION:
+        return None
+    return {"team": team, "port": port, "v": ver}
+
+
+def check_fallback_hosts(hosts) -> tuple:
+    """(usable hosts in order, [problem strings]) for a configured fallback list.
+
+    Only IPv4 literals outside the course networks are usable: a hostname would
+    make every attempt wait on a resolver, and a course address is the one place
+    this boat must never be pointed. Shared by the link and by check_config, so
+    the file and the code cannot disagree about what a good list is.
+    """
+    if isinstance(hosts, str):
+        hosts = [hosts]                 # a hand-edited YAML with one bare string
+    kept: list = []
+    problems: list = []
+    for raw in hosts or ():
+        host = str(raw).strip()
+        try:
+            ipaddress.IPv4Address(host)
+        except ValueError:
+            problems.append("%r is not an IPv4 address" % host)
+            continue
+        if on_course_network(host):
+            problems.append("%s is on a RoboCommand course network -- the boat "
+                            "must never be pointed there" % host)
+            continue
+        if host not in kept:
+            kept.append(host)
+    return kept, problems
+
+
+class ChangeLog:
+    """Logs a message only when its key differs from the last one logged on the
+    same channel, so a state that holds is said once and a state that changes is
+    said again. A channel with a constant key is "once ever"."""
+
+    _UNSET = object()
+
+    def __init__(self, log) -> None:
+        self._log = log
+        self._last: dict = {}
+
+    def __call__(self, channel, key, message: str) -> None:
+        if self._last.get(channel, self._UNSET) != key:
+            self._last[channel] = key
+            self._log(message)
+
+
+class TargetChooser:
+    """Which OCS to dial next. Pure: no sockets, and the clock is injectable.
+
+    `hear()` is called from the listener thread, `choose()` from the link thread,
+    and only when the link has no connection -- so a beacon that arrives while
+    connected is recorded but never acted on. That is the no-flapping rule.
+    """
+
+    def __init__(self, fallback_hosts, port: int, *,
+                 fresh_s: float = BEACON_FRESH_S, clock=time.monotonic) -> None:
+        self.fallback = list(fallback_hosts)
+        self.port = port
+        self.fresh_s = fresh_s
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._heard = None              # (ip, tcp_port, when) of the newest beacon
+        self._next = 0                  # round-robin cursor into the fallback list
+
+    def hear(self, ip: str, tcp_port: int) -> None:
+        with self._lock:
+            self._heard = (ip, tcp_port, self._clock())
+
+    def choose(self):
+        """(host, port, why), or None if there is neither a fresh beacon nor a
+        fallback host. A fallback choice advances the cursor, so a host that does
+        not answer is followed by the next one."""
+        with self._lock:
+            if self._heard and self._clock() - self._heard[2] <= self.fresh_s:
+                ip, tcp_port, _ = self._heard
+                return ip, tcp_port, "beacon from %s" % ip
+            if not self.fallback:
+                return None
+            host = self.fallback[self._next % len(self.fallback)]
+            self._next += 1
+            return host, self.port, "fallback %s" % host
+
+    def note_connected(self, host: str) -> None:
+        """A fallback host that answered is tried first next time: the OCS that
+        was there a moment ago is most likely still there."""
+        with self._lock:
+            if host in self.fallback:
+                self._next = self.fallback.index(host)
+
+
+class BeaconListener:
+    """Receives the OCS beacons on UDP and feeds the ones that are ours to a
+    TargetChooser. `handle()` is the whole decision and takes no socket."""
+
+    def __init__(self, port: int, team: str, chooser: TargetChooser, log=print) -> None:
+        self.port = port
+        self.team = team
+        self.chooser = chooser
+        self.log = log
+        self._once = ChangeLog(log)
+        self.heard = 0                  #: beacons accepted
+        self.ignored = 0                #: datagrams that were not ours
+        self.listening = False
+        self._sock = None
+        self._stop = threading.Event()
+        self._thread = None
+
+    def handle(self, data: bytes, ip: str) -> bool:
+        """True if `data` from `ip` was one of our OCS's beacons and was recorded."""
+        beacon = parse_beacon(data)
+        if beacon is None:
+            return self._ignore()
+        if beacon["team"] != self.team:
+            return self._ignore(
+                ("team", ip, beacon["team"]),
+                "OCS link: beacon from %s ignored -- its team is %r, ours is %r"
+                % (ip, beacon["team"], self.team))
+        if on_course_network(ip):
+            return self._ignore(
+                ("course", ip),
+                "OCS link: beacon from %s ignored -- that is a RoboCommand "
+                "course network and this boat must never be pointed there" % ip)
+        self.chooser.hear(ip, beacon["port"])
+        self.heard += 1
+        return True
+
+    def _ignore(self, channel=None, message: str = "") -> bool:
+        """Count a datagram that was not ours; say why once per channel, if asked."""
+        self.ignored += 1
+        if message:
+            self._once(channel, True, message)
+        return False
+
+    def start(self) -> bool:
+        """Bind and listen. False (logged) if the port is taken: the link then
+        runs on its fallback hosts alone rather than not at all.
+
+        No SO_REUSEADDR, deliberately: sharing the port would let two listeners
+        split the datagrams between them, and the one that loses sees silence
+        rather than an error.
+        """
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.bind(("0.0.0.0", self.port))
+        except OSError as exc:
+            sock.close()
+            self.log("OCS link: cannot listen for beacons on UDP %d -- %s -- "
+                     "using the fallback hosts only" % (self.port, exc))
+            return False
+        sock.settimeout(0.5)
+        self._sock = sock
+        self.listening = True
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="ocs-beacon-rx",
+                                        daemon=True)
+        self._thread.start()
+        return True
+
+    def stop(self) -> None:
+        self._stop.set()
+        sock, self._sock = self._sock, None
+        if sock is not None:
+            sock.close()
+        if self._thread is not None:
+            self._thread.join(2.0)
+        self.listening = False
+
+    def _run(self) -> None:
+        sock = self._sock
+        while not self._stop.is_set() and sock is not None:
+            try:
+                data, (ip, _port) = sock.recvfrom(2048)
+            except socket.timeout:
+                continue
+            except OSError as exc:
+                if not self._stop.is_set():
+                    self.log("OCS link: beacon listener stopped -- %s" % exc)
+                self.listening = False
+                return
+            self.handle(data, ip)
+
+
 # ---- the link ---------------------------------------------------------------
 
 class OcsLink:
@@ -171,15 +428,38 @@ class OcsLink:
 
     on_command(dict) is called for every RxCommand that arrives. It runs on the
     link thread, so it must not block -- hand the work to ROS and return.
+
+    `host` is an address to dial (today's behaviour, nothing else happens) or
+    "auto": find the OCS from its beacon, falling back to `fallback_hosts` in
+    turn. Only "auto" looks at `team`, `discovery_port` and `fallback_hosts`;
+    `discovery_port` 0 means do not listen for beacons at all.
     """
 
     def __init__(self, host: str, port: int, *, on_command=None, log=print,
-                 retry_s: float = 5.0) -> None:
+                 retry_s: float = 5.0, team: str = "",
+                 discovery_port: int = 0, fallback_hosts=()) -> None:
         self.host = host
         self.port = port
         self.on_command = on_command
         self.log = log
         self.retry_s = retry_s
+        self.team = team
+
+        self._chooser: TargetChooser | None = None
+        self._listener: BeaconListener | None = None
+        self._announce = ChangeLog(log)
+        if str(host).strip().lower() == AUTO_HOST:
+            if discovery_port and not team:
+                # A listener that took any team's beacon would dial a stranger.
+                raise ValueError("ocs_host 'auto' with a discovery port needs the "
+                                 "team code the beacon must carry")
+            usable, problems = check_fallback_hosts(fallback_hosts)
+            for problem in problems:
+                log("OCS link: fallback host dropped -- %s" % problem)
+            self._chooser = TargetChooser(usable, port)
+            if discovery_port:
+                self._listener = BeaconListener(discovery_port, team,
+                                                self._chooser, log)
 
         self._sock: socket.socket | None = None
         self._reader = FrameReader()
@@ -207,6 +487,8 @@ class OcsLink:
         return self._sent, self._received
 
     def start(self) -> None:
+        if self._listener is not None:
+            self._listener.start()
         self._thread = threading.Thread(target=self._run, name="ocs-link",
                                         daemon=True)
         self._thread.start()
@@ -215,7 +497,22 @@ class OcsLink:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(3.0)
+        if self._listener is not None:
+            self._listener.stop()
         self._close()
+
+    def describe(self) -> str:
+        """Where this link is aimed, for the startup log."""
+        if self._chooser is None:
+            return "%s:%d" % (self.host, self.port)
+        if self._listener is None:
+            how = "no beacon listener"
+        elif self._listener.listening:
+            how = "beacons on UDP %d for team %s" % (self._listener.port, self.team)
+        else:
+            how = "beacon listener on UDP %d NOT RUNNING" % self._listener.port
+        return "auto (%s; fallback %s)" % (
+            how, ", ".join(self._chooser.fallback) or "none")
 
     # ---- the thread ------------------------------------------------------
 
@@ -231,19 +528,44 @@ class OcsLink:
                 # pass after the retry wait, not here, so one code path owns it.
         self._close()
 
+    def _pick_target(self):
+        """(host, port) to dial now, or None when there is nowhere to dial yet.
+
+        Called only while NOT connected -- a connected link never looks at the
+        beacons again, which is what stops it flapping between two OCS laptops.
+        An explicit host is returned untouched and logs nothing extra.
+        """
+        if self._chooser is None:
+            return self.host, self.port
+        choice = self._chooser.choose()
+        if choice is None:
+            self._announce("target", None,
+                           "OCS link: no OCS beacon heard and no fallback hosts "
+                           "-- waiting for a beacon")
+            return None
+        host, port, why = choice
+        self._announce("target", (host, port, why),
+                       "OCS link: target -> %s:%d (%s)" % (host, port, why))
+        return host, port
+
     def _connect(self) -> bool:
+        target = self._pick_target()
+        if target is None:
+            return False
+        host, port = target
         try:
-            sock = socket.create_connection((self.host, self.port), timeout=5.0)
+            sock = socket.create_connection((host, port), timeout=5.0)
         except OSError as exc:
             # Name the address. "connection refused" without it sends people
             # hunting through config files for which box they were even aiming at.
-            self.log("OCS link: cannot reach %s:%d -- %s"
-                     % (self.host, self.port, exc))
+            self.log("OCS link: cannot reach %s:%d -- %s" % (host, port, exc))
             return False
         sock.settimeout(_READ_TIMEOUT_S)
         self._sock = sock
         self._reader = FrameReader()
-        self.log("OCS link: connected to %s:%d" % (self.host, self.port))
+        if self._chooser is not None:
+            self._chooser.note_connected(host)
+        self.log("OCS link: connected to %s:%d" % (host, port))
         return True
 
     def _pump(self) -> bool:
@@ -377,6 +699,22 @@ def _selftest() -> int:
         json_safe({"heading_deg": float("nan")}), {"heading_deg": "NaN"})
     chk("frames round-trip", FrameReader().feed(encode(b"hi")), [b"hi"])
 
+    # Discovery: what counts as a beacon, and the one place the boat must never
+    # be pointed.
+    good = b'{"ocs_beacon":{"team":"ASTA","port":37564,"v":1}}'
+    chk("a v1 beacon parses", parse_beacon(good),
+        {"team": "ASTA", "port": 37564, "v": 1})
+    for bad in (b"", b"junk", b'{"ocs_beacon":{"team":"ASTA","port":0,"v":1}}',
+                b'{"ocs_beacon":{"team":"ASTA","port":37564,"v":2}}'):
+        chk("%r is not a beacon" % bad[:30], parse_beacon(bad), None)
+    chk("a course-network host is on_course_network",
+        [on_course_network(h) for h in ("192.168.65.2", "192.168.68.9",
+                                        "192.168.69.2", "192.168.100.107")],
+        [True, True, False, False])
+    chk("fallback hosts: course and non-IPs are dropped",
+        check_fallback_hosts(["192.168.100.107", "192.168.66.5", "host.local",
+                              "192.168.100.107"])[0], ["192.168.100.107"])
+
     print()
     if fails:
         print("FAIL — %d check(s):" % len(fails))
@@ -393,10 +731,19 @@ def main(argv=None) -> int:
         prog="ocs_link",
         description="Stream fake telemetry to the OCS. No ROS, no boat.")
     ap.add_argument("--host", default="127.0.0.1",
-                    help="OCS address. 127.0.0.1 only when the OCS is on THIS "
-                         "machine -- on the Jetson it must be the OCS's address "
-                         "on the team subnet.")
-    ap.add_argument("--port", type=int, default=37564)
+                    help="OCS address, or 'auto' to find it from its beacon. "
+                         "127.0.0.1 only when the OCS is on THIS machine -- on "
+                         "the Jetson it must be the OCS's address on the team "
+                         "subnet.")
+    ap.add_argument("--port", type=int, default=37564,
+                    help="the OCS vehicle-link port (with --host auto: used for "
+                         "--fallback hosts; a beacon names its own)")
+    ap.add_argument("--discovery-port", type=int, default=DEFAULT_DISCOVERY_PORT,
+                    help="UDP port to listen for the OCS beacon on (--host auto "
+                         "only; 0 = do not listen)")
+    ap.add_argument("--fallback", default=",".join(DEFAULT_FALLBACK_HOSTS),
+                    help="comma-separated OCS addresses to try when no beacon "
+                         "is heard (--host auto only)")
     ap.add_argument("--vehicle", default="USV1")
     ap.add_argument("--team", default="ASTA")
     ap.add_argument("--rate", type=float, default=2.0, help="Hz")
@@ -409,8 +756,11 @@ def main(argv=None) -> int:
     if args.selftest:
         return _selftest()
 
-    link = OcsLink(args.host, args.port)
+    link = OcsLink(args.host, args.port, team=args.team,
+                   discovery_port=args.discovery_port,
+                   fallback_hosts=[h for h in args.fallback.split(",") if h.strip()])
     link.start()
+    print("OCS link: %s" % link.describe())
     t0 = time.time()
     try:
         while True:

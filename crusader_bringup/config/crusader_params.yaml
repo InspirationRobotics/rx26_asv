@@ -835,17 +835,58 @@ rc_heartbeat_watchdog:
 # must not be changeable from a laptop mid-run.
 ocs_client:
   ros__parameters:
-    ocs_host: "192.168.8.107"               # [RO] the OCS on the TEAM subnet.
-                                           #      There is NO discovery: give the
-                                           #      OCS a static address on its team
-                                           #      NIC or a DHCP reservation, and
-                                           #      set this to match.
-                                           #      NOT 127.0.0.1 — that is this
-                                           #      Jetson, and the connect fails.
+    ocs_host: "auto"                       # [RO] "auto" = find the OCS from the
+                                           #      UDP beacon it broadcasts, so no
+                                           #      address is typed here. While not
+                                           #      connected the node dials the
+                                           #      source of the newest beacon (under
+                                           #      5 s old, carrying team_id), at the
+                                           #      port the beacon names; with none,
+                                           #      it tries ocs_fallback_hosts in
+                                           #      turn. Once connected it STAYS: a
+                                           #      later beacon from anywhere else
+                                           #      changes nothing until the link
+                                           #      drops, so two OCS laptops cannot
+                                           #      make it flap. Two laptops: it
+                                           #      keeps whichever it reached first.
+                                           #      Or a fixed IP, dialled and nothing
+                                           #      else (the old behaviour; no
+                                           #      listener). NOT 127.0.0.1 — that is
+                                           #      this Jetson. NEVER 192.168.65-68.x:
+                                           #      those are RoboCommand's course
+                                           #      networks and this boat must not be
+                                           #      pointed at them (check_config
+                                           #      fails it; the OCS never beacons
+                                           #      there either).
     ocs_port: 37564                        # [RO] = [tcp] port in the OCS
                                            #      bridge.toml. Clear of 8090
                                            #      (ground_station) and 8080/8081
-                                           #      (the viewers it embeds).
+                                           #      (the viewers it embeds). With
+                                           #      "auto" this is the port tried on
+                                           #      fallback hosts; a beacon carries
+                                           #      its own.
+    ocs_discovery_port: 37565              # [RO] UDP port the node LISTENS on for
+                                           #      the OCS beacon ("auto" only) =
+                                           #      [discovery] port in the OCS
+                                           #      bridge.toml. 0 = do not listen
+                                           #      (fallback hosts only). Bound
+                                           #      without SO_REUSEADDR so it cannot
+                                           #      steal another process's
+                                           #      datagrams; if the port is taken
+                                           #      the node logs it and runs on the
+                                           #      fallback list. Nothing else on
+                                           #      this repo uses 37565.
+    ocs_fallback_hosts: ["192.168.100.107", "192.168.8.107"]   # [RO] tried in
+                                           #      turn when no beacon is heard
+                                           #      (AP drops broadcasts, OCS not
+                                           #      beaconing): lab WiFi, then the
+                                           #      Rocket network. IPv4 literals
+                                           #      only, at least one, none on a
+                                           #      course network. A host that
+                                           #      answered is tried first next
+                                           #      time. A new laptop address that
+                                           #      is not here is still found by
+                                           #      its beacon.
     vehicle_id: "USV1"                     # [RO] MUST match a [[vehicle]] id in
                                            #      the OCS bridge.toml, or the OCS
                                            #      drops every frame with
@@ -1285,7 +1326,8 @@ safe_passage_server:
 bt_runner_node:
   ros__parameters:
     tree_file: "/root/robotx_ws/install/crusader_bt/share/crusader_bt/behavior_trees/task1_safe_passage.xml"
-                                            # [RO] absolute, INSIDE the container.
+                                            # [DYN] absolute, INSIDE the container.
+                                            #      Read when a goal is accepted.
                                             #      There is deliberately no
                                             #      default in code: a runner that
                                             #      silently ticks the wrong tree

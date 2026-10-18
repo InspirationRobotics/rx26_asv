@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Task3Disruptive: Task 3 Coordinated Logistics, the USV's half (handbook 3.3.4), all three tiers.
+
+  Core stops once the fire is out; Advanced and Disruptive go on to read the resource request off
+  the same window (TierAtLeast, from the goal's tier or SetTier). Three bays, numbered LEFT TO
+  RIGHT FACING THEM, one with a GREEN indicator: dock there, DockingReport(bay_id); then a window
+  lights RED: spray it until it turns GREEN, FirefightingReport(window_id); Disruptive then reads
+  the c1/c2 code off the window and reports ResourceDeliveryRequest. Numbers come from the build
+  guide's dock (1.5 m slips between 0.5 m fingers 2.0 m long, bays 2.0 m apart) and the boat
+  (~1.0 x 0.6 m, camera 0.37 m ahead of the body origin and 0.41 m up). Details: README Task 3.
+
+  1. Bays are known by where they are: the runner places every sighting in the world and folds it
+     into a track, and a bay's NUMBER comes from sorting three confirmed tracks along the dock.
+  2. Look from where all three fit (5 m out, clear of the fingers) and never from inside a slip.
+     Every look goes via a lead point further out, because the camera faces forward and the
+     heading a boat stops with is the direction it arrived from. No strafing: MANUAL is G1-gated.
+  3. Strict, then lenient: GREEN + RED + RED first; a lone strong GREEN only once every look is spent.
+  4. The choice can be undone on the way in: ChosenBaySafe re-reads recent readings on every tick
+     of the berthing legs, and a run of REDs restarts the search with that bay vetoed.
+  5. Enter straight, from outside: lead-in, line-up and berth sit on the bay's centreline. The
+     line-up and berth are STRAIGHT legs (avoid="false" exempt="dock"): the slip leaves 0.45 m a
+     side, inside the 0.8 m hard clearance, so a planned leg could never enter it. Needs WP_RADIUS
+     well under the berth tolerance; GUIDED cannot hold a slip against a cross-current.
+  6. AwaitFireTarget re-sends the docking report until RoboCommand confirms it. The camera must see
+     the upper window from the berth, which level it cannot: it needs ~20 deg of pitch-up.
+
+  A failure past the berth fails the mission on purpose: a retry would drive a lead-in point that
+  is BEHIND a boat in a slip, and there is no reverse on the setpoint path. Undocking is not here.
+  DockCameraAlive is in the guard band: a blind boat must not keep driving at a dock.
+-->
+<root BTCPP_format="4">
+
+  <BehaviorTree ID="Task3Disruptive">
+    <ReactiveSequence name="guard_band">
+      <DockCameraAlive max_age_s="{camera_max_age_s}"/>
+      <UpdateDockBook/>
+
+      <Sequence name="task3">
+
+        <!-- Find the bay, commit, line up, all OUTSIDE the slips. A failure anywhere in here
+             starts the search again with everything learned so far. -->
+        <RetryUntilSuccessful num_attempts="3" name="dock_attempts">
+          <Sequence name="find_and_dock">
+
+            <ReactiveFallback name="find_safe_bay">
+              <SafeBayKnown need_others_red="true"/>
+              <RetryUntilSuccessful num_attempts="4" name="looks">
+                <Sequence name="look">
+                  <PickVantage standoff="{vantage_standoff_m}" lead_m="2.0" out="{vantage}" lead="{lead}"/>
+                  <NavigateTo target="port" goal="{lead}" tolerance="1.0"/>
+                  <NavigateTo target="port" goal="{vantage}" tolerance="1.0"/>
+                  <!-- WATCH, then fail the look so the retry moves on; SafeBayKnown above ends
+                       this as soon as the readings settle. Not HoldStation: it re-sends the
+                       CURRENT position while the boat is still moving, so the boat turns round
+                       to go back to it, away from the dock. -->
+                  <ForceFailure>
+                    <Sleep msec="12000"/>
+                  </ForceFailure>
+                </Sequence>
+              </RetryUntilSuccessful>
+              <SafeBayKnown need_others_red="false"/>
+            </ReactiveFallback>
+
+            <CommitSafeBay/>
+
+            <!-- Onto the centreline from OUTSIDE the line-up point, so the boat arrives heading
+                 in. Skipped when already there: a lead-in behind the boat turns it round twice. -->
+            <Fallback name="lead_in">
+              <LinedUp min_along_m="2.7" lateral_tol="0.4" heading_tol_deg="20.0"/>
+              <ReactiveSequence name="to_lead">
+                <ChosenBaySafe min_ema="0.3"/>
+                <DockWaypoint point="lead" predock_m="{predock_m}" berth_m="{berth_m}"
+                              lead_m="{lead_m}" out="{goal}"/>
+                <NavigateTo target="port" goal="{goal}" tolerance="1.0"/>
+              </ReactiveSequence>
+            </Fallback>
+            <ReactiveSequence name="line_up">
+              <ChosenBaySafe min_ema="0.3"/>
+              <DockWaypoint point="predock" predock_m="{predock_m}" berth_m="{berth_m}"
+                            lead_m="{lead_m}" out="{goal}"/>
+              <NavigateTo target="port" goal="{goal}" tolerance="0.4" resend_m="0.2"
+                          avoid="false" exempt="dock"/>
+            </ReactiveSequence>
+
+          </Sequence>
+        </RetryUntilSuccessful>
+
+        <!-- In the slip from here on, and outside the retry on purpose (see above). berth_m is
+             face to BODY ORIGIN: the bow is 0.5 m ahead of it. -->
+        <ReactiveSequence name="enter">
+          <ChosenBaySafe min_ema="0.3"/>
+          <DockWaypoint point="berth" predock_m="{predock_m}" berth_m="{berth_m}"
+                        lead_m="{lead_m}" out="{goal}"/>
+          <NavigateTo target="port" goal="{goal}" tolerance="{berth_tolerance_m}" resend_m="0.2"
+                      avoid="false" exempt="dock"/>
+        </ReactiveSequence>
+
+        <!-- Wait until docked, up to 10 s: the boat arrives still settling, and one sample taken
+             mid-swing is not the answer. Inverter / KeepRunningUntilFailure / Inverter is BT for
+             "run until this holds". DockedInBay tests the whole HULL against the measured slip. -->
+        <Timeout msec="10000">
+          <Inverter>
+            <KeepRunningUntilFailure>
+              <Inverter>
+                <DockedInBay along_tol="0.25" lateral_tol="0.3" heading_tol_deg="15.0"
+                             hull_length="1.0" hull_beam="0.6" finger_margin="0.35"/>
+              </Inverter>
+            </KeepRunningUntilFailure>
+          </Inverter>
+        </Timeout>
+
+        <ReportDocking/>
+
+        <AwaitFireTarget timeout_s="60.0" resend_s="10.0"/>
+        <SprayUntilHit timeout_s="{spray_timeout_s}" min_green_s="0.4" max_aim_age_s="1.0"/>
+        <ReportFirefighting window_id_base="1"/>
+
+        <!-- Core ends here. Above it, the same window carries the request. -->
+        <Fallback name="request">
+          <Inverter>
+            <TierAtLeast tier="1"/>
+          </Inverter>
+          <Sequence name="read_and_report">
+            <DecodeResourceRequest timeout_s="{decode_timeout_s}" hold_s="5.0" min_frames="20"/>
+            <ReportResourceRequest/>
+          </Sequence>
+        </Fallback>
+
+      </Sequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <TreeNodesModel>
+    <SubTree ID="Task3Disruptive">
+      <input_port name="vantage_standoff_m" default="5.0">how far out from the dock to look at the bays from, metres</input_port>
+      <input_port name="predock_m" default="3.0">line-up point, metres out from the bay face</input_port>
+      <input_port name="berth_m" default="1.25">berth, metres from the face to the body origin</input_port>
+      <input_port name="lead_m" default="2.0">lead-in point, metres beyond the line-up point</input_port>
+      <input_port name="berth_tolerance_m" default="0.25">arrival radius at the berth, metres</input_port>
+      <input_port name="spray_timeout_s" default="60.0">give up spraying the window after this long, seconds</input_port>
+      <input_port name="decode_timeout_s" default="80.0">give up reading the resource request after this long, seconds</input_port>
+      <input_port name="camera_max_age_s" default="3.0">stop when the dock camera is silent this long, seconds</input_port>
+    </SubTree>
+  </TreeNodesModel>
+
+</root>

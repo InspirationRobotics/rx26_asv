@@ -169,13 +169,7 @@ bool replan(Context & c, Phase from, const rclcpp::Logger & lg, const std::strin
 /// Hold where the boat is: its own position as the setpoint, once per hold.
 void holdHere(Context & c, const rclcpp::Logger & lg, const char * why)
 {
-  Vec2 here;
-  {
-    std::lock_guard<std::mutex> lk(c.mu);
-    if (!c.pose_fresh) {return;}
-    here = c.boat;
-  }
-  sendSetpoint(c, lg, here, std::string("hold (") + why + ") at");
+  sendHold(c, lg, std::string("hold (") + why + ") at");
 }
 
 // ---------------------------------------------------------------- conditions
@@ -193,8 +187,8 @@ public:
 
   BT::NodeStatus tick() override
   {
-    const std::string t = getInput<std::string>("tier").value_or("disruptive");
-    const int want = (t == "core" || t == "0") ? 0 : (t == "advanced" || t == "1") ? 1 : 2;
+    int want = 2;                           // an unrecognised name reads as disruptive, as before
+    parseTier(getInput<std::string>("tier").value_or("disruptive"), &want);
     std::lock_guard<std::mutex> lk(ctx_->mu);
     return ctx_->tier == want ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
   }
