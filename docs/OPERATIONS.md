@@ -273,7 +273,7 @@ Inside the container:
 cd /root/robotx_ws && source install/setup.bash && ros2 launch crusader_bringup core.launch.py
 ```
 
-That starts four nodes:
+That starts:
 
 | Node | Package | Role |
 |---|---|---|
@@ -281,6 +281,11 @@ That starts four nodes:
 | `pixhawk_led_status_node` | `crusader_behavior` | Pixhawk state → LED state |
 | `led_node` | `crusader_behavior` | `/crsd/led_state` → LED serial |
 | `rc_watchdog` | `crusader_behavior` | force-disarm on RC-link loss |
+| `ground_station` | `crusader_groundstation` | the web UI on :8090 |
+| `lidar_cluster_node` | `crusader_perception` | MID360 cloud → `crsd/lidar_clusters` |
+| `proximity_bridge` | `crusader_perception` | clusters → `OBSTACLE_DISTANCE` for the autopilot's avoidance |
+| `lidar_view` | `tools/lidar_view.py` (a script) | LiDAR view on :8081 |
+| `rxl_link_node` | `crusader_link` | the RFD900 UAV link; respawns |
 
 **Verify:** flip the RC arm switch — the LED strip and the launch logs should
 change together.
@@ -308,16 +313,15 @@ from anything and any number can run at once. It cannot share port 8080 with
 `buoy_detector`'s view, and they are never both useful at once.
 
 > Neither perception node is in `core.launch.py` — they contend for the one
-> camera, so which runs is an operator choice per session. World-model nodes are
-> not there either: that package is still scaffolded and empty (§13).
+> camera, so which runs is an operator choice per session. `target_tracker` is
+> not there either.
 
 ### Obstacle avoidance (Nav2)
 
-NOT in `core.launch.py`, and not run on the water yet. Spec: `docs/nav2_avoidance_spec.md`.
+NOT in `core.launch.py`. Spec: `docs/nav2_avoidance_spec.md`.
 The tree's `NavigateTo` and `CircleBuoy` plan around hazards through Nav2's `planner_server`
 and a costmap; ArduPilot still flies the boat (GUIDED position setpoints). **Avoidance is not a
-safety system. The RC e-stop is.** It needs the `asv` container to have Nav2, which means the
-container recreation in `setup/README.md` ("Recreating the asv container"), done once.
+safety system. The RC e-stop is.**
 
 **Start order**, in `asv` over ssh, after `source /opt/ros/humble/setup.bash && source /root/robotx_ws/install/setup.bash`:
 
@@ -452,7 +456,7 @@ needs a rebuild before it takes effect. From the **host**:
 bash tools/scripts/rebuild.sh
 ```
 
-That is the one blessed path: it builds both packages inside the container and
+That is the one blessed path: it builds the stack inside the container and
 runs an import smoke test. Equivalent by hand, inside the container:
 
 ```bash
@@ -526,13 +530,19 @@ cd ~/robotx_ws/src/rx26_asv && git add -A && git commit -m "short description" &
 ```
 ~/robotx_ws/                        # colcon WORKSPACE — holds build/ install/ log/
 └── src/
-    ├── rx26_asv/                   # <- THIS REPO (seven packages, not one)
-    │   ├── crusader_msgs/          # ament_cmake — msg definitions (6)
+    ├── rx26_asv/                   # <- THIS REPO (13 packages)
+    │   ├── crusader_msgs/          # ament_cmake — 25 msgs + SafePassage.action
     │   ├── crusader_common/        # shared lib: params, lifecycle, latch, geo
     │   ├── crusader_fcu/           # telemetry_bridge — the only MAVLink talker
-    │   ├── crusader_perception/    # OAK-D driver + buoy detection
-    │   ├── crusader_world_model/   # EMPTY — fusion + occupancy grid
+    │   ├── crusader_perception/    # OAK-D driver + buoy detection, LiDAR clusters
+    │   ├── crusader_world_model/   # target_tracker
     │   ├── crusader_behavior/      # safety/ watchdog + indicator/ LED stack
+    │   ├── crusader_bt/            # bt_runner_node — missions as behaviour trees
+    │   ├── crusader_nav/           # nav.launch.py — Nav2 avoidance
+    │   ├── crusader_nav_layers/    # Nav2 costmap plugin
+    │   ├── crusader_link/          # rxl_link_node — the RFD900 UAV link
+    │   ├── crusader_groundstation/ # ground_station — web UI on :8090
+    │   ├── crusader_sim/           # Gazebo + SITL; laptop only, never built on the boat
     │   ├── crusader_bringup/       # ament_cmake — launch/ + config/; build entry point
     │   ├── docs/  firmware/  params/
     │   ├── scripts/start_mavproxy.sh
@@ -549,7 +559,7 @@ when a package is added. **A new package must be listed in
 `crusader_bringup/package.xml`** or it silently stops being built.
 
 The repo root is deliberately **not** a colcon package. If it were, colcon would
-stop descending and never find `interfaces/`. Do not add a `package.xml` at the
+stop descending and never find the packages. Do not add a `package.xml` at the
 repo root.
 
 ---
@@ -615,9 +625,9 @@ the guard came out. The package formerly called `crusader_sensors` is now
 `crusader_perception` for the same reason: it does both jobs.
 
 - `crusader_perception` — owns the OAK-D, publishes detections with ranges in
-  `camera_link`. Runs in `asv`. Its LiDAR half is unwritten.
-- `crusader_world_model` — sensor-agnostic: fusion into 3D object positions, occupancy
-  grid. Still **empty and scaffolded**.
+  `camera_link`. Runs in `asv`.
+- `crusader_world_model` — sensor-agnostic: fusion into 3D object positions
+  (`target_tracker`).
 
 The pre-v0.5 LiDAR fusion was removed unverified. It is recoverable from git at `8c4ffa5`
 and worth reading before rewriting — see each package's README.
@@ -856,20 +866,16 @@ Rebuild it on the Jetson host:
 cd ~/robotx_ws/src/rx26_asv && docker build -t asv .
 ```
 
-**Build to a throwaway tag first** if the current container is working, verify,
-then retag and recreate:
-
-```bash
-docker build -t asv:next . && docker tag asv:next asv:latest && docker rm -f asv && docker create -it --name asv --network host --privileged --runtime nvidia -v /dev:/dev -v /home/crusader/robotx_ws:/root/robotx_ws asv && docker start asv
-```
-
-Those create flags are not optional:
+The boat runs `asv:nav2-20261003`, built in layers on top of this image (Nav2, STVL,
+BehaviorTree.CPP). Recreate the container only per `setup/README.md` "Recreating the asv
+container"; its create flags are not optional:
 
 | Flag | Why |
 |---|---|
 | `--network host` | MAVProxy loopback rebroadcast, DDS multicast, and the MID360 cloud from the livox container |
 | `--privileged` + `-v /dev:/dev` | the Pixhawk and LED serial devices |
 | `--runtime nvidia` | GPU for TensorRT — detection runs in this container |
+| `-v /run/crsd-power.sock:/run/crsd-power.sock` | the ground station's shutdown/reboot through `crsd-power` |
 | `-it` | keeps `CMD ["bash"]` alive so `docker start -a` works |
 
 **The image is the only place runtime dependencies are installed.** Never
@@ -956,7 +962,7 @@ each one before arming. Manual items it cannot check: GPS yaw resolved (open sky
 
 The legacy boat repo lives at `~/robotx_ws/src/robotx_2026`. It is **not built by
 us** — `rebuild.sh` and `install_container.sh` use
-`--packages-up-to crusader_bringup`, which reaches only our seven packages.
+`--packages-up-to crusader_bringup`, which reaches only our packages.
 
 **Never launch both stacks.** `robotx_2026` ships its own `led_node`,
 `pixhawk_led_node`, `gate_navigator` and `dp_hold`, each opening its own
@@ -986,15 +992,11 @@ Honest list — these are known-wrong or known-missing, not merely untested:
   Confirmed 2026-09-03: **the boat is running the in-progress pair**, `1.5` and
   `0.65`, while the baseline still has `1.0` and `0.0`. Tunable, not protected —
   but that is which one you are running, and the baseline is not it.
-- **The livox topic contract is half-settled.** Measured on the boat 2026-09-03:
-  `/livox/lidar` is `sensor_msgs/PointCloud2` at **10.0 Hz**, ~20k points per
-  message, RELIABLE/VOLATILE, frame `livox_frame`; `/livox/imu` is
-  `sensor_msgs/Imu` at **200.0 Hz**, same frame. Both are visible from inside
-  `asv` — the containers share host network and the default `ROS_DOMAIN_ID`, so
-  no bridge is needed. What is still open is not the plumbing but the **frame
-  convention**: `livox_frame` is the raw upside-down sensor frame (+y starboard,
-  +z down), and nothing downstream has yet agreed where the negation to REP-103
-  body happens. The camera side is settled: `oak/detections`,
+- **The livox frame convention is open.** The topics are settled (`/livox/lidar`
+  `PointCloud2` 10 Hz, `/livox/imu` 200 Hz, frame `livox_frame`, visible from
+  inside `asv`). Open: `livox_frame` is the raw upside-down sensor frame
+  (+y starboard, +z down), and nothing downstream has yet agreed where the
+  negation to REP-103 body happens. The camera side is settled: `oak/detections`,
   `Detection3DArray`, `camera_link`.
 - ~~`fcu_status` trips its own staleness rule at idle.~~ **Closed 2026-09-03 by
   raising HEARTBEAT to 5 Hz** (§3.1). `stream_timeout_s` stays at 1.0 s
@@ -1020,12 +1022,6 @@ Honest list — these are known-wrong or known-missing, not merely untested:
   never appears, and this hub exposes no per-port power control
   (`/sys/bus/usb/devices/1-2/port2/disable` does not exist) so there is nothing
   to power-cycle in software either.
-- **The `asv` container lacks the power-socket bind mount**, so the ground
-  station's System tab reports "power helper unreachable" and cannot shut the
-  Jetson down. Everything else on the page works. Fixing it requires recreating
-  the container, which destroys anything living only inside it — left alone
-  deliberately. Nothing depends on that mount any more — `crsd-battwatch` was
-  the only other user of the socket and it was removed on 2026-09-05.
 
 ### Confirmed hardware (2026-07-28)
 

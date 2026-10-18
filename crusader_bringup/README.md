@@ -4,7 +4,7 @@ Launch files and the single-source-of-truth parameter file. **Ships no code.**
 
 | Path | What |
 |---|---|
-| `launch/core.launch.py` | The always-on stack: `telemetry_bridge`, `pixhawk_led_status_node`, `led_node`, `rc_watchdog` |
+| `launch/core.launch.py` | The always-on stack: `telemetry_bridge`, `pixhawk_led_status_node`, `led_node`, `rc_watchdog`, `ground_station`, `lidar_cluster_node`, `proximity_bridge`, `lidar_view`, `rxl_link_node` |
 | `config/crusader_params.yaml` | Every ROS parameter for every node ([config/README.md](config/README.md)) |
 
 ```bash

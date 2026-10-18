@@ -4,13 +4,12 @@ Per-sensor detections in, one consistent picture of the world out. In the archit
 diagram this is the pair of boxes drawn *outside* the Perception group, because it belongs
 to neither the sensors nor the missions.
 
-**State: two nodes, neither has run on the boat.** Both are excluded from `core.launch.py`
-and both carry a `NOTE:` at the top of the file. The occupancy grid is still unwritten.
+**State: one node, `target_tracker`.** It is not in `core.launch.py`. The occupancy grid is
+still unwritten.
 
 | Node | Job | State |
 |---|---|---|
-| `target_tracker` | Camera + LiDAR + pose → earth-anchored target tracks on `crsd/world_targets` | bench only |
-| `map_server` | Those tracks and the vessel state, live in a laptop browser on `:8082` | bench only |
+| `target_tracker` | Camera + LiDAR + pose → earth-anchored target tracks on `crsd/world_targets` | started by `crusader_sim/scripts/lake_rig_up.sh` |
 | *(occupancy grid)* | World-anchored obstacle map with time decay | not written |
 
 ## Why this is a separate package from `crusader_perception`
@@ -19,7 +18,7 @@ Because it is testable and perception isn't. Everything here is geometry and tim
 it can be exercised with invented detections, on a laptop, with no camera, no GPU and no
 boat. Perception can't — it needs a model, a calibration and a scene.
 
-That is not an aspiration. `target_tracker_core.py` and `map_server_core.py` have **no ROS
+That is not an aspiration. `target_tracker_core.py` has **no ROS
 imports at all**, and [`tools/bench/bench_world_model.py`](../tools/bench/README.md) drives
 the whole chain from an invented buoy field. If a change here can only be checked on the
 water, it is in the wrong file.
@@ -228,72 +227,6 @@ are confirmed.
 The tracker says this out loud: if both sensors are producing and *nothing* fuses, it logs
 that every target is being tracked twice and names the mount angles as the suspect.
 
-## `map_server` — the display
-
-```bash
-ros2 run crusader_world_model map_server
-# then, from the laptop:  http://<JETSON_IP>:8082
-```
-
-Vessel position, heading, speed, roll/pitch, mode and armed state as text; a north-up plan
-map with the boat as a heading arrow, its wake, range rings centred on the boat, and every
-tracked target coloured by its label. Pan, zoom, follow-boat toggle.
-
-**It sends data, not pixels.** `tools/oak_view.py` and `tools/lidar_view.py` ship MJPEG
-because their subject *is* an image. A map is a boat position and a few dozen targets —
-well under a kilobyte — so the page is HTML+canvas polling a JSON endpoint. The Jetson
-spends no CPU drawing or encoding, the link carries ~1 KB per update instead of ~100 KB,
-the laptop can zoom without a round trip, and the readouts are selectable text. The shared
-rule survives either way: **the laptop needs a browser and nothing else.** No ROS on
-Windows, no rviz2, no X forwarding.
-
-**Port 8082**, because 8080 is `buoy_detector`'s annotated view and `tools/oak_view.py`, and
-8081 is `tools/lidar_view.py`. All three are useful at once — they are three different
-questions about one moment.
-
-### What it costs on the radio link
-
-Measured on the real `/state` path, at the 5 Hz default poll, **per connected browser**:
-
-| Scenario | `/state` | Per client |
-|---|---|---|
-| Idle at the dock | 0.3 KiB | 0.02 Mbps |
-| Typical run, 6 targets, trail saturated | 12.2 KiB | 0.51 Mbps |
-| Busy course, 20 targets | 15.5 KiB | 0.64 Mbps |
-| Worst case, `max_tracks: 64` | 25.5 KiB | 1.05 Mbps |
-
-Plus 13 KiB once, when the page loads. Against a 150 Mbps link that is 0.34% typical and
-0.7% worst case — but the number worth remembering is the **0.5 Mbps**, not the percentage,
-because a WiFi link's rated speed is a close-range PHY rate and what matters is what is
-left at the far end of a course.
-
-**The trail is 86% of every poll** — 600 points of unchanged history, resent five times a
-second. `trail_length` is `[DYN]`, so it is the one knob that moves this number without a
-restart: halving it roughly halves the bandwidth. Sending only new points would be the real
-fix and has not been done, because 0.5 Mbps has not yet been worth the protocol.
-
-The page holds **one poll in flight at a time**. `setInterval` fires on a wall clock and
-does not care whether the last request returned, so on a link that has gone slow the
-requests pile up faster than they drain, hit the browser's per-host connection cap, and
-freeze the map on stale data while the banner that should be warning about it waits behind
-the queue. Skipping a tick instead costs one frame of a 5 Hz display and keeps the request
-rate matched to what the link can carry — measured at 4 requests rather than 20 across four
-seconds of a two-second-latency link.
-
-**It has no publishers, no services and no timers that touch anything but its own trail
-buffer**, so it can be started and killed at any point in a session, including under way.
-A display that can affect the vehicle is a display nobody dares restart when it misbehaves.
-
-**Staleness is the feature.** A dead pose does not freeze the boat marker at its last
-position and keep looking healthy — the marker greys out, the readout goes red, and a
-banner says so. A moving map is the most convincing thing on a screen, and a convincing map
-of a lie is worse than a blank one.
-
-It anchors its own display origin rather than reusing the tracker's, and re-projects targets
-from the lat/lon they carry. The two nodes start at different moments, so their origins
-differ; lat/lon is the frame they genuinely share, and metres are always relative to
-somebody's choice.
-
 ## Verifying it before the sensors are trustworthy
 
 ```bash
@@ -366,6 +299,5 @@ a hull — which is a real return at a real height and is exactly what `use_lida
 | the fusion or association gates in `crusader_params.yaml` | `python3 tools/scripts/check_config.py`, then the bench with `--chop` — watch `position_stddev` on the map |
 | `use_lidar` | nothing to rebuild — it is `[DYN]`. Confirm in `crsd/world_model_health` that `lidar_ignored` moved, and re-run the bench with `--no-lidar` to exercise the same path it now takes by default. Note the default bench field's unlabelled member is invisible with it off: that buoy exists to prove the LiDAR-only path, and there is no longer one |
 | `cam_x/y/z/yaw/pitch` | every fused position shifts; re-check against real buoys at known ranges, and tighten `fuse_bearing_deg` |
-| `map_server_core.py`'s page | open it in a browser and confirm the **stale** path still fires — feed it a snapshot with `ok: false` and check the banner, not just the healthy case |
 | `TrackedTarget`/`TrackedTargetArray` fields | full `tools/scripts/rebuild.sh`; a mismatched message is a silent deserialization failure |
 | topic names in either section | `python3 tools/scripts/check_config.py` — it pins producer against consumer, because a mismatch there starts both nodes cleanly and delivers nothing |

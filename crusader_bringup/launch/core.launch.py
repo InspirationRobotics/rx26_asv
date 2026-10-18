@@ -10,7 +10,8 @@ Starts (all reading config/crusader_params.yaml from THIS package's share dir):
   * rc_watchdog           — crusader_behavior; force-disarm on RC-transmitter link
                             loss; consumes telemetry_bridge topics and routes the
                             disarm back through the bridge (/crsd/force_disarm)
-  * lidar_cluster_node    — crusader_perception; MID360 cloud -> crsd/lidar_clusters
+  * ground_station        — crusader_groundstation; the web UI on :8090
+  * lidar_cluster_node   — crusader_perception; MID360 cloud -> crsd/lidar_clusters
   * proximity_bridge      — crusader_perception; clusters -> OBSTACLE_DISTANCE,
                             which is what feeds the autopilot's own avoidance
   * lidar_view            — tools/lidar_view.py; plan + elevation MJPEG on :8081,
@@ -41,7 +42,7 @@ proximity source and refuses to arm without one:
 
     PreArm: PRX1: No Data
 
-Those last two nodes are the source. They are in this launch precisely so that
+lidar_cluster_node and proximity_bridge are the source. They are in this launch precisely so that
 message does not appear on a healthy boat — it was exactly what happened on
 2026-09-05, when a power cycle left them behind because they were hand-started.
 The flip side is the coupling: if the MID360 is unpowered, or crsd-livox is down,
@@ -55,9 +56,8 @@ Check the LiDAR before reaching for it — `ros2 topic hz /livox/lidar` should r
 10 Hz, and `ros2 topic echo /crsd/proximity_health --once` says what the bridge
 thinks it is seeing.
 
-World-model nodes are NOT here: that package is scaffolded and empty (see its
-README). Add a node to this launch once it has run on the boat, not when it
-compiles.
+target_tracker (crusader_world_model) is NOT here. Add a node to this launch
+once it has run on the boat, not when it compiles.
 
 `crusader_perception`'s CAMERA nodes (`oakd_publisher`, `buoy_detector`, `oak_detector`) run in
 `asv` but are NOT in this launch: they contend for the one OAK-D (the device admits one client), and

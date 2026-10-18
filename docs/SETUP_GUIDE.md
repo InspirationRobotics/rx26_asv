@@ -42,15 +42,13 @@ powershell -ExecutionPolicy Bypass -File setup\install_dev.ps1
 .\.venv\Scripts\Activate.ps1
 ```
 
-The script self-verifies by running the config guards — which is also everything CI runs
-off-boat:
+The script self-verifies by running the config guards:
 
 ```bash
 python3 tools/scripts/check_config.py
 ```
 
-There is no simulator and no test suite in this repo. Node behaviour is verified on the
-bench and on the water, per [OPERATIONS.md](OPERATIONS.md) and the
+Node behaviour is verified on the bench and on the water, per [OPERATIONS.md](OPERATIONS.md) and the
 [G1 bench procedure](G1_bench_procedure.md).
 
 ### B2. Jetson host (once per Jetson, and after cabling changes)
@@ -85,13 +83,14 @@ LED tells you state at a glance: RED e-stopped · YELLOW armed/manual · GREEN a
 
 ### B3. Inside the container (once, and after package changes)
 
-Seven packages build as one target: `crusader_bringup` depends on all of them, so
+Every package but `crusader_sim` (laptop only) builds as one target: `crusader_bringup`
+depends on all of them, so
 `--packages-up-to crusader_bringup` is the whole stack and stays correct as packages are
 added. Every path that builds — `rebuild.sh`, `install_container.sh`, CI — uses that form.
 
 ```bash
 docker exec -it asv bash /root/robotx_ws/src/rx26_asv/setup/install_container.sh
-# dependency guard → colcon build (all seven packages) → import smoke
+# dependency guard → colcon build (up to crusader_bringup) → import smoke
 ```
 
 ### B4. Boat bring-up (bench/field — day-of runbook)
@@ -139,4 +138,3 @@ flowchart LR
 | Add a ROS node | Pick the package by domain (see the root README table). Write `*_core.py` (pure logic) + `*_node.py` (wrapper via `crusader_common.node_main`), add a params section in the YAML and to `CONFIG_DRIVEN_NODES` in `check_config.py`. Add the `console_scripts` entry and the `core.launch.py` line **only after it has run on the boat**. |
 | Add a message | `crusader_msgs/msg/` + its `CMakeLists.txt` line, then `rebuild.sh`, and update all producers/consumers in one commit. A `.msg` not listed in CMakeLists is silently not generated. |
 | Add a package | `package.xml` + `setup.py` + `setup.cfg` + `resource/<name>`, then add it to `crusader_bringup/package.xml`'s exec_depends and to CI's discovery list — or it silently stops being built by every path. |
-| Bring a mission node back | Define the topic contract with the livox container first; port the algorithm from [robotx_2026](https://github.com/InspirationRobotics/robotx_2026) (prequal-proven), not from this repo's deleted rewrite. |

@@ -5,9 +5,8 @@ ros2 run crusader_groundstation ground_station
 # then, on the laptop:  http://<JETSON_IP>:8090
 ```
 
-**State: one node, not proven on the boat.** It starts and stops real nodes and can power
-the Jetson off, and none of that has been exercised on the water. It carries a `NOTE:`
-header and is not in `core.launch.py`.
+**State: one node, started by `core.launch.py`.** It starts and stops real nodes and can
+power the Jetson off.
 
 | Tab | Shows | Can do |
 |---|---|---|

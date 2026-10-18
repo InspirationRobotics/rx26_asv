@@ -20,24 +20,26 @@ Before developing ANY code, read [Format](#format) and the standing
 
 ## Packages
 
-Eight packages, laid out along the architecture: perception → world model → cognition →
+Thirteen packages, laid out along the architecture: perception → world model → cognition →
 behavior, with a shared library underneath, a ground station beside it and a bringup
-package on top. All eight build
-and run in the `asv` container (`--packages-up-to crusader_bringup`).
+package on top. All but `crusader_sim` (laptop only) build and run in the `asv` container
+(`--packages-up-to crusader_bringup`).
 
 | Package | Contains | State |
 |---|---|---|
-| [`crusader_msgs`](crusader_msgs/README.md) | Message definitions. Depends on nothing but `std_msgs`, so any image can build it cheaply | 10 msgs |
+| [`crusader_msgs`](crusader_msgs/README.md) | Message definitions. Depends on nothing but `std_msgs`, so any image can build it cheaply | 25 msgs + 1 action |
 | [`crusader_common`](crusader_common/README.md) | Shared plumbing: params loader, node lifecycle, stream cache, drop latch, geodesy. No nodes | library |
 | [`crusader_fcu`](crusader_fcu/README.md) | `telemetry_bridge` — the only thing that speaks MAVLink. Localization source *and* Movement actuator | **field** |
 | [`crusader_perception`](crusader_perception/README.md) | Owns the OAK-D and detects in it: `oakd_publisher` → raw frames; `buoy_detector` → `oak/detections` in `camera_link`. Not launched — the two contend for the camera | 2 nodes |
 | [`crusader_world_model`](crusader_world_model/README.md) | `target_tracker` → earth-anchored target tracks on `crsd/world_targets`. **Camera-only by default** (`use_lidar: false`); LiDAR fusion is a switch, on for open water. Sensor-agnostic, driven off-boat by `tools/bench/bench_world_model.py`. Occupancy grid still unwritten | 1 node |
 | [`crusader_behavior`](crusader_behavior/README.md) | `safety/` RC-loss force-disarm watchdog; `indicator/` LED status stack | **field** |
 | [`crusader_groundstation`](crusader_groundstation/README.md) | `ground_station` — one web page on `:8090`: node control, telemetry, the camera and LiDAR viewers, the map, live parameter tuning, and host power. The one package allowed to *know about* every other while importing none | 1 node |
+| [`crusader_bt`](crusader_bt/README.md) | Cognition: `bt_runner_node` takes one coarse action per mission and ticks a behaviour tree of primitive leaves | **field** |
+| `crusader_link` | The boat's end of the UAV link: `rxl_link_node` decodes RXL and Ekko's TUNNEL frames off the radio | **field** |
+| [`crusader_nav`](crusader_nav/README.md) | Nav2 avoidance: `nav_frames_node` (datum, map→base_footprint) and `nav.launch.py` (planner + costmap) | **field** |
+| [`crusader_nav_layers`](crusader_nav_layers/README.md) | Nav2 costmap plugin: `HazardLayer` draws the tree's known hazards LETHAL | **field** |
+| [`crusader_sim`](crusader_sim/README.md) | Gazebo + ArduRover SITL sim of Crusader and the course. Sim only: nothing runs on the boat | sim |
 | [`crusader_bringup`](crusader_bringup/README.md) | Launch files + the params YAML. Ships no code; build entry point | — |
-
-Cognition (missions, mission planner, RoboCommand interface) has no package yet — its
-shape is still being decided.
 
 Every package has its own README with its design rationale and a change-impact table.
 
@@ -46,7 +48,7 @@ Every package has its own README with its design rationale and a change-impact t
 This repo is **a set of source dirs inside a colcon workspace**, not the workspace itself.
 On the Jetson it lives at `~/robotx_ws/src/rx26_asv`, alongside any other package sources.
 The repo root is deliberately **not** a colcon package — that is what lets `colcon build`
-discover all eight packages instead of stopping at the first one it finds.
+discover every package instead of stopping at the first one it finds.
 
 ```
 ~/robotx_ws/                    # colcon WORKSPACE (not this repo; holds build/ install/ log/)
@@ -59,6 +61,11 @@ discover all eight packages instead of stopping at the first one it finds.
      |    |-- crusader_world_model/ # ament_python: fusion + target tracking
      |    |-- crusader_groundstation/# ament_python: the operator's web page
      |    |-- crusader_behavior/    # ament_python: safety/ + indicator/
+     |    |-- crusader_bt/          # ament_cmake: behaviour trees + bt_runner_node
+     |    |-- crusader_link/        # ament_python: UAV link (rxl_link_node)
+     |    |-- crusader_nav/         # ament_python: Nav2 launch + nav_frames_node
+     |    |-- crusader_nav_layers/  # ament_cmake: HazardLayer costmap plugin
+     |    |-- crusader_sim/         # ament_python: Gazebo + SITL, laptop only
      |    |-- crusader_bringup/     # ament_cmake: launch/ + config/
      |    |-- docs/                 # setup guide, operations manual, G1 bench procedure
      |    |-- firmware/             # Arduino sketch flashed to the LED controller
@@ -146,10 +153,9 @@ are expected to know them:
 1. **Nothing ships until it has run on the boat.** A node that compiles and has never
    moved the vehicle does not belong in `setup.py`'s entry points or `core.launch.py`.
    v0.5 exists because that rule was not applied for four phases.
-2. Verification is on the bench and on the water, not in a test framework — this repo
-   ships no test suite. What CI can check statically it does: `tools/scripts/check_config.py`
-   guards the two config files that can ground the boat, and the build job proves every
-   package imports and that the params file resolves from a real install space. If pushing
+2. Verification is on the bench and on the water; tests back that up, they do not replace
+   it. CI runs `tools/scripts/check_config.py` (guards the two config files that can ground
+   the boat) and the ROS-free unit tests, and the build job proves every package imports and that the params file resolves from a real install space. If pushing
    unverified code is unavoidable (e.g. remote push to enable on-boat testing), mark it
    with a `NOTE:` comment at the top of the file or function.
 3. Split ROS nodes into pure-logic `*_core.py` + thin `*_node.py` wrappers, so the logic
@@ -207,7 +213,7 @@ fusion, the occupancy grid and APF avoidance advisory, the mission planner and R
 protobuf link, inter-vehicle comms, the Mission-3 actuators, `gate_navigator`, `dp_hold`,
 and the keep-out fence uploader. All of it is in git history at `8c4ffa5`.
 
-Perception and world-model work is being rebuilt in their own packages. The field-proven
+The field-proven
 `gate_navigator` and `dp_hold` algorithms live in
 [robotx_2026](https://github.com/InspirationRobotics/robotx_2026), which completed
 prequal — that is the version to port from when mission work restarts.
@@ -229,13 +235,8 @@ prequal — that is the version to port from when mission work restarts.
   state the LiDAR was in when `Resources.md` described it with a left-handed frame that
   could not exist. Until the camera gets its own G2, `cam_yaw_deg`/`cam_pitch_deg` are an
   assumption and `fuse_bearing_deg` has to stay wide to cover it.
-- **A water test of `target_tracker` + `map_server`**, against buoys at known lat/lon. The
-  off-boat bench proves the plumbing and the algorithms; it cannot prove the frame
-  convention, and nothing here has earned a place in `core.launch.py` yet.
 - **Gate G1**: build + sign off the RC autonomy-drop switch. The enforcement point exists;
   the bench harness needs rewriting ([docs/G1_bench_procedure.md](docs/G1_bench_procedure.md)).
 - Rebuild the occupancy grid in `crusader_world_model` on top of the tracks, verified
   off-boat before it ever sees a camera.
-- **A consumer for `crsd/world_targets`.** Nothing reads it yet — the tracker publishes a
-  picture and nothing acts on it, which is deliberate for now.
 - Decide the shape of Cognition, then give it a package.
