@@ -1,9 +1,9 @@
 # Every process the Task 1 sim rig starts inside crsd-sim, as pkill -f patterns.
 #
-# ONE LIST, READ FROM BOTH ENDS. task1_sim_up.sh clears the rig before it starts
-# it, and nodes_down.sh clears it on the way out. Those were two hand-kept
-# copies; a node added to one and not the other survives a shutdown and the next
-# run comes up with two publishers on the same topic, which looks like a
+# ONE LIST, READ FROM BOTH ENDS: the rig clears these before it starts and
+# nodes_down.sh clears them on the way out. A node added to one hand-kept copy
+# and not the other survives a shutdown and the next run comes up with two
+# publishers on the same topic, which looks like a
 # perception bug and is not one.
 #
 # MATCH THE INSTALL PATH, NOT THE `ros2 run` LINE. `ros2 run pkg node` EXECS the

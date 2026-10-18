@@ -1,8 +1,7 @@
 # crsd-sim — the x86 stand-in for the boat's `asv` container, for the sim rig.
 #
-# Runs in: WSL2 Ubuntu-22.04 (docker). tools/sitl/sim_up.sh and gz_sim_up.sh
-# expect a container named `crsd-sim`, NET=host, ~/robotx_ws bind-mounted at
-# /root/robotx_ws (docs/G6_task1_disruptive_handoff.md:100).
+# Runs in: WSL2 Ubuntu-22.04 (docker). gz_sim_up.sh expects a container named
+# `crsd-sim`, NET=host, ~/robotx_ws bind-mounted at /root/robotx_ws.
 #
 # The boat's Dockerfile cannot build here: its base is the ultralytics JETSON
 # image (arm64, JetPack). This mirrors its ROS and Python layer only — no CUDA,

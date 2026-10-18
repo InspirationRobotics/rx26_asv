@@ -37,7 +37,7 @@ rem while it runs it is the wsl.exe client that keeps the WSL VM up.
 echo Starting the Task 1 panel (it syncs the Windows checkout into WSL first).
 powershell -NoProfile -Command "Start-Process -WindowStyle Hidden -FilePath wsl.exe -ArgumentList '-d','%DISTRO%','--cd','~','-e','bash','/tmp/task1_panel_up.sh'"
 
-rem WHICH HOST ANSWERS FROM WINDOWS (tools/sitl/SIM_UP.cmd has the story):
+rem WHICH HOST ANSWERS FROM WINDOWS:
 rem WSL's localhost proxy sometimes refuses Windows connections to a port
 rem that serves fine inside WSL; the VM's own address always works. Both
 rem are tried until one answers or about a minute is up.

@@ -8,8 +8,8 @@
 #   (container)  bash src/rx26_asv/tools/sitl/nodes_down.sh
 #   (WSL)        docker exec crsd-sim bash /root/robotx_ws/src/rx26_asv/tools/sitl/nodes_down.sh
 #
-# It does NOT touch SITL: that is a WSL-side process in a different PID namespace; sim_down.sh
-# does it.
+# It does NOT touch SITL: that is a WSL-side process in a different PID namespace;
+# gz_sim_down.sh does it.
 #
 # THE LIST IS READ THROUGH `tr -d`, NOT TRUSTED. A trailing CR makes a pattern a silent no-op
 # (`pkill -f "crusader_bt/lib<CR>"` matches nothing and reports success), and git checks this file

@@ -506,7 +506,7 @@ manual, spins in AUTO". Fix it in the YAML, never in the params.
 | `crusader_sim/panel_common.js`, `.css` | (served by the panel) | the map, layers, field editing and look both pages share; `gz_sync.sh` copies them |
 | `crusader_sim/lake_panel.py`, `lake_panel.html`, `lake_goal.py`, `goal_client.py` | `asv` on the Jetson | LAKE MODE (`LAKE_MODE.md`): the real boat, the panel plays the UAV; `goal_client` is the goal-sending/cancel code `task1_goal` shares |
 | `scripts/lake_rig_up.sh`, `lake_rig_down.sh` | `asv` on the Jetson | start / stop what lake mode adds to `core.launch.py` (by recorded pid) |
-| `scripts/gz_rig_up.sh`, `gz_rig_down.sh` | `crsd-sim` | the ROS rig (the headless rig's `task1_sim_up.sh`, with sensors from Gazebo) |
+| `scripts/gz_rig_up.sh`, `gz_rig_down.sh` | `crsd-sim` | the ROS rig, with sensors from Gazebo |
 | `config/crusader_hull.yaml` | — | **the placeholder boat.** Edit this when CAD arrives |
 | `config/sitl_overlay.parm` | — | every place SITL differs from the boat, and why |
 | `config/gz_bridge.yaml` | — | Gazebo → ROS topic map |

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install_wsl.sh — everything the Gazebo sim needs, in WSL2 Ubuntu-22.04.
 #
-# Runs in: WSL2 Ubuntu-22.04 (the same distro tools/sitl/SIM_UP.cmd targets).
+# Runs in: WSL2 Ubuntu-22.04 (the same distro GZ_SIM_UP.cmd targets).
 #
 #     # from Windows PowerShell — the apt stage needs root, and WSL's root login
 #     # needs no password:

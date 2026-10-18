@@ -12,10 +12,9 @@
 #                        Operator Control Station at IP (port 37564, the params file's ocs_port).
 #                        Without it ocs_client is not started, as before.
 #
-# Started by gz_sim_up.sh (WSL) after Gazebo and SITL are up. It is
-# tools/sitl/task1_sim_up.sh with ONE substitution: where that rig runs
-# bench_world_model (an invented buoy field and invented detections), this one
-# runs the simulator's sensors through the boat's own perception:
+# Started by gz_sim_up.sh (WSL) after Gazebo and SITL are up. Instead of
+# bench_world_model (an invented buoy field and invented detections), it runs
+# the simulator's sensors through the boat's own perception:
 #
 #     gz  --ros_gz_bridge-->  /sim/*  --livox_shim-->  /livox/lidar
 #                                         --> lidar_cluster_node (the boat's) --> crsd/lidar_clusters
