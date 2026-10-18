@@ -1,23 +1,18 @@
 // context.hpp — the one shared object every leaf reads, and the leaf base class.
 //
-// WHY A CONTEXT AND NOT BLACKBOARD PORTS FOR EVERYTHING.
-//
-// BehaviorTree.CPP can carry any type through a port, but every non-trivial one
-// needs a convertFromString specialisation before it can appear in the XML, and
-// a missing one is a RUNTIME error at tree-load — on the boat, at the dock. So
-// ports here carry only strings and numbers, which the library handles natively,
-// and world state (pose, buoys, entry/exit, the local origin) travels in this
-// struct instead. It is the blackboard in the sense that matters: one object,
-// written by the runner, read by every leaf.
+// WHY A CONTEXT AND NOT BLACKBOARD PORTS FOR EVERYTHING. A non-trivial port type
+// needs a convertFromString specialisation before it can appear as a literal in
+// the XML, and a missing one is a RUNTIME error at tree-load — on the boat, at
+// the dock. So world state (pose, buoys, entry/exit, the local origin) travels in
+// this struct: one object, written by the runner, read by every leaf.
 //
 // THE LEAVES NEVER SUBSCRIBE. The runner owns every subscription and refreshes
-// this struct once per tick. A leaf that opened its own subscription could not
-// be reasoned about off-boat, would double the DDS traffic for a topic already
-// being read, and would see a different instant of the world than its siblings.
+// this struct once per tick. A leaf with its own subscription could not be
+// reasoned about off-boat, would double the DDS traffic, and would see a
+// different instant of the world than its siblings.
 //
-// LOCKING. The runner writes under `mu` from ROS callbacks; leaves read under
-// it from the tick thread. Every access goes through a lock_guard — the tick
-// runs on the executor thread and the callbacks may not.
+// LOCKING. The runner writes under `mu` from ROS callbacks; leaves read under it
+// from the tick thread, which is not the callbacks' thread. Every access locks.
 #ifndef CRUSADER_BT__CONTEXT_HPP_
 #define CRUSADER_BT__CONTEXT_HPP_
 
@@ -48,10 +43,8 @@
 namespace crusader_bt
 {
 
-/// World state, refreshed by the runner once per tick. Read-only to leaves
-/// except for `waypoint` and `consumed`, which NextWaypoint writes, the gate
-/// bookkeeping the Disruptive Task 1 leaves keep, and the Task 3 commitments
-/// (chosen bay, berth, request) below `dock`.
+/// World state, refreshed by the runner once per tick. Leaves write only their
+/// own bookkeeping (waypoint, gates, Task 3 commitments, fire and leg state).
 struct Context
 {
   std::mutex mu;
@@ -83,12 +76,9 @@ struct Context
 
   // ---- the UAV's passage plan, above Core tier ----
   //
-  // `buoys` above is the FUSION of this and the tracker's targets, and the
-  // beacon state in it always came from here. See nav::fusePassage.
-  //
-  // entry/exitp come from the plan too, not from findBeacon over the boat's own
-  // targets: the EXIT sits 92 m out in a full-size field, far past the camera,
-  // and a transit that waits to SEE it never starts.
+  // `buoys` above is the FUSION of this and the tracker's targets
+  // (nav::fusePassage), with its beacon states from here. entry/exitp come from
+  // the plan too; bt_runner_node's refuseLocked says why.
   std::vector<nav::PlanBuoy> plan;
   std::uint32_t plan_version = 0;             ///< bumps on every new plan
   bool plan_fresh = false;                    ///< aged like pose_fresh
@@ -97,43 +87,34 @@ struct Context
 
   // ---- the passage the BOAT planned ----
   //
-  // The aircraft sends ten buoys and their colours. Which pair is a gate, and
-  // what order to drive them in, is worked out here by nav::planPassage over
-  // `buoys` -- the FUSED field, so the aircraft's colours and the tracker's
-  // positions. Re-planned every tick, because a confirmation can bring new
-  // colours and the answer must follow them.
+  // The aircraft sends the buoys and their colours; which pairs are gates, and in
+  // what order, nav::planPassage works out here over the FUSED `buoys`.
+  // Re-planned every tick, because a confirmation can bring new colours.
   nav::Passage passage;
 
-  /// Gates already driven, as (red_id, green_id).
-  ///
-  /// BY BUOY IDS, NOT BY COUNT. A confirmation can recolour the field, the plan
-  /// re-runs, and the order can change underneath the boat; "I have done two,
-  /// start at index two" then skips a gate that was never driven. Ids survive
-  /// a reorder and survive the pair itself swapping colours.
+  /// Gates already driven, as (red_id, green_id). BY BUOY IDS, NOT BY COUNT: a
+  /// confirmation can recolour the field and reorder the plan under the boat,
+  /// and "start at index two" then skips a gate never driven. Ids survive a
+  /// reorder and the pair swapping colours.
   std::vector<std::pair<int, int>> cleared_gates;
 
   // ---- the confirmation handshake ----
   //
   // Having crossed a gate, the boat publishes gate_reached(gate_seq) and waits
-  // for an acknowledgement carrying the SAME seq before driving the next one.
-  // The question it is asking is "is the next pair still where you said it
-  // was" -- the aircraft answers by acking and retransmitting the whole field.
-  //
-  // Matching on the sequence is what makes a retransmission on a lossy radio
-  // distinguishable from the answer to the next request.
+  // for an ack carrying the SAME seq before driving the next one ("is the next
+  // pair still where you said?"); the aircraft acks and retransmits the field.
+  // Matching the seq is what tells a retransmission on a lossy radio from the
+  // answer to the next request.
   std::uint8_t gate_seq = 0;
   int gate_red_id = -1;                       ///< the gate being driven now
   int gate_green_id = -1;
   bool have_confirmation = false;             ///< an ack for gate_seq arrived
-  /// Every gate in `passage` is in `cleared_gates`: go to the exit.
+  /// Every gate in `passage` is in `cleared_gates`: go to the exit. The boat
+  /// decides this from its own plan; it holds the whole field.
   ///
-  /// THE BOAT DECIDES THIS NOW, from its own plan -- it holds the whole field,
-  /// so it can count. The aircraft used to end the transit with a 255/255
-  /// answer, which it can no longer do because it no longer assigns gates.
-  ///
-  /// Proximity to the exit is still not a substitute, for the reason it never
-  /// was: the boat must clear every gate first, and the exit buoy can sit well
-  /// inside any sane arrival radius of the last one.
+  /// Proximity to the exit is not a substitute: the boat must clear every gate
+  /// first, and the exit buoy can sit well inside any sane arrival radius of
+  /// the last one.
   bool passage_complete = false;
   /// Did the boat finish the gate it last asked about?
   ///
@@ -141,20 +122,13 @@ struct Context
   /// that failed re-asks under the SAME seq and the aircraft's idempotent
   /// answer gives the same reply. Without it every failure inside the leg --
   /// a confirmation timeout, an unusable pair, a PlanChanged re-task -- burns
-  /// a sequence number, and back when the sequence number chose the gate that
-  /// also SKIPPED one. SITL 2026-09-13.
-  ///
-  /// It is no longer what stops a gate being skipped -- cleared_gates is, and
-  /// it is keyed on the buoys rather than on a counter -- but it still keeps
-  /// the sequence numbering honest.
+  /// a sequence number. (cleared_gates, not this, stops a gate being skipped.)
   bool gate_cleared = false;
 
   // ---- Task 3: the docking bays ----
   //
-  // `dock` is written by the runner on every DockObservation, through
-  // ingestDockObservation() below - the ONE function both runners call, so
-  // the ROS node and the off-ROS sim runner cannot disagree about what a frame
-  // means. Everything after it is written by the Task 3 leaves.
+  // `dock` is written by the runner through ingestDockObservation() below;
+  // everything after it by the Task 3 leaves.
   int tier = 0;                               ///< goal tier: 0 Core, 1 Adv, 2 Disr (SetTier changes it)
   /// RoboCommand's newest RunStart, on `now_s`'s clock. NOT reset per goal: a RunStart that
   /// arrives before the operator presses START must still count (WaitForRunStart).
@@ -177,9 +151,8 @@ struct Context
   int dock_hits = 0;
 
   /// How much indicator evidence makes a verdict, and how many sightings make
-  /// a bay. HERE rather than on each leaf's ports because SafeBayKnown and
-  /// CommitSafeBay must apply the SAME rule - a condition that passes on
-  /// looser numbers than the commit that follows it is a tree that stalls.
+  /// a bay. HERE, not on leaf ports, because SafeBayKnown and CommitSafeBay
+  /// must apply the SAME rule: a condition looser than its commit stalls the tree.
   dock::VoteParams dock_votes;
   int dock_min_obs = 5;
 
@@ -206,9 +179,9 @@ struct Context
   // ---- the fixed-nozzle shot (fire_math; src/fire_leaves.cpp) ----
   //
   // Stand off a wall at the calibrated range, pointed at a window, and fire
-  // when still. The runner feeds the three streams through the ingest*()
-  // functions below; now_s is the runner's clock (monotonic seconds) for this
-  // tick, the SAME clock the samples are stamped with.
+  // when still. The runner feeds the streams through the ingest*() functions
+  // below; now_s is its monotonic clock for this tick, the SAME clock the
+  // samples are stamped with.
   double now_s = 0.0;
   std::string mode;                           ///< the autopilot's mode, upper case
   /// /crsd/autonomy_drop (latched): the drop latch (ch9) has cut autonomy.
@@ -233,9 +206,8 @@ struct Context
   fire::BurstBook bursts;
   double cmd_speed = 0.0;                     ///< the last speed StationKeep asked for
   double last_keep_t = -1.0;
-  /// Set by StationKeep on every tick it commands; the runner clears it before
-  /// each tick and sends a STOP if motion was commanded last tick and not this
-  /// one - a leaf has no hook for "I stopped being ticked".
+  /// Set by StationKeep on every tick it commands; the runner sends STOP when it
+  /// stops being set (stopIfSilent).
   bool hs_commanded = false;
 
   // ---- the strafe keep (MANUAL; fire_math's second half) ----
@@ -254,9 +226,8 @@ struct Context
   fire::StrafeCmd strafe;                     ///< ... and what it made of it
   std::string strafe_block;                   ///< non-empty: the keep refuses (why)
   double last_strafe_t = -1.0;
-  /// Set by StrafeKeep on every tick it commands the sticks; the runner clears
-  /// it before each tick and RELEASES the sticks if they were commanded last
-  /// tick and not this one.
+  /// Set by StrafeKeep on every tick it commands the sticks; the runner RELEASES
+  /// them when it stops being set.
   bool sticks_commanded = false;
 
   // ---- the whole-field Task 1 plan (global_passage.hpp; src/global_leaves.cpp) ----
@@ -286,10 +257,9 @@ struct Context
   bool publish_setpoints = false;             ///< false = this tree cannot move the boat
 
   // ---- obstacle avoidance (path_math.hpp, planned_leg.hpp) ----
-  // Spec: docs/nav2_avoidance_spec.md sections 2 and 5.4. Written by the runner,
-  // read by NavigateTo and CircleBuoy; every runner-side rule that touches the
-  // frame lives in ingestPose / applyDatum below so the ROS runner and the
-  // off-ROS one cannot disagree about it.
+  // Spec: docs/nav2_avoidance_spec.md sections 2 and 5.4. Written by the runner
+  // (the frame through ingestPose / applyDatum below), read by NavigateTo and
+  // CircleBuoy.
   path::Mode nav_mode = path::Mode::Off;
   path::NavParams nav;                          ///< bt_runner_node's nav_* params
   std::shared_ptr<path::PlannerPort> planner;   ///< null when nav_mode is off (or no Nav2 build)
@@ -300,9 +270,8 @@ struct Context
   /// `origin` came from /crsd/datum, i.e. it IS the TF frame `map`. A first-fix
   /// origin is not: hazards are published only when this is set (hazardsPublishable).
   bool datum_from_topic = false;
-  /// A different datum arrived after one was adopted. The origin never moves
-  /// mid-run (the DockBook, home and the gate bookkeeping hold local coordinates),
-  /// so every planned leg holds and the hazard publisher stops.
+  /// A different datum arrived after one was adopted (applyDatum): every planned
+  /// leg holds and the hazard publisher stops.
   bool datum_mismatch = false;
 
   /// What the running leg reports; the runner turns it into /crsd/nav/leg_status.
@@ -367,9 +336,8 @@ using ContextPtr = std::shared_ptr<Context>;
 //
 // Spec section 2. The TF frame `map`, ctx.origin and every HazardArray
 // coordinate are ONE local ENU plane, centred on one datum that nav_frames_node
-// owns and publishes on /crsd/datum. These two functions are the whole of how a
-// runner learns it, and BOTH runners call them (bt_runner_node.cpp and
-// offros_runner.cpp): the rule lives here, not in two copies that drift.
+// owns and publishes on /crsd/datum. BOTH runners learn it only through these
+// two functions: the rule lives here, not in two copies that drift.
 
 /// What one /crsd/pose did to the frame.
 enum class PoseEvent
@@ -382,18 +350,17 @@ enum class PoseEvent
 
 /// One /crsd/pose. CALL UNDER ctx.mu.
 ///
-/// With nav_mode off the origin is pinned at the first fix, as it always was. With
-/// shadow or on it is NOT: a first-fix origin is not the TF frame, so the planner
-/// would be handed coordinates in a plane the costmap does not share, and the
-/// error is a silent offset. The boat is left unplaced until the datum arrives
-/// (applyDatum places it from the fix kept here); pose_fresh stays false until
-/// then because it requires origin_set.
+/// nav_mode off pins the origin at the first fix. Shadow and on do NOT: a
+/// first-fix origin is not the TF frame, so the planner would get coordinates in
+/// a plane the costmap does not share — a silent offset. The boat stays unplaced
+/// (pose_fresh false, as it requires origin_set) until applyDatum places it from
+/// the fix kept here.
 inline PoseEvent ingestPose(Context & c, nav::LatLon fix, double heading_deg)
 {
   if (!std::isfinite(fix.lat) || !std::isfinite(fix.lon)) {return PoseEvent::Bad;}
   c.fix = fix;
   c.have_fix = true;
-  c.heading_deg = heading_deg;        // NaN when GPS yaw is unresolved
+  c.heading_deg = heading_deg;
   PoseEvent ev = PoseEvent::Tracked;
   if (!c.origin_set) {
     if (c.nav_mode != path::Mode::Off) {return PoseEvent::Waiting;}
@@ -416,15 +383,14 @@ enum class DatumEvent
 
 /// A datum arrived (/crsd/datum, or the offros "datum" line). CALL UNDER ctx.mu.
 ///
-/// NEVER RE-PINS MID-RUN. A datum that differs from the adopted origin by more than
-/// 0.01 m sets datum_mismatch instead: the DockBook, `home` and the gate
-/// bookkeeping all hold local coordinates, and moving the origin under them would
-/// teleport the field. The leg holds until bt_runner is restarted.
+/// NEVER RE-PINS MID-RUN. A datum more than 0.01 m from the adopted origin sets
+/// datum_mismatch instead: the DockBook, `home` and the gate bookkeeping hold
+/// local coordinates, and moving the origin under them would teleport the field.
+/// The leg holds until bt_runner is restarted.
 ///
-/// NOT IN OFF: off pins the origin at the first fix, as it always did, and shares its
-/// frame with no costmap, so a datum is none of its business. Without this a boat in
-/// off whose container merely runs nav_frames_node would log a "datum changed,
-/// restart bt_runner" ERROR against a pin nobody asked to be the datum.
+/// IGNORED IN OFF: off pins the first fix and shares no costmap frame. Without
+/// this, a boat in off whose container merely runs nav_frames_node would log a
+/// spurious "datum changed, restart bt_runner" ERROR.
 inline DatumEvent applyDatum(Context & c, nav::LatLon datum)
 {
   if (c.nav_mode == path::Mode::Off) {return DatumEvent::Ignored;}
@@ -459,12 +425,10 @@ inline bool hazardsPublishable(const Context & c)
 /// THE ONE FUNCTION both the hazard publisher and the leaves call, so the costmap
 /// and the BT's own local checks can never disagree about the known field.
 ///
-/// SIDE FENCES join the set ONLY in nav_mode on (path::sideFences). They exist for the planner,
-/// which is the only thing that can steer round them. In off a known hazard on a straight leg
-/// HOLDS the boat, and in shadow the legacy legs ignore the plan, so a fence there would stop
-/// the boat at a wall nothing is going to go round. They come from the tree's own passage plan
-/// (ctx.passage, re-planned every tick of the transit and cleared with the mission), so a
-/// Task 1 field is the only thing that can produce one.
+/// SIDE FENCES (path::sideFences) join ONLY in nav_mode on, where the planner can steer
+/// round them. In off a known hazard on a straight leg HOLDS the boat, and shadow drives the
+/// legacy legs, so a fence there would stop the boat at a wall nothing will go round. They
+/// come from ctx.passage, so only a Task 1 field produces one.
 inline std::vector<path::Hazard> knownHazards(const Context & c)
 {
   std::vector<path::Hazard> hz =
@@ -630,7 +594,6 @@ struct LegStatusPacer
   }
 };
 
-/// Back to "no leg running". CALL UNDER ctx.mu.
 /// Send `p` as the GUIDED setpoint when publish_setpoints allows it, and log
 /// "<what> lat, lon", marked [NOT SENT] when it did not go out. `what` empty = no log line.
 /// The local point is converted under the lock; the publish is not. TAKES ctx.mu ITSELF.
@@ -650,6 +613,7 @@ inline void sendSetpoint(Context & c, const rclcpp::Logger & lg, nav::Vec2 p, co
   }
 }
 
+/// Back to "no leg running". CALL UNDER ctx.mu.
 inline void clearLeg(Context & c)
 {
   c.leg = Context::LegStatus{};
@@ -694,9 +658,8 @@ inline void announceTask(Context & c, const std::string & token)
 
 /// Fold one DockObservation into the context. CALL UNDER ctx.mu.
 ///
-/// Both runners convert their input (a crusader_msgs/DockObservation, or a
-/// JSON line from the sim) into a dock::Frame and hand it here; nothing about
-/// what a frame MEANS is decided in either runner.
+/// Both runners convert their input (the ROS message, or the sim's JSON line)
+/// into a dock::Frame and hand it here, so neither decides what a frame MEANS.
 ///
 /// The bays are placed only with a fresh pose and a resolved heading - a
 /// sighting placed from a stale pose is a bay in the wrong place, forever. The
@@ -744,10 +707,9 @@ inline void ingestAttitude(
 
 /// The strafe keep's view of one DockObservation. CALL UNDER ctx.mu, after
 /// ingestDockObservation, with `t` on now_s's clock (the frame's own stamp is
-/// another clock). Takes the bay nearest the bow that has a positioned
-/// window; puts its windows into the body frame through cam_mount; and, when
-/// both windows are there at the face's spacing, the heading that would square
-/// the bow to it - else the same from the face plane's normal.
+/// another clock). Takes the bay nearest the bow with a positioned window, puts
+/// its windows into the body frame, and derives the heading that squares the bow
+/// to it: from both windows at the face's spacing, else the face plane's normal.
 inline void ingestFireWindows(Context & c, double t, const dock::Frame & f)
 {
   constexpr double kFaceSepM = 0.45, kFaceSepTolM = 0.15;   // UL-LR, build guide
@@ -820,25 +782,19 @@ inline void resetTask3(Context & c)
   c.have_request = false;
 }
 
-/// A place to go, passed BETWEEN LEAVES on the blackboard.
-///
-/// This is the channel perception uses to tell an action where to drive. A
-/// compute leaf writes one to an output port, an action leaf reads it from an
-/// input port, and the XML shows the wire:
+/// A place to go, passed BETWEEN LEAVES on the blackboard: a compute leaf writes
+/// one to an output port, an action leaf reads it from an input port, and the
+/// XML shows the wire:
 ///
 ///     <NextWaypoint buoys="{buoys}" out="{goal}"/>
 ///     <NavigateTo   goal="{goal}"/>
 ///
-/// NO convertFromString SPECIALISATION IS NEEDED, and that is worth knowing
-/// because the fear of needing one is why the first version of this package
-/// smuggled every position through the Context struct instead. A specialisation
-/// is only required to parse a LITERAL out of the XML (goal="1.28;103.85"). A
-/// value that only ever travels between leaves as {ref} is moved as the real
-/// type and never touches a string.
+/// NO convertFromString SPECIALISATION IS NEEDED: one is only required to parse
+/// a LITERAL out of the XML (goal="1.28;103.85"). A value that only travels
+/// between leaves as {ref} is moved as the real type and never touches a string.
 ///
-/// `why` is carried so a log line, a feedback message or a viewer can say WHICH
-/// buoy this is and why we are steering there — a bare lat/lon in a log tells
-/// you where the boat went and nothing about what it thought it was doing.
+/// `why` lets a log line, feedback or a viewer say WHICH buoy this is and why we
+/// steer there; a bare lat/lon says nothing about what the boat was thinking.
 struct Waypoint
 {
   double lat = 0.0;
@@ -884,11 +840,10 @@ protected:
 
 /// Base for a leaf that DOES something but finishes within one tick.
 ///
-/// The distinction from CrusaderCondition is not decoration. BT.CPP's
-/// SyncActionNode::executeTick THROWS if the leaf returns RUNNING, which is the
-/// right guard for a leaf that is supposed to be instantaneous, and the two
-/// report different NodeType — so Groot, and tools/bt_view.py, draw a thing that
-/// publishes a topic differently from a thing that answers a question.
+/// Not decoration: BT.CPP's SyncActionNode::executeTick THROWS if the leaf
+/// returns RUNNING, the right guard for an instantaneous leaf, and the NodeType
+/// differs from CrusaderCondition's, so Groot and tools/bt_view.py draw a thing
+/// that publishes differently from a thing that answers a question.
 ///
 /// If it publishes, writes a port, or changes anything: this one.
 /// If it only reads state and answers yes/no: CrusaderCondition.
@@ -919,20 +874,18 @@ protected:
 
 /// Register every Crusader leaf with `factory`.
 ///
-/// Registered DIRECTLY rather than loaded as plugins with registerFromPlugin().
-/// Plugins buy hot-swapping a behaviour without relinking, which we will never
-/// do mid-competition, and cost a shared-library search path that is wrong in
-/// exactly one environment — the container — and fails at tree-load with a
-/// message about a missing .so rather than about the tree.
+/// Registered DIRECTLY, not as plugins via registerFromPlugin(). Plugins buy
+/// hot-swapping without relinking, which we will never do mid-competition, and
+/// cost a shared-library search path that is wrong in the container and fails at
+/// tree-load with a message about a missing .so rather than about the tree.
 void registerCrusaderNodes(BT::BehaviorTreeFactory & factory);
 
-/// The Task 3 leaves, from src/task3_leaves.cpp. Called by
-/// registerCrusaderNodes, so a runner registers everything with one call.
+/// The Task 3 leaves (src/task3_leaves.cpp). This and the two below are called
+/// by registerCrusaderNodes, so a runner registers everything with one call.
 void registerTask3Nodes(BT::BehaviorTreeFactory & factory);
 /// The fixed-nozzle shot's leaves (src/fire_leaves.cpp).
 void registerFireNodes(BT::BehaviorTreeFactory & factory);
-/// The whole-field Task 1 leaves (src/global_leaves.cpp, task1_global.xml). Also called by
-/// registerCrusaderNodes.
+/// The whole-field Task 1 leaves (src/global_leaves.cpp, task1_global.xml).
 void registerGlobalPassageNodes(BT::BehaviorTreeFactory & factory);
 
 }  // namespace crusader_bt

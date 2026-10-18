@@ -30,57 +30,36 @@
 //   calls (nav_mode shadow or on): Nav2's planner_server - /compute_path_to_pose,
 //        /is_path_valid and the global costmap's clear service.
 //
-// NOTE: the Task 3 plumbing here (onDock, onOcsCommand, the five publishers)
-// has NOT been built against real ROS. It was written on a laptop with no ROS
-// and checked there only with g++ -fsyntax-only against a MOCK of the rclcpp
-// API this file uses and structs generated rosidl-style from crusader_msgs
-// (the unmodified task1-disruptive version of this file passed the same check,
-// which is what the mock was calibrated against). Everything it feeds is
-// compiled and exercised off-ROS by crusader_bt/offros/, whose frameFromJson()
-// is this file's onDock() field for field. First colcon build: read the errors
-// here before anywhere else.
+// offros/offros_runner.cpp is this file's plumbing without ROS, for the sim:
+// change one, change both.
 //
-// The fixed-nozzle shot's plumbing (onWallRange, onAttitude, onPumpState,
-// the autonomy_drop subscription, heading_speed/pump, stopIfSilent) was
-// added later, and has not had even that mock check: offros_runner.cpp holds
-// the same logic line for line and is what the sim builds and runs.
-//
-// WHY THE COARSE ACTION SURVIVES the move to a behaviour tree. It is exactly
-// Nav2's shape: bt_navigator exposes ONE NavigateToPose action and runs a tree
-// of ComputePathToPose / FollowPath / Spin inside it. The action is what lets
-// the ground station, a bench test or a higher-level tree say "run Task 1"
-// without knowing that trees exist, and it is where the three cross-cutting
+// WHY THE COARSE ACTION SURVIVES the behaviour tree. It is Nav2's shape:
+// bt_navigator exposes ONE NavigateToPose action and runs a tree inside it. The
+// action lets the ground station, a bench test or a higher-level tree say "run
+// Task 1" without knowing trees exist, and it is where the three cross-cutting
 // guarantees live:
 //
-//   * the MISSION TIMEOUT — kept here, not in the XML, so a tree that somehow
-//     never terminates still cannot strand the boat;
+//   * the MISSION TIMEOUT — here, not in the XML, so a tree that never
+//     terminates still cannot strand the boat;
 //   * CANCEL — halts the tree, which fires onHalted() on every RUNNING leaf;
 //   * the terminal state — a cancelled goal that is succeed()-ed reports success
 //     to the caller, and the caller carries on as though the mission worked.
 //
-// THREADING — and where the "does the poll loop block the callbacks?" worry
-// actually lands, because it lands in a different place than you would expect.
+// THREADING. A leaf never loops and never blocks: CircleBuoy's onStart()
+// publishes one waypoint and returns RUNNING; its onRunning() does one distance
+// comparison. The polling a per-primitive action server would each need is
+// HOISTED into the single tick loop below.
 //
-// IT IS NOT IN THE LEAVES. A leaf never loops and never blocks. CircleBuoy's
-// onStart() publishes one waypoint and returns RUNNING; its onRunning() does one
-// distance comparison and returns. The polling loop that a per-primitive action
-// server would each need is HOISTED OUT of the leaves into the single tick loop
-// below — one loop for the whole mission instead of one per primitive, which is
-// most of the reason the leaves are 40 lines each.
-//
-// IT IS HERE. The tick loop does sleep, so it runs on its OWN thread (worker_)
-// rather than on an executor thread, and cannot starve the subscriptions that
-// feed it or the cancel that has to interrupt it. The action server also sits in
-// a ReentrantCallbackGroup under a MultiThreadedExecutor so the cancel callback
-// can run while a goal is executing. Cancel is polled at the top of every tick,
-// so its worst-case latency is one tick — 100 ms at 10 Hz — not one leaf.
+// That loop sleeps, so it runs on its OWN thread (worker_), not an executor
+// thread, and cannot starve the subscriptions that feed it or the cancel that
+// interrupts it. The action server sits in a ReentrantCallbackGroup under a
+// MultiThreadedExecutor so the cancel callback runs while a goal executes.
+// Cancel is polled at the top of every tick: worst-case latency one tick
+// (100 ms at 10 Hz), not one leaf.
 //
 // worker_ is OWNED AND JOINED, never detached: a detached thread outlives the
 // node and keeps publishing through destroyed members, and the moment that
 // happens is Ctrl+C or `systemctl stop` mid-mission.
-//
-// Subscriptions write Context under its mutex; the tick loop reads under the
-// same one.
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -143,12 +122,10 @@ struct TreeFileError : std::runtime_error
   using std::runtime_error::runtime_error;
 };
 
-/// Maps a tracked target's label to a beacon state.
-///
-/// Deliberately conservative: anything it does not recognise becomes Unknown,
-/// which carries no side constraint, rather than being guessed into a colour.
-/// A mis-called colour steers the boat to the wrong side of a buoy; an Unknown
-/// one is simply left to the autopilot's avoidance.
+/// Maps a tracked target's label to a beacon state. Anything unrecognised is
+/// Unknown (no side constraint), never guessed into a colour: a mis-called
+/// colour steers the boat to the wrong side of a buoy; an Unknown one is left
+/// to the autopilot's avoidance.
 static nav::Beacon beaconFromLabel(const std::string & raw)
 {
   std::string s;
@@ -157,9 +134,8 @@ static nav::Beacon beaconFromLabel(const std::string & raw)
   if (s.find("red") != std::string::npos) {return nav::Beacon::FlashingRed;}
   if (s.find("green") != std::string::npos) {return nav::Beacon::FlashingGreen;}
   if (s.find("blue") != std::string::npos) {
-    // ENTRY is FLASHING blue, EXIT is STEADY blue, and they are the only two
-    // buoys where the distinction matters. Absent a flash label we cannot tell
-    // them apart, so we say so rather than pick one.
+    // ENTRY is FLASHING blue, EXIT is STEADY blue. Absent a flash or steady
+    // label we cannot tell them apart, so we say so rather than pick one.
     if (flashing) {return nav::Beacon::FlashingBlue;}
     if (s.find("steady") != std::string::npos || s.find("solid") != std::string::npos) {
       return nav::Beacon::SteadyBlue;
@@ -178,9 +154,7 @@ public:
   BtRunner()
   // The node name MUST equal its section in crusader_params.yaml, or ROS hands
   // it a different node's parameters and it comes up misconfigured while
-  // looking perfectly healthy. Named "safe_passage_server" once, which is the
-  // PYTHON server's section, so it advertised that node's
-  // action_name (/crsd/safe_passage_dwell) and nobody could find it.
+  // looking perfectly healthy.
   : rclcpp::Node("bt_runner_node")
   {
     tree_file_ = declare_parameter<std::string>("tree_file", "");
@@ -238,9 +212,8 @@ public:
     nav_set_cb_ = add_on_set_parameters_callback(&BtRunner::checkNavSet);
 
     // Latched: a subscriber that starts mid-mission must learn the current
-    // value rather than sit on a default. avoidance_enable especially —
-    // proximity_bridge coming up late and defaulting to off would silently
-    // disarm avoidance.
+    // value, not sit on a default. A late proximity_bridge defaulting
+    // avoidance_enable to off would silently disarm avoidance.
     auto latched = rclcpp::QoS(1).reliable().transient_local();
     gate_reached_pub_ = create_publisher<std_msgs::msg::UInt8>("/crsd/gate_reached", 10);
     setpoint_pub_ = create_publisher<crusader_msgs::msg::GuidedSetpoint>(
@@ -249,11 +222,9 @@ public:
     avoid_pub_ = create_publisher<std_msgs::msg::Bool>("/crsd/avoidance_enable", latched);
     autonomy_pub_ = create_publisher<std_msgs::msg::Bool>("/crsd/autonomy_active", 10);
     report_pub_ = create_publisher<std_msgs::msg::String>("/crsd/safe_passage_report", 10);
-    // The live tree picture, for anything that wants to draw it — a terminal,
-    // the ground station, a recording. Plain text, no escapes.
+    // The live tree as JSON, for anything that wants to draw it.
     bt_status_pub_ = create_publisher<std_msgs::msg::String>("/crsd/bt_status", 10);
-    // Task 3. The three reports are JSON for the OCS to relay, like
-    // safe_passage_report; the field names are rx_reports.proto's.
+    // Task 3. The reports are JSON for the OCS to relay, in rx_reports.proto's names.
     docking_pub_ = create_publisher<std_msgs::msg::String>("/crsd/docking_report", 10);
     firefighting_pub_ = create_publisher<std_msgs::msg::String>("/crsd/firefighting_report", 10);
     request_pub_ = create_publisher<std_msgs::msg::String>(
@@ -312,12 +283,7 @@ public:
       });
     // The frame. Latched on nav_frames_node's side: a bt_runner restarted mid-run
     // must learn the datum rather than wait for a publish that never comes.
-    //
-    // NOT IN OFF. Off pins the origin at the first fix, exactly as it always did and
-    // with no Nav2 around to share a frame with, so a datum could only ever disagree
-    // with that pin: a spurious "datum changed, restart bt_runner" ERROR on a boat
-    // whose container merely has nav_frames_node running. (applyDatum ignores it in
-    // Off too, so the rule does not depend on this subscription being absent.)
+    // Not subscribed in off, for applyDatum's reason (which also ignores it there).
     if (ctx_->nav_mode != path::Mode::Off) {
       datum_sub_ = create_subscription<crusader_msgs::msg::LatLonHead>(
         nav_datum_topic_, rclcpp::QoS(1).reliable().transient_local(),
@@ -350,16 +316,9 @@ public:
         return rclcpp_action::CancelResponse::ACCEPT;
       },
       [this](const std::shared_ptr<GoalHandle> gh) {
-        // The mission runs on its OWN thread, not an executor thread, so its
-        // tick loop cannot starve the subscriptions that feed it or the cancel
-        // callback that has to interrupt it.
-        //
-        // Held and JOINED, never detached. A detached thread keeps touching
-        // `this`, the publishers and the context after the node is destroyed —
-        // and the moment that happens is Ctrl+C or `systemctl stop` DURING a
-        // mission, which is exactly when someone is already having a bad day.
-        // The previous goal is always finished by the time a new one is
-        // accepted (busy_ gates that), so this join is instant.
+        // Own thread, joined never detached: see the file header. The previous
+        // goal is always finished by the time a new one is accepted (busy_
+        // gates that), so this join is instant.
         if (worker_.joinable()) {worker_.join();}
         worker_ = std::thread([this, gh] {execute(gh);});
       },
@@ -447,12 +406,11 @@ private:
         RCLCPP_INFO(
           get_logger(), "local frame origin pinned at %.7f, %.7f (no /crsd/datum: pinned at "
           "the first fix; nav_mode off, frame not shared)", m->latitude, m->longitude);
-        // A plan can arrive BEFORE the first fix -- rxl_link_node is up long
-        // before telemetry_bridge has a position -- and refuseLocked() bails out
-        // when there is no origin to express it in. Without this the plan sits
-        // unused until the NEXT one arrives, which at 0.2 Hz is up to 5 s, and a
-        // goal sent in that window fails with "entry buoy not available" while
-        // the guard band happily reports the plan as fresh.
+        // A plan can arrive BEFORE the first fix (rxl_link_node is up long before
+        // telemetry_bridge has a position), and refuseLocked() bails out with no
+        // origin. Without this the plan sits unused until the next one, up to 5 s
+        // at 0.2 Hz, and a goal sent then fails "entry buoy not available" while
+        // the plan reads as fresh.
         refuseLocked();
         break;
       case PoseEvent::Waiting:
@@ -500,12 +458,10 @@ private:
     std::vector<nav::Buoy> next;
     next.reserve(m->targets.size());
     for (const auto & t : m->targets) {
-      // TENTATIVE tracks are skipped. TrackedTarget.msg is explicit that one
-      // "may be one frame of detector noise, so a mission should not commit to
-      // it" — and committing here means steering to a particular side of it, or
-      // declaring it the ENTRY buoy and circling it. The tracker publishes them
-      // anyway because a suppressed obstacle cannot be reconsidered; that is
-      // the AVOIDANCE consumer's business, not this one's.
+      // TENTATIVE tracks are skipped: TrackedTarget.msg says one "may be one
+      // frame of detector noise, so a mission should not commit to it", and
+      // committing here means steering to a side of it or circling it as ENTRY.
+      // The tracker publishes them for the AVOIDANCE consumer, not this one.
       if (!t.confirmed) {continue;}
       nav::Buoy b;
       b.id = static_cast<int>(t.id);
@@ -519,10 +475,9 @@ private:
     refuseLocked();
   }
 
-  /// The UAV's passage. Stored raw and folded in by refuseLocked(), because a
-  /// plan can arrive before the first GPS fix and there would be no origin to
-  /// express it in yet -- dropping it then would lose the plan the whole
-  /// mission is gated on.
+  /// The UAV's passage. Stored raw and folded in by refuseLocked(): a plan can
+  /// arrive before there is an origin to express it in, and dropping it would
+  /// lose the plan the whole mission is gated on.
   void onPlan(const crusader_msgs::msg::PassagePlan::SharedPtr m)
   {
     std::lock_guard<std::mutex> lk(ctx_->mu);
@@ -532,23 +487,16 @@ private:
     refuseLocked();
   }
 
-  /// The next gate pair. Accepted ONLY when it answers the sequence we asked
-  /// about: on a lossy radio a retransmission of the previous answer is
-  /// otherwise indistinguishable from the answer to this request, and the boat
-  /// would drive the wrong gate with nothing in any log looking wrong.
-  /// The aircraft's answer to a confirmation request.
+  /// The aircraft's answer to a confirmation request: an ACKNOWLEDGEMENT, NOT AN
+  /// ASSIGNMENT. The boat plans its own gate order, so only the sequence number
+  /// matters ("the field I just retransmitted is current as of your gate N").
+  /// Accepted ONLY when it answers the seq we asked about: on a lossy radio a
+  /// retransmitted earlier answer is otherwise indistinguishable from this one.
   ///
-  /// THIS IS AN ACKNOWLEDGEMENT, NOT AN ASSIGNMENT. The message used to carry
-  /// the next pair for the boat to drive; the boat now works its own gate order
-  /// out of the ten buoys, so all that matters here is the sequence number --
-  /// "yes, the field I just retransmitted is current as of your gate N".
-  ///
-  /// The red_id/green_id fields are vestigial and are deliberately IGNORED
-  /// rather than removed: the message is on the air between two vehicles whose
-  /// software is updated separately, and a boat that quietly drove whatever
-  /// pair an older aircraft happened to put in them would be worse than one
-  /// that ignores them. They are logged when set, so a mismatched aircraft is
-  /// visible rather than silent.
+  /// red_id/green_id are vestigial and deliberately IGNORED rather than removed:
+  /// the two vehicles' software is updated separately, and a boat that drove
+  /// whatever pair an older aircraft put in them would be worse than one that
+  /// ignores them. Logged when set, so a mismatched aircraft is visible.
   void onGate(const crusader_msgs::msg::GatePair::SharedPtr m)
   {
     std::lock_guard<std::mutex> lk(ctx_->mu);
@@ -600,12 +548,10 @@ private:
     }
     ctx_->plan = plan;
 
-    // NO PLAN MEANS CORE TIER, and there the tracker is the only source there
-    // is. fusePassage() is right to call every unmatched contact an obstacle --
-    // that is what "the UAV wins" means -- but running it against an EMPTY plan
-    // would put the whole field in `obstacles` and leave ctx_->buoys empty, so
-    // the Core tree would see no buoys at all. Caught in SITL on 2026-09-13:
-    // the tracker was publishing and the tree reported buoys_known 0.
+    // NO PLAN MEANS CORE TIER, and the tracker is the only source. fusePassage()
+    // rightly calls every unmatched contact an obstacle ("the UAV wins"), but
+    // against an EMPTY plan that puts the whole field in `obstacles` and the
+    // Core tree sees no buoys at all.
     if (plan.empty()) {
       ctx_->buoys = tracked_;
       ctx_->obstacles.clear();
@@ -757,11 +703,9 @@ private:
 
   // ------------------------------------------------------------------ Task 3
 
-  /// DockObservation -> dock::Frame -> ingestDockObservation().
-  ///
-  /// Field copies only. The twin of offros_runner.cpp's frameFromJson(), which
-  /// the sim exercises: change one, change both. Which range to believe is
-  /// dock::sightingRange's decision, not this function's.
+  /// DockObservation -> dock::Frame -> ingestDockObservation(). Field copies
+  /// only (which range to believe is dock::sightingRange's call). The twin of
+  /// offros_runner.cpp's frameFromJson(): change one, change both.
   void onDock(const crusader_msgs::msg::DockObservation::SharedPtr m)
   {
     dock::Frame f;
@@ -856,9 +800,9 @@ private:
   /// TWO KINDS, AND THE DESCRIPTOR SAYS WHICH. The planner knobs (path::kNavKnobs)
   /// are dynamic: reloadNavParams() copies them into ctx_->nav when a goal is accepted, so a
   /// `ros2 param set` or the ground station's Tuning tab applies at the next START. Everything
-  /// else further down (rates, frames, topic and service names, the planner id, nav_mode) is
-  /// wired into a timer, a topic or the planner port ONCE, so it is read_only: a live set of
-  /// those used to succeed and change nothing.
+  /// else (rates, frames, topic and service names, the planner id, nav_mode) is wired into a
+  /// timer, a topic or the planner port ONCE, so it is read_only: a live set would succeed and
+  /// change nothing.
   void declareNavParams()
   {
     path::NavParams & n = ctx_->nav;
@@ -900,11 +844,10 @@ private:
 
     // A typo here must stop the node, never fall back to a mode nobody asked for.
     //
-    // DYNAMICALLY TYPED, AND THAT IS THE POINT. On the command line `-p nav_mode:=on`
-    // is parsed as YAML 1.1, where a bare on / off is a BOOLEAN, so a string-typed
-    // parameter dies at startup with InvalidParameterTypeException - on exactly the
-    // spelling the sim rig and the docs use. (The YAML params file quotes "off".)
-    // Both spellings mean what they say; shadow was never ambiguous.
+    // DYNAMICALLY TYPED ON PURPOSE. `-p nav_mode:=on` is parsed as YAML 1.1, where a
+    // bare on / off is a BOOLEAN, so a string-typed parameter dies at startup with
+    // InvalidParameterTypeException on the spelling the docs use. (The YAML params
+    // file quotes "off".) Both spellings mean what they say.
     rcl_interfaces::msg::ParameterDescriptor mode_desc = fixed;
     mode_desc.dynamic_typing = true;
     mode_desc.description = "off | shadow | on (a bare on or off on the command line is a "
@@ -919,8 +862,8 @@ private:
       mode = mode_value.get<bool>() ? "on" : "off";
     }
     if (!parseNavMode(mode, ctx_->nav_mode)) {
-      // What was actually given, with its type: an integer or a double has no mode
-      // string, and "got ''" would not say which of the two the operator wrote.
+      // Show what was given, with its type: an int or double has no mode string,
+      // and "got ''" would not say which the operator wrote.
       throw std::runtime_error(
         "nav_mode must be off, shadow or on (a bare on or off boolean is that mode); got '" +
         rclcpp::to_string(mode_value) + "' (" + rclcpp::to_string(mode_value.get_type()) + ")");
@@ -967,9 +910,8 @@ private:
     return true;
   }
 
-  /// The set-callback: a value the planner cannot work with is refused when it is SET, with the
-  /// reason, instead of sitting in the parameter until the next mission misbehaves. It judges
-  /// only the planner knobs (path::checkNavValue); every other parameter passes untouched.
+  /// The set-callback: a planner-knob value the planner cannot work with is refused when it is
+  /// SET, with the reason, not left for the next mission to trip on. Other parameters pass.
   static rcl_interfaces::msg::SetParametersResult checkNavSet(
     const std::vector<rclcpp::Parameter> & params)
   {
@@ -989,8 +931,7 @@ private:
   }
 
   /// Re-reads `tree_file` when a goal is accepted, so the ground station can set it and then send
-  /// the goal. Logs a change. Returns "" when the file exists, else why the goal cannot run.
-  /// Startup still requires a non-empty tree_file; this only follows later sets.
+  /// the goal. Returns "" when the file exists, else why the goal cannot run.
   std::string reloadTreeFile()
   {
     const std::string wanted = get_parameter("tree_file").as_string();
@@ -1009,8 +950,7 @@ private:
   /// Re-reads every planner knob into ctx_->nav and logs the ones that changed since the
   /// previous goal. Called when a goal is ACCEPTED (execute(), before the tree is built) and
   /// never while a mission runs: a `ros2 param set` or a Tuning-tab set changes the PARAMETER at
-  /// once, and the planner picks it up at the next START. Before this the knobs were copied once
-  /// at construction, so a live set succeeded and changed nothing.
+  /// once, and the planner picks it up at the next START.
   void reloadNavParams()
   {
     path::NavParams fresh;
@@ -1103,13 +1043,10 @@ private:
     publishLegStatus(elapsed_s);
   }
 
-  /// SafePassageReport as JSON, for ocs_client to relay.
-  ///
-  /// JSON rather than protobuf for the reason in ocs_link.py: the OCS
-  /// re-serialises everything before it reaches RoboCommand, so the boat
-  /// carries no generated code. Blank fields are OMITTED rather than sent as
-  /// zero — (0, 0) is a real place in the Gulf of Guinea and a report carrying
-  /// it reads as a measurement.
+  /// SafePassageReport as JSON, for ocs_client to relay. Not protobuf: the OCS
+  /// re-serialises everything for RoboCommand, so the boat carries no generated
+  /// code. Blank fields are OMITTED, not sent as zero — (0, 0) is a real place
+  /// in the Gulf of Guinea and reads as a measurement.
   void publishReport()
   {
     std::ostringstream os;
@@ -1131,9 +1068,8 @@ private:
       hx = ctx_->have_exit;  x = ctx_->exitp;
       const gp::Plan & whole = ctx_->global_passage.plan;
       if (whole.ok) {
-        // task1_global.xml: its gates are the pairs its path drives between (a checkpoint
-        // each); cleared ones have left the plan and are counted from cleared_gates.
-        // (a checkpoint driven since the plan was made is in both: count it once)
+        // task1_global.xml: one checkpoint per gate its path drives; cleared ones have left
+        // the plan and are counted from cleared_gates (one in both is counted once).
         cleared = ctx_->cleared_gates.size();
         gates = cleared;
         for (const gp::Checkpoint & cp : whole.checkpoints) {
@@ -1163,8 +1099,8 @@ private:
     }
     os << "]";
     // The boat's own plan, for whoever draws the checkpoints: one per PAIRED gate (plus the
-    // entry orbit's, and the last gate's is the exit confirmation). A red or green with no
-    // partner is a single; it has a side to be passed on but no checkpoint.
+    // entry orbit's; the last gate's is the exit confirmation). An unpartnered red or green is
+    // a single: a side to pass on, no checkpoint.
     os << ",\"n_gates\":" << gates << ",\"gates_cleared\":" << cleared
        << ",\"single_count\":" << singles;
     if (he) {
@@ -1210,9 +1146,8 @@ private:
     ctx_->plan_age_s = plan_raw_ ? (t - plan_t_).seconds() : 0.0;
     ctx_->plan_fresh = plan_raw_ != nullptr && ctx_->plan_age_s < plan_timeout_s_;
 
-    // And so do the buoys. targets_t_ was recorded here for weeks and never
-    // read, so a tracker that died left ctx_->buoys frozen and perfectly
-    // convincing. Blanks over guesses: if nothing has arrived, say so.
+    // And so do the buoys: a dead tracker must not leave ctx_->buoys frozen and
+    // perfectly convincing. Blanks over guesses.
     if (!tracked_.empty() && (t - targets_t_).seconds() >= stream_timeout_s_) {
       tracked_.clear();
       refuseLocked();
@@ -1247,12 +1182,10 @@ private:
     // goal applies to this one, and none can apply to it once it runs.
     reloadNavParams();
     const std::string tree_error = reloadTreeFile();
-    // BEFORE reading pose_fresh below. It is computed by refreshFreshness(),
-    // which otherwise only runs inside the tick loop — so at goal start it
-    // still holds whatever the last mission left, which on a freshly started
-    // runner is false. That made have_home false for the whole mission and
-    // NavigateTo target="home" fail at the very end of a tour that had
-    // otherwise worked. Found in SITL 2026-09-06.
+    // BEFORE reading pose_fresh below: otherwise only the tick loop refreshes it,
+    // so at goal start it holds what the last mission left (false on a fresh
+    // runner), have_home stays false, and NavigateTo target="home" fails at the
+    // very end of a mission that otherwise worked.
     refreshFreshness();
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
@@ -1262,18 +1195,13 @@ private:
       ctx_->have_waypoint = false;
       // THE GATE HANDSHAKE IS PER-MISSION STATE AND MUST START EMPTY.
       //
-      // passage_complete latches when the aircraft answers 255/255, and it used
-      // to survive the end of the mission. The next goal then found it already
-      // true on the FIRST tick: PassageComplete succeeded, the Inverter failed,
-      // KeepRunningUntilFailure ended, and the boat orbited the entry, drove to
-      // the exit, orbited that, and reported RESULT SUCCESS having never asked
-      // for a single gate. 62.6 s, no warning, no failed leaf. SITL 2026-09-13.
+      // A passage_complete left over from the last goal is true on the FIRST
+      // tick: the boat orbits the entry, drives to the exit and reports RESULT
+      // SUCCESS having never asked for a gate, with no warning and no failed leaf.
       //
-      // gate_seq carried over the same way, so a second run also re-asked under
-      // whatever sequence number the last one stopped at. The aircraft answers a
-      // REPEATED seq idempotently -- that is what makes a lossy radio safe --
-      // which means a stale seq is answered with the previous run's pair rather
-      // than being noticed as wrong.
+      // A leftover gate_seq is as quiet: the aircraft answers a REPEATED seq
+      // idempotently (what makes a lossy radio safe), so a stale seq gets the
+      // previous run's answer rather than being noticed as wrong.
       //
       // The aircraft rewinds its own half in set_gates; this is the boat's.
       ctx_->passage_complete = false;
@@ -1293,9 +1221,7 @@ private:
       resetTask3(*ctx_);
       resetFire(*ctx_);
       goal_mode_ = ctx_->mode;
-      // "Home" is where THIS attempt started, captured once. Not the autopilot's
-      // HOME, which is wherever it was armed and is usually somewhere else after
-      // the boat has been driven out manually.
+      // "Home" is where THIS attempt started, not the autopilot's HOME (Context::home).
       ctx_->home = ctx_->boat;
       ctx_->have_home = ctx_->pose_fresh;
     }
@@ -1312,10 +1238,9 @@ private:
       bb->set("ctx", ctx_);
       BT::Tree tree = factory.createTreeFromFile(tree_file_, bb);
 
-      // The whole tree with every node's status, reprinted only when something
-      // changes. See tree_view.hpp for why this rather than the transition log
-      // BT.CPP ships: a scrolling list of transitions cannot answer "where is
-      // it now and what has it already done" without replaying it in your head.
+      // The whole tree with every node's status, reprinted only on change: a
+      // scrolling transition log cannot answer "where is it now and what has it
+      // already done" without replaying it in your head.
       TreeView view(tree);
 
       RCLCPP_INFO(
@@ -1363,11 +1288,9 @@ private:
             RCLCPP_INFO(get_logger(), "tree @ %5.1fs\n%s", elapsed, frame.c_str());
           }
         }
-        // JSON every tick, whether or not it changed: a GUI wants the current
-        // picture when it asks, not the last time something happened to move.
-        // Structured rather than the rendered text, because a viewer that has
-        // to parse box-drawing characters back into a tree is a viewer that
-        // breaks the first time a node is renamed.
+        // JSON every tick, changed or not: a GUI wants the current picture when
+        // it asks. Structured, not the rendered text: a viewer parsing
+        // box-drawing characters back into a tree breaks at the first rename.
         {
           std_msgs::msg::String bs;
           bs.data = view.json(elapsed);
@@ -1386,11 +1309,8 @@ private:
         if (st != BT::NodeStatus::RUNNING) {
           if (st == BT::NodeStatus::SUCCESS) {
             outcome = SafePassage::Result::OUTCOME_SUCCESS;
-            // Says what happened, not what a Task 1 run WOULD have done. The
-            // runner ticks whatever tree_file names — the demo tour reported
-            // "entry circled, field transited, exit circled" for a mission that
-            // did none of those, which is the kind of confident-and-wrong
-            // report that costs an hour later.
+            // Names the tree that ran, not what a Task 1 run WOULD have done:
+            // the runner ticks whatever tree_file names.
             detail = "tree completed: " + treeName();
           } else {
             std::lock_guard<std::mutex> lk(ctx_->mu);
@@ -1438,9 +1358,7 @@ private:
         outcome, result->elapsed_s, detail.c_str());
     }
 
-    // The RIGHT terminal state, not just any: a cancelled goal that is
-    // succeed()-ed reports success, and the caller carries on as though the
-    // mission had worked.
+    // The RIGHT terminal state (see the file header): never succeed() a cancel.
     if (outcome == SafePassage::Result::OUTCOME_CANCELLED) {
       gh->canceled(result);
     } else if (outcome == SafePassage::Result::OUTCOME_SUCCESS) {
@@ -1449,10 +1367,10 @@ private:
       gh->abort(result);
     }
 
-    // Every exit path, including the exception one. Leaving current_task set
-    // tells the OCS the attempt is still running on behalf of a mission that
-    // has stopped. And the pump OFF: SprayUntilHit switches it off when it is
-    // halted, but a tree that throws never halts its leaves.
+    // Every exit path, including the exception one. A current_task left set
+    // tells the OCS a stopped mission is still running. And the pump OFF:
+    // SprayUntilHit switches it off when halted, but a tree that throws never
+    // halts its leaves.
     if (ctx_->cannon) {ctx_->cannon(false, 0.0, 0.0, 0.0);}
     {
       // The side fences are drawn from this plan: a finished mission leaves no walls behind.
@@ -1486,9 +1404,6 @@ private:
       if (b.state != nav::Beacon::Unknown) {++resolved;}
     }
     fb->buoys_resolved = resolved;
-    // Was consumed_.size(), which was a placeholder from before a plan
-    // version existed: the field is documented as the UAV's plan version and
-    // an operator watching it would have read buoy progress as re-tasking.
     fb->plan_version = ctx_->plan_version;
     fb->warning = ctx_->pose_fresh ? "" : "pose is stale";
     if (ctx_->leg.state == "BLOCKED") {
@@ -1529,8 +1444,7 @@ private:
   }
 
   /// Stop the mission thread and JOIN it before any member it touches is
-  /// destroyed. Without this, a Ctrl+C or `systemctl stop` mid-mission tears
-  /// the node down under a thread that is still publishing through it.
+  /// destroyed (see the file header).
   void shutdown()
   {
     stop_ = true;

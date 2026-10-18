@@ -3,41 +3,35 @@
 //     tools/task3_sim/.build/offros_runner --tree crusader_bt/behavior_trees/task3_disruptive.xml
 //
 // THE SAME TREE, THE SAME LEAVES, THE SAME CONTEXT. Built by
-// tools/task3_sim/build.py from leaves.cpp, task3_leaves.cpp and this file,
+// tools/task3_sim/build.py from the package's src/*leaves.cpp and this file,
 // against BehaviorTree.CPP compiled from source and a four-symbol rclcpp shim
-// (offros/shim). Only bt_runner_node's plumbing is replaced: its subscriptions
-// become JSON lines on STDIN and its publishers become JSON lines on STDOUT.
-// Logs go to STDERR.
+// (offros/shim). Only bt_runner_node's plumbing is replaced: subscriptions
+// become JSON lines on STDIN, publishers JSON lines on STDOUT, logs STDERR.
 //
-// WHY. The Task 1 rig needs WSL2, Docker and ArduRover SITL, and a laptop
-// without hardware virtualisation can run none of them. Everything the tree
+// WHY. The Gazebo sim (crusader_sim) needs Docker and ArduRover SITL, and a
+// laptop without hardware virtualisation can run neither. Everything the tree
 // decides can still be exercised: it reads a Context and calls functions.
 //
 // WHAT MUST STAY IN STEP WITH bt_runner_node.cpp, because this is a copy of
-// its shape rather than a shared implementation (that one cannot be compiled
-// without ROS):
+// its shape rather than a shared implementation (that one needs ROS):
 //
 //   execute()           cancel first; the mission timeout; no HEARTBEAT past
 //                       mode_grace_s is a fault; refresh, tick, report; the
 //                       FAILURE-means-not-autonomous-or-tree-failed split
 //   refreshFreshness()  pose and dock observations age out; a dead HEARTBEAT
 //                       is not permission
-//   onPose()            the origin is pinned ONCE, at the first fix - unless
-//                       nav_mode is shadow or on, when it comes from the datum
 //
-// What a DockObservation MEANS is NOT copied: both runners hand a dock::Frame
-// to ingestDockObservation() in context.hpp. The frame rule is NOT copied either:
-// onPose and onDatum are one call each into ingestPose() and applyDatum() there,
-// and the leg status JSON is legStatusJson()'s, so the two runners cannot differ.
+// NOT copied, so the two runners cannot differ: what a DockObservation MEANS
+// (ingestDockObservation), the frame rule (ingestPose, applyDatum) and the leg
+// status JSON (legStatusJson), all in context.hpp.
 //
 // OBSTACLE AVOIDANCE (docs/nav2_avoidance_spec.md 5.7). `--nav-mode off|shadow|on`,
-// default off: tools/task3_sim/test_e2e.py runs against off and is unchanged. With
-// shadow or on the planner is path::StraightPlannerPort - an instant straight
-// [start, goal] path, not a planner - so the REAL PlannedLeg state machine and the
-// real leaves run with no Nav2 around; the leg's own "plan crosses a known hazard"
-// rejection is what makes it refuse a line through the dock. With shadow or on the
-// origin is NOT pinned at the first fix: it waits for a "datum" line, as
-// bt_runner_node waits for /crsd/datum.
+// default off (what tools/task3_sim/test_e2e.py runs). With shadow or on the
+// planner is path::StraightPlannerPort - an instant straight [start, goal] path -
+// so the REAL PlannedLeg state machine and leaves run with no Nav2; the leg's own
+// "plan crosses a known hazard" rejection is what refuses a line through the
+// dock. The origin then waits for a "datum" line, as bt_runner_node waits for
+// /crsd/datum.
 //
 // STDIN, one JSON object per line ("type" says which):
 //   status        {mode, armed}                           /crsd/fcu_status
@@ -108,11 +102,8 @@ double num(const json & j, const char * key, double dflt)
   return it->get<double>();
 }
 
-/// A DockObservation, as JSON with the message's own field names -> dock::Frame.
-///
-/// The twin of bt_runner_node's conversion from crusader_msgs/DockObservation.
-/// Field copies only; the range choice is dock::sightingRange, so neither
-/// runner decides it.
+/// A DockObservation as JSON (the message's own field names) -> dock::Frame.
+/// The twin of bt_runner_node's onDock: field copies only.
 dock::Frame frameFromJson(const json & j)
 {
   dock::Frame f;
@@ -350,9 +341,9 @@ private:
     have_dock_ = true;
   }
 
-  /// The camera extrinsic and the face height: bt_runner_node's cam_x,
-  /// cam_y, cam_yaw_deg, cam_pitch_deg and dock_face_dz_m parameters. The sim
-  /// sends them, because its scenario can change the camera's pitch.
+  /// bt_runner_node's cam_x, cam_y, cam_yaw_deg, cam_pitch_deg and
+  /// dock_face_dz_m parameters, sent by the sim because a scenario can change
+  /// the camera's pitch.
   void onMount(const json & j)
   {
     std::lock_guard<std::mutex> lk(ctx_->mu);
@@ -400,10 +391,9 @@ private:
 
   double nowS() const {return std::chrono::duration<double>(Clock::now() - t0_).count();}
 
-  /// /crsd/ocs_command: RoboCommand's RxCommand as JSON. The RunStart is what WaitForRunStart
-  /// waits for (ingestRunStart, as in bt_runner_node). The readiness confirmation matters to
-  /// Task 3, and the tree does not wait on it - it waits on the light. It only stops the
-  /// docking report being re-sent.
+  /// /crsd/ocs_command: RoboCommand's RxCommand as JSON. RunStart releases WaitForRunStart
+  /// (ingestRunStart, as in bt_runner_node). Task 3's readiness confirmation only stops the
+  /// docking report being re-sent; the tree waits on the light, not on it.
   void onOcsCommand(const json & j)
   {
     const json d = j.value("data", json::object());
@@ -477,9 +467,8 @@ private:
     ctx_->release_sticks = [this]() {emit({{"type", "sticks"}, {"release", true}});};
   }
 
-  /// Motion was commanded last tick and not this one: say STOP, once. A leaf
-  /// has no hook for "I stopped being ticked", and 3 s of the autopilot
-  /// carrying on is 0.9 m next to a dock. Called after every tick and on exit.
+  /// bt_runner_node::stopIfSilent: say STOP once when motion stops being
+  /// commanded. After every tick and on exit.
   void stopIfSilent(bool exiting)
   {
     bool commanded;
@@ -508,9 +497,8 @@ private:
   void emitBook()
   {
     json out = {{"type", "book"}};
-    // Built under ctx_->mu, written after it is released: out_mu_ and
-    // ctx_->mu are never held together anywhere, and this is not the place to
-    // start.
+    // Built under ctx_->mu, emitted after: out_mu_ and ctx_->mu are never held
+    // together.
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       if (!ctx_->origin_set) {return;}
@@ -722,9 +710,7 @@ private:
             detail = "tree completed: " + treeName();
           } else {
             std::lock_guard<std::mutex> lk(ctx_->mu);
-            // The pilot took it back = the MODE CHANGED during the run. A tree
-            // that drives in MANUAL (task3_fire_manual.xml) is never
-            // "autonomous", so "not autonomous" alone is not the pilot.
+            // The pilot took it back = the MODE CHANGED (as in bt_runner_node).
             if (ctx_->mode != goal_mode_ || (!ctx_->autonomous && goal_mode_ != "MANUAL")) {
               outcome = OUTCOME_NOT_AUTONOMOUS;
               detail = "flight mode " + (ctx_->mode != goal_mode_ ?
