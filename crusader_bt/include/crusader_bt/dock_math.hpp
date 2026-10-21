@@ -8,8 +8,7 @@
 // The Task 3 leaves (src/task3_leaves.cpp) read the Context, call in here, and publish.
 //
 // Colours: three numbering schemes meet here and DISAGREE (the CV's DockBay and
-// DockWindow put OFF at 1 and RED at 2; RoboCommand's Color and RXL_COLOR put RED
-// at 1), so every crossing is a named function with a test. Bay identity comes
+// DockWindow put OFF at 1 and RED at 2; RoboCommand's Color puts RED at 1), so every crossing is a named function with a test. Bay identity comes
 // from WHERE a bay is, never from the CV's per-frame bay_index.
 //
 // CONVENTIONS (the same as nav_math, and the same order they bite):
@@ -93,15 +92,15 @@ inline const char * colourName(Colour c)
   }
 }
 
-// RoboCommand's Color (rx_common.proto) and the radio's RXL_COLOR share ONE
-// numbering, and it is NOT the CV's: there is no OFF, so RED is 1, not 2.
+// RoboCommand's Color (rx_common.proto) is NOT the CV's numbering: there is no OFF, so
+// RED is 1, not 2.
 constexpr int kWireUnknown = 0;   // never send - "not yet identified"
 constexpr int kWireRed = 1;
 constexpr int kWireGreen = 2;
 constexpr int kWireBlue = 3;
 constexpr int kWireAny = 4;       // Advanced tier: any tin will do
 
-/// Colour -> RoboCommand Color / RXL_COLOR. OFF and UNKNOWN map to 0, which the
+/// Colour -> RoboCommand Color. OFF and UNKNOWN map to 0, which the
 /// OCS validator refuses; callers must check wireColour(c) != 0 before sending.
 inline int wireColour(Colour c)
 {

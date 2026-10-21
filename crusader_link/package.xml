@@ -2,31 +2,20 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>crusader_link</name>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
   <description>
-    The boat's end of the UAV link. rxl_link_node decodes the RXL dialect off a
-    radio -- and Ekko's own TUNNEL format (POSITIONS, LIGHTS), which is what the
-    real aircraft sends -- and republishes both as the same ROS passage plan. It
-    sends back the checkpoint request and, to Ekko, the BOAT packet (position
-    and the map held).
-
-    It speaks MAVLink but it is NOT a second autopilot gateway: a different
-    endpoint, a different dialect, and a message set with no command in it. It
-    cannot arm, set a mode or move the boat. crusader_fcu/telemetry_bridge
-    remains the only path to the Pixhawk, and the two never share a socket.
-
-    Version 0.1.0: the version counts capability proven, and nothing here has
-    carried a frame over a real radio yet -- only UDP loopback against the
-    bench.
+    The boat's end of the RFD900 mesh to Ekko: TUNNEL v3 frames in (the passage plan), the
+    BOAT packet out. It talks to the radio, never to the Pixhawk.
   </description>
   <maintainer email="brandont3927@gmail.com">Team Inspiration</maintainer>
   <license>MIT</license>
-  <url type="repository">https://github.com/InspirationRobotics/rx26_asv</url>
 
   <depend>rclpy</depend>
-  <depend>std_msgs</depend>
   <depend>std_srvs</depend>
   <depend>crusader_msgs</depend>
+  <depend>crusader_common</depend>
+  <exec_depend>python3-serial</exec_depend>
+  <test_depend>python3-pytest</test_depend>
 
   <export>
     <build_type>ament_python</build_type>

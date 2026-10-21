@@ -1,11 +1,11 @@
-from setuptools import find_packages, setup
+from setuptools import setup
 
 package_name = "crusader_link"
 
 setup(
     name=package_name,
-    version="0.1.0",
-    packages=find_packages(include=[package_name, package_name + ".*"]),
+    version="0.2.0",
+    packages=[package_name],
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
@@ -14,12 +14,12 @@ setup(
     zip_safe=False,
     maintainer="Team Inspiration",
     maintainer_email="brandont3927@gmail.com",
-    description="Crusader UAV link (RXL dialect over a radio, to ROS)",
-    url="https://github.com/InspirationRobotics/rx26_asv",
+    description="Crusader's end of the RFD900 mesh to the UAV",
     license="MIT",
+    tests_require=["pytest"],
     entry_points={
         "console_scripts": [
-            "rxl_link_node = crusader_link.rxl_link_node:main",
+            "rfd_link_node = crusader_link.rfd_link_node:main",
         ],
     },
 )

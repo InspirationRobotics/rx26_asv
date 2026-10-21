@@ -1,16 +1,8 @@
-# tunnel_link.py -- COPIED, byte for byte below this header, from
-#   Drone/rx26_uav/uav_common/uav_common/boat_link.py   at drone commit 91aa269
-# (branch ocs-rxl-uplink = origin/main at the time). A ROS package must not
-# import across repos, and every radio on the mesh has to pack and unpack with
-# the SAME bytes, so this is a copy and not a re-implementation: it replaces the
-# boat's old copy of Ekko's v1 format (0x8000/0x8001), which Ekko stopped
-# sending on 27 Sep 2026.
-#
-# CHANGE ONE, CHANGE BOTH. Do not edit below the header here: re-copy the
-# aircraft's file and update the commit above. test_tunnel_link.py compares the
-# two when the Drone checkout is beside this one, so a drift is a failing test
-# on a laptop that has both. Anything the boat needs that boat_link does not
-# provide (the passage plan, the self-ack clock) lives in ekko_map.py.
+# tunnel_link.py -- a byte copy, below this header, of rx26_uav
+#   uav_common/uav_common/boat_link.py   at rx26_uav commit 2ab6f93
+# Every radio on the mesh packs and unpacks with the same bytes, and a ROS package cannot
+# import across repos, so this is a copy. Do not edit below the header: re-copy the file and
+# update the commit. test_rfd_link.py fails when it drifts.
 """boat_link -- the bytes Ekko and Crusader exchange over the RFD900ux mesh.
 
 PURE: struct packing and the bookkeeping around it; no ROS, no MAVLink import,

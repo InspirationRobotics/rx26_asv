@@ -133,7 +133,7 @@ def generate_launch_description():
         # the radio can be plugged in after boot. Now that launch owns it, do
         # not also start it from the Nodes tab or by hand -- two processes on
         # one serial port each read half the bytes.
-        Node(package="crusader_link", executable="rxl_link_node",
+        Node(package="crusader_link", executable="rfd_link_node",
              output="screen", parameters=[params],
              respawn=True, respawn_delay=5.0),
     ])

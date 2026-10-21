@@ -65,7 +65,7 @@ CONFIG_DRIVEN_NODES = set("""
     target_tracker
     ground_station
     bt_runner_node
-    rxl_link_node
+    rfd_link_node
     nav_frames_node
     wall_range_node
     squirt_cal
@@ -321,7 +321,7 @@ def check_params_yaml():
 
     try:
         mav_ep = cfg["telemetry_bridge"]["ros__parameters"]["mav_endpoint"]
-        rxl_ep = cfg["rxl_link_node"]["ros__parameters"]["rxl_endpoint"]
+        rxl_ep = cfg["rfd_link_node"]["ros__parameters"]["rfd_endpoint"]
     except KeyError as e:
         fail("mavlink udp ports", f"missing key {e}")
     else:
@@ -331,10 +331,10 @@ def check_params_yaml():
         net = str(rxl_ep).startswith(("udp:", "udpin:", "udpout:", "tcp:"))
         mav_p, rxl_p = _udp_port(mav_ep), _udp_port(rxl_ep)
         if not net and str(rxl_ep).startswith("/dev/"):
-            ok("mavlink udp ports", f"rxl_link on the radio at {rxl_ep}")
+            ok("mavlink udp ports", f"rfd_link on the radio at {rxl_ep}")
         elif not net:
             fail("mavlink udp ports",
-                 f"rxl_endpoint {rxl_ep!r} is neither a udp endpoint nor a "
+                 f"rfd_endpoint {rxl_ep!r} is neither a udp endpoint nor a "
                  "/dev device; pymavlink would read it as a file name and the "
                  "link would be silent rather than refused")
         elif mav_p is None or rxl_p is None:
@@ -342,19 +342,19 @@ def check_params_yaml():
                  f"could not read a port from {mav_ep!r} / {rxl_ep!r}")
         elif mav_p == rxl_p:
             fail("mavlink udp ports",
-                 f"rxl_link_node and telemetry_bridge both on {mav_p} — the "
+                 f"rfd_link_node and telemetry_bridge both on {mav_p} — the "
                  "second to bind steals the first's datagrams and the boat "
                  "loses pose with nothing logging an error")
         elif not (14550 <= rxl_p <= 14559):
             fail("mavlink udp ports",
-                 f"rxl_endpoint port {rxl_p} is outside the boat's 1455x range "
+                 f"rfd_endpoint port {rxl_p} is outside the boat's 1455x range "
                  "(the aircraft owns 1454x)")
         elif not str(rxl_ep).startswith("udpin:"):
             fail("mavlink udp ports",
-                 f"rxl_endpoint {rxl_ep!r} must be udpin: to BIND and listen; "
+                 f"rfd_endpoint {rxl_ep!r} must be udpin: to BIND and listen; "
                  "'udp:' is an outbound client that receives nothing, silently")
         else:
-            ok("mavlink udp ports", f"telemetry_bridge {mav_p}, rxl_link {rxl_p}")
+            ok("mavlink udp ports", f"telemetry_bridge {mav_p}, rfd_link {rxl_p}")
 
     # Distinct HTTP ports (see PORT_OWNERS).
     seen = {}

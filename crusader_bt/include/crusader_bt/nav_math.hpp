@@ -314,8 +314,7 @@ inline NextWaypoint nextWaypoint(
 
 // -------------------------------------------------------------------- gates
 
-/// The UAV's "id not known" sentinel. Matches NO_BUOY in Mesh/rxl.py, which is
-/// what RXL_NEXT_BUOY_SET puts in a buoy_id field it cannot fill.
+/// "No buoy id": a gate side with no buoy.
 constexpr int kNoBuoy = 255;
 
 /// A gate the UAV has named, resolved into two places to steer.
@@ -422,8 +421,7 @@ struct Fused
 ///     detectable from the air; the boat's own colour guess is noise).
 ///   * POSITION comes from the TRACKER when a contact was associated, else the plan:
 ///     LiDAR is best close in, where metre accuracy at a gate matters.
-///   * THE ID stays the UAV's, the key RXL_NEXT_BUOY_SET names a gate pair with (the
-///     tracker's ids are another number space).
+///   * THE ID stays the UAV's (the tracker's ids are another number space).
 ///
 /// A tracked contact matching nothing in the plan is NOT a passage buoy: it goes to
 /// `obstacles` with Beacon::Unknown (never half a gate) but still becomes a hazard

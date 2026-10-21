@@ -1147,62 +1147,13 @@ bt_runner_node:
                                             #      EXIT buoy: orbit radius 6 +
                                             #      nav_orbit_clear_m 1.4 + radius 0.3
 
-# ---------------------------------------------------------------------------
-# rxl_link_node — the boat's end of the UAV link.
-#
-# Speaks MAVLink to the RADIO, never the Pixhawk: different endpoint, dialect,
-# and a message set with no command in it — it cannot arm, set a mode, or move
-# the boat. telemetry_bridge stays the only path to the autopilot; the two never
-# share a socket.
-# In core.launch.py (respawning), so the Radio tab survives a reboot. Do not
-# also hand-start it: two processes on the radio's serial port each read half.
-rxl_link_node:
+# ---- rfd_link_node: the RFD900 mesh to Ekko (crusader_link) ----
+rfd_link_node:
   ros__parameters:
-    rxl_endpoint: "/dev/crsd-rfd"
-                                            # [RO] THE RFD900, on its FTDI cable,
-                                            #      via a udev symlink (tools/udev):
-                                            #      never /dev/ttyUSB0 (plug
-                                            #      order) nor by-id (names ONE
-                                            #      cable; a swapped cable left the
-                                            #      node on a dead path). The link
-                                            #      node OWNS it; nothing else may
-                                            #      open it, including the test
-                                            #      kit's companion.py.
-                                            #      SITL/bench: override per run,
-                                            #      do not edit this line:
-                                            #        ros2 run crusader_link \
-                                            #          rxl_link_node --ros-args \
-                                            #          -p rxl_endpoint:=udpin:127.0.0.1:14555
-                                            #      udpin BINDS and listens; "udp:"
-                                            #      is an outbound client that
-                                            #      receives nothing, silently.
-                                            #      Not 14551: telemetry_bridge's,
-                                            #      and a udpin bind STEALS
-                                            #      datagrams (the displaced
-                                            #      consumer sees silence). 14550
-                                            #      stays free for ad-hoc tooling.
-    radio_traffic_topic: "crsd/radio/traffic"  # [RO] every frame sent or heard,
-                                            #      for the Radio tab. A RECORD:
-                                            #      nothing acts on it.
-    uav_sysid: 200                          # [RO] the Radio tab's test-frame
-                                            #      target: the aircraft's autopilot
-                                            #      is 1 (Fleet ICD), its companion
-                                            #      answers from 200.
-    rxl_baud: 115200                        # [RO] serial endpoints only; every
-                                            #      mesh radio runs SERIAL=115.
-    source_system: 42                       # [RO] the boat's MAVLink sysid on the
-                                            #      MESH, not the autopilot link.
-                                            #      Must differ from the aircraft's
-                                            #      or an inspector files both
-                                            #      vehicles under one tree.
-    plan_topic: "crsd/passage_plan"         # [RO] PassagePlan out, ON ARRIVAL.
-                                            #      Never resampled: republishing
-                                            #      the last plan would defeat the
-                                            #      staleness check downstream.
-    gate_topic: "crsd/next_gate"            # [RO] GatePair out, on arrival.
-    gate_reached_topic: "crsd/gate_reached" # [RO] std_msgs/UInt8 IN. The ONLY
-                                            #      thing the boat transmits on
-                                            #      this link.
-    quiet_warn_s: 15.0                      # [DYN] say so once when the link goes
-                                            #       quiet. Warns; publishes
-                                            #       nothing either way.
+    rfd_endpoint: "/dev/crsd-rfd"           # [RO] the radio (udev); the sim uses udpin:127.0.0.1:14555
+    rfd_baud: 115200                        # [RO] serial only; every mesh radio runs SERIAL=115
+    uav_sysid: 200                          # [RO] Ekko's companion, which sends the TUNNELs
+    source_system: 42                       # [RO] the boat on the mesh (not its autopilot)
+    pose_timeout_s: 1.0                     # [RO] older /crsd/pose: no BOAT packet
+    quiet_warn_s: 15.0                      # [DYN] say once when Ekko goes quiet
+    reconnect_s: 5.0                        # [RO] retry an absent radio this often

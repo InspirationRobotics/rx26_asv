@@ -329,7 +329,7 @@ private:
         RCLCPP_INFO(
           get_logger(), "local frame origin pinned at %.7f, %.7f (no /crsd/datum: pinned at "
           "the first fix; nav_mode off, frame not shared)", m->latitude, m->longitude);
-        // A plan can arrive BEFORE the first fix (rxl_link_node is up long before
+        // A plan can arrive BEFORE the first fix (rfd_link_node is up long before
         // telemetry_bridge has a position), and refuseLocked() bails out with no
         // origin. Without this the plan sits unused until the next one, up to 5 s
         // at 0.2 Hz, and a goal sent then fails "entry buoy not available" while
