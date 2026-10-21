@@ -1,29 +1,8 @@
-"""override_core — the rules for RC overrides (software on the sticks), no ROS, no MAVLink.
+"""override_core: the rules for RC overrides (software on the sticks, MANUAL only). No ROS.
 
-The fixed-nozzle shot needs to STRAFE, and on this OmniX hull only MANUAL mode
-strafes (GUIDED turns and drives, it does not slide). So in MANUAL the tree moves
-the boat the way the team's dp_hold did, RC_CHANNELS_OVERRIDE on the steering,
-throttle and lateral sticks, and telemetry_bridge is still the only thing that
-sends it. These are its rules for /crsd/rc_override:
-
-  * MODE: forwarded only in one of `modes` (MANUAL). The pilot's SC switch is
-    the take-back: flip it and nothing of ours reaches the motors. ArduRover
-    applies overrides in any mode, so this check is ours to make.
-  * LATCH: the autonomy-drop latch must be clear (as before).
-  * CHANNELS: only `channels` (1 steer, 3 throttle, 4 lateral) may be
-    overridden; every other channel is sent as 0 = "the pilot's own". SB (the
-    e-stop, ch7), SC (the mode, ch8) and the pump can never be taken over, so
-    the pilot keeps all three whatever the software asks.
-  * CLAMP: each overridden channel is held within +-max_us of 1500.
-  * DEAD-MAN: commands stop for deadman_s -> ONE release (all zeros), which
-    hands the sticks straight back. ArduPilot's own RC_OVERRIDE_TIME (3 s on
-    the boat) is the backstop; 3 s at 0.3 m/s is 0.9 m next to a dock.
-  * The mode leaving `modes`, or the latch tripping, releases at once.
-
-A value of 0 in RC_CHANNELS_OVERRIDE means "release this channel to RC";
-that is what "release" means everywhere here.
-
-`now` is monotonic seconds from the caller; tests drive it.
+Only `channels` (steer, throttle, lateral) may be taken; every other channel is sent as 0
+(the pilot's), so SB, SC and the pump stay the pilot's. Each is clamped to 1500 +- max_us.
+The dead-man, the mode leaving `modes` or a latch trip sends one release (all zeros).
 """
 from dataclasses import dataclass, field
 

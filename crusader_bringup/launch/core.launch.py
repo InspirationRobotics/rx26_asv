@@ -103,9 +103,9 @@ def generate_launch_description():
             "tools_dir"]
 
     return LaunchDescription([
-        Node(package="crusader_fcu", executable="telemetry_bridge",
+        Node(package="crusader_behavior", executable="telemetry_bridge",
              output="screen", parameters=[params]),
-        Node(package="crusader_behavior", executable="pixhawk_led_status_node",
+        Node(package="crusader_behavior", executable="led_status_node",
              output="screen", parameters=[params]),
         Node(package="crusader_behavior", executable="led_node",
              output="screen", parameters=[params]),

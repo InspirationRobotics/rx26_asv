@@ -1,21 +1,7 @@
-"""rc_heartbeat_core — ROS-free force-disarm state machine for the RC watchdog.
+"""rc_heartbeat_core: the force-disarm-on-RC-loss state machine behind rc_watchdog. No ROS.
 
-The safety logic of `rc_heartbeat_watchdog` lives here so the latch / link-loss
-transitions can be exercised without rclpy. The node parses RcChannels/FcuStatus
-into observations, drives this machine once per tick, and turns the returned
-`Decision` into ROS publishes + throttled logging. Every safety-relevant choice
-(when to disarm, when to latch, what clears the latch, the "bridge down during RC
-loss -> defer to ArduPilot" case) is decided here, in one place.
-
-Semantics:
-  * `last_rc_ok` is seeded optimistically (a fresh start is not a dropout);
-    `last_bridge_msg` is seeded "down" (never disarm on startup silence).
-  * A dropout = the monitored channel's PWM has been stale for
-    `heartbeat_timeout` s (ArduPilot reports 0/invalid PWM when the TX is out of
-    range or off).
-  * The latch clears only on a deliberate LOW->HIGH toggle of the reset channel
-    seen while the RC link carries valid PWM — reconnecting with the switch
-    already HIGH, or the 0 PWM seen during link loss, can never auto-clear it.
+The latch clears only on a deliberate LOW->HIGH toggle of the reset channel seen with valid
+PWM, so reconnecting with the switch already HIGH (or the 0 PWM of a lost link) never clears it.
 """
 from dataclasses import dataclass
 

@@ -42,9 +42,13 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   # HazardLayer (crusader_nav_layers). Hazard must precede HazardArray.
   "msg/Hazard.msg"
   "msg/HazardArray.msg"
+  "msg/RoboCommandReport.msg"
+  "msg/FcuHealth.msg"
+  "msg/RadioSend.msg"
   # Actions. Same rule as above: a file not listed here is silently not
   # generated, and the import fails at node start, on the boat.
   "action/SafePassage.action"
+  "action/RunMission.action"
   DEPENDENCIES std_msgs action_msgs
 )
 

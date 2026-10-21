@@ -1,0 +1,29 @@
+# Run one of bt_runner_node's built-in trees (crusader_bt/behavior_trees/<name>.xml).
+# The goal names a tree; it never carries XML. No backslash line continuations in this
+# file: rosidl's template fails to decode them.
+#
+#   ros2 action send_goal /crsd/run_mission crusader_msgs/action/RunMission "{name: competition, tier: 1}" --feedback
+
+uint8 TIER_CORE=0
+uint8 TIER_ADVANCED=1
+uint8 TIER_DISRUPTIVE=2
+string name                    # tree file stem, e.g. competition, task1_global
+uint8 tier
+float32 timeout_s              # 0 = the node's default_timeout_s; every goal terminates
+float64 approach_latitude      # team-provided approach point; both 0 = none
+float64 approach_longitude
+---
+uint8 OUTCOME_SUCCESS=0
+uint8 OUTCOME_FAILURE=1
+uint8 OUTCOME_TIMEOUT=2
+uint8 OUTCOME_CANCELLED=3
+uint8 OUTCOME_NOT_AUTONOMOUS=4  # the pilot took the mode away
+uint8 OUTCOME_FAULT=5           # bad tree name, no HEARTBEAT, or the tree threw
+uint8 outcome
+string detail
+float64 elapsed_s
+---
+float64 elapsed_s
+string running_node            # deepest RUNNING node, "" when none
+string current_task            # the RxTask token on /crsd/current_task
+string warning                 # "" when nothing is wrong

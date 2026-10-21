@@ -54,8 +54,8 @@ NAV2_PARAMS = REPO / "crusader_nav" / "config" / "nav2_params.yaml"
 CONFIG_DRIVEN_NODES = set("""
     telemetry_bridge
     led_node
-    pixhawk_led_status_node
-    rc_heartbeat_watchdog
+    led_status_node
+    rc_watchdog
     ocs_client
     oakd_publisher
     buoy_detector
@@ -472,7 +472,7 @@ def check_pump():
         cfg = yaml.safe_load(PARAMS_YAML.read_text(encoding="utf-8"))
         tb = cfg["telemetry_bridge"]["ros__parameters"]
         sq = cfg["squirt_cal"]["ros__parameters"]
-        led = cfg["pixhawk_led_status_node"]["ros__parameters"]
+        led = cfg["led_status_node"]["ros__parameters"]
         ch, servo = int(tb["pump_rc_channel"]), int(tb["pump_servo_channel"])
         on, off = int(tb["pump_on_pwm"]), int(tb["pump_off_pwm"])
         drop, estop = int(tb["drop_channel"]), int(tb["estop_channel"])
@@ -490,7 +490,7 @@ def check_pump():
     if (estop, int(tb["estop_threshold"])) != (int(led["estop_channel"]),
                                                 int(led["estop_threshold"])):
         problems.append("telemetry_bridge's estop_channel/threshold differ from "
-                        "pixhawk_led_status_node's")
+                        "led_status_node's")
     if abs(on - off) < 200:
         problems.append(f"pump_on_pwm {on} and pump_off_pwm {off} are too close to "
                         "tell apart")

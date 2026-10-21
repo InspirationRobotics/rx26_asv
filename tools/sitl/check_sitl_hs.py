@@ -35,8 +35,8 @@ import time
 from pymavlink import mavutil
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..",
-                                "crusader_fcu"))
-from crusader_fcu.guided_hs_core import encode   # noqa: E402  the bridge's own encoding
+                                "crusader_behavior"))
+from crusader_behavior.guided_hs_core import encode   # noqa: E402  the bridge's own encoding
 
 WP_SPEED = 1.0          # = telemetry_bridge.hs_wp_speed_mps = the boat's WP_SPEED
 RATE_HZ = 5.0           # the tree ticks at 10 Hz; 5 is the slowest it would send

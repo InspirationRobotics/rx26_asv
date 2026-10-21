@@ -42,6 +42,7 @@ shared:
 telemetry_bridge:
   ros__parameters:
     mav_endpoint: "udp:127.0.0.1:14551"   # [RO] MAVProxy rebroadcast, never serial
+    fcu_sysid: 2                           # [RO] the autopilot's SYSID_THISMAV; Ekko is 1
     # The AUTONOMY INTERLOCK, = shared.autonomous_modes: the pilot leaving these
     # modes on SC is the autonomy drop. ArduPilot independently ignores
     # SET_POSITION_TARGET_* outside GUIDED/AUTO/RTL.
@@ -176,8 +177,9 @@ led_node:
     baud: 115200                           # [RO] must match firmware/LED.ino Serial.begin
     reconnect_s: 3.0                       # [RO] serial reconnect retry period [s]
 
-pixhawk_led_status_node:
+led_status_node:
   ros__parameters:
+    autonomous_modes: ["GUIDED", "AUTO", "LOITER", "RTL"]   # [RO] = telemetry_bridge's
     estop_channel: 7                       # [RO] SB e-stop switch channel (RC reference)
     estop_threshold: 1200                  # [RO] us; below = e-stopped (RC loss reads 0)
     autonomy_hold_s: 1.0                   # [RO] stay GREEN this long after last autonomy beat
@@ -646,7 +648,7 @@ ground_station:
 # Defense in depth beside ArduPilot FS_THR/FS_GCS and the hardware SB e-stop.
 # All [RO]. rc_channel/reset_channel read ch7 (SB), as telemetry_bridge and
 # pixhawk_led do.
-rc_heartbeat_watchdog:
+rc_watchdog:
   ros__parameters:
     heartbeat_timeout: 1.0                 # [RO] s of stale monitored-channel PWM -> RC link lost
     rc_channel: 7                          # [RO] channel whose valid PWM is the RC heartbeat

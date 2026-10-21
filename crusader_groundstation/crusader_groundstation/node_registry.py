@@ -67,14 +67,14 @@ class NodeSpec:
 
 REGISTRY = (
     # ---- core: the stack that has been on the water. Protected. ----
-    NodeSpec("telemetry_bridge", "telemetry_bridge", "crusader_fcu",
+    NodeSpec("telemetry_bridge", "telemetry_bridge", "crusader_behavior",
              "telemetry_bridge", "core", protected=True,
              note="the only thing that speaks MAVLink"),
-    NodeSpec("rc_heartbeat_watchdog", "rc_watchdog", "crusader_behavior",
+    NodeSpec("rc_watchdog", "rc_watchdog", "crusader_behavior",
              "rc_watchdog", "core", protected=True,
              note="force-disarm on RC link loss"),
-    NodeSpec("pixhawk_led_status_node", "pixhawk_led_status", "crusader_behavior",
-             "pixhawk_led_status_node", "core", protected=True),
+    NodeSpec("led_status_node", "led_status_node", "crusader_behavior",
+             "led_status_node", "core", protected=True),
     NodeSpec("led_node", "led_node", "crusader_behavior", "led_node", "core",
              protected=True),
 
@@ -138,8 +138,8 @@ BY_NAME = {n.name: n for n in REGISTRY}
 # naming them here rather than in the page keeps that claim reviewable.
 PROFILES = {
     "field": ("Field profile",
-              ("telemetry_bridge", "rc_heartbeat_watchdog",
-               "pixhawk_led_status_node", "led_node",
+              ("telemetry_bridge", "rc_watchdog",
+               "led_status_node", "led_node",
                "buoy_detector", "lidar_cluster_node", "target_tracker")),
     "bench": ("Bench profile",
               ("telemetry_bridge", "lidar_cluster_node", "target_tracker")),

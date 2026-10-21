@@ -119,7 +119,7 @@ for t in pgrep setsid; do command -v $t >/dev/null || { echo "*** $t is not in t
 echo "=== preflight ==="
 # Every ros2 introspection here is --no-daemon: a wedged ros2 daemon ("!rclpy.ok()") makes `ros2 node list` fail
 # and would read as "nothing is running". A process check does not depend on it.
-if pgrep -f 'lib/crusader_fcu/telemetry_bridge|crusader_fcu.*telemetry_bridge' >/dev/null; then echo "  telemetry_bridge up (core.launch.py)"
+if pgrep -f 'lib/crusader_behavior/telemetry_bridge' >/dev/null; then echo "  telemetry_bridge up (core.launch.py)"
 else echo "*** telemetry_bridge is not running: core.launch.py (systemd crsd-ros) must be up first. On the HOST: systemctl status crsd-ros" >&2; exit 2; fi
 fcu="$(timeout 8 ros2 topic echo /crsd/fcu_status --once --no-daemon 2>/dev/null | grep -E '^mode|^armed' | tr '
 ' ' ')"

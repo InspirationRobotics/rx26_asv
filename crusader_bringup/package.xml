@@ -14,7 +14,6 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
-  <exec_depend>crusader_fcu</exec_depend>
   <exec_depend>crusader_behavior</exec_depend>
   <!-- Not launched by core.launch.py (its two nodes contend for the one OAK-D,
        so which one runs is an operator choice) but exec_depended on anyway: a

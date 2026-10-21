@@ -1,14 +1,10 @@
 """override_core: the bridge's rules for software on the sticks. No ROS.
 
-    python crusader_fcu/test/test_override_core.py
+python3 -m pytest crusader_behavior/test/test_override_core.py
 """
-import os
-import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-
-from crusader_fcu import override_core as oc   # noqa: E402
+from crusader_behavior import override_core as oc
 
 
 def sticks(steer=1500, thr=1500, lat=1500, **extra):

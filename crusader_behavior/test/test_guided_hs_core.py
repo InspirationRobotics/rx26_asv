@@ -1,15 +1,11 @@
 """guided_hs_core: the gates, the encoding, the dead-man.
 
-No ROS, no pymavlink:   python crusader_fcu/test/test_guided_hs_core.py
+python3 -m pytest crusader_behavior/test/test_guided_hs_core.py
 """
 import math
-import os
-import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-
-from crusader_fcu import guided_hs_core as hs   # noqa: E402
+from crusader_behavior import guided_hs_core as hs
 
 P = hs.HsParams(max_speed=0.4, wp_speed=1.0, deadman_s=0.5)
 

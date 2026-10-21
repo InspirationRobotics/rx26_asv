@@ -23,7 +23,7 @@ import time
 
 from pymavlink import mavutil
 
-# Must equal POSITION_ONLY_TYPE_MASK in crusader_fcu/telemetry_bridge.py.
+# Must equal POSITION_ONLY_TYPE_MASK in crusader_behavior/telemetry_bridge.py.
 # Bits: use x/y, ignore z, ignore velocity, acceleration, yaw and yaw rate.
 POSITION_ONLY_TYPE_MASK = 0b110111111100      # 3580
 

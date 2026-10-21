@@ -1,27 +1,9 @@
-"""guided_hs_core — the rules for GUIDED heading+speed, with no ROS and no MAVLink.
+"""guided_hs_core: the rules for GUIDED commands from the tree. No ROS.
 
-The fixed-nozzle shot has to stand a set distance off a wall and point at a
-window, which needs astern as well as ahead and a chosen heading. Position
-setpoints can do neither on this boat, so telemetry_bridge grows one narrow
-extra TX path: /crsd/guided_heading_speed -> MAVLink SET_ATTITUDE_TARGET.
-
-ARDUROVER, AS REMEMBERED (verify in SITL before trusting; docs/G1 records it):
-  * SET_ATTITUDE_TARGET is acted on only in GUIDED, and only if the
-    THROTTLE_IGNORE bit (64) is CLEAR;
-  * with BODY_YAW_RATE_IGNORE (4) set, the heading comes from the quaternion,
-    and speed = thrust * the mode's default speed (WP_SPEED), thrust clamped
-    to [-1, 1] -- negative = astern;
-  * after 3 s with no new target it stops by itself.
-
-WHAT THIS ADDS ON TOP, because 3 s at 0.3 m/s is 0.9 m next to a dock:
-  * TWO interlocks, both independent of us: the flight MODE (the pilot's SC
-    switch; ArduPilot also ignores this message outside GUIDED) and the
-    autonomy-drop LATCH (ch9: a drop switch, SD proposed - none is wired yet);
-  * a speed clamp here, whatever the tree asks for;
-  * a dead-man: commands stop for deadman_s -> ONE zero-speed command, sent by
-    the bridge itself. So does a latch trip.
-
-`now` is monotonic seconds from the caller; tests drive it.
+Heading + signed speed (SET_ATTITUDE_TARGET) goes out only in GUIDED and while the drop
+latch allows it, speed clamped, with one zero-speed command when commands stop for deadman_s
+or the latch trips: ArduRover itself waits 3 s, 0.9 m at 0.3 m/s next to a dock. ArduRover's
+handling is unverified until SITL (docs/G1).
 """
 import math
 from dataclasses import dataclass
@@ -54,6 +36,17 @@ def encode(heading_deg, speed_mps, wp_speed):
     q = [math.cos(psi / 2.0), 0.0, 0.0, math.sin(psi / 2.0)]
     thrust = max(-1.0, min(1.0, float(speed_mps) / float(wp_speed)))
     return TYPE_MASK, q, thrust
+
+
+def setpoint_error(lat, lon):
+    """Why a GUIDED position setpoint must not be sent, or '' when it is a real position."""
+    if not (math.isfinite(lat) and math.isfinite(lon)):
+        return "non-finite latitude/longitude"
+    if abs(lat) > 90.0 or abs(lon) > 180.0:
+        return "latitude/longitude out of range"
+    if lat == 0.0 and lon == 0.0:
+        return "(0, 0) is an unset message, not a place"
+    return ""
 
 
 class HsGate:

@@ -1,26 +1,8 @@
-"""Autonomy-drop switch latch — the state machine behind the G1 safety gate.
+"""drop_latch: the autonomy-drop switch latch (Gate G1). No ROS.
 
-Context: `dp_hold` overrides the RC sticks, and flipping SC to manual does NOT
-regain control while an override is active; the pilot's only recovery was Ctrl+C
-(WiFi, not a safety tool) or the hardware e-stop. This latch closes that gap: a
-dedicated RC channel, read via the Pixhawk (so it works at ELRS range, far beyond
-WiFi), software-latches autonomy OFF and releases all RC overrides.
-
-Design rules (deliberate, do not weaken):
-  * FAIL-SAFE START: overrides are NOT allowed until the latch has seen a fresh,
-    valid RC sample with the switch in the SAFE position. No data = no override.
-  * TRIP conditions (any -> latched DROPPED):
-      - switch channel crosses the drop threshold (pilot commanded drop),
-      - channel value 0 (RC link lost / failsafe no-pulses),
-      - RC data stale for > stale_timeout (can't verify the pilot has a path in).
-  * LATCHED: once dropped, stays dropped. reset() succeeds only when the switch is
-    back in SAFE position AND data is fresh — and reset must be an explicit
-    operator action (service call), never automatic.
-  * This class contains NO ROS/MAVLink code so it is unit-testable everywhere;
-    enforcement wiring lives in telemetry_bridge (the sole RC-override sender).
-
-This is a software layer ABOVE the hardware e-stop (SB switch), never a
-replacement for it.
+Blocked until a fresh RC sample shows the switch SAFE. The switch in the drop position, the
+channel reading 0 (RC lost) or RC older than stale_timeout trips it; only an explicit reset
+with fresh, safe RC clears it.
 """
 from enum import Enum
 
@@ -32,8 +14,7 @@ class DropState(Enum):
 
 
 class DropLatch:
-    def __init__(self, channel: int = 7, threshold: int = 1700,
-                 invert: bool = False, stale_timeout: float = 1.0):
+    def __init__(self, channel: int, threshold: int, invert: bool, stale_timeout: float):
         """channel is 1-indexed (RC convention). threshold in us.
         invert=False: value >= threshold trips. invert=True: value <= threshold trips.
         """

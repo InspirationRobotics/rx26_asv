@@ -1,24 +1,8 @@
-"""pump_core — every rule about the water pump, with no ROS and no MAVLink.
+"""pump_core: every rule about the water pump. No ROS.
 
-telemetry_bridge is the only thing that talks to the Pixhawk, so the pump's rules
-live where the command leaves: anything upstream (squirt_cal, the Task 3 tree,
-`ros2 topic pub`) can only ASK on /crsd/pump_cmd.
-
-HOW A BURST IS SENT. The pump is on a Pixhawk output that passes the pilot's pump
-channel through (SERVOn_FUNCTION = RCINx). MAV_CMD_DO_REPEAT_SERVO with ONE cycle
-drives that output ON for half the cycle time and then back to the output's TRIM,
-on the autopilot's own clock, so a burst ends even if the bridge, laptop, WiFi or
-MAVProxy dies halfway through it. That only works if SERVOn_TRIM IS THE PUMP'S
-OFF VALUE; check_config and the watchdog below both hold that line. (From
-ArduPilot's AP_ServoRelayEvents as remembered, not read: docs/G7_pump_bench.md
-verifies it on the bench.)
-
-WHY THE BRIDGE REFUSES SO MUCH. The e-stop (SB, RC7_OPTION 165) stops the MOTORS;
-a pass-through output is not a motor, and disarming does not stop it either.
-Nothing but these checks stands between a software request and water coming out
-while someone is standing at the bow.
-
-`now` is monotonic seconds from the caller; tests drive it.
+A burst is MAV_CMD_DO_REPEAT_SERVO with one cycle, so the autopilot ends it at the output's
+TRIM even if everything upstream dies: SERVOn_TRIM must equal off_pwm. The e-stop stops the
+motors, not this output, so these checks are all that stands between a request and water.
 """
 from dataclasses import dataclass
 

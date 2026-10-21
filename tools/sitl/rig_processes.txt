@@ -1,26 +1,11 @@
-# Every process the Task 1 sim rig starts inside crsd-sim, as pkill -f patterns.
-#
-# ONE LIST, READ FROM BOTH ENDS: the rig clears these before it starts and
-# nodes_down.sh clears them on the way out. A node added to one hand-kept copy
-# and not the other survives a shutdown and the next run comes up with two
-# publishers on the same topic, which looks like a
-# perception bug and is not one.
-#
-# MATCH THE INSTALL PATH, NOT THE `ros2 run` LINE. `ros2 run pkg node` EXECS the
-# binary under install/pkg/lib, so by the time the node is doing anything the
-# string "ros2 run crusader_fcu" appears in nobody's argv.
-#
-# THESE PATTERNS MUST NEVER APPEAR ON A COMMAND LINE. `pkill -f` matches the
-# argv of the shell running it too, so `docker exec ... pkill -f crusader_bt/lib`
-# kills its own shell -- exit 143, no output, indistinguishable from a hang.
-# Reading them from this file into a shell variable is what keeps them out of
-# argv, and is the only reason this is a file rather than a loop.
-crusader_fcu/lib
-crusader_bt/lib
-crusader_link/lib
-crusader_world_model/lib
-crusader_groundstation/lib
-bench_world_model
-bench_uav
-tools/bt_view.py
+# pkill -f patterns for every process the sim rig starts in crsd-sim, read by the rig on the way
+# up and by nodes_down.sh on the way out. Install paths, not `ros2 run` lines (ros2 run execs the
+# binary). Never type one on a command line: pkill -f matches its own shell's argv.
+lib/crusader_behavior/telemetry_bridge
+lib/crusader_bt/bt_runner_node
+lib/crusader_link/rfd_link_node
+lib/crusader_world_model/target_tracker
+lib/crusader_groundstation/gcs_bridge
+lib/crusader_perception/camera_node
+lib/crusader_perception/lidar_node
 action send_goal

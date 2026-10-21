@@ -28,7 +28,7 @@ up gz_bridge /tmp/gzb.log \
 up livox_shim /tmp/livox_shim.log ros2 run crusader_sim livox_shim
 up sim_camera /tmp/sim_camera.log ros2 run crusader_sim sim_camera --ros-args -p course:="$COURSE"
 up telemetry_bridge /tmp/tb.log \
-  ros2 run crusader_fcu telemetry_bridge --ros-args --params-file "$CFG" -p mav_endpoint:=udp:127.0.0.1:14551
+  ros2 run crusader_behavior telemetry_bridge --ros-args --params-file "$CFG" -p mav_endpoint:=udp:127.0.0.1:14551
 up lidar_cluster_node /tmp/lidar_cluster.log \
   ros2 run crusader_perception lidar_cluster_node --ros-args --params-file "$CFG"
 up ground_station /tmp/gcs.log \

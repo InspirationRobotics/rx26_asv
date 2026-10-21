@@ -1,30 +1,7 @@
-"""run_node — the one canonical entry point for every Crusader node (Phase 3.5).
+"""run_node: the entry point every Crusader Python node uses; declare_params: its parameters.
 
-Fixes three defects of the naive init/spin/shutdown idiom:
-
-  1. Constructor failure: our nodes fail loudly by design (bad endpoint, USB2,
-     unmapped classes). Construction happens INSIDE the try and the finally
-     guards `node is not None`, so the original exception propagates cleanly
-     instead of being masked by UnboundLocalError, and rclpy still shuts down.
-  2. `ros2 launch` shutdown surfaces as ExternalShutdownException, not
-     KeyboardInterrupt — both are caught; `try_shutdown()` is idempotent where
-     `shutdown()` raises if the context is already down.
-  3. SIGTERM (systemd units, `docker stop`) is converted to a normal exception
-     so destroy_node() runs — thread joins, MAVLink close, override release
-     bookkeeping — honoring the deterministic-teardown rule on ALL exit paths,
-     not just Ctrl+C. Exit code 143 (128+15) is preserved for supervisors.
-
-`executor_factory` exists for action servers. An rclpy action server whose
-execute_callback blocks CANNOT service the cancel request it is waiting on: the
-single-threaded executor is busy running the callback, so the cancel sits in the
-queue until the mission ends on its own. Such a node passes
-`MultiThreadedExecutor()` here and puts its server in a ReentrantCallbackGroup;
-every other node keeps the default single-threaded spin.
-
-It is a FACTORY, not an executor, like node_factory: an rclpy Executor grabs a
-GuardCondition from the global context in its constructor, so building one before
-rclpy.init() dies with a bare `AttributeError: __enter__`. Construct it after
-init.
+run_node turns SIGTERM (systemd, docker stop, process_manager) into a normal exit so
+destroy_node() runs on every exit path, and keeps exit code 143 for supervisors.
 """
 import signal
 import sys
@@ -41,13 +18,24 @@ def _raise_sigterm(signum, frame):
     raise _SigTerm(143)
 
 
-def run_node(node_factory, args=None, executor_factory=None):
-    """node_factory: zero-arg callable returning the Node (construct INSIDE).
+def declare_params(node, defaults, dynamic=()):
+    """Declare every {name: default} on `node` and return {name: value}.
 
-    executor_factory: zero-arg callable returning an rclpy Executor, or None for
-    the default single-threaded spin. Called AFTER rclpy.init() — see above. The
-    executor is shut down here on every exit path, so a MultiThreadedExecutor's
-    worker threads are joined before destroy_node() rather than after it.
+    Read-only unless the name is in `dynamic`, so a `ros2 param set` on a value the
+    node only reads at startup is refused instead of silently doing nothing.
+    """
+    from rcl_interfaces.msg import ParameterDescriptor
+    for name, default in defaults.items():
+        node.declare_parameter(name, default,
+                               ParameterDescriptor(read_only=name not in dynamic))
+    return {name: node.get_parameter(name).value for name in defaults}
+
+
+def run_node(node_factory, args=None, executor_factory=None):
+    """Construct the node inside rclpy and spin it until shutdown.
+
+    executor_factory: zero-arg callable returning an Executor (built after rclpy.init()),
+    or None for the default single-threaded spin.
     """
     signal.signal(signal.SIGTERM, _raise_sigterm)
     rclpy.init(args=args)

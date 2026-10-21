@@ -1,14 +1,11 @@
 """pump_core: every refusal, the burst it sends, the watchdog.
 
-No ROS, no pymavlink:   python crusader_fcu/test/test_pump_core.py
+python3 -m pytest crusader_behavior/test/test_pump_core.py
 """
 import os
-import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-
-from crusader_fcu import pump_core as pc   # noqa: E402
+from crusader_behavior import pump_core as pc
 
 P = pc.PumpParams(servo_channel=10, rc_channel=10, on_pwm=2000, off_pwm=1000,
                   max_burst_s=1.0, min_gap_s=1.0, allow_disarmed=False,
