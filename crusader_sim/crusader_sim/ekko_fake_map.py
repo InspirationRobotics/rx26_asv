@@ -7,7 +7,7 @@
 Runs on any machine with Python and PyYAML (no ROS, no pymavlink), so the line it prints
 can be made on the sim PC and pasted on Ekko.
 
-WHAT IT IS FOR. Closing the radio loop with the REAL aircraft before the lake: the sim boat
+WHAT IT IS FOR. Closing the radio loop with the REAL aircraft before a field test: the sim boat
 listens on its RFD radio for Ekko's v3 TUNNEL traffic, and Ekko's telemetry_bridge puts a map
 on the air from `/uav/perception/buoy_map`. Publish this map there, on Ekko, and Ekko
 transmits the sim course as if its camera had found it, in the SIM's Gazebo world where the

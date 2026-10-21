@@ -8,7 +8,7 @@
 # (centre to surface), then orbit the EXIT counter-clockwise. Pass: referee PASS, black3
 # centre-to-surface >= 0.73 m.
 
-# RXL_SAFE_PASSAGE carries at most 10 buoys (see task1_avoid.yaml), so the obstacle REPLACES
+# A Task 1 field is 10 buoys, so the obstacle REPLACES
 # task1_core's black2 (37, -9), which is off every leg, rather than adding an 11th.
 
 name: task1_blocked_exit

@@ -5,16 +5,17 @@
 
 Runs in: the crsd-sim container, after gz_rig_up.sh — the same place as task1_goal, and
 it does what task1_goal does before a mission (operator_tools.arm over MAVLink 14550,
-operator_tools.set_mode GUIDED through /crsd/set_mode, then the SafePassage goal to
+operator_tools.set_mode GUIDED through /crsd/set_mode, then the RunMission goal to
 bt_runner), with two differences: the goal is tier 0 at an approach point you give as
 metres EAST/NORTH of the course origin (course.enu_to_latlon, the SITL scale), and the
 referee is task1_judge's clearance arithmetic only, on GROUND TRUTH
 (/sim/crusader/odometry, never anything the boat's stack computes).
 
-Meant for a tree that is one planned leg to the approach point (nav_test_line.xml), so
-the boat's path is whatever the planner made of the hazards. Prints, one line each:
+Meant for a tree that is one planned leg to the approach point (--tree, default
+nav_test_line), so the boat's path is whatever the planner made of the hazards. Ctrl-C
+cancels the goal (goal_client.run_goal). Prints, one line each:
 
-    [result] outcome 0 (SUCCESS)  <detail>  87 s
+    [result] outcome SUCCESS  <detail>  (87 s)
     [clear] plat centre-to-surface 1.23 m (hull 0.95 m)      one per --watch element
     [contact] none                                           elements the hull touched
     [arrive] final distance to goal 1.4 m
@@ -30,6 +31,7 @@ import argparse
 import sys
 
 from crusader_sim import course as C
+from crusader_sim.goal_client import install_stop, outcome_names, run_goal, tree_name
 from crusader_sim.operator_tools import arm, set_mode
 from crusader_sim.task1_judge import Task1Judge
 
@@ -103,23 +105,10 @@ def score(outcome_ok, dist_m, arrive_m, clearance, min_clear_m, hit):
     return not why, why
 
 
-def feedback_printer():
-    """One line per phase, per 5 % of progress or per new warning: the tree sends
-    feedback every tick."""
-    last = [None]
-
-    def fb(msg):
-        f = msg.feedback
-        key = (f.phase, int(f.progress * 20), f.warning)
-        if key != last[0]:
-            print(f"[tree] {f.phase:10s} {f.progress * 100:5.1f}%  {f.warning}".rstrip(), flush=True)
-            last[0] = key
-    return fb
-
-
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--course", required=True)
+    ap.add_argument("--tree", default="nav_test_line", help="a built-in tree of bt_runner_node")
     ap.add_argument("--east-m", type=float, required=True,
                     help="goal, metres east of the course origin")
     ap.add_argument("--north-m", type=float, default=0.0,
@@ -152,7 +141,7 @@ def main(argv=None):
         return 2
 
     import rclpy
-    from crusader_msgs.action import SafePassage
+    from crusader_msgs.action import RunMission
     from crusader_sim.task1_goal import Operator
 
     rclpy.init()
@@ -162,27 +151,21 @@ def main(argv=None):
         return 2
     print("[operator] mode GUIDED (confirmed by the autopilot)", flush=True)
     if not op.client.wait_for_server(timeout_sec=20.0):
-        print("[operator] no /crsd/safe_passage server (is bt_runner up?)")
+        print("[operator] no /crsd/run_mission server (is bt_runner up?)")
         return 2
-    goal = SafePassage.Goal(tier=SafePassage.Goal.TIER_CORE, approach_latitude=lat,
-                            approach_longitude=lon, orbit_radius_m=0.0,
-                            timeout_s=float(a.timeout_s))
-    print(f"[operator] goal: tier 0, approach {lat:.7f} {lon:.7f} "
+    goal = RunMission.Goal(name=tree_name(a.tree), tier=RunMission.Goal.TIER_CORE,
+                           approach_latitude=lat, approach_longitude=lon,
+                           timeout_s=float(a.timeout_s))
+    print(f"[operator] goal: {goal.name}, tier 0, approach {lat:.7f} {lon:.7f} "
           f"({a.east_m:g} m east, {a.north_m:g} m north of the origin)", flush=True)
 
-    fut = op.client.send_goal_async(goal, feedback_callback=feedback_printer())
-    rclpy.spin_until_future_complete(op, fut)
-    handle = fut.result()
-    if not handle.accepted:
-        print("[operator] goal REJECTED")
+    stop = install_stop()                   # after rclpy.init(): see goal_client.install_stop
+    run = run_goal(op.client, goal, lambda t: rclpy.spin_once(op, timeout_sec=t), stop,
+                   say=lambda line: print(line, flush=True),
+                   names=outcome_names(RunMission.Result))
+    if run.status != "result":
         return 1
-    res_fut = handle.get_result_async()
-    rclpy.spin_until_future_complete(op, res_fut)
-    r = res_fut.result().result
-    outcomes = {getattr(SafePassage.Result, k): k[len("OUTCOME_"):]
-                for k in dir(SafePassage.Result) if k.startswith("OUTCOME_")}
-    print(f"[result] outcome {r.outcome} ({outcomes.get(r.outcome, '?')})  {r.detail}  "
-          f"{r.elapsed_s:.0f} s", flush=True)
+    r = run.result
 
     verdict = judge.verdict()
     clearance = watched_clearance(verdict, a.watch)
@@ -192,7 +175,7 @@ def main(argv=None):
     print(f"[contact] {', '.join(hit) if hit else 'none'}", flush=True)
     dist = final_distance(judge, a.east_m, a.north_m)
     print(f"[arrive] final distance to goal {_num(dist, 1)} m", flush=True)
-    passed, reasons = score(r.outcome == SafePassage.Result.OUTCOME_SUCCESS, dist, a.arrive_m,
+    passed, reasons = score(r.outcome == RunMission.Result.OUTCOME_SUCCESS, dist, a.arrive_m,
                             clearance, a.min_clear_m, hit)
     print("[score] PASS" if passed else "[score] FAIL: " + "; ".join(reasons), flush=True)
     op.destroy_node()

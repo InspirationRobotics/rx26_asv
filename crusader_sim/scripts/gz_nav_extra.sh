@@ -8,9 +8,9 @@
 #     bash gz_nav_extra.sh n3 [--in entry] [--out g1_grn] [--no-up] [--tag NAME]
 #
 #   s6  open_water_platform, TREE=nav_test_line.xml, NAV_MODE=on. First the spec's precondition (is
-#       the platform in the LiDAR nav cloud? if not, water_margin 0.08 on /lidar_cluster_node, recorded),
+#       the platform in the LiDAR nav cloud? if not, water_margin 0.08 on /lidar_node, recorded),
 #       then crusader_sim.nav_goal 40 m east with --watch plat (arrives, centre-to-surface >= 0.73 m).
-#       Without --rmax it runs twice, lidar_cluster_node r_max 10 then 30.
+#       Without --rmax it runs twice, lidar_node r_max 10 then 30.
 #   s9  task1_core, NAV_MODE=on, the default tree. Into the first TRANSIT phase (--at-s N: N s after the
 #       goal instead) SITL's SIM_GPS_HDG goes to 0 for --hold-s, then back to 1. Pass: DEGRADED within a
 #       tick of the heading going NaN, no leg FAILED, the leg resumes, the mission completes.
@@ -91,8 +91,8 @@ cpy() { docker exec "$CONTAINER" bash -c "$(pyline "$@")"; }
 cx() { docker exec "$CONTAINER" bash -c "$ENVSRC && $*"; }
 # hpy <module> <args>: a crusader_sim module on THIS host (WSL python3, no ROS): scorers and the SITL parameter
 hpy() { PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$SIM${PYTHONPATH:+:$PYTHONPATH}" python3 -m "crusader_sim.$1" "${@:2}"; }
-# setp <param> <value>: ros2 param set on /lidar_cluster_node; 0 only when the node confirms it
-setp() { timeout 30 docker exec "$CONTAINER" bash -c "$ENVSRC && ros2 param set /lidar_cluster_node $1 $2" 2>&1 \
+# setp <param> <value>: ros2 param set on /lidar_node; 0 only when the node confirms it
+setp() { timeout 30 docker exec "$CONTAINER" bash -c "$ENVSRC && ros2 param set /lidar_node $1 $2" 2>&1 \
          | tee -a "$OUT/params.log" | grep 'Set parameter successful' >/dev/null; }
 # first line of $2 matching regex $1, without the seconds prefix
 pick() { grep -m1 -E "$1" "$2" 2>/dev/null | sed -E 's/^ *[0-9]+ //'; }
@@ -104,7 +104,7 @@ stamp_lines() { while IFS= read -r line; do printf '%4d %s\n' "$SECONDS" "$line"
 # the container's logs next to the run's own
 grab_logs() {
   local f
-  for f in bt nav lidar_cluster; do
+  for f in bt nav lidar; do
     docker cp "$CONTAINER:/tmp/$f.log" "$1.$f.log" >/dev/null 2>&1 || : > "$1.$f.log"
   done
 }
@@ -134,7 +134,7 @@ bring_up() {
 }
 
 # ---------------------------------------------------------------- S6
-# One run at lidar_cluster_node r_max $1.
+# One run at lidar_node r_max $1.
 s6_run() {
   local rmax="$1" L="$OUT/s6_rmax$1" wm=0.15 pre rc rv score blk
   echo "== s6  rmax $rmax  course $COURSE  tree nav_test_line.xml"
@@ -167,7 +167,7 @@ s6_run() {
 
   SECONDS=0
   timeout $(( ${TMO%.*} + 90 )) docker exec "$CONTAINER" bash -c \
-    "$(pyline $(( ${TMO%.*} + 60 )) nav_goal --course "$COURSE" --east-m 40 --north-m 0 --timeout-s "$TMO" --min-clear-m 0.73 --watch plat)" 2>&1 \
+    "$(pyline $(( ${TMO%.*} + 60 )) nav_goal --course "$COURSE" --tree nav_test_line --east-m 40 --north-m 0 --timeout-s "$TMO" --min-clear-m 0.73 --watch plat)" 2>&1 \
     | stamp_lines > "$L.nav_goal.log"
   grab_logs "$L"
   score="$(field '\[score\]' "$L.nav_goal.log")"

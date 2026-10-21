@@ -1,25 +1,25 @@
 """task1_goal — the operator's "Send goal" for a Gazebo run: arm, GUIDED, go.
 
-    python3 -m crusader_sim.task1_goal --course task1_core [--tier disruptive] [--no-judge]
+    python3 -m crusader_sim.task1_goal --course task1_core [--tree task1_global] [--tier disruptive]
 
-Runs in the crsd-sim container, after gz_rig_up.sh. --no-judge leaves the referee out: the
-Task 1 panel runs its own, because only the panel knows when it changed a beacon mid-run.
+Runs in the crsd-sim container, after gz_rig_up.sh.
 
 Does what an operator does before a Task 1 attempt, in order, then watches:
   1. ARM, over MAVLink on the TOOLING port 14550 (the bridge has no arm path on purpose; on
      the water the pilot arms with SB). Retries while pre-arm refuses, as ArduPilot does for
      ~10-20 s after boot.
   2. GUIDED, through /crsd/set_mode — the bridge's own mode path.
-  3. The SafePassage goal to bt_runner (/crsd/safe_passage): tier from the course, approach
-     point = the course's `approach` if it has one, else 6 m short of the ENTRY buoy on the
-     line from the start.
-Then prints the tree's feedback (phase, progress, buoys) until the result.
+  3. The RunMission goal to bt_runner (/crsd/run_mission): the built-in tree --tree, tier
+     from the course, approach point = the course's `approach` if it has one, else 6 m short
+     of the ENTRY buoy on the line from the start.
+Then prints the tree's running node until the result, and task1_judge's verdict.
 
 Ctrl-C / SIGTERM CANCELS the goal (goal_client.run_goal) and waits for the tree to finish it:
-the action server keeps ticking when its client dies. The task 1 panel's "abort" relies on it.
+the action server keeps ticking when its client dies.
 """
 import argparse
 import math
+import os
 import sys
 
 import rclpy
@@ -29,9 +29,9 @@ from std_msgs.msg import String
 
 from nav_msgs.msg import Odometry
 
-from crusader_msgs.action import SafePassage
+from crusader_msgs.action import RunMission
 from crusader_sim import course as C
-from crusader_sim.goal_client import TIERS, install_stop, run_goal
+from crusader_sim.goal_client import TIERS, install_stop, outcome_names, run_goal, tree_name
 from crusader_sim.operator_tools import arm, set_mode
 from crusader_sim.task1_judge import Task1Judge, format_verdict
 
@@ -65,7 +65,7 @@ class Operator(Node):
     def __init__(self, judge=None):
         super().__init__("sim_operator")
         self.mode_pub = self.create_publisher(String, "/crsd/set_mode", 10)
-        self.client = ActionClient(self, SafePassage, "/crsd/safe_passage")
+        self.client = ActionClient(self, RunMission, "/crsd/run_mission")
         if judge is not None:
             self.create_subscription(Odometry, "/sim/crusader/odometry",
                                      lambda m: _feed_judge(judge, m), 10)
@@ -83,13 +83,14 @@ def _feed_judge(judge, m):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--course", default="task1_core")
+    ap.add_argument("--tree", default=os.environ.get("TREE") or "task1_global",
+                    help="a built-in tree of bt_runner_node (default: $TREE, else task1_global)")
     ap.add_argument("--tier", choices=sorted(TIERS), default=None,
                     help="default: the course's `tier`")
     ap.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S,
                     help="mission timeout, WALL-CLOCK seconds (bt_runner counts its own now(); the "
                          "sim runs on wall clock, no use_sim_time). default: %(default).0f")
-    ap.add_argument("--no-judge", action="store_true",
-                    help="no referee (the Task 1 panel runs its own)")
+    ap.add_argument("--no-judge", action="store_true", help="no referee")
     a = ap.parse_args()
 
     course = C.load(a.course)
@@ -110,14 +111,15 @@ def main():
     print("[operator] mode GUIDED (confirmed by the autopilot)", flush=True)
 
     if not op.client.wait_for_server(timeout_sec=20.0):
-        print("[operator] no /crsd/safe_passage server (is bt_runner up?)")
+        print("[operator] no /crsd/run_mission server (is bt_runner up?)")
         return 2
-    goal = SafePassage.Goal(tier=tier, approach_latitude=lat, approach_longitude=lon,
-                            orbit_radius_m=0.0, timeout_s=float(a.timeout_s))
-    print(f"[operator] goal: tier {tier}, approach {lat:.7f} {lon:.7f}", flush=True)
+    goal = RunMission.Goal(name=tree_name(a.tree), tier=tier, approach_latitude=lat, approach_longitude=lon,
+                           timeout_s=float(a.timeout_s))
+    print(f"[operator] goal: {goal.name}, tier {tier}, approach {lat:.7f} {lon:.7f}", flush=True)
 
     stop = install_stop()                   # after rclpy.init(): see goal_client.install_stop
-    run = run_goal(op.client, goal, lambda t: rclpy.spin_once(op, timeout_sec=t), stop)
+    run = run_goal(op.client, goal, lambda t: rclpy.spin_once(op, timeout_sec=t), stop,
+                   names=outcome_names(RunMission.Result))
     if run.status != "result":
         return 1
     r = run.result
@@ -128,7 +130,7 @@ def main():
         passed = v["pass"]
     op.destroy_node()
     rclpy.shutdown()
-    return 0 if (r.outcome == SafePassage.Result.OUTCOME_SUCCESS and passed) else 1
+    return 0 if (r.outcome == RunMission.Result.OUTCOME_SUCCESS and passed) else 1
 
 
 if __name__ == "__main__":

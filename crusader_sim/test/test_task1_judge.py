@@ -120,7 +120,7 @@ class PerBuoySides(unittest.TestCase):
     def test_a_pass_earned_survives_a_recolour(self):
         j = judge(buoy("r", 10, -3, "flash_red"))
         drive(j, [(0, 0), (20, 0)])
-        j.set_states({"r": "off"})                           # the panel turns it black afterwards
+        j.set_states({"r": "off"})                           # turned black afterwards
         v = j.verdict()
         self.assertEqual(v["buoys"], 1)
         self.assertTrue(v["pass"])
@@ -199,9 +199,9 @@ class UnpairedCourse(unittest.TestCase):
     def setUp(self):
         self.course = C.load("task1_unpaired")
 
-    def test_the_course_is_what_the_rxl_field_can_carry(self):
+    def test_the_course_is_a_ten_buoy_field(self):
         b = C.buoys(self.course)
-        self.assertEqual(len(b), 10)                          # RXL_SAFE_PASSAGE: at most 10
+        self.assertEqual(len(b), 10)
         kinds = sorted(s for _, _, _, s, *_ in b)
         self.assertEqual(kinds, ["flash_blue", "flash_green", "flash_green", "flash_green",
                                  "flash_red", "flash_red", "off", "off", "off", "steady_blue"])
@@ -248,7 +248,7 @@ class UnpairedCourse(unittest.TestCase):
 
 
 class VerdictShape(unittest.TestCase):
-    """The panel and gz_nav_test read these keys: they stay."""
+    """gz_nav_test reads these keys: they stay."""
 
     def test_the_old_keys_are_still_there(self):
         j = judge(buoy("r", 10.02, -3, "flash_red"), buoy("g", 10.02, 3, "flash_green"))

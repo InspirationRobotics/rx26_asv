@@ -8,9 +8,8 @@ and the course file — nothing the boat's stack computes — so it can disagree
 with the tree, which is the point: the tree's own "passed correctly" counter is
 the tree grading itself.
 
-Also imported by the Task 1 panel (plain python3 on the WSL host, no ROS — so
-rclpy is imported only inside main()), which changes beacons mid-run through
-set_states() and feeds positions to update() itself.
+rclpy is imported only inside main(): task1_goal and nav_goal import the referee
+and feed it positions themselves, and set_states() changes beacons mid-run.
 
 Rules (handbook 3.3.2:19-33):
     flashing RED   kept to STARBOARD      flashing GREEN   kept to PORT
@@ -230,7 +229,7 @@ class Task1Judge:
                 self.shapes[e["name"]] = rects
         self.clear = {}               # name -> the minima so far, see _track_clearance
         self._t0 = None
-        # the panel calls set_states from its web thread while positions arrive
+        # set_states may come from another thread than the positions
         # on another; update() must never walk a half-rebuilt gate list
         self._lock = threading.Lock()
         self._rebuild()

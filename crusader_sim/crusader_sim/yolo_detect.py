@@ -6,7 +6,7 @@ container, with the venv that crusader_sim/scripts/setup_yolo_venv.sh builds
 
     /root/robotx_ws/venvs/yolo/bin/python -m crusader_sim.yolo_detect frame.png
 
-WHAT IS THE REAL PIPELINE HERE, AND WHAT IS NOT. oak_detector (the boat's node)
+WHAT IS THE REAL PIPELINE HERE, AND WHAT IS NOT. buoy_model (camera_node's buoy model)
 is: detector -> association -> LED crop -> colour classifier -> per-track light
 state -> label. Everything that DECIDES something is a pure function in
 crusader_perception.oak_detector_core and is imported, not copied:
@@ -17,10 +17,10 @@ crusader_perception.oak_detector_core and is imported, not copied:
                    label words (flash_red_diamond, red_diamond, off_diamond, ...)
     LabelVoter     the colour vote used when flash_enable is false
 
-and every tunable comes from the same oak_detector block of crusader_params.yaml
+and every tunable comes from camera_node's buoy parameters (oak_detector_core.camera_params)
 the boat reads. What differs is only the inference backend: the boat loads
 TensorRT .engine files, the sim loads the .pt files they were exported from
-(ultralytics on CPU). `YoloPipeline.process` is oak_detector._run_pipeline's
+(ultralytics on CPU). `YoloPipeline.process` is BuoyModel.run's
 stages 1, 3, 4 and 5 in the same order; stage 2 (marking_shape) is skipped on
 purpose: the sim's RoboBuoy carries no circle/diamond marking and Task 1 never
 branches on shape, so the geometry stage would only abstain, which already means
@@ -49,11 +49,11 @@ DET_PT = "crusader_det_yolo26n.pt"
 CLS_PT = "crusader_led_cls.pt"
 VENV_PYTHON = "/root/robotx_ws/venvs/yolo/bin/python"
 
-# oak_detector.py's own constants (module scope there, parameters nowhere)
+# buoy_model.py's own constants (module scope there, parameters nowhere)
 MIN_CROP_PX = 10
 OFF_CLASS = "off"
 
-# box (x1, y1, x2, y2) RGB px, clamped to the frame; label as oak_detector would
+# box (x1, y1, x2, y2) RGB px, clamped to the frame; label as buoy_model would
 # publish it; colour = the lit colour or None; state = flashing|solid|off|unknown
 Det = namedtuple("Det", "box label conf shape colour state track")
 
@@ -74,9 +74,9 @@ def _oak_core():
 # the pipeline
 # ======================================================================
 class YoloPipeline:
-    """oak_detector's stages around two ultralytics models.
+    """buoy_model's stages around two ultralytics models.
 
-    `od` is the oak_detector ros__parameters dict from crusader_params.yaml.
+    `od` is camera_node's buoy parameters (oak_detector_core.camera_params).
     imgsz / conf_min override the boat's det_imgsz_* (640) and det_conf_min (0.60)
     when above 0 — experiments only: the boat runs fixed-size engines at those."""
 
@@ -165,7 +165,7 @@ class YoloPipeline:
 
     # -- stages 3 and 5
     def _label(self, track, probs, shape, now):
-        """(label, colour, state word) — oak_detector._run_pipeline's labelling."""
+        """(label, colour, state word) — BuoyModel.run's labelling."""
         if probs is None:
             return shape, None, None
         frame_colour = self.colours[int(np.argmax(probs))]

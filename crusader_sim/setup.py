@@ -16,8 +16,6 @@ setup(
     name=PKG,
     version="0.1.0",
     packages=[PKG],
-    # task1_panel serves its page from beside its own .py
-    package_data={PKG: ["*.html"]},
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + PKG]),
         ("share/" + PKG, ["package.xml"]),
@@ -38,7 +36,6 @@ setup(
             # ROS nodes (crsd-sim container)
             "livox_shim = crusader_sim.livox_shim:main",
             "sim_camera = crusader_sim.sim_camera:main",
-            "panel_feed = crusader_sim.panel_feed:main",
             # plain processes
             "sim_uav = crusader_sim.sim_uav:main",
             "task1_goal = crusader_sim.task1_goal:main",

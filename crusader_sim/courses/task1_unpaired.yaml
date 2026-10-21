@@ -2,7 +2,7 @@
 # FENCES (crusader_bt path::sideFences, nav_mode on). The frame and the rules are
 # task1_core.yaml's (read its header): the boat starts at the origin heading east, so
 # starboard is SOUTH: RED must end up south of the boat's track, GREEN north of it.
-# 88 m long, exactly 10 buoys (RXL_SAFE_PASSAGE carries at most 10):
+# 88 m long, exactly 10 buoys, a Task 1 field:
 #   ENTRY (10, 2), EXIT (88, 0), 2 red, 3 green, 3 black (beacon off).
 #
 # What is on it, in the order the boat meets it:

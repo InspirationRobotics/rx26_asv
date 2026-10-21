@@ -19,8 +19,8 @@
 # live container still runs the old image, build to a NEW tag first:
 #   docker build -t crsd-sim:nav2 -f crusader_sim/docker/crsd-sim.Dockerfile crusader_sim/docker
 # gz_sim_up.sh picks crsd-sim:nav2 over crsd-sim:humble when both exist (RX26_IMAGE).
-# An EXISTING container keeps the image it was created from: recreate it (sim down
-# first) - see crusader_sim/README.md "Nav2 avoidance in the sim".
+# An EXISTING container keeps the image it was created from: recreate it with the sim
+# down, `gz_sim_up.sh <course> --recreate-container` (its header says what that does).
 #
 # --ipc=host IS LOAD-BEARING: the Gazebo bridge and sim shims run on the WSL
 # host, the boat's nodes in here. Fast DDS sees "same machine" and moves data

@@ -42,7 +42,6 @@ NODE_PATH = "/" + NODE
 PLANNER_PREFIX = "nav_"
 
 
-# The sim panel's rule (crusader_sim.task1_panel.NAME_RE), so a name that works there works here.
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 
 SHIPPED = "shipped"

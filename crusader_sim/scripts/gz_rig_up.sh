@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # gz_rig_up.sh — the ROS half of the Gazebo sim. Runs in: the crsd-sim container.
 #
-#     bash crusader_sim/scripts/gz_rig_up.sh [course] [--no-uav] [--rxl-endpoint EP] [--ocs-host IP]
+#     bash crusader_sim/scripts/gz_rig_up.sh [course] [--no-uav] [--radio-endpoint EP] [--ocs-host IP]
 #
-#     --rxl-endpoint EP  where rxl_link_node listens (a pymavlink endpoint). Default
+#     --radio-endpoint EP  where rfd_link_node listens (a pymavlink endpoint). Default
 #                        udpin:127.0.0.1:14555, which only sim_uav in this container can reach.
 #                        udpin:0.0.0.0:14555 lets a radio relay on the Windows side (the real
 #                        Ekko's RFD traffic, forwarded) reach it. Give --no-uav too when Ekko is
@@ -17,11 +17,9 @@
 # the simulator's sensors through the boat's own perception:
 #
 #     gz  --ros_gz_bridge-->  /sim/*  --livox_shim-->  /livox/lidar
-#                                         --> lidar_cluster_node (the boat's) --> crsd/lidar_clusters
+#                                         --> lidar_node (the boat's) --> crsd/lidar_clusters
 #                             /sim/*  --sim_camera-->  oak/rgb, oak/depth, crsd/oak/detections
-#     sim_uav  --RXL udp 14555-->  rxl_link_node (the boat's)
-#     panel_feed: leg_status + world_targets + safe_passage_report --udp 14556--> the Task 1
-#         panel's map layers (planned path, the boat's tracks, its fused passage). Always on; sim only
+#     sim_uav  --TUNNEL v3, udp 14555-->  rfd_link_node (the boat's): Ekko's map of the course
 #     nav_frames_node + Nav2 planner_server (crusader_nav, when the image has Nav2)
 #         --/crsd/nav/hazards, /crsd/nav/obstacle_cloud-->  bt_runner's planned legs
 #
@@ -30,12 +28,14 @@
 #
 # SIM_DETECTOR=truth|yolo in the environment picks sim_camera's boxes: truth (default) is the
 # geometric oracle; yolo runs the team's REAL YOLO detector + LED classifier on the rendered
-# frames (crusader_sim/README.md, "The real YOLO detector in the sim"). It needs the venv from
+# frames (setup_yolo_venv.sh's header). It needs the venv from
 # setup_yolo_venv.sh and falls back to truth, with a banner, when that is missing.
 # SIM_CAMERA_ARGS adds ROS args to sim_camera, e.g. "-p yolo_imgsz:=1920 -p yolo_conf:=0.1".
 #
-# Everything downstream — telemetry_bridge, rxl_link_node, target_tracker,
-# ground_station, bt_runner — is the boat's code, unmodified, same params file.
+# Everything downstream — telemetry_bridge, rfd_link_node, target_tracker, gcs_bridge,
+# bt_runner — is the boat's code, unmodified, same params file. The laptop's ground station
+# connects to it: BOAT_GUI.cmd --boat 127.0.0.1. TREE (a built-in tree name, default
+# task1_global) is the mission gz_task1.sh sends.
 # ROS's setup.bash reads unset variables, so strict mode goes on AFTER it
 source /opt/ros/humble/setup.bash
 source /root/robotx_ws/install/setup.bash
@@ -43,15 +43,15 @@ set -uo pipefail
 
 COURSE=task1_core
 UAV=1
-RXL_EP=udpin:127.0.0.1:14555     # sim_uav's udpout:127.0.0.1:14555 lands here
-RXL_EP_DEFAULT=$RXL_EP
+RADIO_EP=udpin:127.0.0.1:14555   # sim_uav's udpout:127.0.0.1:14555 lands here
+RADIO_EP_DEFAULT=$RADIO_EP
 OCS_HOST=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-uav) UAV=0 ;;
-    --rxl-endpoint)
-      [ $# -ge 2 ] || { echo "--rxl-endpoint needs an endpoint" >&2; exit 2; }
-      RXL_EP="$2"; shift ;;
+    --radio-endpoint)
+      [ $# -ge 2 ] || { echo "--radio-endpoint needs an endpoint" >&2; exit 2; }
+      RADIO_EP="$2"; shift ;;
     --ocs-host)
       [ $# -ge 2 ] || { echo "--ocs-host needs an address" >&2; exit 2; }
       OCS_HOST="$2"; shift ;;
@@ -61,7 +61,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 # both values are words in a ros2 run line, so only the characters an endpoint or a host needs
-[[ "$RXL_EP" =~ ^[A-Za-z0-9_.:/@-]+$ ]] || { echo "*** --rxl-endpoint '$RXL_EP': letters, digits and _ . : / @ - only" >&2; exit 2; }
+[[ "$RADIO_EP" =~ ^[A-Za-z0-9_.:/@-]+$ ]] || { echo "*** --radio-endpoint '$RADIO_EP': letters, digits and _ . : / @ - only" >&2; exit 2; }
 [[ -z "$OCS_HOST" || "$OCS_HOST" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "*** --ocs-host '$OCS_HOST': letters, digits and _ . - only" >&2; exit 2; }
 WS=/root/robotx_ws
 SRC=$WS/src/rx26_asv
@@ -74,9 +74,7 @@ if [ -n "${SIM_TUNING:-}" ]; then
   BT_TUNE=(--params-file "$SIM_TUNING"); NAV_TUNE=("nav2_overlay:=$SIM_TUNING")
 fi
 SIMSHARE=$WS/install/crusader_sim/share/crusader_sim
-BT=$WS/install/crusader_bt/share/crusader_bt/behavior_trees
-TREE="${TREE:-task1_global.xml}"    # the whole-field planner; TREE=task1_disruptive.xml = the per-gate tree
-case "$TREE" in */*) ;; *) TREE="$BT/$TREE" ;; esac     # a bare name means crusader_bt's
+TREE="${TREE:-task1_global}"       # sent by gz_task1.sh as the RunMission name
 export GZ_PARTITION=crusader_sim
 export RX26_SRC=$SRC
 
@@ -118,19 +116,23 @@ fi
 up sim_camera /tmp/sim_camera.log   "${CAM_CMD[@]}" --ros-args -p course:="$COURSE" "${CAM_ARGS[@]}" ${SIM_CAMERA_ARGS:-}
 
 echo "=== the boat's stack ==="
+# the GCS Sensors tab's picture: the boat's camera_node on sim_camera's oak/rgb + oak/depth,
+# model none (sim_camera already publishes the detections); it encodes only while watched
+up camera_node /tmp/camera.log \
+  ros2 run crusader_perception camera_node --ros-args --params-file "$CFG" \
+  -p source:=topic -p model:=none
 up telemetry_bridge /tmp/tb.log \
   ros2 run crusader_behavior telemetry_bridge --ros-args --params-file "$CFG" \
   -p mav_endpoint:=udp:127.0.0.1:14551
-up lidar_cluster_node /tmp/lidar_cluster.log \
-  ros2 run crusader_perception lidar_cluster_node --ros-args --params-file "$CFG"
-# rxl_endpoint on this branch is the RFD900 (/dev/crsd-rfd); the params file's
-# own comment gives the UDP form for a bench/sim, which is what sim_uav talks to.
-# --rxl-endpoint overrides it (a Windows-side radio relay needs udpin:0.0.0.0:14555)
-up rxl_link_node /tmp/rxl.log \
-  ros2 run crusader_link rxl_link_node --ros-args --params-file "$CFG" \
-  -p rxl_endpoint:="$RXL_EP"
-if [ "$RXL_EP" != "$RXL_EP_DEFAULT" ] && [ "$UAV" = 1 ]; then
-  echo "  *** rxl endpoint is $RXL_EP but sim_uav is still on: if the real Ekko is the source, add --no-uav (two transmitters make the plan alternate)"
+up lidar_node /tmp/lidar.log \
+  ros2 run crusader_perception lidar_node --ros-args --params-file "$CFG"
+# rfd_endpoint is the RFD900 (/dev/crsd-rfd) on the boat; here the UDP form sim_uav talks to.
+# --radio-endpoint overrides it (a Windows-side radio relay needs udpin:0.0.0.0:14555)
+up rfd_link_node /tmp/rfd.log \
+  ros2 run crusader_link rfd_link_node --ros-args --params-file "$CFG" \
+  -p rfd_endpoint:="$RADIO_EP"
+if [ "$RADIO_EP" != "$RADIO_EP_DEFAULT" ] && [ "$UAV" = 1 ]; then
+  echo "  *** radio endpoint is $RADIO_EP but sim_uav is still on: if the real Ekko is the source, add --no-uav (two transmitters make the plan alternate)"
 fi
 if [ "$UAV" = 1 ]; then
   up sim_uav /tmp/sim_uav.log python3 -u -m crusader_sim.sim_uav --course "$COURSE"
@@ -150,7 +152,7 @@ case "${NAV_MODE:-}" in ""|off|shadow|on) ;;
   *) echo "*** NAV_MODE must be off, shadow or on (got '$NAV_MODE')" >&2; exit 2 ;; esac
 NAV_WHY=""
 if ! ros2 pkg prefix nav2_planner >/dev/null 2>&1; then
-  NAV_WHY="this image has no Nav2. Rebuild crsd-sim and recreate the container (crusader_sim/README.md, 'Nav2 avoidance in the sim')"
+  NAV_WHY="this image has no Nav2. Rebuild crsd-sim and recreate the container (docker/crsd-sim.Dockerfile's header)"
 elif ! ros2 pkg prefix crusader_nav >/dev/null 2>&1 || ! ros2 pkg prefix crusader_nav_layers >/dev/null 2>&1; then
   NAV_WHY="Nav2 is here but crusader_nav / crusader_nav_layers are not built. In the container: colcon build --packages-up-to crusader_nav crusader_nav_layers crusader_bt"
 fi
@@ -174,9 +176,8 @@ else
   fi
 fi
 
-up bt_view /tmp/btview.log python3 -u "$SRC/tools/bt_view.py"
-up ground_station /tmp/gcs.log \
-  ros2 run crusader_groundstation ground_station --ros-args --params-file "$CFG"
+up gcs_bridge /tmp/gcs.log \
+  ros2 run crusader_groundstation gcs_bridge --ros-args --params-file "$CFG"
 # the boat's heartbeat to the Operator Control Station, only when asked for: the OCS is a
 # laptop on the team network and the sim has no business dialling it unless told where it is.
 # The params file gives the rest (ocs_port 37564, team_id, vehicle_id); -p wins over it.
@@ -186,14 +187,10 @@ if [ -n "$OCS_HOST" ]; then
 else
   echo "  ocs_client           -- off (--ocs-host IP starts it)"
 fi
-# the boat's own picture for the Task 1 panel (crusader_sim/panel_feed.py): it only subscribes and
-# sends 4 datagrams a second to udp 127.0.0.1:14556, so it costs nothing measurable. Started before
-# bt_runner so it hears the first leg status; nothing breaks if the panel is not running
-up panel_feed /tmp/panel_feed.log ros2 run crusader_sim panel_feed --ros-args -p course:="$COURSE"
 sleep 6
 up bt_runner /tmp/bt.log \
   ros2 run crusader_bt bt_runner_node --ros-args --params-file "$CFG" "${BT_TUNE[@]}" \
-  -p tree_file:="$TREE" -p publish_setpoints:=true -p default_timeout_s:=400.0 \
+  -p publish_setpoints:=true -p default_timeout_s:=400.0 \
   -p nav_mode:="$NAV_MODE"
 sleep 6
 
@@ -217,6 +214,6 @@ echo
 echo "=== up ==="
 ros2 node list 2>/dev/null | sort | sed 's/^/  /'
 echo "  tree: $(basename "$TREE")   course: $COURSE   nav_mode: $NAV_MODE   detector: $DETECTOR"
-echo "  rxl: $RXL_EP   ocs_client: ${OCS_HOST:-off}"
+echo "  radio: $RADIO_EP   ocs_client: ${OCS_HOST:-off}   ground station: BOAT_GUI.cmd --boat 127.0.0.1"
 timeout 5 ros2 topic echo /crsd/fcu_status --once 2>/dev/null \
   | grep -E '^mode|^armed' | tr '\n' ' ' | sed 's/^/  /'; echo

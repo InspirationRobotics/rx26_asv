@@ -1,9 +1,9 @@
 # title: Tight field (3-5 m between buoys)
 # about: 3 m orbits, gate points 3 m out, 3 m fences, 1.2 m inflation, for courses/task1_tight.yaml.
 #
-# A planner-tuning profile for the Task 1 panel (load it in PLANNER TUNING, then
-# STOP SIM + LAUNCH). Same format as the panel's tuning.yaml: only the keys that
-# differ from crusader_params.yaml / nav2_params.yaml. SIM ONLY.
+# A planner-tuning profile: gz_sim_up.sh --tuning <this file>, or Apply in the GCS Params
+# tab (bt_runner_node keys only). Only the keys that differ from crusader_params.yaml /
+# nav2_params.yaml.
 #
 # Why each number (buoy radius 0.3, robot_radius 0.82, hard 0.8 are unchanged):
 #   orbit 3.0 m      2.0 was tried and FAILED (2026-10-02): the hull touched the

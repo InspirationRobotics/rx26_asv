@@ -3,9 +3,8 @@
 #
 #     bash crusader_sim/scripts/gz_sync.sh
 #
-# Step 1 of gz_sim_up.sh, and the first thing task1_panel_up.sh does. Both run
-# the WINDOWS copy of this file (CR stripped into /tmp): before the first sync
-# the WSL workspace may not have it yet.
+# Step 1 of gz_sim_up.sh, which runs the WINDOWS copy of this file (CR stripped into
+# /tmp): before the first sync the WSL workspace may not have it yet.
 #
 #     RX26_WIN_SRC   the Windows checkout, as a WSL path (default below)
 #     RX26_WSL_SRC   the WSL workspace copy (default ~/robotx_ws/src/rx26_asv)
@@ -25,9 +24,3 @@ if [ -d "$WIN_SRC/crusader_sim/meshes" ]; then
   mkdir -p "$SIM/meshes" && cp -u "$WIN_SRC/crusader_sim/meshes/"* "$SIM/meshes/" 2>/dev/null
   echo "  meshes: $(ls "$SIM/meshes" | wc -l) file(s)"
 fi
-# the Task 1 panel's pages: the team's extension list has no *.html, *.js or *.css, and the
-# panel serves them from this source tree (task1_panel.py make_handler), not install/
-for f in "$WIN_SRC"/crusader_sim/crusader_sim/*.html "$WIN_SRC"/crusader_sim/crusader_sim/*.js \
-         "$WIN_SRC"/crusader_sim/crusader_sim/*.css; do
-  if [ -f "$f" ]; then tr -d '\r' < "$f" > "$SIM/crusader_sim/$(basename "$f")"; fi
-done

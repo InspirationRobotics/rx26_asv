@@ -3,7 +3,7 @@
 #
 #     bash crusader_sim/scripts/gz_sim_up.sh [course | --course-file PATH] [--tuning FILE] [--no-gui] [--no-uav] [--no-rig]
 #                                            [--recreate-container] [--detector truth|yolo]
-#                                            [--rxl-endpoint EP] [--ocs-host IP]
+#                                            [--radio-endpoint EP] [--ocs-host IP]
 #
 #     NAV_MODE=off|shadow|on  (environment) the tree's Nav2 planning; default on
 #                 when the image has Nav2. docs/nav2_avoidance_spec.md.
@@ -21,21 +21,21 @@
 #
 #     course     a name in crusader_sim/courses/ (default task1_core)
 #     --course-file PATH
-#                a course YAML from anywhere (the Task 1 panel writes one). It
+#                a course YAML from anywhere. It
 #                is copied in as courses/<its stem>.yaml after the sync, so the
 #                container's colcon build installs it and every node finds it
 #                by name, exactly like a checked-in course
 #     --tuning FILE
-#                a ROS params file of OVERRIDES (the Task 1 panel's planner
-#                tuning writes one): layered on top of crusader_params.yaml for
+#                a ROS params file of OVERRIDES (config/tuning_profiles/*.yaml, or one
+#                the GCS Params tab saved): layered on top of crusader_params.yaml for
 #                bt_runner and of nav2_params.yaml for Nav2 (nav2_overlay:=), so
 #                only the keys it names change. Sim only; it is copied to
 #                ~/robotx_ws/sim_tuning.yaml and listed in this log. Without it
 #                that copy is deleted, so an old tuning never leaks into a run
 #     --no-gui   Gazebo server only (the sim runs the same; you just can't watch)
 #     --no-uav   no Ekko stand-in: the boat is on its own camera (Core tier)
-#     --rxl-endpoint EP
-#                where the boat's rxl_link_node listens, instead of the rig's udpin:127.0.0.1:14555.
+#     --radio-endpoint EP
+#                where the boat's rfd_link_node listens, instead of the rig's udpin:127.0.0.1:14555.
 #                udpin:0.0.0.0:14555 is what a Windows-side radio relay (the real Ekko's RFD traffic
 #                forwarded in) needs to reach it; add --no-uav then, or sim_uav and Ekko both transmit
 #     --ocs-host IP
@@ -58,7 +58,7 @@
 set -uo pipefail
 
 COURSE=task1_core; COURSE_FILE=""; TUNING_FILE=""; GUI=1; UAV_ARG=""; RIG=1; RECREATE=0
-RXL_EP=""; OCS_HOST=""
+RADIO_EP=""; OCS_HOST=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --recreate-container) RECREATE=1 ;;
@@ -74,9 +74,9 @@ while [ $# -gt 0 ]; do
     --tuning)
       [ $# -ge 2 ] || { echo "--tuning needs a path" >&2; exit 2; }
       TUNING_FILE="$2"; shift ;;
-    --rxl-endpoint)
-      [ $# -ge 2 ] || { echo "--rxl-endpoint needs an endpoint, e.g. udpin:0.0.0.0:14555" >&2; exit 2; }
-      RXL_EP="$2"; shift ;;
+    --radio-endpoint)
+      [ $# -ge 2 ] || { echo "--radio-endpoint needs an endpoint, e.g. udpin:0.0.0.0:14555" >&2; exit 2; }
+      RADIO_EP="$2"; shift ;;
     --ocs-host)
       [ $# -ge 2 ] || { echo "--ocs-host needs the OCS's address" >&2; exit 2; }
       OCS_HOST="$2"; shift ;;
@@ -123,9 +123,9 @@ die()  { printf '\n*** FAILED: %s\n' "$1" >&2; exit 2; }
 # the two rig flags cross into `docker exec bash -lc "..."` as words, so they are checked here,
 # before the sim that is running now is torn down (gz_rig_up.sh checks them again)
 RIG_ARGS=""
-if [ -n "$RXL_EP" ]; then
-  [[ "$RXL_EP" =~ ^[A-Za-z0-9_.:/@-]+$ ]] || die "--rxl-endpoint '$RXL_EP': letters, digits and _ . : / @ - only"
-  RIG_ARGS="$RIG_ARGS --rxl-endpoint $RXL_EP"
+if [ -n "$RADIO_EP" ]; then
+  [[ "$RADIO_EP" =~ ^[A-Za-z0-9_.:/@-]+$ ]] || die "--radio-endpoint '$RADIO_EP': letters, digits and _ . : / @ - only"
+  RIG_ARGS="$RIG_ARGS --radio-endpoint $RADIO_EP"
 fi
 if [ -n "$OCS_HOST" ]; then
   [[ "$OCS_HOST" =~ ^[A-Za-z0-9_.-]+$ ]] || die "--ocs-host '$OCS_HOST': letters, digits and _ . - only"
@@ -153,7 +153,7 @@ ensure_container() {
         FULL_BUILD=1
       else
         echo "  *** $CONTAINER was made from an older image than $IMAGE and keeps it: Nav2 may be missing (the rig then runs nav_mode off and says so)."
-        echo "      To switch, with the sim down: gz_sim_up.sh --recreate-container   (crusader_sim/README.md, 'Nav2 avoidance in the sim')"
+        echo "      To switch, with the sim down: gz_sim_up.sh --recreate-container   (docker/crsd-sim.Dockerfile's header)"
       fi
     fi
   fi
@@ -321,9 +321,9 @@ cat <<EOF
 
 === ready ===
   Gazebo GUI      on the desktop (or: gz sim -g, with GZ_PARTITION=crusader_sim)
-  ground station  http://localhost:8090     behaviour tree  http://localhost:8085
+  ground station  BOAT_GUI.cmd --boat 127.0.0.1 (Windows), then http://localhost:8090
   QGroundControl  auto-connects on udp 14550 (Windows)
-  start Task 1:   bash $SIM/scripts/gz_task1.sh $COURSE
+  start Task 1:   bash $SIM/scripts/gz_task1.sh $COURSE   (TREE=<built-in tree> to choose)
   drive MANUAL:   ros2 topic pub /crsd/rc_override ... (in $CONTAINER), mode MANUAL
   stop:           bash $SIM/scripts/gz_sim_down.sh
 EOF

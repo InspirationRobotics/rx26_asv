@@ -25,13 +25,13 @@ LABEL_OF = {
     "steady_blue": "steady_blue_buoy",
     "off": "black_buoy",
 }
-# course beacon state -> rxl_codec beacon enum on the radio
-RXL_BEACON_OF = {"off": 1, "flash_red": 2, "flash_green": 3,
+# course beacon state -> its code: PassageBuoy.BEACON_* and Ekko's TUNNEL light code alike
+BEACON_CODE = {"off": 1, "flash_red": 2, "flash_green": 3,
                  "flash_blue": 4, "steady_blue": 5}
 # every state a buoy's `beacon:` may take. It is what the buoy MEANS (the
 # judge and the UAV read it); whether it is visible is side_beacon/up_beacon,
 # so an Advanced/Disruptive course keeps the true colour with both lights off
-BEACON_STATES = tuple(RXL_BEACON_OF)
+BEACON_STATES = tuple(BEACON_CODE)
 
 
 def resolve(course):

@@ -13,7 +13,7 @@ Runs in: the crsd-sim container (sim only — never on the boat).
 
 Why not bridge straight onto /livox/lidar: a gz scan carries a point for every
 ray, with +inf/NaN where nothing was hit, and the real driver never sends those.
-Feeding them to lidar_cluster_node would test it against data the boat cannot
+Feeding them to lidar_node would test it against data the boat cannot
 produce. The frame convention needs no work here: gen_crusader mounts the sim
 sensor rolled 180 deg from the same lidar_sign_y/z params, so the raw points are
 already x fwd, y STARBOARD, z DOWN, like the real upside-down MID360.

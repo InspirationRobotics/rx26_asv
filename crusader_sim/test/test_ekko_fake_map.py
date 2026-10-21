@@ -89,8 +89,8 @@ class WhatTheAircraftSees(unittest.TestCase):
         c["elements"][0].pop("side_beacon"), c["elements"][0].pop("up_beacon")
         self.assertEqual(F.buoy_map(c)["buoys"][0]["label"], "FLASHING_GREEN")
 
-    def test_the_panels_disruptive_course_shape(self):
-        # what task1_panel.course_of writes: side off, up on
+    def test_a_disruptive_course_shape(self):
+        # side beacons off, up beacons on
         c = mini_course("disruptive", [("flash_blue", False, True), ("steady_blue", False, True),
                                        ("flash_red", False, True), ("flash_green", False, True),
                                        ("off", False, True)])
@@ -122,7 +122,7 @@ class EkkosOwnPipelineAcceptsIt(unittest.TestCase):
         c = mini_course("core", [(k, True, True) for k in C.BEACON_STATES])
         for b, k in zip(F.buoy_map(c)["buoys"], C.BEACON_STATES):
             self.assertIn(b["label"], tl.STATES)
-            self.assertEqual(tl.CODE[b["label"]], C.RXL_BEACON_OF[k])
+            self.assertEqual(tl.CODE[b["label"]], C.BEACON_CODE[k])
 
     def test_a_sender_puts_the_whole_course_on_the_air_and_a_receiver_reads_it(self):
         course = C.load("task1_core")

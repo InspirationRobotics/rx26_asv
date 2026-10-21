@@ -12,12 +12,12 @@ Runs in the crsd-sim container (sim only — never on the boat).
                                 (gz OdometryPublisher; sim-only ground truth)
     out  oak/rgb                Image bgr8, frame oak_rgb_camera_optical_frame
          oak/depth              Image 16UC1 millimetres, same frame
-                                (= oakd_publisher's contract; only converted
+                                (= camera_node's source:=topic contract; only converted
                                 while someone subscribes — frames are expensive)
          crsd/oak/detections    Detection3DArray, frame camera_link (REP-103),
-                                labels as oak_detector/buoy_detector emit them
+                                labels as buoy_model emits them
 
-WHY AN ORACLE FOR THE BOX, NOT THE REAL DETECTOR. oak_detector and buoy_detector
+WHY AN ORACLE FOR THE BOX, NOT THE REAL DETECTOR. camera_node's buoy model
 need depthai or TensorRT, which a sim lacks, so existence, bbox and LABEL are what
 a working detector WOULD report: buoys inside the field of view, big enough to
 classify (min_bbox_px, from oak_detector_core.buoy_patch's 24 px floor), labelled
@@ -27,16 +27,16 @@ misclassification (bench_world_model --miscolour).
 
 POSITION IS NOT AN ORACLE (position_source:=depth, the default): the boat sees a
 buoy's position only through the stereo depth inside its box, as
-oak_detector._position does, so this repeats that on the
+buoy_model._position does, so this repeats that on the
 SIMULATED depth image:
 
     1. the sampling patch — the real one: centre u = box centre, v = 55 % down
        the box, half-size box_w/8 x box_h/6 px clamped to (4..12) x (5..20) RGB
-       px (oak_detector's SAMPLE_V_RATIO, HALF_W_LIMITS, HALF_H_LIMITS) — moved into depth pixels by the
+       px (buoy_model's SAMPLE_V_RATIO, HALF_W_LIMITS, HALF_H_LIMITS) — moved into depth pixels by the
        ratio of the two focal lengths (depth is aligned to the RGB camera);
     2. the MEDIAN of the valid depths in it (range_min_m..range_max_m, at least
-       min_depth_samples — the real oak_detector params from crusader_params.yaml).
-       None valid => the detection is DROPPED (oak_detector counts it as no_depth). So is one
+       min_depth_samples — camera_node's real buoy parameters (oak_detector_core.camera_params)).
+       None valid => the detection is DROPPED (buoy_model counts it as no_depth). So is one
        whose median is not the buoy: a real network does not box a buoy another
        one hides, and without the check the depth reports the OCCLUDER's range at
        the hidden buoy's bearing, a ghost 5-10 m short. occlusion_tol_m is how far
@@ -45,8 +45,8 @@ SIMULATED depth image:
        (z = f*B/d). Applied once, AFTER the median, since a stereo matcher's
        errors are correlated across a patch;
     4. back-projection of the patch CENTRE, z forward: x = z, y = -(u-cx)z/fx,
-       z_up = -(v-cy)z/fy — oak_detector's optical-frame to camera_link
-       conversion (the tail of oak_detector._position).
+       z_up = -(v-cy)z/fy — buoy_model's optical-frame to camera_link
+       conversion (the tail of buoy_model._position).
 
 So the tracker sees what the real pipeline gives it: range from the buoy's NEAR
 SURFACE (~0.1-0.2 m toward the boat), noise growing as z^2, lateral position from
@@ -65,12 +65,12 @@ The frames ARE real renders — use them to exercise a detector offline or recor
 dataset (tools/oak_record.py).
 
 detector:=yolo runs THE REAL MODELS INSTEAD OF THE ORACLE (SIM_DETECTOR=yolo in
-the rig; crusader_sim/README.md, "The real YOLO detector in the sim"). The box and
+the rig; scripts/setup_yolo_venv.sh's header). The box and
 label come from the team's detector + LED classifier on the RGB frames
 (yolo_detect.py: oak_detector_core's crop, tracking and flash logic, the .pt files
 the boat's .engines are exported from) at yolo_rate_hz on a worker thread;
 everything after the box is unchanged (depth median over the SAME patch, stereo
-noise, same Detection3DArray, labelled as oak_detector labels: flash_red_diamond,
+noise, same Detection3DArray, labelled as buoy_model labels: flash_red_diamond,
 red_diamond, off_diamond, ...). The oracle half still runs, only to SCORE the
 models: every ~10 s a line gives recall, precision, colour and ENTRY/EXIT
 agreement against the projected truth boxes (yolo_log:=<path> writes per-buoy
@@ -103,9 +103,9 @@ BUOY_ZC = 0.15            # the point a depth-based detector would report: the
                           # side silhouette's area centroid (the frustum puts
                           # most of the area low; it was 0.18 for the old box)
 
-# oak_detector._position's sampling patch, copied (not imported: the module
+# buoy_model._position's sampling patch, copied (not imported: the module
 # pulls depthai-side imports the sim container does not have). Keep equal to
-# oak_detector's SAMPLE_V_RATIO / HALF_W_LIMITS / HALF_H_LIMITS — they are RGB pixels at the detector's own RGB size.
+# buoy_model's SAMPLE_V_RATIO / HALF_W_LIMITS / HALF_H_LIMITS — they are RGB pixels at the detector's own RGB size.
 ROI_V = 0.55              # patch centre, as a fraction of the box height
 ROI_HALF_W = (4, 12)      # half-width = box_w // 8, clamped
 ROI_HALF_H = (5, 20)      # half-height = box_h // 6, clamped
@@ -206,7 +206,7 @@ class SimCamera(Node):
         # + yaw = aimed to PORT, + pitch = aimed DOWN (REP-103 +pitch)
         self.R_cam = rot_z(math.radians(tt.get("cam_yaw_deg", 0.0))) @ \
             rot_y(math.radians(tt.get("cam_pitch_deg", 0.0)))
-        # the depth thresholds the REAL ranging applies (oak_detector._position)
+        # the depth thresholds the REAL ranging applies (buoy_model._position)
         self.depth_lo, self.depth_hi = float(od["range_min_m"]), float(od["range_max_m"])
         self.min_samples = int(od["min_depth_samples"])
         with open(default_hull_yaml(), encoding="utf-8") as f:
@@ -394,7 +394,7 @@ class SimCamera(Node):
         sample = self._sample_depth(depth, bbox)
         if sample is None:
             # sky behind the box, featureless water, or past range_max_m:
-            # oak_detector counts these as no_depth and does not publish them
+            # buoy_model counts these as no_depth and does not publish them
             self.stats["no_depth"] += 1
             return None
         if true_x is not None and self._occluded(sample, true_x):
@@ -505,8 +505,8 @@ class SimCamera(Node):
     # ---------------------------------------------------------- depth source
     @staticmethod
     def _patch(bbox):
-        """(u, v, half_w, half_h) of oak_detector._position's sampling patch, in
-        RGB pixels (oak_detector._position), or None for a degenerate box."""
+        """(u, v, half_w, half_h) of buoy_model._position's sampling patch, in
+        RGB pixels (buoy_model._position), or None for a degenerate box."""
         x1, y1, x2, y2 = bbox
         if x2 <= x1 or y2 <= y1:
             return None
@@ -521,7 +521,7 @@ class SimCamera(Node):
         The depth camera shares the RGB camera's pose, so a pixel maps between
         them by the ratio of the focal lengths about the image centre — exact
         for any pair of FOVs, and 1/3 (640 / 1920) today. The patch is at
-        least one depth pixel, as oak_detector's is: a half-width that rounds
+        least one depth pixel, as buoy_model's is: a half-width that rounds
         to zero is an empty slice, which would read as "no depth here"."""
         patch = self._patch(bbox)
         if patch is None:
@@ -549,7 +549,7 @@ class SimCamera(Node):
 
     def _stereo_position(self, z_med, u, v, _n, width_px):
         """camera_link (x fwd, y left, z up) of the patch centre at the noisy
-        median depth — oak_detector._position's last two lines, with noise."""
+        median depth — buoy_model._position's last two lines, with noise."""
         z = z_med + self.rng.normal(0, self._sigma_z(z_med, width_px))
         z = max(z, 1e-3)
         return z, -(u - self.W / 2.0) * z / self.fx, -(v - self.H / 2.0) * z / self.fx

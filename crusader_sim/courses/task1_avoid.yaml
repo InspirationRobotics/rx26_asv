@@ -1,5 +1,5 @@
-# Task 1 with four black buoys ON the legs the planner drives: the Task 1 panel's DEFAULT
-# template, for watching Nav2 avoidance work (docs/nav2_avoidance_spec.md 10.2). The frame
+# Task 1 with four black buoys ON the legs the planner drives, for watching Nav2
+# avoidance work (docs/nav2_avoidance_spec.md 10.2). The frame
 # and the rules are task1_core.yaml's (read its header). 77 m long, 10 buoys:
 #   ENTRY (9, 3), gate 1 at x 30, gate 2 at x 55, EXIT (77, -1), each gate 9 m wide
 #   (red on -y = starboard, green on +y), and four obstacles, beacon off.
@@ -20,9 +20,7 @@
 # at each, so the planner has to go round (either side), keeping >= 0.8 m centre to surface.
 # Pass: referee PASS and no obstacle touched.
 #
-# RXL_SAFE_PASSAGE carries at most 10 buoys (robotx dialect, array length 10): ENTRY, 2 gates,
-# EXIT and the 4 obstacles make exactly 10. With 11 the UAV stand-in cannot send the field
-# and the tree fails at once.
+# A Task 1 field is 10 buoys: ENTRY, 2 gates, EXIT and the 4 obstacles make exactly 10.
 
 name: task1_avoid
 origin: {lat: 1.28060, lon: 103.85570}   # = tools/sitl/start_sitl.sh SITL_HOME

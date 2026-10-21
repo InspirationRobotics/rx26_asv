@@ -35,12 +35,12 @@ rem taking the sim with it. gz_keepalive.sh is that client, hidden;
 rem GZ_SIM_DOWN.cmd releases it.
 powershell -NoProfile -Command "Start-Process -WindowStyle Hidden -FilePath wsl.exe -ArgumentList '-d','%DISTRO%','--cd','~','-e','bash','robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_keepalive.sh'"
 
-start "" http://localhost:8090
-start "" http://localhost:8085
+rem the ground station, connected to the sim's gcs_bridge
+start "Crusader GCS" cmd /c "%HEREWIN%\..\..\tools\scripts\BOAT_GUI.cmd" --boat 127.0.0.1
 
 if /i not "%COURSE:~0,5%"=="task1" goto :idle
 echo.
-echo Gazebo is on the desktop; the ground station and the tree are in the browser.
+echo Gazebo is on the desktop; the ground station is in the browser.
 choice /c YN /t 20 /d Y /m "Run Task 1 now? It starts by itself in 20 s. N = skip it and drive yourself"
 if "%errorlevel%"=="2" goto :idle
 echo.

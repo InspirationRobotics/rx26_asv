@@ -1,18 +1,15 @@
-"""goal_client — the SafePassage goal-sending helpers task1_goal and lake_goal share.
+"""goal_client — sending a RunMission goal from a script: task1_goal and nav_goal share it.
 
-Runs in: wherever ROS 2 is (crsd-sim for the sim's task1_goal, `asv` for the lake's
-lake_goal). This module itself imports no ROS: the caller passes the action client's
-futures through and a `spin` callable, so the cancel logic is testable on a plain python3
-(test/test_lake.py) and exists ONCE for both tools.
+This module imports no ROS: the caller passes the action client's futures through and a
+`spin` callable, so the cancel logic is tested on a plain python3 (test/test_goal_client.py)
+and exists once.
 
-WHY A SHARED CANCEL. A SafePassage goal outlives the process that sent it: the action server
-(bt_runner) keeps ticking the tree when its client dies, so a Ctrl-C on the sender used to
-leave the boat driving a mission nobody was watching (gz_task1.sh's header says so: "the tree
-itself keeps its goal"). run_goal() therefore turns SIGINT/SIGTERM into an explicit
-cancel_goal_async, WAITS for the server's cancel response and the goal's result, and only then
-returns. On the real boat that is the difference between an ABORT button that stops the tree
-and one that merely stops a script.
+WHY A SHARED CANCEL. A goal outlives the process that sent it: bt_runner keeps ticking the tree
+when its client dies, so a Ctrl-C on the sender would leave the boat driving a mission nobody is
+watching. run_goal() turns SIGINT/SIGTERM into an explicit cancel_goal_async, WAITS for the
+server's answer and the goal's result, and only then returns.
 """
+import os
 import signal
 import threading
 import time
@@ -20,27 +17,37 @@ import time
 TIERS = {"core": 0, "advanced": 1, "disruptive": 2}
 
 
+def tree_name(tree):
+    """A built-in tree's name from a name, a file name or a path: bt_runner takes only the
+    name (crusader_bt/behavior_trees/<name>.xml)."""
+    name = os.path.basename(str(tree))
+    return name[:-4] if name.endswith(".xml") else name
+
+
 def feedback_printer(say=print):
-    """A feedback callback: one line per phase change, per 5 % of progress, or per new
-    warning — the tree sends feedback every tick and 0.1 % steps drown the phases. The
-    line format is what task1_panel's TREE_RE parses."""
+    """A feedback callback: one line whenever the running node, the task or the warning
+    changes. The tree sends feedback twice a second; most of it says the same thing."""
     last = [None]
 
     def fb(msg):
         f = msg.feedback
-        key = (f.phase, int(f.progress * 20), f.buoys_resolved, f.plan_version, f.warning)
+        key = (f.running_node, f.current_task, f.warning)
         if key != last[0]:
-            say(f"[tree] {f.phase:12s} {f.progress * 100:5.1f}%  buoys {f.buoys_resolved}/"
-                f"{f.buoys_known}  plan v{f.plan_version}  {f.warning}")
+            say(f"[tree] {f.elapsed_s:6.1f} s  {f.running_node or '-':24s} task {f.current_task or '-'}"
+                + (f"  WARNING {f.warning}" if f.warning else ""))
             last[0] = key
     return fb
 
 
-def result_lines(r):
-    """The two `[result]` lines the panel's mission parser reads."""
-    return (f"[result] outcome {r.outcome}  {r.detail}\n"
-            f"         classified {r.buoys_classified}, passed correctly "
-            f"{r.buoys_passed_correctly}, {r.elapsed_s:.0f} s")
+def outcome_names(result_cls):
+    """{code: "SUCCESS", ...} from RunMission.Result's OUTCOME_* constants."""
+    return {getattr(result_cls, k): k[len("OUTCOME_"):] for k in dir(result_cls)
+            if k.startswith("OUTCOME_")}
+
+
+def result_line(r, names=None):
+    name = (names or {}).get(r.outcome, str(r.outcome))
+    return f"[result] outcome {name}  {r.detail}  ({r.elapsed_s:.0f} s)"
 
 
 def install_stop(signals=(signal.SIGINT, signal.SIGTERM)):
@@ -64,7 +71,7 @@ class GoalRun:
 
 
 def run_goal(client, goal, spin, stop, say=print, accept_wait_s=15.0, cancel_wait_s=15.0,
-             clock=time.monotonic):
+             clock=time.monotonic, names=None):
     """Send `goal`, print its feedback, wait for the result; if `stop` is set, CANCEL the
     goal and wait for the server to finish it. Returns a GoalRun.
 
@@ -100,5 +107,5 @@ def run_goal(client, goal, spin, stop, say=print, accept_wait_s=15.0, cancel_wai
             return GoalRun("cancel_unconfirmed", None, True)
         spin(0.1)
     r = res_fut.result().result
-    say(result_lines(r))
+    say(result_line(r, names))
     return GoalRun("result", r, cancelled)

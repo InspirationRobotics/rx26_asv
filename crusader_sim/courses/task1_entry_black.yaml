@@ -7,7 +7,7 @@
 # and the clockwise ENTRY orbit must still complete. Pass: referee PASS,
 # black_entry centre-to-surface >= 0.73 m.
 
-# RXL_SAFE_PASSAGE carries at most 10 buoys (see task1_avoid.yaml), so the obstacle REPLACES
+# A Task 1 field is 10 buoys, so the obstacle REPLACES
 # task1_core's black1 (27, 8), which is off every leg, rather than adding an 11th.
 
 name: task1_entry_black
