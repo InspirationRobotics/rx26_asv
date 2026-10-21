@@ -314,7 +314,7 @@ def fit(pts_body, water_z, wp: WallParams = None, roll=0.0, pitch=0.0, seed=0):
 
 
 def params_from(d: dict) -> WallParams:
-    """From wall_range_node's ROS params. KeyError on a missing key."""
+    """From lidar_node's wall_* params, prefix removed. KeyError on a missing key."""
     return WallParams(
         sector_deg=d["sector_deg"], finger_sector_deg=d["finger_sector_deg"],
         r_min=d["r_min"], r_max=d["r_max"],

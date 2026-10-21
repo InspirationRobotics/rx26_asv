@@ -1,9 +1,9 @@
 """oak_controls — every tunable OAK-D camera setting, in one table.
 
 WHY A TABLE. These settings reach the device through fifteen different depthai setters; an
-if-branch per setting in the node puts each control's name in four places (parameter spec,
-YAML, apply path, log line), and forgetting one gives a control that reads back a value it
-never applied. Here a control is one row and the parameter spec is GENERATED from it.
+if-branch per setting puts each control's name in four places (parameter, YAML, apply path,
+log line), and forgetting one gives a control that reads back a value it never applied. Here
+a control is one row, and camera_node's parameters, defaults and ranges come from it.
 
 RANGES ARE DEPTHAI'S OWN, read off CameraControl's docstrings on the boat (depthai 2.32.0.0):
 
@@ -23,7 +23,7 @@ and white balance (a mode OR a temperature) are composites, handled explicitly b
 table: pretending they are simple gives a manual exposure that silently does nothing because
 AE is still enabled.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -38,13 +38,7 @@ class Control:
     hi: float = None
     choices: tuple = ()       # enum: accepted values, lower case
     enum_type: str = ""       # enum: the dai.CameraControl nested enum name
-
-    @property
-    def description(self):
-        """What the Tuning tab shows. Group-prefixed because the tab lists a
-        node's parameters in one flat table, and "saturation" alone does not
-        say whether it is the camera's or the classifier's."""
-        return f"{self.group} · {self.doc}"
+    default: object = None    # the boat's profile; camera_profiles.yaml holds the others
 
 
 # ---- the simple ones: one parameter, one setter, one argument ----
@@ -53,44 +47,44 @@ SIMPLE = (
             "AE bias in EV steps; negative is darker. Also a training "
             "contract — tools/oak_record.py takes the same flag, and the "
             "classifier learned colours at whatever it was shot at",
-            setter="setAutoExposureCompensation", kind="int", lo=-9, hi=9),
+            setter="setAutoExposureCompensation", kind="int", lo=-9, hi=9, default=-3),
     Control("ae_max_exposure_us", "exposure",
             "shutter cap; AE spends gain past it. Without a cap depthai "
             "prioritises exposure over ISO up to frame time, which on a moving "
             "boat buys brightness with smear. 0 = uncapped",
-            setter="setAutoExposureLimit", kind="int", lo=0, hi=100000),
+            setter="setAutoExposureLimit", kind="int", lo=0, hi=100000, default=8000),
     Control("ae_lock", "exposure",
             "freeze AE where it is. Useful for a survey leg where the meter "
             "would otherwise breathe as the boat turns into the sun",
-            setter="setAutoExposureLock", kind="bool"),
+            setter="setAutoExposureLock", kind="bool", default=False),
     Control("anti_banding", "flicker",
             "cancels mains-frequency flicker in artificial light by "
             "constraining exposure time. Irrelevant outdoors; matters in a "
             "shed or under dock lights",
             setter="setAntiBandingMode", kind="enum",
             choices=("off", "mains_50_hz", "mains_60_hz", "auto"),
-            enum_type="AntiBandingMode"),
+            enum_type="AntiBandingMode", default="auto"),
     Control("brightness", "image",
             "post-ISP brightness offset. Moves the picture without changing "
             "what the sensor captured, so it cannot recover a crushed shadow "
             "— fix exposure first, then trim here",
-            setter="setBrightness", kind="int", lo=-10, hi=10),
+            setter="setBrightness", kind="int", lo=-10, hi=10, default=0),
     Control("contrast", "image", "post-ISP contrast",
-            setter="setContrast", kind="int", lo=-10, hi=10),
+            setter="setContrast", kind="int", lo=-10, hi=10, default=0),
     Control("saturation", "image",
             "post-ISP saturation. Reach for this carefully: the LED colour "
             "classifier separates a lit buoy from its hull ON saturation, so "
             "this moves the exact quantity the model is reading",
-            setter="setSaturation", kind="int", lo=-10, hi=10),
+            setter="setSaturation", kind="int", lo=-10, hi=10, default=0),
     Control("sharpness", "image", "edge enhancement, 1 is the depthai default",
-            setter="setSharpness", kind="int", lo=0, hi=4),
+            setter="setSharpness", kind="int", lo=0, hi=4, default=1),
     Control("luma_denoise", "image",
             "luminance noise reduction, 1 is the depthai default. Worth "
             "raising once high ISO is in play, at the cost of fine detail",
-            setter="setLumaDenoise", kind="int", lo=0, hi=4),
+            setter="setLumaDenoise", kind="int", lo=0, hi=4, default=1),
     Control("chroma_denoise", "image",
             "colour noise reduction, 1 is the depthai default",
-            setter="setChromaDenoise", kind="int", lo=0, hi=4),
+            setter="setChromaDenoise", kind="int", lo=0, hi=4, default=1),
 )
 
 # ---- the composites: more than one parameter, or mutually exclusive ----
@@ -99,25 +93,25 @@ COMPOSITE = (
             "'auto' lets the camera meter; 'manual' pins exposure_us and iso "
             "and ignores every ae_* setting. Explicit because depthai silently "
             "ignores whichever of the two you did not mean",
-            kind="enum", choices=("auto", "manual")),
+            kind="enum", choices=("auto", "manual"), default="auto"),
     Control("exposure_us", "exposure",
             "shutter time when ae_mode is 'manual'. 8000 is the cap "
             "oak_record.py uses to keep a dataset free of motion blur",
-            kind="int", lo=1, hi=100000),
+            kind="int", lo=1, hi=100000, default=8000),
     Control("iso", "exposure",
             "sensitivity when ae_mode is 'manual'. 100 is this sensor's floor "
             "— measured on the boat, AE was sitting at exactly 100 with the "
             "whole gain range unused while the frame was 4 stops under",
-            kind="int", lo=100, hi=1600),
+            kind="int", lo=100, hi=1600, default=400),
     Control("ae_region_top", "exposure",
             "top of the metering band, as a fraction of frame height",
-            kind="float", lo=0.0, hi=1.0),
+            kind="float", lo=0.0, hi=1.0, default=0.35),
     Control("ae_region_height", "exposure",
             "height of the metering band, as a fraction of frame height. "
             "0 meters the WHOLE FRAME, which is what makes a backlit scene "
             "dark: the sky averages out to a number that looks correct and "
             "puts the waterline on the floor",
-            kind="float", lo=0.0, hi=1.0),
+            kind="float", lo=0.0, hi=1.0, default=0.45),
     Control("awb_mode", "white balance",
             "'off' uses wb_temperature_k; everything else is a preset the "
             "camera applies for you",
@@ -125,13 +119,13 @@ COMPOSITE = (
             choices=("auto", "off", "daylight", "cloudy_daylight", "shade",
                      "twilight", "incandescent", "fluorescent",
                      "warm_fluorescent"),
-            enum_type="AutoWhiteBalanceMode"),
+            enum_type="AutoWhiteBalanceMode", default="auto"),
     Control("wb_temperature_k", "white balance",
             "colour temperature, used only when awb_mode is 'off'. Water and "
             "sky are both strongly blue, which is the scene auto white balance "
             "is worst at — it corrects the blue away and takes the buoys' "
             "colour with it",
-            kind="int", lo=1000, hi=12000),
+            kind="int", lo=1000, hi=12000, default=5000),
 )
 
 ALL = SIMPLE + COMPOSITE
@@ -145,27 +139,22 @@ SENSOR_WIDTH = 1920
 SENSOR_HEIGHT = 1200
 
 
-def param_spec():
-    """The PARAM_SPEC fragment for every control. All dynamic, by definition:
-    a camera setting you cannot change while looking at the picture is a
-    setting nobody tunes."""
-    spec = {}
-    for c in ALL:
-        entry = dict(read_only=False, description=c.description)
-        if c.lo is not None:
-            entry["lo"], entry["hi"] = c.lo, c.hi
-        if c.choices:
-            entry["choices"] = c.choices
-        spec[c.name] = entry
-    return spec
+def defaults():
+    """{name: default} for every control. All of them are dynamic parameters: a camera
+    setting you cannot change while looking at the picture is one nobody tunes."""
+    return {c.name: c.default for c in ALL}
+
+
+def ranges():
+    """{name: (lo, hi)} for the numeric controls; ROS enforces them on every set."""
+    return {c.name: (c.lo, c.hi) for c in ALL if c.lo is not None}
 
 
 def validate(values):
     """Error string for the first unacceptable value, or None.
 
-    Enums need this because ROS parameter ranges only describe numbers, so a misspelled mode
-    would reach depthai as a lookup failure deep in the apply path, after some other settings
-    had already been applied.
+    Enums only: ROS checks the numeric ranges itself, while a misspelled mode would otherwise
+    reach depthai as a lookup failure after some other settings had already been applied.
     """
     for name, value in values.items():
         c = BY_NAME.get(name)

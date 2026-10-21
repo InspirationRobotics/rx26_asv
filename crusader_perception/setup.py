@@ -14,18 +14,13 @@ setup(
     zip_safe=False,
     maintainer="Team Inspiration",
     maintainer_email="brandont3927@gmail.com",
-    description="Crusader perception: OAK-D frames, detection and ranging",
+    description="Crusader perception: the OAK-D and the MID360",
     url="https://github.com/InspirationRobotics/rx26_asv",
     license="MIT",
     entry_points={
         "console_scripts": [
-            "oakd_publisher = crusader_perception.oakd_publisher:main",
-            "buoy_detector = crusader_perception.buoy_detector:main",
-            "lidar_cluster_node = crusader_perception.lidar_cluster_node:main",
-            "oak_detector = crusader_perception.oak_detector:main",
-            "proximity_bridge = crusader_perception.proximity_bridge_node:main",
-            # Task 3 fixed nozzle: not in core.launch.py until it has run on the boat
-            "wall_range_node = crusader_perception.wall_range_node:main",
+            "camera_node = crusader_perception.camera_node:main",
+            "lidar_node = crusader_perception.lidar_node:main",
         ],
     },
 )

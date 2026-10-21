@@ -201,7 +201,7 @@ class SimCamera(Node):
         with open(default_params_yaml(), encoding="utf-8") as f:
             params = yaml.safe_load(f)
         tt = params["target_tracker"]["ros__parameters"]
-        od = params["oak_detector"]["ros__parameters"]
+        od = Y._oak_core().camera_params(params)
         self.cam_pos = np.array([tt["cam_x"], tt["cam_y"], tt["cam_z"]], dtype=float)
         # + yaw = aimed to PORT, + pitch = aimed DOWN (REP-103 +pitch)
         self.R_cam = rot_z(math.radians(tt.get("cam_yaw_deg", 0.0))) @ \

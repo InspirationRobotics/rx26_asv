@@ -26,7 +26,7 @@ from crusader_sim import yolo_detect as Y                           # noqa: E402
 
 with open(os.path.join(REPO, "crusader_bringup", "config", "crusader_params.yaml"),
           encoding="utf-8") as f:
-    OD = yaml.safe_load(f)["oak_detector"]["ros__parameters"]
+    OD = Y._oak_core().camera_params(yaml.safe_load(f))
 
 BOX = (100, 200, 140, 260)
 RED = [0.0, 0.0, 0.05, 0.95]        # cls_labels order: blue, green, off, red

@@ -1,6 +1,6 @@
 """dock_obs_core — one camera frame's dock detections -> a DockObservation, with no ROS.
 
-tools/dock_view.py runs the CV team's chain (their YOLO, geometry_core,
+dock_model.py runs the CV team's chain (their YOLO, geometry_core,
 colour_core, dock_sequence_core) and hands the result here; this module adds
 what the chain does not compute and the tree needs, and shapes it into the
 message crusader_msgs/DockObservation carries (firefighting-cv
@@ -23,8 +23,6 @@ maps to depth by a plain ratio of the two frame sizes.
 
 numpy only; unit-tested in crusader_perception/test/test_dock_obs_core.py.
 """
-import math
-
 import numpy as np
 
 # DockWindow.STATE_* / DockBay.COLOUR_* (the same numbering)
@@ -132,7 +130,7 @@ def _box(b):
 
 
 def bay_obs(i, bay, depth_mm, rgb_size, intr, plane_kw=None):
-    """One DockBay (as a dict of its fields) from dock_view's bay dict. The
+    """One DockBay (as a dict of its fields) from dock_model's bay dict. The
     windows' aim points come from the face plane when depth gives one."""
     wins = [w for w in bay["windows"] if w.get("index") is not None]
     holes = [w["box"] for w in wins] + ([bay["indicator"]["box"]] if bay.get("indicator") else [])

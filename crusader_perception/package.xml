@@ -4,11 +4,8 @@
   <name>crusader_perception</name>
   <version>0.5.0</version>
   <description>
-    Sensor-coupled processing: raw data in, detections out. Owns the OAK-D and
-    ranges what it detects, so it needs both depthai and TensorRT - it runs in
-    the `asv` container with the rest of the stack. Holds `oakd_publisher`
-    (RGB + depth aligned and paired on-device) and `buoy_detector` (detections
-    in camera_link). See the package README.
+    camera_node (the OAK-D: buoy and dock models, the picture) and lidar_node (the
+    MID360: clusters, the Nav2 cloud, proximity, the wall range). See the README.
   </description>
   <maintainer email="brandont3927@gmail.com">Team Inspiration</maintainer>
   <license>MIT</license>
@@ -16,12 +13,13 @@
 
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>rcl_interfaces</depend>
   <depend>crusader_msgs</depend>
   <depend>crusader_common</depend>
   <exec_depend>python3-numpy</exec_depend>
-  <!-- depthai has no rosdep key: it is a pip package, installed by the `asv`
-       Dockerfile rather than by rosdep. Listing it here would only make
-       `rosdep install` fail on an unresolvable key. -->
+  <exec_depend>python3-opencv</exec_depend>
+  <!-- depthai and ultralytics are pip packages installed by the Dockerfile: no rosdep key -->
 
   <export>
     <build_type>ament_python</build_type>

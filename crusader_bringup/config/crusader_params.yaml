@@ -98,35 +98,6 @@ telemetry_bridge:
                                            #        pass-through outputs, so the
                                            #        bridge sends the pump OFF
 
-# ---- Task 3 fixed nozzle: the wall range (crusader_perception/wall_range_node) ----
-# NOT in core.launch.py until it has run on the boat. The LiDAR extrinsic and the
-# waterline come from lidar_cluster_node's section, not from here: one sensor,
-# one mounting.
-wall_range_node:
-  ros__parameters:
-    cloud_topic: "/livox/lidar"            # [RO] livox container's PointCloud2
-    wall_topic: "/crsd/wall_range"         # [RO] WallRange out, every sweep
-    frame_id: "base_link"                  # [RO]
-    attitude_timeout_s: 0.5                # [RO] older = fit unlevelled
-    health_period_s: 2.0                   # [RO]
-    sector_deg: 40.0                       # [RO] half-angle ahead for the wall
-    finger_sector_deg: 90.0                # [RO] fingers are beside the boat
-    r_min: 0.3                             # [RO] m, horizontal, from the body origin
-    r_max: 4.0                             # [RO]
-    z_min_above_water: 0.03                # [RO] m; the band that is not water
-    z_max_above_water: 1.5                 # [RO]
-    tol_m: 0.03                            # [RO] RANSAC inlier distance
-    iters: 200                             # [RO]
-    max_points: 4000                       # [RO] RANSAC scores a subsample
-    min_inliers: 40                        # [RO]
-    min_span_m: 0.4                        # [RO] this much wall, along it
-    max_angle_deg: 35.0                    # [RO] a wall more oblique is not ahead
-    finger_depth_m: 2.5                    # [RO] fingers within this of the wall
-    finger_min_off_m: 0.25                 # [RO] a finger's inner edge, sideways
-    finger_max_off_m: 1.5                  # [RO]
-    finger_min_points: 15                  # [RO]
-    finger_quantile: 0.1                   # [RO] inner edge = this quantile
-
 # ---- Task 3 fixed nozzle: the calibration tool (tools/squirt_cal) ----
 # A bench tool, not a node in the launch file: python3 tools/squirt_cal/squirt_cal.py
 # Every key must be here (squirt_core.load_config refuses unknown and missing).
@@ -185,200 +156,55 @@ led_status_node:
     autonomy_hold_s: 1.0                   # [RO] stay GREEN this long after last autonomy beat
     rate_hz: 5.0                           # [RO] LED state evaluation rate
 
-# ---- Perception: the OAK-D nodes ----
-# They run in `asv` (it carries depthai) and are not in core.launch.py: they
-# contend for the one OAK-D, so which one runs is an operator choice.
-# Depth is aligned to RGB and both come out at 1920x1200 / isp_denominator, so
-# consumers use the RGB intrinsics on the depth image. Changing isp_denominator
-# changes every downstream pixel-space threshold.
-oakd_publisher:
-  ros__parameters:
-    rgb_topic: "oak/rgb"                   # [RO] relative name; namespace/remap moves the pair
-    depth_topic: "oak/depth"               # [RO] relative name; 16UC1 millimetres
-    frame_id: "oak_rgb_camera_optical_frame"  # [RO] shared by both images (depth is aligned)
-    fps: 15.0                              # [RO] camera frame rate [Hz]
-    isp_denominator: 3                     # [RO] 1/N of 1920x1200; 3 -> 640x400 (stereo-native)
-    poll_period_s: 0.01                    # [RO] output-queue poll; keep well under 1/fps
-    queue_size: 4                          # [RO] device output queue depth (non-blocking)
-    health_period_s: 5.0                   # [RO] warn if no frames arrived since last check
-
-# buoy_detector OWNS THE SAME CAMERA as oakd_publisher (one client at a time).
-# It publishes detections, not frames: a few hundred bytes instead of 1.28 MB.
-# Its camera block MUST equal oakd_publisher's (check_config.py), or a range
-# measured under one means something else under the other.
-buoy_detector:
-  ros__parameters:
-    engine: "/root/robotx_ws/models/buoy_v16.engine"   # [RO] TensorRT engine
-    labels:                                # [RO] IN ENGINE ORDER — a wrong order
-                                           #      silently mislabels every buoy
-      - "black_buoy"
-      - "black_cross"
-      - "black_target_boat"
-      - "black_triangle"
-      - "blue_buoy"
-      - "green_buoy"
-      - "green_light_buoy"
-      - "green_pole_buoy"
-      - "red_buoy"
-      - "red_light_buoy"
-      - "red_pole_buoy"
-      - "yellow_buoy"
-      - "yellow_target_boat"
-    conf_min: 0.40                         # [RO] publish above this; consumers
-                                           #      re-threshold for their own use
-    imgsz_height: 352                      # [RO] engine input height
-    imgsz_width: 640                       # [RO] engine input width
-    range_min_m: 0.30                      # [RO] depth below this is invalid
-    range_max_m: 25.0                      # [RO] depth above this is invalid
-    min_depth_samples: 5                   # [RO] valid pixels needed to range a box
-    frame_id: "camera_link"                # [RO] REP-103 body axes: x fwd, y left, z up
-    detections_topic: "crsd/oak/detections"     # [RO] Detection3DArray, every frame
-    publish_frames: false                  # [RO] BRING-UP ONLY: +38 MB/s at 30fps
-    rgb_topic: "oak/rgb"                   # [RO] only used if publish_frames
-    depth_topic: "oak/depth"               # [RO] only used if publish_frames
-    fps: 15.0                              # [RO] = oakd_publisher.fps
-    isp_denominator: 3                     # [RO] = oakd_publisher.isp_denominator
-    poll_period_s: 0.01                    # [RO] output-queue poll period [s]
-    queue_size: 4                          # [RO] device output queue depth
-    health_period_s: 5.0                   # [RO] rate/health log period [s]
-    stream_enable: true                    # [RO] annotated MJPEG view over HTTP;
-                                           #      frames are only drawn while a
-                                           #      browser is actually connected
-    stream_port: 8080                      # [RO] = tools/oak_view.py's: never
-                                           #      both bound, never both useful
-    stream_quality: 60                     # [RO] JPEG quality for that view
-
-# ---- lidar_cluster_node: MID360 point cloud -> 3D object clusters ----
-# Consumes the livox container's /livox/lidar; opens no device itself.
+# ---- crusader_perception: camera_node (the OAK-D) and lidar_node (the MID360) ----
+# Every parameter and its default is in the node's PARAMS (oak_detector_core, dock_model and
+# oak_controls for camera_node); this lists what is set for this boat. [DYN] = live.
 #
-# THE EXTRINSIC IS BENCH-CONFIRMED (docs/G2_lidar_orientation.md): mounted
-# upside down, the raw frame is x forward, y STARBOARD, z down, so both signs
-# negate into REP-103. [RO]: a live-tunable mounting silently invalidates every
-# position already on the map. Re-run G2 after any remount.
-lidar_cluster_node:
+# camera_node is NOT in core.launch.py: start it from the Nodes tab.
+# THE CROP PARAMS ARE A CONTRACT WITH THE TRAINING EXPORTER: cls_imgsz, crop_pad,
+# crop_top_frac (and ae_compensation, the colour the LED records as) must match what
+# cut the training crops, or the classifier is silently worse everywhere.
+camera_node:
   ros__parameters:
-    cloud_topic: "/livox/lidar"            # [RO] livox container's PointCloud2
-    clusters_topic: "crsd/lidar_clusters"  # [RO] Cluster3DArray, every window
-    frame_id: "base_link"                  # [RO] REP-103: x fwd, y left, z up
-    # -- extrinsic [RO]: sensor -> body. See docs/G2 --
-    lidar_sign_y: -1.0                     # [RO] raw +y is starboard
-    lidar_sign_z: -1.0                     # [RO] mounted upside down
-    lidar_x: 0.32                          # [RO] m forward of geometry centre
-    lidar_y: 0.05                          # [RO] m to PORT of centreline
-    lidar_z: 0.52                          # [RO] m above the hull-bottom datum.
-                                           #      Draft is 0.24 m, so the sensor
-                                           #      sits only 0.28 m ABOVE THE
-                                           #      WATERLINE (wave clearance cost:
-                                           #      Resources.md).
-    # -- self-return filters [DYN], applied in the SENSOR frame --
-    r_min: 0.5                             # [DYN] clear sphere around the sensor;
-                                           #       mount, cabling, deck beneath it
-    fov_deg: 180.0                         # [DYN] forward sector only — the hull
-                                           #       blocks the view aft of the beam,
-                                           #       so returns behind it are the boat
-    # -- levelled-frame gates [DYN] --
-    water_z: 0.24                          # [DYN] MEASURED waterline above the
-                                           #       hull-bottom datum (G2 step 4).
-                                           #       Most of the FOV is water: set
-                                           #       too low, water returns reach
-                                           #       clustering. Anything under
-                                           #       water_margin above the surface
-                                           #       is dropped by design — lower the
-                                           #       margin, not water_z, to see
-                                           #       very low debris.
-    water_margin: 0.15                     # [DYN] keep points this far above water
-    z_ceiling: 4.0                         # [DYN] above this is sky/rain
-    r_max: 10.0                            # [DYN] horizontal range ceiling [m].
-                                           #       POOL VALUE: at 40 m a pool's
-                                           #       walls, deck and room become 100+
-                                           #       permanent tracks at 15-28 m.
-                                           #       ON OPEN WATER RAISE IT to 25-40:
-                                           #       10 m is inside the camera's 25
-                                           #       and makes the fusion one-sided.
-                                           #       ros2 param set /lidar_cluster_node
-                                           #           r_max 40.0
-    # -- voxel-grid DBSCAN [DYN] --
-    # eps stays SMALL, growing only gently with range: a buoy's returns are ~0.3 m
-    # apart at every range, while the neighbourhood volume grows as eps^3 and
-    # sweeps in proportionally more noise.
-    leaf_size: 0.15                        # [DYN] voxel edge [m]
-    eps_0: 0.30                            # [DYN] neighbourhood radius at eps_r_ref
-    eps_r_ref: 15.0                        # [DYN] range where eps_0 applies [m]
-    max_rings: 2                           # [DYN] cap on adaptive eps, in voxels
-    min_density_points: 6                  # [DYN] raw points in the neighbourhood
-                                           #       before a voxel may seed a cluster
-    min_points: 5                          # [DYN] points needed to emit a cluster
-    max_extent_m: 8.0                      # [DYN] bigger = shoreline, not an object
-    # -- accumulation + freshness [DYN] --
-    # A 0.3 m buoy returns ~37 points per sweep at 5 m, 9 at 10 m, 2 at 20 m:
-    # 1 sweep reaches ~10 m, 5 reach ~20 m. Stacking works because Livox's
-    # non-repetitive pattern adds NEW coverage each sweep.
-    accumulate_sweeps: 5                   # [DYN] 10 Hz sweeps -> ~0.5 s window
-    attitude_timeout_s: 1.0                # [DYN] stale -> cluster unlevelled
-    pose_timeout_s: 1.0                    # [DYN] stale -> single sweep, no
-                                           #       accumulation (cannot compensate)
-    health_period_s: 5.0                   # [DYN] JSON stats publish period
-    # -- navigation cloud: the Nav2 costmap's LiDAR input (docs/nav2_avoidance_spec.md
-    #    section 6). Every point in a cluster of >= min_points, levelled and voxel-
-    #    thinned, INCLUDING clusters over max_extent_m: a dock is not a trackable
-    #    object, but the hull still must not hit it. --
-    nav_cloud_enable: true                 # [DYN] THE POOL SWITCH. false publishes
-                                           #       EMPTY clouds: the costmap stays
-                                           #       current and marks nothing.
-                                           #       Pool/indoor: false (with r_max
-                                           #       10) — walls get marked lethal
-                                           #       and goals near them become
-                                           #       unreachable. Open water: true,
-                                           #       r_max 25-40. Live, or the GCS
-                                           #       Tuning tab.
-    nav_cloud_topic: "/crsd/nav/obstacle_cloud"  # [RO] PointCloud2 out, sensor-data QoS
-    nav_cloud_frame: "base_footprint"      # [RO] = nav_frames_node.base_frame.
-                                           #      Stamped with RECEIPT time;
-                                           #      WITHHELD while attitude is stale
-                                           #      (costmap goes non-current,
-                                           #      planned legs hold)
-    nav_cloud_leaf_m: 0.10                 # [DYN] voxel edge, one centroid each;
-                                           #       0.05-0.5. Costmap resolution is 0.1
+    model: "buoy"                          # [DYN] none | buoy | dock
+    fps: 15.0                              # the flash tracker needs 3 fps or more
+    isp_denominator: 3                     # stereo and depth 640x400 (1280 wide at most)
+    rgb_isp_denominator: 1                 # colour 1920x1200: the dock model wants exactly this
+    det_engine: "/root/robotx_ws/models/buoy_detector.engine"
+    det_labels: ["circle", "diamond"]      # IN ENGINE ORDER: a wrong order mislabels every box
+    cls_engine: "/root/robotx_ws/models/led_classifier.engine"
+    cls_labels: ["blue", "green", "off", "red"]   # IN ENGINE ORDER (training folder order)
+    cls_imgsz: 64
+    crop_pad: 0.1
+    crop_top_frac: 0.25
+    dock_ffcv_dir: "/root/robotx_ws/models/ffcv"
+    # the camera profile the boat starts on; camera_profiles.yaml holds the others
+    ae_compensation: -3                    # [DYN] also a training contract, see above
+    ae_max_exposure_us: 8000               # [DYN] shutter cap: no motion blur on a moving boat
+    ae_region_top: 0.35                    # [DYN] meter the band around the horizon,
+    ae_region_height: 0.45                 # [DYN]   not the sky
 
-# ---- proximity_bridge: LiDAR clusters -> OBSTACLE_DISTANCE for the autopilot ----
-# OPTIONAL, and NOT the avoidance mechanism: that is the Nav2 planner called
-# from bt_runner (docs/nav2_avoidance_spec.md). ArduPilot's simple avoidance is
-# at most a backstop and is off in the baseline: PRX1_TYPE 0, so the
-# AVOID_ENABLE=3 / AVOID_MARGIN=2.0 that are set have nothing feeding them.
-# DO NOT turn it on to "help" the planner: with AVOID_MARGIN 2.0 ArduRover STOPS
-# the boat inside the planner's 0.8-2 m band and in the Task 3 berth.
+# lidar_node: clusters, the Nav2 cloud, proximity for the autopilot, the Task 3 wall.
+# THE EXTRINSIC IS BENCH-CONFIRMED (docs/G2_lidar_orientation.md): mounted upside down,
+# the raw frame is x forward, y starboard, z down. Re-run G2 after any remount.
 #
-# AUTOPILOT SIDE, which must be set or none of this does anything:
-#   PRX1_TYPE = 2   MAVLink proximity source; at 0 OBSTACLE_DISTANCE is ignored
-#                   and the viewer stays empty.
-#   AVOID_BEHAVE    IGNORE IT: a COPTER parameter. Rover always stops before
-#                   objects in every mode except MANUAL; there is no Slide.
-#   OA_TYPE = 1     BendyRuler — the ONLY thing that routes AROUND obstacles,
-#                   and only in AUTO, GUIDED and RTL. (OA_BR_TYPE = 1,
-#                   horizontal, is Rover's only option.)
-proximity_bridge:
+# Proximity (crsd/obstacle_distance) is a backstop, not the avoidance: that is the Nav2
+# planner. The autopilot ignores it unless PRX1_TYPE = 2, and with AVOID_MARGIN 2.0
+# ArduRover stops the boat inside the planner's band and in the Task 3 berth.
+lidar_node:
   ros__parameters:
-    clusters_topic: "crsd/lidar_clusters"  # [RO] = lidar_cluster_node.clusters_topic
-    output_topic: "crsd/obstacle_distance" # [RO] telemetry_bridge puts it on the wire
-    send_rate_hz: 5.0                      # [RO] clusters arrive at 10 Hz; 5 is
-                                           #      plenty and halves the load on
-                                           #      the USB link a param download
-                                           #      is known to saturate
-    fov_deg: 180.0                         # [RO] = lidar_cluster_node.fov_deg.
-                                           #      The hull blocks aft; those
-                                           #      sectors go out as NO READING,
-                                           #      never as a near return
-    increment_deg: 5.0                     # [RO] 72 sectors x 5 deg = 360.
-                                           #      ArduPilot consolidates to 8
-                                           #      sectors of 45 deg anyway
-    min_range_m: 0.5                       # [RO] = lidar_cluster_node.r_min
-    max_range_m: 40.0                       # [RO] lidar_cluster_node.r_max's open-water value
-    min_half_deg: 1.0                      # [RO] floor on painted width so a
-                                           #      distant buoy still fills a sector
-    cluster_timeout_s: 1.0                 # [RO] stale clusters -> emit NOTHING.
-                                           #      Repeating the last map claims
-                                           #      the world still looks like that
-    health_period_s: 5.0                   # [RO]
+    lidar_sign_y: -1.0
+    lidar_sign_z: -1.0
+    lidar_x: 0.32                          # m forward of the geometry centre
+    lidar_y: 0.05                          # m to port of the centreline
+    lidar_z: 0.52                          # m above the hull-bottom datum (0.28 above water)
+    water_z: 0.24                          # [DYN] MEASURED waterline above the datum. To see
+                                           #       low debris lower water_margin, not this
+    r_max: 10.0                            # [DYN] POOL value: walls become 100+ tracks at 40.
+                                           #       Open water: ros2 param set /lidar_node r_max 40.0
+    nav_cloud_enable: true                 # [DYN] THE POOL SWITCH: false publishes empty clouds
+                                           #       (walls would be lethal, goals unreachable)
+    wall_enable: false                     # /crsd/wall_range: not yet run on the boat
 
 # ---- Nav2 avoidance: nav_frames_node — the datum, and TF map -> base_footprint ----
 # docs/nav2_avoidance_spec.md section 2. TF `map`, bt_runner's east/north frame
@@ -732,217 +558,6 @@ ocs_client:
                                            #      armed/mode the state is
                                            #      unknowable, and the OCS
                                            #      validator refuses STATE_UNKNOWN
-
-
-# ---- oak_detector: two-stage shape + LED-colour pipeline ----
-# THIRD client for the one OAK-D (see buoy_detector). It shares buoy_detector's
-# topic (oak/detections) and stream_port 8080 on purpose: the two never run
-# together, so target_tracker and the camera tab work behind whichever is up
-# without a remap. check_config.py pins the three topic names together.
-#
-# THE CROP PARAMS ARE A CONTRACT WITH THE TRAINING EXPORTER, not tuning knobs.
-# cls_imgsz / crop_pad / crop_top_frac (and ae_compensation: what colour the LED
-# records as) decide the picture the classifier sees, and the exporter cut its
-# training crops the same way. Disagreement does not fail — the engine just
-# classifies worse, everywhere, silently (mixed exporter versions once graded
-# 0.97 in training vs 0.55 on fresh crops, all geometry). Change both or neither.
-oak_detector:
-  ros__parameters:
-    # -- stage 1: buoy detector --
-    det_engine: "/root/robotx_ws/models/buoy_detector.engine"   # [RO] TensorRT
-    # -- stage 1b: shape, measured rather than predicted --
-    # 'geometry' measures the marking's OUTLINE on the full-resolution crop
-    # (shape_core.marking_shape: whitened 4th harmonic of r(theta) plus bbox fill
-    # ratio; they must agree or it abstains). CPU, no model.
-    # It lets det_engine be a SINGLE-CLASS "buoy" detector: at 15 m a marking is
-    # a couple of feature-map cells and the head is guessing, while the ISP crop
-    # is 60-200 px with the outline right there (8/8 on synthetic buoys over
-    # 0-66 deg of yaw). Abstentions fall back to the detector's own class, so
-    # 'detector' is always safe to switch back to.
-    shape_source: "geometry"               # [RO] "geometry" | "detector"
-    shape_min_radius: 18.0                 # [RO] marking radius [px] below
-                                           #      which it abstains; raise to
-                                           #      abstain more. Renders are
-                                           #      unreliable under ~6 px and
-                                           #      solid by ~10 at 640x400.
-                                           #      SCALES WITH rgb_isp_denominator:
-                                           #      a marking is 3x wider at 1/1
-                                           #      (6 -> 18). Move this whenever
-                                           #      rgb_isp_denominator moves.
-    shape_min_share: 0.6                   # [RO] share of a track's weighted
-                                           #      shape votes one answer needs.
-                                           #      Abstentions are never votes
-    det_labels:                            # [RO] IN ENGINE ORDER — check the
-      - "circle"                           #      dataset.yaml the engine was
-      - "diamond"                          #      trained from, not this comment
-    det_conf_min: 0.60                     # [RO] minimum detector confidence
-    det_imgsz_height: 640                  # [RO] detector engine input height
-    det_imgsz_width: 640                   # [RO] detector engine input width
-    # -- stage 4: LED colour classifier --
-    cls_engine: "/root/robotx_ws/models/led_classifier.engine"  # [RO] TensorRT
-    cls_labels:                            # [RO] IN ENGINE ORDER. For an
-      - "blue"                             #      ultralytics classifier that is
-      - "green"                            #      the training FOLDER order,
-      - "off"                              #      i.e. alphabetical — not the
-      - "red"                              #      order you find natural
-    cls_imgsz: 64                          # [RO] = exporter --crop-size AND the
-                                           #      imgsz the engine was exported
-                                           #      at. 64, not 96: the LED crop is
-                                           #      ~87x48 px on real footage, so
-                                           #      96 was upsampling
-    crop_pad: 0.10                         # [RO] = exporter's 1.2x box padding
-    crop_top_frac: 0.25                    # [RO] = exporter --crop-frac: the
-                                           #      fraction of the BUOY kept below
-                                           #      the LED (buoylib LED_FRAC), NOT
-                                           #      the fraction cut off the crop's
-                                           #      top (0.40 would be a band far
-                                           #      taller than the exporter's)
-    iou_match: 0.25                        # [RO] IoU to continue a track
-    max_missed: 10                         # [RO] frames a track survives unseen.
-                                           #      Losing a track resets its flash
-                                           #      window
-    # -- stage 4: colour vote. BYPASSED while flash_enable is true --
-    # Set flash_enable false with vote_decay 0.0 and vote_min 0.0 to see the RAW
-    # per-frame classification — the view for judging the model, not the tracker.
-    vote_decay: 0.85                       # [RO] per-frame forgetting factor
-    vote_min: 0.55                         # [RO] share needed to publish
-    # -- stage 5: flash detection --
-    # Task 1: five light states (OFF, flashing RED / GREEN / BLUE, solid BLUE),
-    # flashing 1 s ON / 1 s OFF; Task 2 adds SOLID red and green indicators.
-    # Flashing blue is ENTRY and solid blue EXIT: a course-direction decision.
-    # THE GAP BETWEEN off_max AND solid_min IS DELIBERATE: a non-periodic signal
-    # in it is `unknown` and the label degrades to the bare colour. Reading EXIT
-    # as ENTRY sends the boat to the wrong end of the course; refusing is cheaper.
-    # Measured, not taste: a confident classifier reports ~0.9 for a lit frame,
-    # so a SOLID light measures ~0.90 duty before noise; solid_min 0.85 would make
-    # a solid buoy unclassifiable if the model is wrong one frame in ten. These
-    # survive 10% frame error and abstain at 25%.
-    flash_enable: true                     # [RO] false -> colour only, via voter
-    flash_window_s: 6.0                    # [RO] duty window; 3 full periods
-    flash_min_span_s: 4.0                  # [RO] observed time before a verdict
-    flash_min_samples: 8                   # [RO] frames before a verdict
-    solid_min: 0.70                        # [RO] at/above this = solid
-    off_max: 0.30                          # [RO] at/below this = off
-    colour_min_share: 0.6                  # [RO] share of LIT frames one colour
-                                           #      needs before it is named
-    # -- how "flashing" is actually decided --
-    # NOT by duty cycle alone: a 1 s / 1 s light averages 0.5, and so does a
-    # classifier hedging at 0.5 every frame — how this one fails (`off`: 27%
-    # recall on a held-out session). So the tracker asks whether the signal MOVES
-    # LIKE A LIGHT: anti-correlation with itself half a period earlier (square
-    # wave ~1.0, noise ~0). SCALE-FREE, so a faint green flash (0.52 to 0.47;
-    # green's whole margin over an unlit hull is +6 saturation points) passes as
-    # well as a bright red one. 14/14 on synthetic cases incl. 25% frame error.
-    flash_period_s: 2.0                    # [RO] FULL cycle [s]. Task 1 is
-                                           #      1 s ON / 1 s OFF = 2.0
-    flash_corr_min: 0.45                   # [RO] anti-correlation at half a
-                                           #      period needed to call it
-                                           #      flashing
-    flash_debug_path: ""                   # [RO] jsonl of every observation, to
-                                           #      replay footage through the
-                                           #      tracker off-boat. "" = off; one
-                                           #      line per detection per frame
-    # -- ranging --
-    range_min_m: 0.30                      # [RO] depth below this is invalid
-    range_max_m: 25.0                      # [RO] depth above this is invalid
-    min_depth_samples: 5                   # [RO] valid pixels needed to range
-    # -- output --
-    frame_id: "camera_link"                # [RO] REP-103: x fwd, y left, z up
-    detections_topic: "crsd/oak/detections"     # [RO] = buoy_detector.detections_topic
-    health_topic: "crsd/oak_detector_health"   # [RO] std_msgs/String JSON:
-                                           #      per-track light state and the
-                                           #      rate the flash tracker needs
-    # -- camera: fps and isp_denominator MUST equal the other OAK-D nodes.
-    # subpixel / lr_check / sync_threshold_ms are constants in oak_pipeline.py.
-    fps: 15.0                              # [RO] = oakd_publisher.fps. 15, NOT
-                                           #      30, for the USB link: colour
-                                           #      (NV12) + depth cross XLink EVERY
-                                           #      frame, so load = size x rate:
-                                           #        640x400  @30 =  27 MB/s  ok
-                                           #        1920x1200@30 = 119 MB/s  DIES
-                                           #        1920x1200@15 =  60 MB/s
-                                           #      (X_LINK_ERROR, node exits). The
-                                           #      flash is 1 s on/off, so even
-                                           #      4 fps clears Nyquist.
-    rgb_isp_denominator: 1                 # [RO] 1/N for the COLOUR camera
-                                           #      ALONE (1 -> 1920x1200). Both
-                                           #      paths at 1/2 halved the frame
-                                           #      rate with inference barely
-                                           #      moved — the cost is stereo and
-                                           #      USB — and past 1280 px wide the
-                                           #      stereo engine drops EVERY frame.
-                                           #      The 64x64 LED crop is cut from
-                                           #      the RAW frame, so this helps the
-                                           #      CLASSIFIER; the 640x640 DETECTOR
-                                           #      only after a larger re-export.
-    isp_denominator: 3                     # [RO] 3 -> 640x400. Raise resolution
-                                           #      (2 -> 960x600) if no_crop is
-                                           #      high — moves all three nodes
-    # ---- camera profile: every one [DYN], tunable from the Tuning tab ----
-    # Ranges are depthai's own (2.32), ENFORCED from the table the node builds
-    # its parameter spec from (oak_controls.py).
-    # A tuning surface because the right profile depends on the light: at dusk
-    # facing a bright sky, whole-frame metering chose 2214 us at ISO 100 (1/15th
-    # of the shutter, no gain) — median luma 12/255, 38% crushed to black.
-    ae_mode: "auto"                        # [DYN] auto | manual. manual pins
-                                           #       exposure_us + iso and makes
-                                           #       every ae_* setting inert.
-    exposure_us: 8000                      # [DYN] shutter when ae_mode=manual
-    iso: 400                               # [DYN] gain when ae_mode=manual,
-                                           #       100..1600 (100 is the floor)
-    ae_compensation: -3                    # [DYN] EV steps, -9..9; negative is
-                                           #       darker. A TRAINING CONTRACT:
-                                           #       match the classifier footage's
-                                           #       exposure (oak_record.py uses
-                                           #       -3). Moving it means retraining
-                                           #       or accepting new colours.
-    ae_max_exposure_us: 8000               # [DYN] shutter cap; AE spends gain
-                                           #       past it. Uncapped, depthai buys
-                                           #       brightness with smear — a noisy
-                                           #       sharp buoy detects where a
-                                           #       smeared one does not. 0 =
-                                           #       uncapped.
-    ae_lock: false                         # [DYN] freeze AE where it is
-    ae_region_top: 0.35                    # [DYN] metering band, as fractions
-    ae_region_height: 0.45                 # [DYN] of frame height. WHERE the
-                                           #       meter looks matters more than
-                                           #       the bias outdoors: 0.35+0.45 is
-                                           #       the horizon and near water
-                                           #       (median luma 12 -> 41). height
-                                           #       0 = whole frame. Fractions of
-                                           #       the SENSOR, before ISP scale.
-    awb_mode: "auto"                       # [DYN] auto | off | daylight |
-                                           #       cloudy_daylight | shade |
-                                           #       twilight | incandescent |
-                                           #       fluorescent | warm_fluorescent
-    wb_temperature_k: 5000                 # [DYN] 1000..12000, only when
-                                           #       awb_mode is off. Water and sky
-                                           #       are strongly blue, auto WB's
-                                           #       worst case: it corrects the blue
-                                           #       away and the buoys with it.
-    brightness: 0                          # [DYN] -10..10, post-ISP. Cannot
-                                           #       recover a crushed shadow --
-                                           #       fix exposure first.
-    contrast: 0                            # [DYN] -10..10
-    saturation: 0                          # [DYN] -10..10. Careful: the LED
-                                           #       classifier tells a lit buoy
-                                           #       from its hull BY saturation.
-    sharpness: 1                           # [DYN] 0..4, depthai default 1
-    luma_denoise: 1                        # [DYN] 0..4, worth raising once high
-    chroma_denoise: 1                      # [DYN] 0..4, ISO is in play
-    anti_banding: "auto"                   # [DYN] off | mains_50_hz |
-                                           #       mains_60_hz | auto. Mains
-                                           #       flicker: dock lights only.
-    poll_period_s: 0.01                    # [RO] output-queue poll period [s]
-    queue_size: 4                          # [RO] device output queue depth
-    health_period_s: 5.0                   # [RO] rate/health log period [s]
-    # -- annotated view --
-    stream_enable: true                    # [RO] MJPEG over HTTP; frames drawn
-                                           #      only while a browser is open
-    stream_port: 8080                      # [RO] SHARED with buoy_detector and
-                                           #      tools/oak_view.py: one camera,
-                                           #      so never contended
-    stream_quality: 60                     # [RO] JPEG quality for that view
 
 # ---- Missions: bt_runner_node — one coarse action outside, a tree inside ----
 # Runs the built-in tree a RunMission goal names (crusader_bt/behavior_trees/<name>.xml).

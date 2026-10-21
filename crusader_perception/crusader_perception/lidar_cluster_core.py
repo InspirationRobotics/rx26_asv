@@ -2,10 +2,8 @@
 
 Pure numpy: no rclpy, no ROS messages, no device, so every decision here is exercisable
 with an invented cloud on a laptop (none of it is verifiable by staring at a live sensor).
-`lidar_cluster_node.py` is the thin ROS wrapper.
-
-`tools/lidar_view.py` imports the transform and the filters FROM HERE: the bench view and
-the node must apply identical geometry or the orientation check (docs/G2) proves nothing.
+`lidar_node.py` is the ROS wrapper, and its /crsd/lidar/preview is the cloud after this
+module's transform and filters: what the orientation check (docs/G2) looks at.
 
 THE PIPELINE, in order, and the order matters:
 
@@ -456,7 +454,7 @@ def process_body_nav(pts_body: np.ndarray, p: ClusterParams, roll: float = 0.0,
 def process_body(pts_body: np.ndarray, p: ClusterParams, roll: float = 0.0,
                  pitch: float = 0.0, levelled: bool = True, st=None):
     """BODY-frame cloud -> (clusters, ClusterStats). `process_body_nav` without
-    the navigation cloud; `lidar_view.py` and the tests call this one."""
+    the navigation cloud; the tests call this one."""
     clusters, st, _ = process_body_nav(pts_body, p, roll, pitch, levelled, st)
     return clusters, st
 

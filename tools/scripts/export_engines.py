@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""export_engines — build oak_detector's two TensorRT engines ON the Jetson.
+"""export_engines — build camera_node's two TensorRT engines ON the Jetson.
 
-Runs INSIDE the asv container, where oak_detector loads them:
+Runs INSIDE the asv container, where camera_node loads them:
 
     docker exec -it asv bash
     python3 /root/robotx_ws/src/rx26_asv/tools/scripts/export_engines.py \
@@ -17,9 +17,9 @@ laptop, or in a different container, fails to load or loads wrong.
 WHAT IT DOES, in order. It stops at the first thing that is wrong.
   1. Prints the versions it can read (L4T, torch, CUDA, TensorRT, ultralytics, onnx, protobuf).
   2. Loads each .pt and checks its task and its class ORDER against crusader_params.yaml's
-     det_labels / cls_labels. oak_detector maps class index to name by that list, so a different
+     det_labels / cls_labels. camera_node maps class index to name by that list, so a different
      order paints every buoy the wrong colour, and nothing downstream can tell.
-  3. Exports. The detector is a static batch of 1 at 640, matching oak_detector's
+  3. Exports. The detector is a static batch of 1 at 640, matching camera_node's
      predict(imgsz=(640, 640)). The classifier is FP16 with a DYNAMIC batch of up to 8 at
      cls_imgsz (with a static batch of 8, ultralytics refuses a call with 1-7 crops, and the
      node's one-crop fallback would fail the same way).
@@ -28,7 +28,7 @@ WHAT IT DOES, in order. It stops at the first thing that is wrong.
   5. Installs them at det_engine / cls_engine from the YAML. An engine already there is RENAMED to
      <name>.bak-<stamp>, never overwritten.
 
-It never restarts anything. Restart oak_detector from the GCS Nodes tab, then read its "engines
+It never restarts anything. Restart camera_node from the GCS Nodes tab, then read its "engines
 ready" log line.
 
 PROTOBUF. The asv image pins protobuf 5.29.x (Dockerfile, "Nothing here may move protobuf"), and
@@ -75,7 +75,7 @@ def detector_params(path):
            ("det_engine", "cls_engine", "det_labels", "cls_labels", "cls_imgsz")}
     missing = [k for k, v in out.items() if v is None]
     if missing:
-        die("%s has no %s for oak_detector" % (path, ", ".join(missing)))
+        die("%s has no %s for camera_node" % (path, ", ".join(missing)))
     return out
 
 
@@ -125,10 +125,10 @@ def load_checked(pt, task, labels):
             "architecture fails exactly like this. Fallback detector: YOLO11n, "
             "Boat/crusader_vision/runs/det_yolo11n/weights/best.pt." % (pt, type(e).__name__, e))
     if model.task != task:
-        die("%s is a %s model, oak_detector needs %s" % (pt, model.task, task))
+        die("%s is a %s model, camera_node needs %s" % (pt, model.task, task))
     names = [model.names[i] for i in sorted(model.names)]
     if names != list(labels):
-        die("%s classes %s != crusader_params.yaml %s. oak_detector maps index to "
+        die("%s classes %s != crusader_params.yaml %s. camera_node maps index to "
             "name by the YAML, so this order would mislabel every detection."
             % (pt, names, list(labels)))
     print("ok: %s  task %s  classes %s" % (os.path.basename(pt), task, names))
@@ -144,7 +144,7 @@ def export(model, **kw):
 
 
 def smoke(engine, task, imgsz, batches):
-    """Run the engine on blank input of each batch size, as oak_detector calls it."""
+    """Run the engine on blank input of each batch size, as camera_node calls it."""
     import numpy as np
     from ultralytics import YOLO
     model = YOLO(engine, task=task)
@@ -204,7 +204,7 @@ def main():
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     install(det_engine, p["det_engine"], stamp)
     install(cls_engine, p["cls_engine"], stamp)
-    print("done. Restart oak_detector from the GCS Nodes tab and look for its "
+    print("done. Restart camera_node from the GCS Nodes tab and look for its "
           "'engines ready' line; the old engines are the .bak-%s files." % stamp)
 
 

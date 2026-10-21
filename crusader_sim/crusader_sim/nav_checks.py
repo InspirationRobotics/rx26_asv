@@ -263,7 +263,7 @@ def run_s6_precond(a):
     with _ros_node("nav_checks_precond") as node:
         node.create_subscription(Odometry, "/sim/crusader/odometry", on_odom, 10)
         node.create_subscription(PointCloud2, "/crsd/nav/obstacle_cloud", on_cloud, qos_profile_sensor_data)
-        node.create_subscription(String, "/crsd/lidar_cluster_health",
+        node.create_subscription(String, "/crsd/lidar/health",
                                  lambda m: st.update(health=json.loads(m.data)), 10)
         _spin(node, a.seconds)
     counts, health = st["counts"], st["health"] or {}
@@ -271,7 +271,7 @@ def run_s6_precond(a):
     print("[precond] health: " + (" ".join(f"{k}={health[k]}" for k in keys if k in health) or "none yet"),
           flush=True)
     if not counts:
-        print("[precond] no navigation cloud with a ground-truth pose arrived (is lidar_cluster_node up?)")
+        print("[precond] no navigation cloud with a ground-truth pose arrived (is lidar_node up?)")
         return 2
     best = max(counts)
     clustered = best >= a.min_points

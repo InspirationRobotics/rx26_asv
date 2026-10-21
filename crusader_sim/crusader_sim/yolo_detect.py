@@ -413,7 +413,7 @@ def main(argv=None):
     ap.add_argument("--conf", type=float, default=0.0, help="detector confidence floor (boat: 0.60)")
     args = ap.parse_args(argv)
     with open(default_params_yaml(), encoding="utf-8") as f:
-        od = yaml.safe_load(f)["oak_detector"]["ros__parameters"]
+        od = _oak_core().camera_params(yaml.safe_load(f))
     pipe = YoloPipeline(od, args.model_dir, threads=args.threads, imgsz=args.imgsz,
                         conf_min=args.conf)
     for i, path in enumerate(args.images):

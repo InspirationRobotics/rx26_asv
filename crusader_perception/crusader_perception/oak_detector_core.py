@@ -1,10 +1,9 @@
-"""oak_detector_core — the ROS-free half of oak_detector.
+"""oak_detector_core — the ROS-free half of buoy_model (camera_node's buoy model).
 
 No rclpy, no depthai, no ultralytics, and no cv2 at module scope: crop geometry,
 association, voting and flash detection are exercisable against invented inputs on
 a laptop, the only way to trust logic none of which is verifiable from a live
-stream. `oak_detector.py` is the thin ROS wrapper (Format rule 3, same split as
-lidar_cluster_core/node).
+stream. The module keeps its name because crusader_sim imports it.
 
 One section per pipeline stage, each headed by why it works the way it does:
 
@@ -18,6 +17,46 @@ One section per pipeline stage, each headed by why it works the way it does:
 (tools/bench/bench_flash.py runs on a laptop with no OpenCV).
 """
 import numpy as np
+
+# buoy_model's parameters and defaults: here, with no ROS, so the sim reads what the boat runs.
+PARAMS = {
+    "det_engine": "/root/robotx_ws/models/buoy_detector.engine",
+    "det_labels": ["circle", "diamond"],    # IN ENGINE ORDER: a mismatch mislabels every box
+    "det_conf_min": 0.6,
+    "det_imgsz_height": 640,
+    "det_imgsz_width": 640,
+    "shape_source": "geometry",             # geometry | detector; geometry falls back to
+                                            # the detector's class when it abstains
+    "shape_min_radius": 18.0,               # px: the outline test is unreliable under ~6
+    "shape_min_share": 0.6,
+    "cls_engine": "/root/robotx_ws/models/led_classifier.engine",
+    "cls_labels": ["blue", "green", "off", "red"],   # IN ENGINE ORDER (training folders)
+    "cls_imgsz": 64,                        # these three MUST match the training exporter
+    "crop_pad": 0.1,
+    "crop_top_frac": 0.25,
+    "iou_match": 0.25,
+    "max_missed": 10,
+    "vote_decay": 0.85,
+    "vote_min": 0.55,
+    "flash_enable": True,
+    "flash_window_s": 6.0,                  # whole 1 s ON / 1 s OFF periods
+    "flash_min_span_s": 4.0,
+    "flash_min_samples": 8,
+    "solid_min": 0.7,                       # the gaps between these four are dead bands
+    "off_max": 0.3,
+    "colour_min_share": 0.6,
+    "flash_period_s": 2.0,                  # RobotX Task 1: 1 s ON / 1 s OFF
+    "flash_corr_min": 0.45,
+    "flash_debug_path": "",                 # jsonl of every observation, for replay
+    "range_min_m": 0.3,
+    "range_max_m": 25.0,
+    "min_depth_samples": 5,
+}
+
+
+def camera_params(doc):
+    """The buoy parameters camera_node runs with, from a parsed crusader_params.yaml."""
+    return dict(PARAMS, **doc.get("camera_node", {}).get("ros__parameters", {}))
 
 # LED box geometry. MUST match buoylib's LED_APEX / LED_WIDTH, which is what
 # tools/buoy_color/4_export.py cut the training crops with.

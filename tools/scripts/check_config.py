@@ -32,6 +32,7 @@ What it guards, and why each one is here:
    costmap does not enforce, or publishes hazards on a topic the layer is not
    listening to, and the boat looks healthy throughout. See check_nav.
 """
+import ast
 import importlib.util
 import math
 import re
@@ -57,17 +58,13 @@ CONFIG_DRIVEN_NODES = set("""
     led_status_node
     rc_watchdog
     ocs_client
-    oakd_publisher
-    buoy_detector
-    oak_detector
-    lidar_cluster_node
-    proximity_bridge
+    camera_node
+    lidar_node
     target_tracker
     ground_station
     bt_runner_node
     rfd_link_node
     nav_frames_node
-    wall_range_node
     squirt_cal
 """.split())
 
@@ -81,24 +78,7 @@ SIM_ONLY_PACKAGES = {"crusader_sim"}
 # two plausible names, and the consumer never receives anything — the most
 # expensive kind of green.
 TOPIC_PAIRS = (
-    (("buoy_detector", "detections_topic"),
-     ("target_tracker", "detections_topic")),
-    (("oak_detector", "detections_topic"),
-     ("target_tracker", "detections_topic")),
-    (("lidar_cluster_node", "clusters_topic"),
-     ("target_tracker", "clusters_topic")),
-    # proximity_bridge, the second cluster consumer: a mismatch leaves the
-    # autopilot's avoidance silently blind.
-    (("lidar_cluster_node", "clusters_topic"),
-     ("proximity_bridge", "clusters_topic")),
     (("target_tracker", "targets_topic"), ("ground_station", "targets_topic")),
-    (("lidar_cluster_node", "clusters_topic"),
-     ("ground_station", "clusters_topic")),
-    (("proximity_bridge", "output_topic"),
-     ("ground_station", "obstacle_topic")),
-    # squirt_cal on the wrong topic logs "no range" forever while the node
-    # publishes fine.
-    (("wall_range_node", "wall_topic"), ("squirt_cal", "wall_range_topic")),
     # Nav2 avoidance (docs/nav2_avoidance_spec.md). A leg-topic mismatch is a
     # blank map, not an error; a datum-topic mismatch leaves bt_runner waiting
     # for a datum nobody sends, holding every planned leg.
@@ -109,17 +89,7 @@ TOPIC_PAIRS = (
 # Ports that must stay distinct: the loser of a bind fails at startup with an
 # address-in-use that reads like a crash. The ground station EMBEDS the viewers
 # rather than proxying them, so it must avoid their ports.
-PORT_OWNERS = (("buoy_detector", "stream_port"), ("ground_station", "port"),
-               ("squirt_cal", "port"))
-
-# The three nodes that each build the SAME OAK-D pipeline (the camera admits one
-# client). Depth is aligned to RGB at exactly this geometry, so if they drift
-# nothing fails: ranges under one node just quietly mean something else.
-CAMERA_NODES = ("oakd_publisher", "buoy_detector", "oak_detector")
-
-# Only the per-node frame geometry; sync_threshold_ms, subpixel and lr_check are
-# constants in crusader_perception/oak_pipeline.py, equal by construction.
-CAMERA_PARAMS = ("fps", "isp_denominator")
+PORT_OWNERS = (("ground_station", "port"), ("squirt_cal", "port"))
 
 OCS_LINK = (REPO / "crusader_groundstation" / "crusader_groundstation"
             / "ocs_link.py")
@@ -392,57 +362,29 @@ def check_params_yaml():
 
     check_ocs_client(cfg)
 
-    # The camera profile is generated from oak_controls, so YAML and table can
-    # drift two ways: a control with no value (the node refuses to start, "no
-    # declared posture"), or a value outside the enforced range (it starts, then
-    # rejects the first set). Imported off the SOURCE TREE so this runs on the
-    # laptop before any build; oak_controls imports only dataclasses for that.
+    # camera_node's YAML values for the camera controls, against oak_controls' ranges and
+    # choices: one outside them stops the node at startup (ROS refuses it at declaration).
+    # Imported off the SOURCE TREE so this runs on a laptop; oak_controls needs no ROS.
     try:
         sys.path.insert(0, str(REPO / "crusader_perception"))
         from crusader_perception import oak_controls
     except Exception as e:
         fail("oak camera profile", f"could not import oak_controls: {e}")
     else:
-        node = cfg.get("oak_detector", {}).get("ros__parameters", {})
+        node = cfg.get("camera_node", {}).get("ros__parameters", {})
         problems = []
-        for control in oak_controls.ALL:
-            if control.name not in node:
-                problems.append(f"{control.name} has no value in the YAML")
+        for name, value in dict(oak_controls.defaults(), **node).items():
+            control = oak_controls.BY_NAME.get(name)
+            if control is None:
                 continue
-            value = node[control.name]
             if control.choices and str(value).lower() not in control.choices:
-                problems.append(f"{control.name}={value!r} is not one of "
-                                + "/".join(control.choices))
+                problems.append(f"{name}={value!r} is not one of " + "/".join(control.choices))
             if control.lo is not None and not (control.lo <= value <= control.hi):
-                problems.append(f"{control.name}={value} is outside "
-                                f"[{control.lo}, {control.hi}]")
-        extra = [c.name for c in oak_controls.ALL if c.name not in node]
+                problems.append(f"{name}={value} is outside [{control.lo}, {control.hi}]")
         if problems:
             fail("oak camera profile", "; ".join(problems))
         else:
-            ok("oak camera profile",
-               f"{len(oak_controls.ALL)} controls, every one valued and in range")
-
-    # All three OAK-D nodes must describe the same camera (see CAMERA_NODES),
-    # compared against the first so the message names the odd ones out.
-    reference = CAMERA_NODES[0]
-    try:
-        differing = {}
-        for name in CAMERA_PARAMS:
-            want = cfg[reference]["ros__parameters"][name]
-            for node in CAMERA_NODES[1:]:
-                got = cfg[node]["ros__parameters"][name]
-                if got != want:
-                    differing[f"{node}.{name}"] = (got, f"{reference}={want}")
-        if differing:
-            fail("oak camera params consistent",
-                 f"{differing} — depth is aligned at this geometry, so a range "
-                 "means different things under each node")
-        else:
-            ok("oak camera params consistent",
-               f"{len(CAMERA_NODES)} nodes agree on {', '.join(CAMERA_PARAMS)}")
-    except KeyError as e:
-        fail("oak camera params consistent", f"missing key {e}")
+            ok("oak camera profile", f"{len(oak_controls.ALL)} controls in range")
 
 
 # ------------------------------------------------------------------ the pump
@@ -570,6 +512,25 @@ def _load_module(name, path):
     return module
 
 
+def _module_literals(path):
+    """{name: value} for every top-level `NAME = <literal>` in a source file, without
+    importing it (the nodes import rclpy): a node's PARAMS defaults and fixed topics."""
+    out = {}
+    for stmt in ast.parse(Path(path).read_text()).body:
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 \
+                and isinstance(stmt.targets[0], ast.Name):
+            try:
+                out[stmt.targets[0].id] = ast.literal_eval(stmt.value)
+            except ValueError:
+                pass
+    return out
+
+
+def _effective(cfg, node, path):
+    """The values a Python node runs with: its PARAMS defaults under its YAML section."""
+    return dict(_module_literals(path).get("PARAMS", {}), **cfg[node]["ros__parameters"])
+
+
 def _baseline_params():
     """The saved autopilot baseline as {name: value}, or {} when it is absent
     (check_param_baseline reports that on its own)."""
@@ -632,7 +593,9 @@ def check_nav():
         hazard_topic = cm["hazard_layer"]["topic"]
         bt = cfg["bt_runner_node"]["ros__parameters"]
         frames = cfg["nav_frames_node"]["ros__parameters"]
-        lidar = cfg["lidar_cluster_node"]["ros__parameters"]
+        lidar_src = REPO / "crusader_perception" / "crusader_perception" / "lidar_node.py"
+        lidar = _effective(cfg, "lidar_node", lidar_src)
+        lidar["nav_cloud_topic"] = _module_literals(lidar_src)["NAV_CLOUD_TOPIC"]
         inscribed = cm["robot_radius"] * math.cos(math.pi / 16)
         half_window = min(cm["width"], cm["height"]) / 2.0
         hard, soft, clip = bt["nav_hard_m"], bt["nav_soft_m"], bt["nav_clip_radius_m"]
@@ -666,12 +629,12 @@ def check_nav():
           "the layer subscribes to a topic nobody publishes, the costmap goes "
           "non-current and every plan hangs")
     for src in ("lidar_mark", "lidar_clear"):
-        _same(f"obstacle cloud lidar_cluster_node -> stvl {src}",
-              ("lidar_cluster_node.nav_cloud_topic", lidar["nav_cloud_topic"]),
+        _same(f"obstacle cloud lidar_node -> stvl {src}",
+              ("lidar_node.NAV_CLOUD_TOPIC", lidar["nav_cloud_topic"]),
               (f"{src}.topic", cm["stvl_layer"][src]["topic"]),
               "STVL listens to a topic nobody publishes")
     _same("nav_cloud_frame is the TF child frame",
-          ("lidar_cluster_node.nav_cloud_frame", lidar["nav_cloud_frame"]),
+          ("lidar_node.nav_cloud_frame", lidar["nav_cloud_frame"]),
           ("nav_frames_node.base_frame", frames["base_frame"]),
           "the cloud is stamped in a frame TF does not publish, so STVL drops it")
     _same("costmap robot_base_frame is the TF child frame",

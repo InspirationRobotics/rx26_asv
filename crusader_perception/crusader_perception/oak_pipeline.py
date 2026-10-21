@@ -1,10 +1,8 @@
 """oak_pipeline — the one OAK-D RGB+depth pipeline, built in one place.
 
-Two nodes in this package need the identical device configuration: depth is aligned to the
-RGB camera and emitted at the same size, which is what makes the RGB intrinsics valid on the
-depth image and `depth[v, u]` legal for a (u, v) taken off an RGB detection box. Two copies of
-this builder would drift (a different ISP scale, a different setOutputSize), and the result is
-not a crash but quietly wrong ranges.
+camera_node builds its device from this; tools/oak_record.py keeps a standalone copy so it can
+run on a laptop. Depth is aligned to the RGB camera's field of view, which is what makes the
+RGB intrinsics valid on the depth image after a plain ratio of the two frame sizes.
 
 Geometry ported from the prequal-proven gate_navigator in InspirationRobotics/robotx_2026.
 
@@ -24,10 +22,8 @@ STEREO_MAX_WIDTH = 1280
 SENSOR_WIDTH = 1920
 SENSOR_HEIGHT = 1200
 
-# Stereo settings. CONSTANTS, not parameters: all three OAK-D nodes must configure the device
-# identically or a range under one does not mean the same under another; as parameters they
-# were three values duplicated across crusader_params.yaml sections, kept equal by a
-# check_config.py check. Nobody has tuned them; if you need to, change them here, once.
+# Stereo settings. Constants, not parameters: nobody has tuned them, and a range should mean
+# the same thing in every recording. If you need to, change them here, once.
 SUBPIXEL = True             # finer far-range depth
 LR_CHECK = True             # left/right check; rejects occlusions
 SYNC_THRESHOLD_MS = 50      # max RGB/depth gap the device Sync will pair
@@ -56,9 +52,7 @@ def build_rgbd(isp_denominator, fps, controls=None, rgb_isp_denominator=None):
     controls is the camera profile as {parameter: value} — see oak_controls, which owns the
     table of what exists and how each reaches depthai. It is applied to CAM_A's initialControl
     here and re-applied through the control queue on every change, so the picture at startup
-    and after tuning come from the same code. None leaves depthai's defaults, which
-    buoy_detector and oakd_publisher want (frames for a human; a classifier-tuned profile is a
-    poor view).
+    and after tuning come from the same code. None leaves depthai's defaults.
 
     APPLIED TO CAM_A ONLY, deliberately: the stereo pair's exposure is a depth-quality
     decision, and darkening it to fix a colour problem would spend range on the water. Stereo
@@ -77,7 +71,7 @@ def build_rgbd(isp_denominator, fps, controls=None, rgb_isp_denominator=None):
         frame is unreachable while the two share one scale.
 
     The cost is that `depth[v, u]` stops being legal, which this module's header exists to
-    protect. The caller pays it: oak_detector scales detection boxes into depth space and keeps
+    protect. The caller pays it: buoy_model scales detection boxes into depth space and keeps
     the bearing maths on RGB coordinates with RGB intrinsics. Depth is still ALIGNED to CAM_A
     (same field of view), so a plain ratio is the whole correction.
     """

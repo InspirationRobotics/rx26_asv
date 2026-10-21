@@ -33,7 +33,7 @@ LIDAR_HIDDEN = 2
 def _sensor_mounts(params_path):
     with open(params_path, encoding="utf-8") as f:
         p = yaml.safe_load(f)
-    lid = p["lidar_cluster_node"]["ros__parameters"]
+    lid = p["lidar_node"]["ros__parameters"]
     cam = p["target_tracker"]["ros__parameters"]
     return {
         "lidar": (float(lid["lidar_x"]), float(lid["lidar_y"]), float(lid["lidar_z"])),

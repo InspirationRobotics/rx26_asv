@@ -1,4 +1,5 @@
-"""The navigation obstacle cloud (docs/nav2_avoidance_spec.md section 6).
+"""lidar_node: the navigation obstacle cloud (docs/nav2_avoidance_spec.md section 6),
+proximity and the preview.
 
 Core tests are numpy only, no ROS:   python crusader_perception/test/test_lidar_nav_cloud.py
 The node tests need rclpy and a built crusader_msgs, and skip themselves without
@@ -28,8 +29,9 @@ try:
     from rclpy.parameter import Parameter
     from rclpy.qos import ReliabilityPolicy
     from builtin_interfaces.msg import Time
+    from std_msgs.msg import Bool
     from crusader_msgs.msg import Attitude
-    from crusader_perception import lidar_cluster_node as lcn
+    from crusader_perception import lidar_node as lcn
     HAVE_ROS = True
 except Exception:                                   # no ROS, or msgs not built
     HAVE_ROS = False
@@ -221,14 +223,14 @@ class NavCloudNode(unittest.TestCase):
         rclpy.try_shutdown()
 
     def setUp(self):
-        self.node = lcn.LidarClusterNode()
+        self.node = lcn.LidarNode()
         # What the real publisher was built with, before it is swapped for a recorder
         self.qos = self.node.nav_pub.qos_profile
         self.topic = self.node.nav_pub.topic_name
         self.nav, self.clusters, self.log = _Rec(), _Rec(), _Rec()
-        self.node.nav_pub, self.node.pub = self.nav, self.clusters
+        self.node.nav_pub, self.node.cluster_pub = self.nav, self.clusters
         self.node.get_logger = lambda: self.log
-        self.node.params.r_max = 40.0
+        self.assertTrue(self.setp("r_max", Parameter.Type.DOUBLE, 40.0).successful)
 
     def tearDown(self):
         self.node.destroy_node()
@@ -317,7 +319,46 @@ class NavCloudNode(unittest.TestCase):
         self.assertFalse(self.setp("nav_cloud_leaf_m", Parameter.Type.DOUBLE, 0.01).successful)
         self.assertTrue(self.setp("nav_cloud_leaf_m", Parameter.Type.DOUBLE, 0.5).successful)
         self.assertEqual(self.node.nav_leaf, 0.5)
-        self.assertFalse(self.setp("nav_cloud_topic", Parameter.Type.STRING, "/x").successful)
+        self.assertFalse(self.setp("lidar_x", Parameter.Type.DOUBLE, 0.0).successful)   # read-only
+
+    def test_proximity_follows_clusters_and_the_switch(self):
+        prox = _Rec()
+        self.node.prox_pub = prox
+        self.attitude()
+        self.node._send_proximity()
+        self.assertEqual(prox.msgs, [])                      # no clusters yet: silence
+        self.feed(buoy(x=8.0, y=0.0))
+        self.node._send_proximity()
+        m = prox.msgs[-1]
+        self.assertEqual((len(m.distances), m.header.frame_id), (72, "base_link"))
+        ahead = m.distances[0]
+        self.assertTrue(700 <= ahead <= 900, ahead)          # cm, dead ahead
+        self.node._on_avoid(Bool(data=False))
+        self.node._send_proximity()
+        self.assertEqual(len(prox.msgs), 1)                  # disabled: nothing more
+        self.node._on_avoid(Bool(data=True))
+        self.node._clusters.set([], time.monotonic() - 100.0)  # clusters gone stale
+        self.node._send_proximity()
+        self.assertEqual(len(prox.msgs), 1)
+
+    def test_preview_only_while_watched_and_thinned(self):
+        prev = _Rec()
+        self.node.preview_pub = prev
+        prev.get_subscription_count = lambda: 0
+        self.attitude()
+        self.feed(buoy(n=5000))
+        self.assertEqual(prev.msgs, [])
+        prev.get_subscription_count = lambda: 1
+        self.feed(buoy(n=5000))
+        self.feed(buoy(n=5000))                              # inside PREVIEW_PERIOD_S: skipped
+        self.assertEqual(len(prev.msgs), 1)
+        m = prev.msgs[0]
+        self.assertEqual(m.header.frame_id, "base_link")
+        self.assertLessEqual(m.width, lcn.PREVIEW_MAX_POINTS)
+        self.assertGreater(m.width, 1000)
+
+    def test_wall_is_off_by_default(self):
+        self.assertIsNone(self.node.wall_pub)
 
     def test_cloud_round_trip(self):
         pts = np.array([[1.0, -2.0, 0.5], [8.0, 0.25, 1.0]], dtype=np.float32)
