@@ -13,7 +13,8 @@ The page talks only to this process:
   GET  /lidar.json      the LiDAR preview, likewise
   GET  /download?name=  a recording, streamed straight through
 A page reload gets the newest frame of every kind and the recent log, radio and OCS events
-from this process, so nothing waits for the boat to say it again.
+from this process, so nothing waits for the boat to say it again. A page that cannot keep up
+is cut off rather than waited for; its EventSource reconnects and gets that same cache.
 """
 import argparse
 import itertools
@@ -40,30 +41,109 @@ STATIC = {"/": ("page.html", "text/html; charset=utf-8"),
           "/map.js": ("map.js", "text/javascript; charset=utf-8")}
 REQ_TIMEOUT_S = 15.0
 LINK_EVENT_S = 2.0
+LINK_PUSH_S = 1.0           # the link's state goes to the pages at least this often
+PING_S = 2.0
+PING_FORGET_S = 30.0        # a ping unanswered this long is not coming back
+RTT_STALE_S = 6.0
+STATE_HZ_WINDOW_S = 5.0
+OUTBOX_SLOTS = 64
+WRITE_TIMEOUT_S = 10.0      # a write to a browser that has stopped reading gives up after this
+SUPERSEDED = ("state", "link")      # a newer one makes an older one worthless
+DONE = (b"", None)                  # the end of a download's chunks, however it ended
+
+
+def every(period, fn):
+    def loop():
+        while True:
+            time.sleep(period)
+            fn()
+    threading.Thread(target=loop, daemon=True).start()
+
+
+class LinkTiming:
+    """Round trip and state cadence, on the laptop's own clock: the boat's `stamp` comes from
+    another clock and is never compared with it."""
+
+    def __init__(self, clock):
+        self._clock = clock
+        self._lock = threading.Lock()       # the reader, the pinger and the pages all come here
+        self._pings = {}                    # id -> when it was sent
+        self._rtt_ms, self._rtt_at = None, 0.0
+        self._last_state = None
+        self._states = deque()              # arrivals within the last STATE_HZ_WINDOW_S
+
+    def ping_sent(self, rid):
+        with self._lock:
+            now = self._clock()
+            self._pings = {i: t for i, t in self._pings.items() if now - t < PING_FORGET_S}
+            self._pings[rid] = now
+
+    def ping_reply(self, rid):
+        """True when rid was one of our pings. Whatever the boat answered, the round trip counts."""
+        with self._lock:
+            sent = self._pings.pop(rid, None)
+            if sent is None:
+                return False
+            self._rtt_at = self._clock()
+            self._rtt_ms = (self._rtt_at - sent) * 1000.0
+            return True
+
+    def state_seen(self):
+        with self._lock:
+            self._last_state = self._clock()
+            self._states.append(self._last_state)
+            self._expire(self._last_state)
+
+    def forget_rtt(self):
+        with self._lock:
+            self._pings.clear()
+            self._rtt_ms = None
+
+    def snapshot(self):
+        with self._lock:
+            now = self._clock()
+            self._expire(now)
+            fresh = self._rtt_ms is not None and now - self._rtt_at <= RTT_STALE_S
+            return {"rtt_ms": round(self._rtt_ms) if fresh else None,
+                    "state_age_s": (None if self._last_state is None
+                                    else round(now - self._last_state, 1)),
+                    "state_hz": round(len(self._states) / STATE_HZ_WINDOW_S, 1)}
+
+    def _expire(self, now):
+        while self._states and now - self._states[0] >= STATE_HZ_WINDOW_S:
+            self._states.popleft()
 
 
 class BoatLink:
     """One connection to gcs_bridge, kept up; frames fanned out to the page."""
 
-    def __init__(self, host, port, on_frame):
+    def __init__(self, host, port, on_frame, clock=time.perf_counter):
         self.host, self.port = host, port
         self.on_frame = on_frame
+        self.timing = LinkTiming(clock)
         self.up, self.error, self.since = False, "", time.time()
         self._sock = None
         self._send_lock = threading.Lock()
         self._ids = itertools.count(1)
-        self._pending = {}          # id -> {"done": Event, "result", "chunks": Queue | None}
+        self._pending = {}          # id -> {"done": Event, "result", "chunks": Outbox | None}
         self._pending_lock = threading.Lock()
         threading.Thread(target=self._run, daemon=True).start()
+        every(LINK_PUSH_S, self._publish)
+        every(PING_S, self._ping)
 
     def status(self):
         return {"t": "link", "up": self.up, "boat": f"{self.host}:{self.port}",
-                "since": self.since, "error": self.error}
+                "since": self.since, "error": self.error, **self.timing.snapshot()}
+
+    def _publish(self):
+        self.on_frame(self.status(), b"")
 
     def _set(self, up, error=""):
         if (up, error) != (self.up, self.error):
             self.up, self.error, self.since = up, error, time.time()
-            self.on_frame(self.status(), b"")
+            if not up:
+                self.timing.forget_rtt()
+            self._publish()
 
     def _run(self):
         while True:
@@ -77,6 +157,7 @@ class BoatLink:
                 continue
             self._sock = sock
             self._set(True)
+            self._ping()
             try:
                 while True:
                     header, blob = gcs_wire.read_frame(sock)
@@ -94,11 +175,15 @@ class BoatLink:
 
     def _dispatch(self, header, blob):
         rid = header.get("id")
+        if header["t"] == "state":
+            self.timing.state_seen()
+        if self.timing.ping_reply(rid):
+            return
         with self._pending_lock:
             pend = self._pending.get(rid) if rid is not None else None
         if pend is not None:
             if header["t"] == "file" and pend["chunks"] is not None:
-                pend["chunks"].put((blob, header.get("last")))
+                pend["chunks"].offer((blob, header.get("last")))
                 return
             if header["t"] in ("result", "cam", "lidar"):
                 pend["result"] = (header, blob)
@@ -113,7 +198,23 @@ class BoatLink:
             pend["result"] = ({"t": "result", "ok": False, "msg": why}, b"")
             pend["done"].set()
             if pend["chunks"] is not None:
-                pend["chunks"].put((b"", None))
+                pend["chunks"].offer(DONE)
+
+    def _send(self, sock, rid, op, fields=None):
+        frame = gcs_wire.encode(dict(fields or {}, t="req", id=rid, op=op))
+        with self._send_lock:
+            sock.sendall(frame)
+
+    def _ping(self):
+        sock = self._sock
+        if sock is None:
+            return
+        rid = next(self._ids)
+        self.timing.ping_sent(rid)
+        try:
+            self._send(sock, rid, "ping")
+        except OSError:
+            pass                    # the reader is about to find the link gone
 
     def request(self, op, fields=None, timeout=REQ_TIMEOUT_S, chunks=None):
         """(header, blob) of the boat's answer; a failed result header when it cannot be had."""
@@ -125,10 +226,8 @@ class BoatLink:
             sock = self._sock
             if sock is None:
                 return {"t": "result", "ok": False, "msg": self.error or "no link to the boat"}, b""
-            frame = gcs_wire.encode(dict(fields or {}, t="req", id=rid, op=op))
             try:
-                with self._send_lock:
-                    sock.sendall(frame)
+                self._send(sock, rid, op, fields)
             except OSError as e:
                 return {"t": "result", "ok": False, "msg": f"send failed: {e}"}, b""
             if not pend["done"].wait(timeout):
@@ -138,6 +237,52 @@ class BoatLink:
         finally:
             with self._pending_lock:
                 self._pending.pop(rid, None)
+
+
+class Outbox:
+    """What one page (or one download) has yet to be sent. The producer, the link reader, never
+    waits on it: a consumer more than OUTBOX_SLOTS behind loses its superseded state and link
+    events first and, if that is not enough, is cut off. Nothing else is ever dropped."""
+
+    def __init__(self):
+        self.closed = False
+        self._items = deque()               # (kind, item)
+        self._cond = threading.Condition()
+
+    def offer(self, item, kind=None):
+        with self._cond:
+            if self.closed:
+                return
+            if len(self._items) >= OUTBOX_SLOTS:
+                self._drop_oldest_superseded()
+            if len(self._items) >= OUTBOX_SLOTS:
+                self.close()
+            else:
+                self._items.append((kind, item))
+                self._cond.notify()
+
+    def get(self, timeout):
+        """The next item; queue.Empty after `timeout` of nothing, ConnectionAbortedError once the
+        consumer has been cut off, so that a consumer's existing OSError handling ends it."""
+        with self._cond:
+            self._cond.wait_for(lambda: self._items or self.closed, timeout)
+            if self.closed:
+                raise ConnectionAbortedError("could not keep up with the boat")
+            if not self._items:
+                raise queue.Empty
+            return self._items.popleft()[1]
+
+    def close(self):
+        with self._cond:
+            self.closed = True
+            self._items.clear()
+            self._cond.notify_all()
+
+    def _drop_oldest_superseded(self):
+        for i, (kind, _) in enumerate(self._items):
+            if kind in SUPERSEDED:
+                del self._items[i]
+                return
 
 
 class Hub:
@@ -164,10 +309,7 @@ class Hub:
             clients = list(self.clients)
         data = json.dumps(header, separators=(",", ":"))
         for q in clients:
-            try:
-                q.put_nowait(data)
-            except queue.Full:
-                pass                # a page that stopped reading misses events, nothing else
+            q.offer(data, kind)
 
     def replay(self):
         with self.lock:
@@ -178,7 +320,7 @@ class Hub:
         return [json.dumps(h, separators=(",", ":")) for h in out]
 
     def subscribe(self):
-        q = queue.Queue(2000)
+        q = Outbox()
         with self.lock:
             self.clients.append(q)
         return q
@@ -270,6 +412,8 @@ def make_handler(link, hub, allowed_hosts):
             self._json({k: header.get(k) for k in ("ok", "msg", "data")})
 
         def _events(self):
+            self.close_connection = True
+            self.connection.settimeout(WRITE_TIMEOUT_S)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-store")
@@ -292,13 +436,14 @@ def make_handler(link, hub, allowed_hosts):
                 hub.unsubscribe(q)
 
         def _download(self, name):
-            chunks = queue.Queue(64)
+            self.connection.settimeout(WRITE_TIMEOUT_S)
+            chunks = Outbox()
             result = {}
 
             def ask():
                 result["r"] = link.request("record_download", {"name": name}, timeout=3600.0,
                                            chunks=chunks)
-                chunks.put((b"", None))
+                chunks.offer(DONE)
 
             threading.Thread(target=ask, daemon=True).start()
             first, last = chunks.get(timeout=REQ_TIMEOUT_S + 5.0)
@@ -318,9 +463,14 @@ def make_handler(link, hub, allowed_hosts):
                     if last is not False:
                         break
                     blob, last = chunks.get(timeout=60.0)
+                if last is None:            # the boat answered before the file's last chunk: aborted
+                    self.close_connection = True    # no terminator, so the browser marks it failed
+                    return
                 self.wfile.write(b"0\r\n\r\n")
             except (OSError, queue.Empty):
                 self.close_connection = True
+            finally:
+                chunks.close()      # a download nobody reads any more must not fill up
 
     return Handler
 

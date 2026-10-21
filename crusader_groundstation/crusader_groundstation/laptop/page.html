@@ -5,28 +5,66 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" href="data:,">
 <title>Crusader GCS</title>
+<script>
+(function () {
+  var t = null;
+  try { t = localStorage.getItem("crsd-theme"); } catch (e) {}
+  if (t !== "light" && t !== "dark") t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  document.documentElement.setAttribute("data-theme", t);
+})();
+</script>
 <style>
-:root {
-  --bg: #f4f5f7; --panel: #ffffff; --fg: #1d2330; --muted: #6b7280; --line: #d9dde3;
-  --accent: #1565c0; --ok: #2e7d32; --warn: #b26a00; --bad: #c62828;
-  --map-bg: #eef2f6; --grid: #d3dae3; --trail: #7e57c2;
+/* Light is the sunlight palette of the old Jetson GUI (dark text, darkened status colours,
+   borders that survive glare); dark is its night palette. */
+:root, html[data-theme="light"] {
+  color-scheme: light;
+  --bg: #e7ebef; --panel: #ffffff; --card: #eef1f4; --fg: #0b0e12; --strong: #000000;
+  --muted: #5a6672; --line: #8d99a6; --rowline: #c9d1d9; --btn: #dde3e9; --field: #ffffff;
+  --accent: #14496e; --primary-bg: #14496e; --primary-fg: #ffffff;
+  --danger-bg: #b0151c; --danger-fg: #ffffff;
+  --ok: #0a6b2e; --warn: #8a4b00; --bad: #b0151c; --stale: #98a4b0; --trail: #14496e;
+  --map-bg: #e4ebf2; --map-grid: #cdd6e0; --map-grid-major: #9eaebf; --map-text: #2b343d;
+  --map-boat: #14496e; --map-path: #00796b; --map-hazard: #b35900;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #12151b; --panel: #1b2029; --fg: #e3e7ee; --muted: #8b94a3; --line: #2c3340;
-    --accent: #64b5f6; --ok: #66bb6a; --warn: #ffb74d; --bad: #ef5350;
-    --map-bg: #0e1218; --grid: #222a36; --trail: #b39ddb;
-  }
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #111111; --panel: #1b1b1b; --card: #202020; --fg: #cccccc; --strong: #eeeeee;
+  --muted: #8e8e8e; --line: #3a3a3a; --rowline: #2a2a2a; --btn: #262626; --field: #0c0c0c;
+  --accent: #7fa8c9; --primary-bg: #2d5a7a; --primary-fg: #ffffff;
+  --danger-bg: #7a3030; --danger-fg: #f3c4c4;
+  --ok: #5fbf6a; --warn: #d8a13a; --bad: #e05252; --stale: #555555; --trail: #4f87b0;
+  --map-bg: #0e1218; --map-grid: #222a36; --map-grid-major: #364254; --map-text: #aab3c0;
+  --map-boat: #64b5f6; --map-path: #26c6da; --map-hazard: #ff9800;
 }
+:root { --grid: var(--map-grid); }
 * { box-sizing: border-box; }
 body { margin: 0; font: 14px system-ui, sans-serif; background: var(--bg); color: var(--fg); }
-header { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 8px; background: var(--panel);
-         border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; }
-.tile { padding: 3px 8px; border-radius: 4px; border: 1px solid var(--line); white-space: nowrap; }
-.tile b { font-weight: 600; }
+header { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px 10px; padding: 6px 8px;
+         background: var(--panel); border-bottom: 1px solid var(--line);
+         position: sticky; top: 0; z-index: 2; }
+@media (max-width: 700px) { header { position: static; } }
+.brand { display: flex; align-items: center; gap: 8px; font-size: 17px; font-weight: 700;
+         color: var(--strong); white-space: nowrap; }
+.logo { display: flex; background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; }
+.logo img { height: 26px; width: auto; display: block; }
+#theme { font-size: 16px; line-height: 1; padding: 5px 9px; }
+#strip { flex: 1 1 22em; display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.tile { --vc: var(--line); display: flex; flex-direction: column; min-width: 0; max-width: min(100%, 30em);
+        padding: 1px 9px 2px 8px; line-height: 1.3; background: var(--card);
+        border: 1px solid var(--line); border-left: 4px solid var(--vc); border-radius: 6px; }
+.tile.t-ok { --vc: var(--ok); } .tile.t-warn { --vc: var(--warn); } .tile.t-bad { --vc: var(--bad); }
+.tile.t-stale { --vc: var(--stale); }
+@supports (background: color-mix(in srgb, red 10%, blue)) {
+  .tile.t-warn, .tile.t-bad { background: color-mix(in srgb, var(--vc) 14%, var(--card)); }
+}
+.tile .k { font-size: 10.5px; font-weight: 700; letter-spacing: .8px; color: var(--muted); }
+.tile .v, .tile .s { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile .v { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.tile .s { font-size: 11px; color: var(--muted); min-height: 1.3em; }
+.t-ok .v { color: var(--ok); } .t-warn .v { color: var(--warn); } .t-bad .v { color: var(--bad); }
+.t-stale .v { color: var(--muted); font-weight: 400; }
 .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
 .muted { color: var(--muted); }
-.tile.bad { border-color: var(--bad); } .tile.warn { border-color: var(--warn); }
 nav { display: flex; flex-wrap: wrap; gap: 2px; padding: 4px 8px 0; }
 nav button { border: 1px solid var(--line); border-bottom: none; background: var(--bg);
              color: var(--fg); padding: 6px 12px; border-radius: 6px 6px 0 0; cursor: pointer; }
@@ -38,16 +76,18 @@ section { display: none; } section.on { display: block; }
 canvas.map { width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 4px; display: block; }
 canvas.small { height: 45vh; }
 table { border-collapse: collapse; width: 100%; }
-td, th { border-bottom: 1px solid var(--line); padding: 3px 6px; text-align: left; vertical-align: top; }
+td, th { border-bottom: 1px solid var(--rowline); padding: 3px 6px; text-align: left; vertical-align: top; }
 th { color: var(--muted); font-weight: 500; }
 button { cursor: pointer; padding: 4px 10px; border-radius: 4px; border: 1px solid var(--line);
-         background: var(--bg); color: var(--fg); }
-button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
-button.danger { background: var(--bad); color: #fff; border-color: var(--bad); }
+         background: var(--btn); color: var(--fg); }
+button.primary { background: var(--primary-bg); color: var(--primary-fg); border-color: var(--primary-bg); }
+button.danger { background: var(--danger-bg); color: var(--danger-fg); border-color: var(--danger-bg); }
 button:disabled { opacity: 0.45; cursor: default; }
-input, select { background: var(--bg); color: var(--fg); border: 1px solid var(--line);
-                border-radius: 4px; padding: 3px 5px; }
+input, select, textarea { background: var(--field); color: var(--fg); border: 1px solid var(--line);
+                          border-radius: 4px; padding: 3px 5px; }
 input.num { width: 7em; }
+input.ll { width: 9.5em; }
+textarea { width: 100%; font: 12px ui-monospace, Consolas, monospace; }
 h3 { margin: 12px 0 6px; font-size: 15px; }
 .box { border: 1px solid var(--line); border-radius: 4px; padding: 8px; margin-bottom: 10px; }
 .scroll { max-height: 60vh; overflow: auto; }
@@ -56,10 +96,30 @@ h3 { margin: 12px 0 6px; font-size: 15px; }
          border-radius: 6px; background: var(--fg); color: var(--bg); display: none; z-index: 5; }
 img#cam { max-width: 100%; border: 1px solid var(--line); border-radius: 4px; background: #000; }
 .drift { color: var(--warn); }
+.small { font-size: 12px; }
+.ngrid { display: grid; grid-template-columns: minmax(0, 1.6fr) 6em minmax(0, 1fr) 14em; }
+.ngrid > div { min-width: 0; padding: 3px 6px; border-bottom: 1px solid var(--rowline);
+               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ngrid .ng-h { color: var(--muted); }
+.ngrid .ng-group { grid-column: 1 / -1; margin-top: 10px; font-size: 15px; white-space: normal; }
+.ngrid .ng-act { display: flex; justify-content: flex-end; align-items: center; gap: 4px; overflow: visible; }
+.ngrid .ng-act button { padding: 2px 8px; }
+.ngrid .ng-tail { grid-column: 1 / -1; max-height: 8em; overflow: auto; text-overflow: clip;
+                  white-space: pre-wrap; background: var(--card); }
+.ll-item { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; padding: 2px 0;
+           border-bottom: 1px solid var(--rowline); }
+.ll-item button { padding: 0 6px; }
+.ll-item .grow { flex: 1 1 auto; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px;
+       border: 1px solid var(--line); }
 </style>
 </head>
 <body>
-<header id="strip"><span class="tile">connecting…</span></header>
+<header>
+  <div class="brand"><span class="logo"><img src="data:image/jpeg;base64,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" alt="Team Inspiration" title="Team Inspiration"></span>Crusader</div>
+  <button id="theme"></button>
+  <div id="strip"></div>
+</header>
 <nav id="tabs"></nav>
 <main>
 <section id="t-map">
@@ -83,6 +143,23 @@ img#cam { max-width: 100%; border: 1px solid var(--line); border-radius: 4px; ba
         <button id="field-clear-boat">Clear on boat</button><br>
         <button id="field-load">Copy current plan</button>
         <button id="field-clear">Clear editor</button>
+      </div>
+      <div class="box">
+        <h3>Place by lat/lon</h3>
+        <input id="ll-lat" class="ll" placeholder="lat" aria-label="latitude" inputmode="decimal">
+        <input id="ll-lon" class="ll" placeholder="lon" aria-label="longitude" inputmode="decimal">
+        <select id="ll-beacon" aria-label="beacon"></select>
+        <button class="primary" id="ll-add">Add</button>
+        <button id="ll-centre">Centre map here</button>
+        <div id="ll-err" class="bad small"></div>
+        <h3>Paste</h3>
+        <textarea id="ll-paste" rows="4" spellcheck="false"
+          placeholder="one buoy per line: lat, lon, beacon&#10;1.2345678, 103.1234567, red&#10;1.2345700, 103.1234600, entry"></textarea>
+        <div class="muted small">beacon: red, green, entry, exit, off, unknown or 0-5; left out means unknown</div>
+        <button id="ll-paste-add">Add pasted</button>
+        <div id="ll-skipped" class="mono muted"></div>
+        <h3>Buoys in the field</h3>
+        <div id="ll-list" class="scroll" style="max-height: 30vh"></div>
       </div>
       <button id="trail-clear">Clear trail</button>
     </div>
@@ -134,6 +211,7 @@ img#cam { max-width: 100%; border: 1px solid var(--line); border-radius: 4px; ba
       <button id="cp-delete">Delete</button>
       &nbsp; save the live settings as <input id="cp-new" placeholder="name">
       <button id="cp-save">Save</button></div>
+    <div id="cp-store" class="muted small"></div>
     <div id="cam-controls"></div>
   </div>
 </section>
@@ -208,8 +286,9 @@ const $ = id => document.getElementById(id);
 const TABS = [["map", "Map"], ["mission", "Mission"], ["sensors", "Sensors"], ["nodes", "Nodes"],
               ["reports", "Reports"], ["radio", "Radio"], ["logs", "Logs"], ["params", "Params"],
               ["record", "Record"]];
-const G = {link: null, state: null, nodes: null, tree: null, plan: null, logs: [], radio: [],
-           ocs: [], tab: "map", params: null, camControls: [], camProfiles: []};
+const G = {link: null, linkAt: null, state: null, stateAt: null, nodes: null, tree: null, plan: null,
+           logs: [], radio: [], ocs: [], tab: "map", params: null, camControls: [], camProfiles: []};
+const DASH = "—";
 
 function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
@@ -253,10 +332,11 @@ function show(id) {
 }
 
 // ---- the event stream -------------------------------------------------------
+function setLink(f) { G.link = f; G.linkAt = performance.now(); strip(); }
 const handlers = {
-  link(f) { G.link = f; strip(); },
+  link: setLink,
   hello(f) { G.hello = f; },
-  state(f) { G.state = f; CrsdMap.update("state", f); strip(); system(); },
+  state(f) { G.state = f; G.stateAt = performance.now(); CrsdMap.update("state", f); strip(); system(); },
   targets(f) { CrsdMap.update("targets", f); },
   plan(f) { G.plan = f; CrsdMap.update("plan", f); planInfo(); },
   path(f) { CrsdMap.update("path", f); },
@@ -270,53 +350,162 @@ const handlers = {
 };
 const es = new EventSource("/events");
 es.onmessage = e => { const f = JSON.parse(e.data); (handlers[f.t] || (() => {}))(f); };
-es.onerror = () => { G.link = {up: false, error: "gcs_app is not running"}; strip(); };
+es.onerror = () => setLink({up: false, error: "gcs_app is not running"});
 
-// ---- status strip -----------------------------------------------------------
-const TRI = ["?", "no", "yes"];
-function tile(text, cls = "") { return `<span class="tile ${cls}">${text}</span>`; }
-function strip() {
-  const L = G.link, s = G.state || {}, out = [];
-  if (!L || !L.up) out.push(tile(`<b>BOAT LINK DOWN</b> ${esc(L ? L.error : "")}`, "bad"));
-  else out.push(tile(`link <b class="ok">up</b> ${esc(L.boat)}`));
-  const age = s.stamp ? Date.now() / 1000 - s.stamp : null;
-  if (L && L.up && age != null && age > 3) out.push(tile(`state ${age.toFixed(0)} s old`, "warn"));
-  const fcu = s.fcu || {}, h = s.health;
-  out.push(tile(fcu.mode == null ? "mode —" : `<b>${esc(fcu.mode)}</b> ${fcu.armed ? '<b class="bad">ARMED</b>' : "disarmed"}`,
-                fcu.mode == null ? "warn" : ""));
-  if (h) {
-    out.push(tile(`E-stop <b>${["?", "off", "ENGAGED / RC lost"][h.estop]}</b>`, h.estop === 2 ? "bad" : h.estop ? "" : "warn"));
-    out.push(tile(`batt ${fmt(h.batt_v, 1, " V")} ${h.batt_pct == null ? "" : h.batt_pct + "%"}`));
-    out.push(tile(`GPS fix ${h.fix} · ${h.sats} sats · hdop ${fmt(h.hdop, 1)}`, h.fix >= 3 ? "" : "warn"));
-    out.push(tile(`EKF ${TRI[h.ekf]}`, h.ekf === 2 ? "" : "warn"));
-    out.push(tile(`pre-arm ${TRI[h.prearm]}`, h.prearm === 2 ? "" : "warn"));
-    if (h.text) out.push(tile(esc(h.text), h.sev <= 3 ? "bad" : h.sev <= 4 ? "warn" : ""));
-  } else out.push(tile("autopilot health: no data", "warn"));
-  const b = s.boat || {};
-  out.push(tile(b.lat == null ? "position —" : `hdg ${fmt(b.hdg, 0, "°")} · ${fmt(b.spd, 1, " m/s")}`,
-                b.lat == null ? "warn" : ""));
-  const m = s.mission;
-  if (m) out.push(tile(m.state === "RUNNING" ? `<b>${esc(m.name)}</b> ${esc(m.running_node || "")}`
-                                            : `mission idle${m.last ? ": " + esc(m.last.name) + " " + esc(m.last.outcome) : ""}`,
-                       m.warning ? "warn" : ""));
-  if (s.record) out.push(tile(`● REC ${esc(s.record.name)}`, "bad"));
-  if (s.sys) out.push(tile(`CPU ${fmt(s.sys.cpu, 0, "%")} · ${fmt(s.sys.temp, 0, "°C")}`));
-  if (s.link && s.link.dropped) out.push(tile(`${s.link.dropped} frames dropped`, "warn"));
-  $("strip").innerHTML = out.join("");
+// ---- theme ------------------------------------------------------------------
+let themeChosen = false;      // a saved or toggled choice beats the OS setting
+try { themeChosen = ["light", "dark"].includes(localStorage.getItem("crsd-theme")); } catch (e) {}
+function themeSet(t, save) {
+  document.documentElement.setAttribute("data-theme", t);
+  if (save) { try { localStorage.setItem("crsd-theme", t); } catch (e) {} }
+  const b = $("theme"), other = t === "dark" ? "light" : "dark";
+  b.textContent = t === "dark" ? "☀" : "☾";
+  b.title = `switch to the ${other} theme`; b.setAttribute("aria-label", b.title);
+  if (typeof CrsdMap.redraw === "function") CrsdMap.redraw();
+}
+$("theme").onclick = () => {
+  themeChosen = true;
+  themeSet(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark", true);
+};
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", e => {
+  if (!themeChosen) themeSet(e.matches ? "dark" : "light", false);
+});
+themeSet(document.documentElement.getAttribute("data-theme"), false);
+
+// ---- status banner ----------------------------------------------------------
+// Ages are measured on this laptop only: the boat's clock is never compared with ours.
+const AGE_WARN_S = 1.5, AGE_BAD_S = 3, RTT_WARN_MS = 400, LINK_STATS_S = 10;
+const GPS_MIN_FIX = 3, GPS_MIN_SATS = 10, GPS_MAX_HDOP = 1.2;     // the old GUI's thresholds
+const FIX_NAMES = ["NO FIX", "NO FIX", "2D", "3D", "DGPS", "RTK FLOAT", "RTK FIXED"];
+const SEVERITY = ["EMERGENCY", "ALERT", "CRITICAL", "ERROR", "WARNING", "NOTICE", "INFO", "DEBUG"];
+// EKF_STATUS_REPORT bits; the same needed / bad sets as crusader_behavior/fcu_health.py
+const EKF_FLAGS = [[1, "ATTITUDE", true], [2, "VELOCITY_HORIZ", true], [16, "POS_HORIZ_ABS", true],
+                   [128, "CONST_POS_MODE", false], [1024, "UNINITIALIZED", false], [32768, "GPS_GLITCH", false]];
+const num = v => typeof v === "number" && isFinite(v);
+const sinceS = t => (performance.now() - t) / 1000;
+
+const tiles = {};
+function tile(id, label, cls, value, sub = "", tip = "") {
+  let t = tiles[id];
+  if (!t) {
+    t = tiles[id] = {key: "", el: document.createElement("div")};
+    t.el.innerHTML = `<span class="k">${label}</span><span class="v"></span><span class="s"></span>`;
+    $("strip").appendChild(t.el);
+  }
+  const key = [cls, value, sub, tip].join("\u0001");
+  if (key === t.key) return;          // rewriting an unchanged tile would close its tooltip
+  t.key = key;
+  t.el.className = "tile t-" + cls;
+  t.el.title = tip;
+  t.el.children[1].textContent = String(value ?? "");
+  t.el.children[2].textContent = String(sub ?? "");
+}
+function stateAge() {
+  if (G.stateAt == null) return null;
+  const L = G.link;
+  return L && num(L.state_age_s) && G.linkAt > G.stateAt ? L.state_age_s + sinceS(G.linkAt) : sinceS(G.stateAt);
+}
+function linkTile(age) {
+  const L = G.link;
+  if (!L) return tile("link", "LINK", "stale", DASH, "connecting");
+  if (!L.up) return tile("link", "LINK", "bad", "DOWN", L.error || "", `${L.boat || "the boat"}: ${L.error || "no link"}`);
+  const heard = sinceS(G.linkAt) <= LINK_STATS_S;
+  const rtt = heard && num(L.rtt_ms) ? L.rtt_ms : null, hz = heard && num(L.state_hz) ? L.state_hz : null;
+  const dropped = ((G.state || {}).link || {}).dropped;
+  const cls = age == null ? "stale" : age > AGE_BAD_S ? "bad" : age > AGE_WARN_S || rtt > RTT_WARN_MS ? "warn" : "ok";
+  const ageText = age == null ? DASH : age.toFixed(1) + " s", rttText = fmt(rtt, 0, " ms"), hzText = fmt(hz, 1, " Hz");
+  tile("link", "LINK", cls, age == null ? "NO STATE" : age > AGE_BAD_S ? "STALE" : "UP",
+       `${rttText} · ${ageText} · ${hzText}` + (dropped ? ` · ${dropped} dropped` : ""),
+       [`boat ${L.boat}`, `round trip ${rttText} (warn above ${RTT_WARN_MS} ms)`,
+        `state ${ageText} old (warn above ${AGE_WARN_S} s, bad above ${AGE_BAD_S} s)`,
+        `state rate ${hzText}`, dropped ? `${dropped} frames dropped` : ""].filter(Boolean).join("\n"));
 }
 
+const triTile = (v, hi, lo, tip) => v === 2 ? [hi[1], hi[0], "", tip] : v === 1 ? [lo[1], lo[0], "", tip] : null;
+function gpsTile(h) {
+  if (!num(h.fix)) return null;
+  const name = FIX_NAMES[h.fix] || `fix ${h.fix}`, sats = h.sats > 0 ? h.sats : null, hdop = num(h.hdop) ? h.hdop : null;
+  const why = [];
+  if (h.fix < GPS_MIN_FIX) why.push(h.fix === 0 ? "no fix reported (or the GPS stream is stale)" : "no 3D fix");
+  else {
+    if (sats != null && sats < GPS_MIN_SATS) why.push(`only ${sats} satellites (< ${GPS_MIN_SATS})`);
+    if (hdop != null && hdop > GPS_MAX_HDOP) why.push(`HDOP ${hdop} > ${GPS_MAX_HDOP}`);
+  }
+  const head = [name, sats == null ? "satellites not reported" : `${sats} satellites`,
+                `HDOP ${hdop == null ? "not reported" : hdop}`].join(" · ");
+  return [h.fix < GPS_MIN_FIX ? "bad" : why.length ? "warn" : "ok", name, `${sats ?? DASH} sats`, [head, ...why].join("\n")];
+}
+function ekfTip(flags) {
+  const base = "EKF needs attitude, horizontal velocity and absolute horizontal position, and no constant-position mode, uninitialised state or GPS glitch.";
+  if (!num(flags)) return base;
+  const failing = EKF_FLAGS.filter(([bit, , needed]) => (needed ? !(flags & bit) : flags & bit))
+                           .map(([, name, needed]) => needed ? `${name} missing` : `${name} set`);
+  return `${base}\n` + (failing.length ? `failing: ${failing.join(", ")}` : "no failing flags");
+}
+function battTile(h) {
+  const tip = "UNVERIFIED: BATT_VOLT_MULT and the cell count are disputed (see crusader-battery). 0 V means no sensor, not a flat pack.";
+  if (!num(h.batt_v) || h.batt_v <= 0) return ["stale", "no sensor", "", tip];
+  return ["info", fmt(h.batt_v, 2, " V"), (num(h.batt_pct) ? `${h.batt_pct}% · ` : "") + "unverified", tip];
+}
+function posTile(b) {
+  return num(b.lat) && num(b.lon)
+    ? ["info", `${b.lat.toFixed(7)}, ${b.lon.toFixed(7)}`, `${fmt(b.spd, 1, " m/s")} · ${fmt(b.hdg, 0, "°")}`,
+       "position, ground speed and heading; the heading is GPS yaw (the compass is disabled)"] : null;
+}
+function missionTile(m) {
+  if (!m) return null;
+  return m.state === "RUNNING" ? [m.warning ? "warn" : "ok", m.name, m.running_node || "", m.warning || "bt_runner is running a mission"]
+                               : ["info", "idle", m.last ? `${m.last.name} ${m.last.outcome}` : "", "bt_runner"];
+}
+// [id, label, build(state, health)]: build returns [verdict, value, sub, tooltip], or null for no data
+const TILES = [
+  ["mode", "MODE", s => { const f = s.fcu || {};
+    return f.mode == null ? null : [f.armed ? "warn" : "info", f.mode, f.armed ? "ARMED" : "disarmed", "autopilot mode and armed state"]; }],
+  ["estop", "E-STOP", (s, h) => h && triTile(h.estop, ["ENGAGED", "bad"], ["RUN", "ok"],
+    "RC e-stop channel below its threshold, or the RC link lost. A readout only: the kill relay is hardware.")],
+  ["gps", "GPS", (s, h) => h && gpsTile(h)],
+  ["ekf", "EKF", (s, h) => h && triTile(h.ekf, ["OK", "ok"], ["BAD", "bad"], ekfTip(h.ekf_flags))],
+  ["prearm", "PRE-ARM", (s, h) => h && triTile(h.prearm, ["PASS", "ok"], ["FAIL", "bad"],
+    "the autopilot's own pre-arm verdict (reasons arrive in MSG); while armed it reports PASS without checking again")],
+  ["batt", "BATTERY", (s, h) => h && battTile(h)],
+  ["pos", "POSITION", s => posTile(s.boat || {})],
+  ["msg", "MSG", (s, h) => h && h.text
+    ? [h.sev <= 3 ? "bad" : h.sev <= 4 ? "warn" : "info", h.text, SEVERITY[h.sev] || "", `${h.text}\nthe last STATUSTEXT; its age is not reported`] : null],
+  ["mission", "MISSION", s => missionTile(s.mission)],
+  ["rec", "REC", s => s.record ? ["bad", "● " + s.record.name, fmt(s.record.elapsed_s, 0, " s"), "a recording session is running on the boat"]
+                               : ["info", "off", "", "no recording session"]],
+  ["cpu", "JETSON", s => s.sys && (num(s.sys.cpu) || num(s.sys.temp)) ? ["info", fmt(s.sys.cpu, 0, "% CPU"), fmt(s.sys.temp, 0, " °C"), "Jetson CPU load and temperature"] : null],
+];
+function strip() {
+  const age = stateAge(), L = G.link, s = G.state || {};
+  linkTile(age);
+  const live = !!(L && L.up && age != null && age <= AGE_BAD_S);
+  const why = !L ? "no link yet" : !L.up ? "link down" : age == null ? "no state yet" : `state ${age.toFixed(0)} s old`;
+  for (const [id, label, build] of TILES) {
+    const t = live && build(s, s.health);
+    t ? tile(id, label, ...t) : tile(id, label, "stale", DASH, live ? "no data" : why);
+  }
+}
+setInterval(strip, 500);          // an age keeps growing while no frame arrives
+strip();
+
 // ---- map + MANUAL field -----------------------------------------------------
+function callMap(name, ...args) { return typeof CrsdMap[name] === "function" ? CrsdMap[name](...args) : undefined; }
+const manualList = () => callMap("manual") || [];
 CrsdMap.attach($("map"), {editable: true});
 CrsdMap.attach($("map2"));
-for (const [code, [name]] of Object.entries(CrsdMap.BEACON))
-  $("edit-beacon").insertAdjacentHTML("beforeend", `<option value="${code}">${name}</option>`);
-$("edit-beacon").value = 2;
+for (const id of ["edit-beacon", "ll-beacon"]) {
+  $(id).innerHTML = Object.entries(CrsdMap.BEACON).map(([code, [name]]) => `<option value="${code}">${esc(name)}</option>`).join("");
+  $(id).value = 2;
+}
 $("edit-beacon").onchange = e => CrsdMap.setBeacon(+e.target.value);
 $("edit-on").onchange = e => CrsdMap.setEditing(e.target.checked);
-CrsdMap.onEdit(() => {
-  const p = CrsdMap.manualPlan();
+function manualChanged() {
+  const p = CrsdMap.manualPlan(), list = manualList();
   $("edit-count").textContent = `${p.buoys.length} buoys · entry ${p.entry ? "set" : "none"} · exit ${p.exit ? "set" : "none"}`;
-});
+  $("ll-list").innerHTML = list.length ? list.map(llItem).join("") : '<span class="muted">none</span>';
+}
+(typeof CrsdMap.onManualChange === "function" ? CrsdMap.onManualChange : CrsdMap.onEdit)(manualChanged);
 $("field-send").onclick = () => {
   const p = CrsdMap.manualPlan();
   if (!p.buoys.length) return toast("place at least one buoy first", false);
@@ -326,6 +515,76 @@ $("field-clear-boat").onclick = () => confirm("Clear the MANUAL field on the boa
 $("field-load").onclick = () => CrsdMap.loadPlan();
 $("field-clear").onclick = () => CrsdMap.clearManual();
 $("trail-clear").onclick = () => CrsdMap.clearTrail();
+
+// by lat/lon: the map labels a buoy with its 0-based index; the boat is sent id = index + 1
+const parseNum = s => (String(s).trim() === "" ? NaN : Number(s));
+function llError(lat, lon) {
+  if (!num(lat) || Math.abs(lat) > 90) return "latitude must be a number within ±90";
+  if (!num(lon) || Math.abs(lon) > 180) return "longitude must be a number within ±180";
+  return "";
+}
+function llPlace(lat, lon, beacon) {
+  const i = callMap("addManual", lat, lon, beacon);
+  return i === undefined ? "this map.js has no addManual" : i < 0 ? "the map refused that position" : "";
+}
+function llItem(b, i) {
+  const [name, col] = CrsdMap.BEACON[b.beacon] || CrsdMap.BEACON[0];
+  return `<div class="ll-item"><b title="index on the map; the boat is sent id ${i + 1}">${i}</b>
+    <span class="mono">${b.lat.toFixed(7)}, ${b.lon.toFixed(7)}</span>
+    <span class="grow"><span class="dot" style="background:${col}"></span>${esc(name)}</span>
+    <button data-act="centre" data-i="${i}">Centre</button><button class="danger" data-act="del" data-i="${i}">Delete</button></div>`;
+}
+$("ll-list").onclick = e => {
+  const b = e.target.closest("button[data-act]"); if (!b) return;
+  const i = +b.dataset.i, m = manualList()[i];
+  if (b.dataset.act === "del") callMap("removeManual", i);
+  else if (m) callMap("centreOn", m.lat, m.lon);
+};
+function llEntry() {
+  const lat = parseNum($("ll-lat").value), lon = parseNum($("ll-lon").value), err = llError(lat, lon);
+  $("ll-err").textContent = err;
+  return err ? null : [lat, lon];
+}
+$("ll-add").onclick = () => {
+  const ll = llEntry(); if (!ll) return;
+  const err = llPlace(ll[0], ll[1], +$("ll-beacon").value);
+  $("ll-err").textContent = err;
+  if (!err) { $("ll-lat").value = $("ll-lon").value = ""; $("ll-lat").focus(); }
+};
+$("ll-centre").onclick = () => {
+  const ll = llEntry();
+  if (ll && callMap("centreOn", ...ll) !== true) $("ll-err").textContent = "the map could not centre there";
+};
+for (const id of ["ll-lat", "ll-lon"]) $(id).onkeydown = e => e.key === "Enter" && $("ll-add").click();
+
+const BEACON_BY_NAME = new Map([["unknown", 0], ["off", 1], ["red", 2], ["green", 3], ["entry", 4], ["exit", 5],
+                                ["flashing blue", 4], ["steady blue", 5]]);
+for (const [code, [name]] of Object.entries(CrsdMap.BEACON)) BEACON_BY_NAME.set(name.toLowerCase(), +code);
+const PASTE_LINE = /^\s*([+-]?(?:\d+\.?\d*|\.\d+))\s*[,;\s]\s*([+-]?(?:\d+\.?\d*|\.\d+))\s*(?:[,;\s]\s*(.*?))?\s*$/;
+function parseBeacon(text) {
+  const t = text.trim().toLowerCase().replace(/\s+/g, " ");
+  if (t === "") return 0;                         // not given: unknown, not a guess
+  if (/^\d$/.test(t)) return +t <= 5 ? +t : null;
+  return BEACON_BY_NAME.has(t) ? BEACON_BY_NAME.get(t) : null;
+}
+function parsePasteLine(line) {
+  const m = PASTE_LINE.exec(line);
+  if (!m) return {error: "expected: lat, lon, beacon"};
+  const lat = Number(m[1]), lon = Number(m[2]), name = (m[3] || "").replace(/[,;\s]+$/, ""), beacon = parseBeacon(name);
+  return {lat, lon, beacon, error: llError(lat, lon) || (beacon == null ? `unknown beacon "${name}"` : "")};
+}
+$("ll-paste-add").onclick = () => {
+  const kept = [], notes = [];
+  let added = 0;
+  $("ll-paste").value.split(/\r?\n/).forEach((line, n) => {
+    if (!line.trim() || line.trim().startsWith("#")) return;
+    const r = parsePasteLine(line), err = r.error || llPlace(r.lat, r.lon, r.beacon);
+    if (err) { kept.push(line); notes.push(`line ${n + 1}: ${err}`); } else added++;
+  });
+  $("ll-paste").value = kept.join("\n");
+  $("ll-skipped").textContent = `added ${added}` + (notes.length ? `, skipped ${notes.length} (left in the box):\n${notes.join("\n")}` : "");
+};
+manualChanged();
 function planInfo() {
   const p = G.plan;
   $("plan-info").innerHTML = !p || !p.ok ? "no plan on the boat" :
@@ -384,14 +643,14 @@ function drawLidar(d) {
   cv.width = cv.clientWidth; cv.height = cv.clientHeight;
   const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
   c.fillStyle = css("--map-bg"); c.fillRect(0, 0, cv.width, cv.height);
-  c.fillStyle = css("--muted"); c.font = "12px system-ui";
+  c.fillStyle = css("--map-text"); c.font = "12px system-ui";
   if (!d.ok) { c.fillText(d.msg || "no preview", 10, 20); return; }
   const range = 20, s = Math.min(cv.width / 2, cv.height) / range, ox = cv.width / 2, oy = cv.height - 10;
-  c.strokeStyle = css("--grid");
+  c.strokeStyle = css("--map-grid-major");
   for (let r = 5; r <= range; r += 5) { c.beginPath(); c.arc(ox, oy, r * s, Math.PI, 2 * Math.PI); c.stroke(); c.fillText(`${r} m`, ox + 3, oy - r * s - 2); }
-  c.fillStyle = css("--accent");
+  c.fillStyle = css("--map-boat");
   for (const [x, y] of d.points) c.fillRect(ox - y * s - 1, oy - x * s - 1, 2, 2);   // x fwd = up, y left = left
-  c.fillStyle = css("--fg"); c.fillText(`${d.points.length} points, ${fmt(d.age, 1)} s old`, 10, 16);
+  c.fillStyle = css("--map-text"); c.fillText(`${d.points.length} points, ${fmt(d.age, 1)} s old`, 10, 16);
 }
 $("cam-model").onchange = async e => {
   const node = camNode(); if (!node) return toast("camera_node is not running", false);
@@ -403,6 +662,7 @@ async function loadCamera() {
   if (pr.ok) {
     G.camControls = pr.data.controls; G.camProfiles = pr.data.profiles;
     $("cp-name").innerHTML = pr.data.profiles.map(p => `<option>${esc(p.name)}</option>`).join("");
+    $("cp-store").textContent = "saved in: " + (((pr.data.store || {}).local_path) ?? DASH);
   }
   const node = camNode();
   if (!node) { $("cam-controls").innerHTML = '<p class="muted">camera_node is not running.</p>'; return; }
@@ -468,19 +728,24 @@ $("pp-apply").onclick = () => req("planner_profile_apply", {name: $("pp-name").v
 $("pp-save").onclick = async () => { await req("planner_profile_save", {name: $("pp-new").value.trim()}); planners(); };
 
 // ---- nodes, system, power -----------------------------------------------------
+const nodeBtn = (act, i, label, attrs = "") => `<button data-act="${act}" data-name="${esc(i.name)}" ${attrs}>${label}</button>`;
+function nodeRow(i) {
+  const gone = !i.running && /^(exited|failed)$/.test(i.state), tail = gone ? (i.tail || []).join("\n") : "";
+  const cls = i.running ? "ok" : gone && i.detail !== "exit 0" ? "bad" : "muted";
+  const acts = (i.protected ? '<span class="muted">protected</span>' : "") +    // tag first: buttons stay flush right
+    (i.running ? (i.protected ? "" : nodeBtn("restart", i, "Restart") +
+                  nodeBtn("stop", i, "Stop", `class="danger" ${i.stoppable ? "" : "disabled"} title="${esc(i.stop_reason)}"`))
+               : nodeBtn("start", i, "Start"));
+  return `<div title="${esc(i.note)}"><b>${esc(i.name)}</b> <span class="muted small">${esc(i.note)}</span></div>
+    <div class="${cls}">${esc(i.state)}</div><div class="muted" title="${esc(i.detail)}">${esc(i.detail)}</div>
+    <div class="ng-act">${acts}</div>` + (tail ? `<div class="ng-tail mono muted">${esc(tail)}</div>` : "");
+}
 function nodes() {
   const N = G.nodes; if (!N) return;
-  $("nodes").innerHTML = N.groups.map(g => {
-    const items = N.items.filter(i => i.group === g.id);
-    return `<h3>${esc(g.label)} <span class="muted">${esc(g.hint)}</span></h3><table>` + items.map(i =>
-      `<tr><td><b>${esc(i.name)}</b><br><span class="muted">${esc(i.note)}</span></td>
-       <td class="${i.running ? "ok" : "muted"}">${esc(i.state)}<br><span class="muted">${esc(i.detail)}</span></td>
-       <td>${i.running ? "" : `<button data-act="start" data-name="${i.name}">Start</button>`}
-           ${i.running && !i.protected ? `<button data-act="restart" data-name="${i.name}">Restart</button>
-             <button class="danger" data-act="stop" data-name="${i.name}" ${i.stoppable ? "" : "disabled"} title="${esc(i.stop_reason)}">Stop</button>` : ""}
-           ${i.protected ? '<span class="muted">protected</span>' : ""}</td>
-       <td class="mono muted">${esc((i.tail || []).slice(-3).join("\n"))}</td></tr>`).join("") + "</table>";
-  }).join("");
+  $("nodes").innerHTML = '<div class="ngrid"><div class="ng-h">Node</div><div class="ng-h">State</div>' +
+    '<div class="ng-h">Detail</div><div class="ng-h"></div>' + N.groups.map(g =>
+    `<div class="ng-group"><b>${esc(g.label)}</b> <span class="muted">${esc(g.hint)}</span></div>` +
+    N.items.filter(i => i.group === g.id).map(nodeRow).join("")).join("") + "</div>";
   $("profiles").innerHTML = N.profiles.map(p => `<button data-profile="${p.id}">Start ${esc(p.label)}</button>`).join(" ");
   if (G.tab === "params" && !$("p-node").options.length) paramNodes();
 }

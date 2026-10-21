@@ -3,15 +3,21 @@ built workspace (crusader_msgs, crusader_bt for missions_list); skips itself wit
 
     ROS_DOMAIN_ID=57 python3 crusader_groundstation/test/test_gcs_bridge.py
 """
+import collections
+import io
 import itertools
 import json
 import os
+import shutil
 import socket
 import sys
+import tarfile
 import tempfile
 import threading
 import time
+import types
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
@@ -21,11 +27,50 @@ try:
     from rclpy.executors import MultiThreadedExecutor
     from std_msgs.msg import String
     from crusader_msgs.msg import LatLonHead, PassagePlan
-    from crusader_groundstation import gcs_wire
-    from crusader_groundstation.gcs_bridge import MANUAL_VERSION_BASE, GcsBridge
+    from crusader_groundstation import gcs_bridge, gcs_wire
+    from crusader_groundstation.gcs_bridge import (MANUAL_VERSION_BASE, OPS_WORKERS, Connection,
+                                                   GcsBridge)
     HAVE_ROS = True
 except Exception:                                   # no ROS, or the msgs are not built
     HAVE_ROS = False
+
+
+class SlowLink:
+    """A laptop's end of the WiFi, as the socket a Connection sends on: sendall waits while the
+    link is held shut (clear `carrying`) and records the frames it carries, in wire order."""
+
+    def __init__(self):
+        self.frames = []
+        self.carrying, self.stalled, self.closed = (threading.Event() for _ in range(3))
+
+    def sendall(self, data):
+        if not self.carrying.is_set():
+            self.stalled.set()
+            self.carrying.wait()
+        if self.closed.is_set():
+            raise OSError("link closed")
+        self.frames.append(gcs_wire.read_frame(types.SimpleNamespace(recv=io.BytesIO(data).read)))
+
+    def recv(self, n):
+        self.closed.wait()
+        return b""
+
+    def shutdown(self, how):
+        self.closed.set()
+        self.carrying.set()
+
+    def close(self):
+        self.shutdown(None)
+
+
+class Peaked(collections.deque):
+    """A lane that remembers the most it ever held."""
+
+    peak = 0
+
+    def append(self, item):
+        super().append(item)
+        self.peak = max(self.peak, len(self))
 
 
 @unittest.skipUnless(HAVE_ROS, "needs rclpy and a built workspace")
@@ -187,6 +232,126 @@ class Bridge(unittest.TestCase):
     def test_unknown_op(self):
         h, _ = self.req("fly")
         self.assertFalse(h["ok"])
+
+    # -- a download on a slow link: a second laptop whose link the test holds shut
+
+    def until(self, pred, what, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        while not pred():
+            if time.monotonic() > deadline:
+                self.fail(f"never saw {what}")
+            time.sleep(0.01)
+
+    def laptop(self):
+        link = SlowLink()
+        conn = Connection(link, ("slow-laptop", 0), self.node._on_frame, self.node.get_logger())
+        with conn._cv:
+            conn._bulk = Peaked()
+        self.addCleanup(conn.close)
+        return link, conn
+
+    def session(self, mb=4):
+        """A session of random bytes, which gzip cannot shrink: mb MB is mb * 4 chunks."""
+        name = f"dl{next(self.ids)}"
+        path = os.path.join(self.tmp, name)
+        os.makedirs(path)
+        with open(os.path.join(path, "frames.bin"), "wb") as f:
+            f.write(os.urandom(mb << 20))
+        self.addCleanup(shutil.rmtree, path, True)
+        return name
+
+    def download(self, conn, name):
+        """The op on the bridge's own pool, as a laptop's request would run it."""
+        return self.node._pool.submit(self.node._run_op, conn, {
+            "t": "req", "id": 7, "op": "record_download", "name": name})
+
+    def full_bulk(self, link, conn):
+        self.until(lambda: link.stalled.is_set() and len(conn._bulk) == conn.BULK_QUEUE,
+                   "the sender stuck on a chunk and the bulk lane full")
+
+    def sent(self, link, t, **fields):
+        return [h for h, _ in list(link.frames)
+                if h["t"] == t and all(h.get(k) == v for k, v in fields.items())]
+
+    def assert_workers_free(self):
+        barrier = threading.Barrier(OPS_WORKERS)
+        for job in [self.node._pool.submit(barrier.wait, 5) for _ in range(OPS_WORKERS)]:
+            job.result(timeout=7)
+
+    def test_control_frames_overtake_a_download(self):
+        link, conn = self.laptop()
+        name = self.session()
+        self.download(conn, name)
+        self.full_bulk(link, conn)
+        conn.send({"t": "state", "stamp": 1.0})
+        conn.send({"t": "result", "id": 99, "ok": True, "msg": "", "data": None})
+        link.carrying.set()
+        self.until(lambda: self.sent(link, "result", id=7), "the download's result", 10.0)
+        kinds = [(h["t"], h.get("id")) for h, _ in link.frames]
+        self.assertEqual(kinds[:3], [("file", 7), ("state", None), ("result", 99)])
+        self.assertEqual(kinds[-2:], [("file", 7), ("result", 7)])    # the result ends the file
+        self.assertTrue(link.frames[-2][0]["last"])
+        self.assertEqual([h["seq"] for h in self.sent(link, "file")],
+                         list(range(len(kinds) - 3)))
+        data = b"".join(b for h, b in link.frames if h["t"] == "file")
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+            self.assertEqual(tar.getmember(f"{name}/frames.bin").size, 4 << 20)
+
+    def test_download_memory_stays_bounded(self):
+        link, conn = self.laptop()
+        self.download(conn, self.session())
+        self.full_bulk(link, conn)
+        time.sleep(0.5)                 # unthrottled, the producer would have queued it all by now
+        self.assertEqual(len(conn._bulk), conn.BULK_QUEUE)
+        link.carrying.set()
+        self.until(lambda: self.sent(link, "result", id=7), "the download's result", 10.0)
+        self.assertEqual(conn._bulk.peak, conn.BULK_QUEUE)
+        self.assertGreater(len(self.sent(link, "file")), 2 * conn.BULK_QUEUE)
+
+    def test_closed_link_aborts_download_and_frees_the_worker(self):
+        link, conn = self.laptop()
+        job = self.download(conn, self.session())
+        self.full_bulk(link, conn)
+        t0 = time.monotonic()
+        conn.close()
+        job.result(timeout=5)
+        self.assertLess(time.monotonic() - t0, 2.0)
+        self.assertFalse(conn._bulk)
+        self.assert_workers_free()
+
+    def test_stalled_link_aborts_download_with_an_error_result(self):
+        link, conn = self.laptop()
+        name = self.session()
+        with mock.patch.object(gcs_bridge, "BULK_WAIT_S", 1.0):
+            t0 = time.monotonic()
+            self.download(conn, name).result(timeout=10)
+            took = time.monotonic() - t0
+        self.assertLess(took, 1.8)      # one wait: tarfile's own close() must not wait again
+        link.carrying.set()
+        self.until(lambda: self.sent(link, "result", id=7), "the error result")
+        result = self.sent(link, "result", id=7)[0]
+        self.assertFalse(result["ok"])
+        self.assertIn("aborted", result["msg"])
+        kinds = [h["t"] for h, _ in link.frames]
+        self.assertNotIn("file", kinds[kinds.index("result"):])      # no chunk follows the error
+        self.assertTrue(conn.alive)
+        self.assert_workers_free()
+
+    def test_full_control_lane_drops_the_oldest_state_first(self):
+        link, conn = self.laptop()
+        conn.send({"t": "hello"})
+        self.until(link.stalled.is_set, "the sender stuck on the first frame")
+        conn.send({"t": "state", "n": 0})
+        for _ in range(conn.QUEUE - 1):
+            conn.send({"t": "log", "items": []})
+        self.assertTrue(conn.send({"t": "state", "n": 1}))            # evicts state 0
+        self.assertTrue(conn.send({"t": "result", "id": 5, "ok": True}))    # evicts state 1
+        self.assertFalse(conn.send({"t": "result", "id": 6, "ok": True}))   # nothing to evict
+        self.assertEqual(conn.dropped, 3)
+        link.carrying.set()
+        self.until(lambda: len(link.frames) == conn.QUEUE + 1, "the control lane drained")
+        self.assertEqual(self.sent(link, "state"), [])
+        self.assertEqual([h["id"] for h in self.sent(link, "result")], [5])
 
 
 if __name__ == "__main__":

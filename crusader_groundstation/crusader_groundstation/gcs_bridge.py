@@ -10,14 +10,15 @@ arrival whatever the laptop showed:
   PROTECTED NODES CANNOT BE STOPPED from here (node_registry).
   POWER IS LOCKED while armed or while the arm state is unknown, and needs the hostname.
 
-Each laptop gets a bounded send queue: a slow WiFi link loses frames, never stalls the boat.
+Each laptop gets two bounded send lanes: a slow WiFi link loses control frames (oldest state
+first), never stalls the boat. A recording download rides the bulk lane and waits for room
+there, so it cannot crowd out the state frames and results the operator is watching.
 The pictures and the LiDAR preview are subscribed only while a laptop keeps asking for them,
 so a closed tab costs camera_node and lidar_node nothing.
 """
 import json
 import math
 import os
-import queue
 import socket
 import threading
 import time
@@ -88,6 +89,7 @@ LIDAR_SCALE = 0.01                      # metres per int16 count
 RECORD_FRAME_HZ_RANGE = (0.05, 30.0)
 REPLAY_EVENTS = 300                     # log/radio rows a laptop gets when it connects
 FILE_CHUNK = 256 * 1024
+BULK_WAIT_S = 30.0                      # a download gives up when the link frees no room in this
 OPS_WORKERS = 4
 
 
@@ -113,15 +115,20 @@ def _round(v, n=2):
 
 
 class Connection:
-    """One laptop: a reader thread, a sender thread, and a bounded queue between them."""
+    """One laptop: a reader thread, a sender thread, and two bounded lanes between them.
 
-    QUEUE = 400
+    The sender drains the control lane (state, results, logs, pictures) before every bulk
+    chunk (a download's file frames), so a download delays a control frame by one chunk."""
+
+    QUEUE = 200                             # control frames
+    BULK_QUEUE = 4                          # file chunks: 1 MB queued, the producer waits
 
     def __init__(self, sock, addr, handle, log):
         self.sock, self.addr = sock, addr
         self.min_level = 20                 # INFO: the Logs tab's default
         self.dropped = 0
-        self._q = queue.Queue(self.QUEUE)
+        self._ctl, self._bulk = deque(), deque()    # (tag, frame): frame type | request id
+        self._cv = threading.Condition()    # guards both lanes and _alive
         self._alive = True
         self._handle, self._log = handle, log
         threading.Thread(target=self._send_loop, daemon=True).start()
@@ -131,29 +138,83 @@ class Connection:
     def alive(self):
         return self._alive
 
-    def send(self, header, blob=b"", wait_s=0.0):
-        """Queue one frame -> sent? Never blocks unless wait_s (a download's backpressure)."""
-        if not self._alive:
+    def send(self, header, blob=b""):
+        """Queue one control frame -> queued? Never blocks: a full lane drops its oldest state
+        (a newer one supersedes it), or this frame when it holds none."""
+        frame = self._encode(header, blob)
+        if frame is None:
             return False
+        with self._cv:
+            if not self._alive:
+                return False
+            if len(self._ctl) >= self.QUEUE:
+                self.dropped += 1
+                if not self._drop_state():
+                    return False
+            self._ctl.append((header.get("t"), frame))
+            self._cv.notify_all()
+            return True
+
+    def send_bulk(self, header, blob, wait_s):
+        """Queue one file chunk -> queued? Waits up to wait_s for room; False when the link
+        closed or the wait ran out."""
+        frame = self._encode(header, blob)
+        if frame is None:
+            return False
+        with self._cv:
+            if not self._wait(lambda: len(self._bulk) < self.BULK_QUEUE, wait_s):
+                return False
+            self._bulk.append((header.get("id"), frame))
+            self._cv.notify_all()
+            return True
+
+    def drain_bulk(self, tag, wait_s):
+        """Wait until the sender has taken every queued chunk of one request -> did it? A
+        control frame queued after this goes out behind that last chunk, not ahead of it."""
+        with self._cv:
+            return self._wait(lambda: all(e[0] != tag for e in self._bulk), wait_s)
+
+    def drop_bulk(self, tag):
+        """Forget the queued chunks of one request: an aborted download leaves nothing behind."""
+        with self._cv:
+            keep = [e for e in self._bulk if e[0] != tag]
+            self._bulk.clear()
+            self._bulk.extend(keep)
+            self._cv.notify_all()
+
+    def _encode(self, header, blob):
         try:
-            frame = gcs_wire.encode(clean(header), blob)
+            return gcs_wire.encode(clean(header), blob)
         except ValueError as e:
             self._log.error(f"frame {header.get('t')!r} not sent: {e}")
-            return False
-        try:
-            if wait_s:
-                self._q.put(frame, timeout=wait_s)
-            else:
-                self._q.put_nowait(frame)
-            return True
-        except queue.Full:
-            self.dropped += 1
-            return False
+            return None
+
+    def _drop_state(self):
+        for i, (tag, _frame) in enumerate(self._ctl):
+            if tag == "state":
+                del self._ctl[i]
+                return True
+        return False
+
+    def _wait(self, ready, wait_s):
+        """With the lock held: wait for ready() -> True, False if the link closed first."""
+        self._cv.wait_for(lambda: not self._alive or ready(), wait_s)
+        return self._alive and ready()
+
+    def _next_frame(self):
+        """Control first, then ONE bulk chunk; None once closed."""
+        with self._cv:
+            self._cv.wait_for(lambda: not self._alive or self._ctl or self._bulk)
+            if not self._alive:
+                return None
+            frame = (self._ctl or self._bulk).popleft()[1]
+            self._cv.notify_all()           # a bulk slot is free
+            return frame
 
     def _send_loop(self):
         try:
             while self._alive:
-                frame = self._q.get()
+                frame = self._next_frame()
                 if frame is None:
                     break
                 self.sock.sendall(frame)
@@ -173,13 +234,13 @@ class Connection:
             self.close()
 
     def close(self):
-        if not self._alive:
-            return
-        self._alive = False
-        try:
-            self._q.put_nowait(None)
-        except queue.Full:
-            pass
+        with self._cv:
+            if not self._alive:
+                return
+            self._alive = False
+            self._ctl.clear()
+            self._bulk.clear()
+            self._cv.notify_all()           # the sender, and any download waiting for room
         for fn in (lambda: self.sock.shutdown(socket.SHUT_RDWR), self.sock.close):
             try:
                 fn()
@@ -188,11 +249,18 @@ class Connection:
 
 
 class _ChunkWriter:
-    """A file-like object that sends what is written as file frames, with backpressure."""
+    """A file-like object that sends what is written as file frames, with backpressure.
+    Raises OSError once the link closed or stopped taking chunks, and keeps raising: tarfile
+    writes again while it unwinds, and must not wait out the timeout a second time."""
 
     def __init__(self, conn, rid):
         self.conn, self.rid, self.seq, self.sent = conn, rid, 0, 0
         self._buf = bytearray()
+        self._failed = False
+
+    @property
+    def mb(self):
+        return self.sent / 1048576.0
 
     def write(self, data):
         self._buf += data
@@ -208,9 +276,13 @@ class _ChunkWriter:
         self._send(bytes(self._buf), last=True)
 
     def _send(self, chunk, last):
-        if not self.conn.send({"t": "file", "id": self.rid, "seq": self.seq, "last": last},
-                              chunk, wait_s=30.0):
-            raise OSError("the laptop stopped reading the download")
+        ok = not self._failed and self.conn.send_bulk(
+            {"t": "file", "id": self.rid, "seq": self.seq, "last": last}, chunk, BULK_WAIT_S)
+        if ok and last:                     # the result must follow the chunk that ends the file
+            ok = self.conn.drain_bulk(self.rid, BULK_WAIT_S)
+        if not ok:
+            self._failed = True
+            raise OSError("the laptop closed or stopped reading the download")
         self.seq += 1
         self.sent += len(chunk)
 
@@ -1000,12 +1072,17 @@ class GcsBridge(Node):
         return ok, msg, None
 
     def _op_record_download(self, conn, req):
-        """The session as a .tar.gz, streamed in file frames: never whole in memory."""
+        """The session as a .tar.gz, streamed in file frames: never whole in memory. The
+        worker is held only as fast as the laptop takes chunks, and let go if it stops."""
         writer = _ChunkWriter(conn, req.get("id"))
-        if not self.recorder.archive_into(req.get("name", ""), writer):
-            return False, f"no such session {req.get('name')!r}", None
-        writer.finish()
-        return True, f"{writer.sent / 1048576.0:.1f} MB sent", {"name": req.get("name")}
+        try:
+            if not self.recorder.archive_into(req.get("name", ""), writer):
+                return False, f"no such session {req.get('name')!r}", None
+            writer.finish()
+        except OSError as e:
+            conn.drop_bulk(writer.rid)
+            return False, f"download aborted after {writer.mb:.1f} MB: {e}", None
+        return True, f"{writer.mb:.1f} MB sent", {"name": req.get("name")}
 
     def _record_sample(self):
         self.recorder.tick()
