@@ -945,19 +945,10 @@ oak_detector:
     stream_quality: 60                     # [RO] JPEG quality for that view
 
 # ---- Missions: bt_runner_node — one coarse action outside, a tree inside ----
-# Crusader's bt_navigator: accepts a SafePassage goal, loads the Task 1
-# behaviour tree and ticks it; the leaves are primitives that publish a
-# GuidedSetpoint and poll /crsd/pose for arrival. Runtime XML:
-# crusader_bt/behavior_trees/. NOT in core.launch.py.
+# Runs the built-in tree a RunMission goal names (crusader_bt/behavior_trees/<name>.xml).
 bt_runner_node:
   ros__parameters:
-    tree_file: "/root/robotx_ws/install/crusader_bt/share/crusader_bt/behavior_trees/task1_safe_passage.xml"
-                                            # [DYN] absolute, INSIDE the container,
-                                            #      read per accepted goal. No code
-                                            #      default: silently ticking the
-                                            #      wrong tree is worse than
-                                            #      refusing to start.
-    action_name: "/crsd/safe_passage"       # [RO] the coarse mission action
+    action_name: "/crsd/run_mission"        # [RO] the RunMission action
     tick_hz: 10.0                           # [RO] tree tick rate. ALSO the cancel
                                             #      latency and the guard band's
                                             #      flight-mode re-check rate.
@@ -970,12 +961,6 @@ bt_runner_node:
     stream_timeout_s: 1.0                   # [RO] = shared.pose_timeout_s. Older
                                             #      and the tree is told the pose
                                             #      is stale rather than acting on it.
-    plan_timeout_s: 15.0                    # [RO] the UAV plan arrives at ~0.2 Hz,
-                                            #      so it cannot share the pose
-                                            #      timeout. A stale plan halts the
-                                            #      mission: a dead radio must STOP
-                                            #      the boat, not leave it driving a
-                                            #      passage nobody can confirm.
     assoc_radius_m: 5.0                     # [RO] how near a tracked contact must
                                             #      be to count as a plan buoy. Too
                                             #      large and two buoys claim one
@@ -999,8 +984,6 @@ bt_runner_node:
     stick_channels: [3, 4, 1]               # [RO] throttle, lateral, steer
     stick_neutral_us: [1495, 1495, 1489]    # [RO] = RC3/RC4/RC1_TRIM
     stick_reverse: [false, false, false]    # [RO]
-    task_token: "TASK_SAFE_PASSAGE"         # [RO] an RxTask name (check_config
-                                            #      vs ocs_link.RX_TASKS)
     autonomous_modes: ["GUIDED", "AUTO", "LOITER", "RTL"]
                                             # [RO] = shared.autonomous_modes; read
                                             #      by the guard band's IsAutonomous

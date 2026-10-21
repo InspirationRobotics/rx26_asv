@@ -585,8 +585,6 @@ int main()
       resourceRequestJson(r) ==
       "{\"task\":\"TASK_COORDINATED_LOGISTICS\",\"resource_color\":\"COLOR_RED\","
       "\"delivery_circle_color\":\"COLOR_BLUE\"}");
-    chk("UAV request carries RXL numbers",
-      uavRequestJson(r, 3) == "{\"seq\":3,\"resource_color\":1,\"delivery_color\":3}");
     chk("Advanced: COLOR_ANY", resourceRequestJson(requestFrom("flash", {Colour::Green}))
       .find("\"resource_color\":\"COLOR_ANY\"") != std::string::npos);
     chk("cannon off", cannonJson(false, 0, 0, 0).find("\"fire\":false") != std::string::npos);

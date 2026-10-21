@@ -18,9 +18,7 @@
                  overshoot_deg="45.0"
                  lookahead_m="2.5"
                  blocked_timeout_s="15.0"
-                 plan_attempts="4"
-                 plan_max_age_s="15.0"
-                 confirm_timeout_s="120.0"/>
+                 plan_attempts="4"/>
         </TaskAttempt>
       </Sequence>
     </ReactiveSequence>

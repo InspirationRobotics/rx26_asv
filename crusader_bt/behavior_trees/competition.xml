@@ -3,7 +3,7 @@
 <!--
   Competition mission: hold station until RoboCommand's RunStart, then Task 1 and Task 3, each
   its own task attempt. Start it once the boat is armed and in GUIDED, tier set on the Start
-  button (SetTier can change it between tasks). timeout_s of WaitForRunStart is 0: wait forever.
+  button. timeout_s of WaitForRunStart is 0: wait forever.
 -->
 <root BTCPP_format="4" main_tree_to_execute="Main">
   <include path="lib/task1_global.xml"/>
@@ -21,9 +21,7 @@
                  overshoot_deg="45.0"
                  lookahead_m="2.5"
                  blocked_timeout_s="15.0"
-                 plan_attempts="4"
-                 plan_max_age_s="15.0"
-                 confirm_timeout_s="120.0"/>
+                 plan_attempts="4"/>
         </TaskAttempt>
         <TaskAttempt token="TASK_COORDINATED_LOGISTICS">
           <SubTree ID="Task3Disruptive" _autoremap="true"

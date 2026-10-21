@@ -42,6 +42,17 @@ static void chk_near(const std::string & name, double got, double want, double t
 
 int main()
 {
+  // ------------------------------------------------------------- beacon labels
+  chk("flash_blue_diamond is ENTRY", beaconFromLabel("flash_blue_diamond") == Beacon::FlashingBlue);
+  chk("flashing_blue_buoy is ENTRY", beaconFromLabel("flashing_blue_buoy") == Beacon::FlashingBlue);
+  chk("blue_diamond (no prefix) is EXIT", beaconFromLabel("blue_diamond") == Beacon::SteadyBlue);
+  chk("steady_blue_buoy is EXIT", beaconFromLabel("steady_blue_buoy") == Beacon::SteadyBlue);
+  chk("blue_buoy cannot tell", beaconFromLabel("blue_buoy") == Beacon::Unknown);
+  chk("off_blue_diamond is not EXIT", beaconFromLabel("off_blue_diamond") == Beacon::Unknown);
+  chk("red_buoy", beaconFromLabel("red_buoy") == Beacon::FlashingRed);
+  chk("black_buoy", beaconFromLabel("black_buoy") == Beacon::Off);
+  chk("unknown_buoy", beaconFromLabel("unknown_buoy") == Beacon::Unknown);
+
   // ------------------------------------------------------------- projection
   const LatLon origin{1.28060, 103.85570};        // Marina Bay, near enough
   {

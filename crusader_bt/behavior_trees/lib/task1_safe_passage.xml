@@ -20,7 +20,7 @@
   <BehaviorTree ID="Task1Core">
     <ReactiveSequence name="guard_band">
       <ResolveBuoyStates/>
-      <PublishSafePassageReport min_period_s="1.0"/>
+      <ReportSafePassage min_period_s="1.0"/>
 
       <Sequence name="passage">
 

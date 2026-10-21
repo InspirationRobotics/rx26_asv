@@ -1039,15 +1039,6 @@ inline std::string resourceRequestJson(const Request & r)
          wireColourName(r.delivery) + "\"}";
 }
 
-/// The same request for the UAV, as NUMBERS in RXL_COLOR's numbering (which is
-/// RoboCommand's), because it is bound for a three-byte radio message rather
-/// than for ParseDict. `seq` lets the aircraft tell a repeat from a new ask.
-inline std::string uavRequestJson(const Request & r, int seq)
-{
-  return "{\"seq\":" + std::to_string(seq) + ",\"resource_color\":" +
-         std::to_string(r.resource) + ",\"delivery_color\":" + std::to_string(r.delivery) + "}";
-}
-
 /// The water cannon command: fire or not, aimed at a point in camera_link.
 inline std::string cannonJson(bool fire, double x, double y, double z)
 {

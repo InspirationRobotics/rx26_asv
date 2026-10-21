@@ -1,4 +1,4 @@
-// test_mission_nodes — WaitForRunStart, TaskAttempt and SetTier, ticked against a Context.
+// test_mission_nodes — WaitForRunStart, TaskAttempt and TierAtLeast, ticked against a Context.
 //
 // Links the leaves, so it needs ROS: build with colcon, run from the build directory
 //
@@ -217,40 +217,18 @@ static void dwellTests()
     r.tick();
     chk("the first attempt of a run claims at once (NONE was long ago)", r.taskList() == "TASK_SAFE_PASSAGE");
   }
-  {
-    Rig r;
-    r.ctx->now_s = 100.0;
-    r.load("<Sequence><SetTask token=\"TASK_NONE\"/>"
-      "<TaskAttempt token=\"TASK_SAFE_PASSAGE\"><Scripted/></TaskAttempt></Sequence>");
-    g_child = RUN;
-    r.tick();
-    chk("a SetTask TASK_NONE is held too", r.taskList() == "TASK_NONE");
-    r.ctx->now_s = 101.5;
-    r.tick();
-    chk("... then the attempt is claimed", r.taskList() == "TASK_NONE,TASK_SAFE_PASSAGE");
-  }
 }
 
-static void setTierTests()
+static void tierTests()
 {
-  std::printf("\n2. SetTier\n");
+  std::printf("\n2. TierAtLeast (the goal's tier)\n");
   Rig r;
-  for (const char * name : {"core", "advanced", "disruptive"}) {
-    r.load(std::string("<SetTier tier=\"") + name + "\"/>");
-    const int want = std::string(name) == "core" ? 0 : std::string(name) == "advanced" ? 1 : 2;
-    chk(std::string(name) + " is accepted", r.tick() == OK);
-    chk(std::string(name) + " sets the tier", r.ctx->tier == want);
-  }
-  r.ctx->tier = 1;
-  r.load("<SetTier tier=\"bogus\"/>");
-  chk("an unknown tier fails", r.tick() == BAD);
-  chk("... and leaves the tier alone", r.ctx->tier == 1);
-  r.load("<SetTier/>");
-  chk("no tier port fails", r.tick() == BAD);
-  r.load("<Sequence><SetTier tier=\"core\"/><TierIs tier=\"core\"/>"
-    "<Inverter><TierAtLeast tier=\"1\"/></Inverter>"
-    "<SetTier tier=\"advanced\"/><TierIs tier=\"advanced\"/><TierAtLeast tier=\"1\"/></Sequence>");
-  chk("TierIs and TierAtLeast follow SetTier", r.tick() == OK);
+  r.ctx->tier = 0;
+  r.load("<TierAtLeast tier=\"1\"/>");
+  chk("core is not at least advanced", r.tick() == BAD);
+  r.ctx->tier = 2;
+  r.load("<TierAtLeast tier=\"1\"/>");
+  chk("disruptive is at least advanced", r.tick() == OK);
 }
 
 static void waitForRunStartTests()
@@ -371,7 +349,7 @@ int main()
   rclcpp::init(0, nullptr);
   taskAttemptTests();
   dwellTests();
-  setTierTests();
+  tierTests();
   waitForRunStartTests();
   tunableTests();
   rclcpp::shutdown();

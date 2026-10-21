@@ -376,21 +376,19 @@ def check_params_yaml():
         ok("http ports distinct", ", ".join(f"{p}={n}" for p, n in
                                             sorted(seen.items())))
 
-    # The mission's task token must be in RoboCommand's RxTask enum. ParseDict
-    # REJECTS THE WHOLE FRAME on an unknown enum name, so a typo stops every
-    # heartbeat reaching RoboCommand for the whole mission -- the scored window.
+    # Every TaskAttempt token in a built-in tree must be in RoboCommand's RxTask enum: ParseDict
+    # rejects the whole heartbeat frame on an unknown enum name.
     try:
         link = load_ocs_link()
-        token = cfg["bt_runner_node"]["ros__parameters"]["task_token"]
-        if token not in link.RX_TASKS:
-            fail("task_token is a real RxTask",
-                 f"{token!r} not in {sorted(link.RX_TASKS)} — protobuf's ParseDict "
-                 "rejects the whole frame, so every heartbeat sent during the "
-                 "mission is lost, not just this field")
+        trees = sorted((REPO / "crusader_bt" / "behavior_trees").rglob("*.xml"))
+        tokens = {t for f in trees for t in re.findall(r'TaskAttempt token="([A-Z_]+)"', f.read_text())}
+        bad = sorted(tokens - set(link.RX_TASKS))
+        if bad:
+            fail("TaskAttempt tokens are real RxTasks", f"{bad} not in {sorted(link.RX_TASKS)}")
         else:
-            ok("task_token is a real RxTask", token)
-    except KeyError as e:
-        fail("task_token is a real RxTask", f"missing key {e}")
+            ok("TaskAttempt tokens are real RxTasks", ", ".join(sorted(tokens)))
+    except Exception as e:  # noqa: BLE001
+        fail("TaskAttempt tokens are real RxTasks", f"{type(e).__name__}: {e}")
 
     check_ocs_client(cfg)
 

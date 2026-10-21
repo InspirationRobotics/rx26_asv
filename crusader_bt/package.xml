@@ -28,6 +28,7 @@
   <depend>std_msgs</depend>
   <depend>behaviortree_cpp</depend>
   <depend>crusader_msgs</depend>
+  <depend>ament_index_cpp</depend>
   <!-- Optional at build time: CMake looks for these with QUIET and builds a stub
        planner port when they are absent (an image without Nav2), after which
        bt_runner_node must run with nav_mode off. The Nav2 planner itself is

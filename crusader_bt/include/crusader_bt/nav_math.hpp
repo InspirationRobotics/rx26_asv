@@ -25,6 +25,7 @@
 #define CRUSADER_BT__NAV_MATH_HPP_
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <string>
 #include <utility>
@@ -145,6 +146,27 @@ enum class Beacon
   FlashingBlue = 4,   // ENTRY
   SteadyBlue = 5      // EXIT
 };
+
+/// A tracked target's label as a beacon state; anything unrecognised is Unknown (no side
+/// constraint), never guessed into a colour. ENTRY is FLASHING blue, EXIT STEADY blue:
+/// oak_detector names a lit shape with no prefix (blue_diamond) and a flashing one flash_*,
+/// while buoy_detector's blue_buoy cannot tell the two apart.
+inline Beacon beaconFromLabel(const std::string & raw)
+{
+  std::string s;
+  for (char c : raw) {s += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));}
+  const auto has = [&s](const char * w) {return s.find(w) != std::string::npos;};
+  if (has("red")) {return Beacon::FlashingRed;}
+  if (has("green")) {return Beacon::FlashingGreen;}
+  if (has("blue")) {
+    if (has("flash")) {return Beacon::FlashingBlue;}
+    if (has("steady") || has("solid")) {return Beacon::SteadyBlue;}
+    if (s.rfind("blue_", 0) == 0 && s != "blue_buoy") {return Beacon::SteadyBlue;}
+    return Beacon::Unknown;
+  }
+  if (has("off") || has("black")) {return Beacon::Off;}
+  return Beacon::Unknown;
+}
 
 inline bool isSideConstrained(Beacon b)
 {

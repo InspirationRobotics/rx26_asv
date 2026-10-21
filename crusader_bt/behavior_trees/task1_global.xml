@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- MISSION: Task 1 Safe Passage, Advanced/Disruptive tier, whole-field planner. -->
+<!-- MISSION: Task 1 Safe Passage above Core, whole-field planner. -->
 <!--
   The tree is Task1Global, in lib/task1_global.xml. This adds the autonomy guard and the
-  task heartbeat, so TREE=task1_global.xml keeps working in the sim and lake rigs.
+  task heartbeat.
   Every tunable is written out with its default.
 -->
 <root BTCPP_format="4" main_tree_to_execute="Main">
@@ -18,9 +18,7 @@
                  overshoot_deg="45.0"
                  lookahead_m="2.5"
                  blocked_timeout_s="15.0"
-                 plan_attempts="4"
-                 plan_max_age_s="15.0"
-                 confirm_timeout_s="120.0"/>
+                 plan_attempts="4"/>
       </TaskAttempt>
     </ReactiveSequence>
   </BehaviorTree>

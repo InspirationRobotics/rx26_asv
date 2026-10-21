@@ -11,8 +11,7 @@
 //   * the boat is not near the start of what is left of the leg it is about to drive;
 //   * a hazard now sits closer to what is left than the plan allowed (fusion moved a buoy,
 //     or a LiDAR/camera track appeared on it).
-// That is the whole re-tasking mechanism. Advanced plans once and keeps it; Disruptive also
-// stops at checkpoints and asks, and replans on any change.
+// That is the whole re-tasking mechanism.
 //
 // NO NAV2: the boat follows its own plan with GUIDED setpoints, so these behave the same in
 // every nav_mode.
@@ -170,26 +169,6 @@ void holdHere(Context & c, const rclcpp::Logger & lg, const char * why)
 
 // ---------------------------------------------------------------- conditions
 
-/// The goal's tier: "core" | "advanced" | "disruptive" (or 0 | 1 | 2).
-class TierIs : public CrusaderCondition
-{
-public:
-  TierIs(const std::string & n, const BT::NodeConfig & c)
-  : CrusaderCondition(n, c) {}
-  static BT::PortsList providedPorts()
-  {
-    return {BT::InputPort<std::string>("tier", "disruptive", "core | advanced | disruptive")};
-  }
-
-  BT::NodeStatus tick() override
-  {
-    int want = 2;                           // an unrecognised name reads as disruptive
-    parseTier(getInput<std::string>("tier").value_or("disruptive"), &want);
-    std::lock_guard<std::mutex> lk(ctx_->mu);
-    return ctx_->tier == want ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
-  }
-};
-
 /// The transit is behind the boat (every gate and side driven).
 class TransitComplete : public CrusaderCondition
 {
@@ -202,22 +181,6 @@ public:
   {
     std::lock_guard<std::mutex> lk(ctx_->mu);
     return ctx_->global_passage.phase > Phase::Transit ?
-           BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
-  }
-};
-
-/// The last transit stretch stopped at a gate's checkpoint, not the transit's end.
-class AtCheckpoint : public CrusaderCondition
-{
-public:
-  AtCheckpoint(const std::string & n, const BT::NodeConfig & c)
-  : CrusaderCondition(n, c) {}
-  static BT::PortsList providedPorts() {return {};}
-
-  BT::NodeStatus tick() override
-  {
-    std::lock_guard<std::mutex> lk(ctx_->mu);
-    return ctx_->global_passage.at_checkpoint ?
            BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
   }
 };
@@ -358,20 +321,19 @@ private:
   bool held_ = false;
 };
 
-/// Drives one phase of the plan (for the transit with stop_at_checkpoints, the stretch to the
-/// next gate's checkpoint).
+/// Drives one phase of the plan.
 ///
 ///   * Already past this phase: SUCCESS at once, so a Retry round the whole sequence resumes
 ///     where the mission is. Not yet at it: FAILURE (a wiring error).
 ///   * The transit's track is recorded: its parity is what a mid-transit replan starts from.
-///   * The field changes (Disruptive re-task) during the approach or transit: re-plans from
+///   * The aircraft's field changes during the approach or transit: re-plans from
 ///     the boat AT ONCE and carries on. An orbit carries on (it does not depend on colours)
 ///     and the next phase picks the change up.
 ///   * A hazard closer to the path ahead than the plan allowed: re-plans and carries on; if
 ///     the path ahead is BLOCKED (closer than hard - local_check_tol), HOLDS, re-plans every
 ///     second, resumes once clear for nav_unblock_reset_s, FAILS after blocked_timeout_s.
-///   * Arrives: approach and entry orbit hand over while moving unless stop_at_end; the
-///     transit's checkpoint stretches and the exit orbit stop on the point.
+///   * Arrives: approach, entry orbit and transit hand over while moving unless stop_at_end;
+///     the exit orbit stops on the point.
 ///   * Stale pose or a changed datum: holds once and waits; never fails for it.
 class DrivePlanPhase : public CrusaderAction
 {
@@ -382,8 +344,6 @@ public:
   {
     return {
       BT::InputPort<std::string>("phase", "transit", "approach | entry_orbit | transit | exit_orbit"),
-      BT::InputPort<bool>("stop_at_checkpoints", false,
-        "transit only: end each stretch at the next gate's checkpoint (Disruptive)"),
       BT::InputPort<bool>("stop_at_end", false,
         "stop on the leg's last point instead of handing over to the next leg while moving"),
       BT::InputPort<double>("blocked_timeout_s", 15.0, "FAILURE after being blocked this long"),
@@ -408,7 +368,6 @@ public:
           gp::phaseName(cur));
         return BT::NodeStatus::FAILURE;
       }
-      ctx_->global_passage.at_checkpoint = false;
       last_now_ = ctx_->now_s;
     }
     blocked_ = false;
@@ -419,14 +378,11 @@ public:
     last_log_ = -kInf;
     follower_.reset({});
     rest_.clear();
-    cp_red_ = cp_green_ = -1;
     if (!startLeg(true)) {
       enterBlocked("no plan for this leg");
       last_replan_ = last_now_;
     } else {
-      const std::string to = cp_red_ < 0 ? std::string() : " to the checkpoint after gate red " +
-        std::to_string(cp_red_) + " / green " + std::to_string(cp_green_);
-      RCLCPP_INFO(log(), "%s: %.1f m to drive%s", gp::phaseName(phase_), follower_.total(), to.c_str());
+      RCLCPP_INFO(log(), "%s: %.1f m to drive", gp::phaseName(phase_), follower_.total());
     }
     return onRunning();
   }
@@ -558,7 +514,6 @@ private:
     if (!why.empty()) {
       if (!allow_replan || !replan(*ctx_, phase_, log(), why)) {return false;}
     }
-    const bool stop_cp = getInput<bool>("stop_at_checkpoints").value_or(false);
     const bool stop_end = getInput<bool>("stop_at_end").value_or(false);
     std::vector<Vec2> path;
     {
@@ -569,31 +524,13 @@ private:
       plan_hard_ = g.plan.hard_used;
       leg_gen_ = g.plans;
       offset_ = phase_ == Phase::Transit ? g.transit_s : 0.0;
-      const double total = gp::arcLengths(leg).back();
-      double end = total;
-      cp_red_ = cp_green_ = -1;
-      if (phase_ == Phase::Transit) {
-        if (g.traj.empty()) {g.traj.push_back(leg.front());}
-        for (const gp::Checkpoint & cp : g.plan.checkpoints) {
-          if (cp.s <= offset_ + 0.5) {continue;}
-          if (stop_cp) {
-            end = cp.s;
-            cp_red_ = cp.red_id;
-            cp_green_ = cp.green_id;
-          }
-          break;
-        }
-      }
-      path = leg.size() < 2 ? leg : gp::slice(leg, offset_, end);
-      stop_ = stop_end || cp_red_ >= 0 || phase_ == Phase::ExitOrbit;
+      if (phase_ == Phase::Transit && g.traj.empty()) {g.traj.push_back(leg.front());}
+      path = leg.size() < 2 ? leg : gp::slice(leg, offset_, gp::arcLengths(leg).back());
+      stop_ = stop_end || phase_ == Phase::ExitOrbit;
       rest_.clear();
       for (int k = static_cast<int>(phase_) + 1; k < 4; ++k) {
         const std::vector<Vec2> & l = g.plan.legs[k];
         rest_.insert(rest_.end(), l.begin(), l.end());
-      }
-      if (end < total && leg.size() >= 2) {
-        const std::vector<Vec2> tail = gp::slice(leg, end, total);
-        rest_.insert(rest_.begin(), tail.begin(), tail.end());
       }
       fp_.lookahead_m = getInput<double>("lookahead_m").value_or(1.5);
       fp_.resend_m = getInput<double>("resend_m").value_or(0.3);
@@ -678,15 +615,14 @@ private:
     if (tr.empty() || nav::norm(boat - tr.back()) >= 0.2) {tr.push_back(boat);}
   }
 
-  /// Gates the boat has driven through count as cleared, stop or no stop (the report's
-  /// gates_cleared, and a replan never puts a checkpoint behind the boat).
+  /// Gates the boat has driven through count as cleared: a replan never puts one behind the boat.
   void markGatesPassed()
   {
     if (phase_ != Phase::Transit) {return;}
     std::lock_guard<std::mutex> lk(ctx_->mu);
     const double at = offset_ + follower_.s();
     for (const gp::Checkpoint & cp : ctx_->global_passage.plan.checkpoints) {
-      if (cp.s > at || (cp.red_id == cp_red_ && cp.green_id == cp_green_)) {continue;}
+      if (cp.s > at) {continue;}
       if (!nav::gateCleared(ctx_->cleared_gates, cp.red_id, cp.green_id)) {
         ctx_->cleared_gates.push_back({cp.red_id, cp.green_id});
         RCLCPP_INFO(log(), "through gate red %d / green %d", cp.red_id, cp.green_id);
@@ -694,23 +630,10 @@ private:
     }
   }
 
-  BT::NodeStatus finish(const gp::FollowOut & o)
+  BT::NodeStatus finish(const gp::FollowOut &)
   {
     std::lock_guard<std::mutex> lk(ctx_->mu);
     Context::GlobalPassage & g = ctx_->global_passage;
-    if (phase_ == Phase::Transit && cp_red_ >= 0) {
-      g.transit_s = offset_ + o.total;
-      g.at_checkpoint = true;
-      if (!nav::gateCleared(ctx_->cleared_gates, cp_red_, cp_green_)) {
-        ctx_->cleared_gates.push_back({cp_red_, cp_green_});
-      }
-      ctx_->gate_red_id = cp_red_;
-      ctx_->gate_green_id = cp_green_;
-      ctx_->gate_cleared = true;
-      RCLCPP_INFO(log(), "through gate red %d / green %d: at its checkpoint (%zu cleared)",
-        cp_red_, cp_green_, ctx_->cleared_gates.size());
-      return BT::NodeStatus::SUCCESS;
-    }
     if (phase_ == Phase::EntryOrbit) {g.entry_ring = g.plan.entry_ring;}
     g.phase = static_cast<Phase>(static_cast<int>(phase_) + 1);
     RCLCPP_INFO(log(), "%s complete -> %s", gp::phaseName(phase_), gp::phaseName(g.phase));
@@ -749,7 +672,6 @@ private:
   int leg_gen_ = -1;                ///< global_passage.plans when the leg was loaded
   double soft_ = 2.0;
   std::vector<double> cum_, planned_clear_;   ///< per follower vertex: arc, clearance when loaded
-  int cp_red_ = -1, cp_green_ = -1;
   bool stop_ = false;
   bool blocked_ = false, degraded_ = false;
   double blocked_s_ = 0.0, clear_since_ = -1.0;
@@ -760,9 +682,7 @@ private:
 
 void registerGlobalPassageNodes(BT::BehaviorTreeFactory & factory)
 {
-  factory.registerNodeType<TierIs>("TierIs");
   factory.registerNodeType<TransitComplete>("TransitComplete");
-  factory.registerNodeType<AtCheckpoint>("AtCheckpoint");
   factory.registerNodeType<WaitForField>("WaitForField");
   factory.registerNodeType<PlanGlobalPassage>("PlanGlobalPassage");
   factory.registerNodeType<DrivePlanPhase>("DrivePlanPhase");

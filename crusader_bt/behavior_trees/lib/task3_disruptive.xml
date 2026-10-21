@@ -3,7 +3,7 @@
   Task3Disruptive: Task 3 Coordinated Logistics, the USV's half (handbook 3.3.4), all three tiers.
 
   Core stops once the fire is out; Advanced and Disruptive go on to read the resource request off
-  the same window (TierAtLeast, from the goal's tier or SetTier). Three bays, numbered LEFT TO
+  the same window (TierAtLeast, from the goal's tier). Three bays, numbered LEFT TO
   RIGHT FACING THEM, one with a GREEN indicator: dock there, DockingReport(bay_id); then a window
   lights RED: spray it until it turns GREEN, FirefightingReport(window_id); Disruptive then reads
   the c1/c2 code off the window and reports ResourceDeliveryRequest. Numbers come from the build
@@ -62,7 +62,7 @@
               <SafeBayKnown need_others_red="false"/>
             </ReactiveFallback>
 
-            <CommitSafeBay/>
+            <CommitSafeBay bay="{bay}"/>
 
             <!-- Onto the centreline from OUTSIDE the line-up point, so the boat arrives heading
                  in. Skipped when already there: a lead-in behind the boat turns it round twice. -->
@@ -110,11 +110,11 @@
           </Inverter>
         </Timeout>
 
-        <ReportDocking/>
+        <ReportDocking bay="{bay}"/>
 
-        <AwaitFireTarget timeout_s="60.0" resend_s="10.0"/>
-        <SprayUntilHit timeout_s="{spray_timeout_s}" min_green_s="0.4" max_aim_age_s="1.0"/>
-        <ReportFirefighting window_id_base="1"/>
+        <AwaitFireTarget bay="{bay}" timeout_s="60.0" resend_s="10.0"/>
+        <SprayUntilHit window="{window}" timeout_s="{spray_timeout_s}" min_green_s="0.4" max_aim_age_s="1.0"/>
+        <ReportFirefighting window="{window}" window_id_base="1"/>
 
         <!-- Core ends here. Above it, the same window carries the request. -->
         <Fallback name="request">
@@ -122,8 +122,8 @@
             <TierAtLeast tier="1"/>
           </Inverter>
           <Sequence name="read_and_report">
-            <DecodeResourceRequest timeout_s="{decode_timeout_s}" hold_s="5.0" min_frames="20"/>
-            <ReportResourceRequest/>
+            <DecodeResourceRequest request="{request}" timeout_s="{decode_timeout_s}" hold_s="5.0" min_frames="20"/>
+            <ReportResourceDelivery request="{request}"/>
           </Sequence>
         </Fallback>
 

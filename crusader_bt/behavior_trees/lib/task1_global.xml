@@ -1,127 +1,38 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Task1Global: Task 1 Safe Passage, whole-field planner (Advanced/Disruptive).
+  Task1Global: Task 1 Safe Passage above Core, planned over the whole field.
 
-  Above Core the aircraft hands over every buoy, its colour, the ENTRY and the EXIT before the
-  boat moves (handbook 3.3.2). One search (global_passage.hpp) solves the whole task from the
-  boat: round the ENTRY clockwise, through the field with every RED to starboard and every GREEN
-  to port, round the EXIT counter-clockwise; ANY drivable passage is found, winding or crowded.
-  The boat follows its own plan with GUIDED setpoints in every nav_mode; Nav2 plans nothing here.
-  TierIs picks the branch: Disruptive below, Advanced otherwise. Core has no aircraft (Task1Core).
-
-  ADVANCED: plan ONCE, drive the four phases. A phase blocked for blocked_timeout_s fails and the
-  Retry re-plans from the boat; phases already done return SUCCESS at once. No freshness guard on
-  the aircraft's field: losing the radio after the report is allowed.
-
-  DISRUPTIVE: the passage may change mid-run and only the aircraft can see it. The plan always
-  covers the whole mission, and the boat stops to ASK at checkpoints (after the entry orbit, and
-  just past each gate; the last gate's is the exit confirmation). A changed field re-plans the rest
-  from the boat, counting the sides already passed. PassagePlanFresh keeps the aircraft on station.
+  The aircraft hands over every buoy, its colour, the ENTRY and the EXIT before the boat moves
+  (handbook 3.3.2). One search (global_passage.hpp) plans the whole task from the boat: round
+  the ENTRY clockwise, every RED to starboard and every GREEN to port, round the EXIT
+  counter-clockwise. Plan once and drive the four phases; a phase blocked for blocked_timeout_s
+  fails and the Retry re-plans from the boat, and phases already done return SUCCESS at once.
 -->
 <root BTCPP_format="4">
 
   <BehaviorTree ID="Task1Global">
-    <IfThenElse>
-      <TierIs tier="disruptive"/>
+    <ReactiveSequence name="guard_band">
+      <ResolveBuoyStates/>
+      <ReportSafePassage min_period_s="1.0"/>
 
-      <!-- ================================================================= DISRUPTIVE -->
-      <ReactiveSequence name="guard_band_disruptive">
-        <PassagePlanFresh max_age_s="{plan_max_age_s}"/>
-        <ResolveBuoyStates/>
-        <PublishSafePassageReport min_period_s="1.0"/>
-
-        <Sequence name="passage">
-          <WaitForField/>
-
-          <RetryUntilSuccessful num_attempts="{plan_attempts}">
-            <Sequence>
-              <PlanGlobalPassage orbit_radius_m="{orbit_radius_m}" orbit_min_m="{orbit_min_m}"
-                                 overshoot_deg="{overshoot_deg}"/>
-              <DrivePlanPhase lookahead_m="{lookahead_m}" blocked_timeout_s="{blocked_timeout_s}"
-                              phase="approach"/>
-              <!-- stop on the orbit's last point: the next thing is a question -->
-              <DrivePlanPhase lookahead_m="{lookahead_m}" blocked_timeout_s="{blocked_timeout_s}"
-                              phase="entry_orbit" stop_at_end="true"/>
-            </Sequence>
-          </RetryUntilSuccessful>
-
-          <!-- Checkpoint 1: "is the field still what you said?" A changed field ends the wait as
-               an answer would (release_on_change) and the transit is re-planned against it. -->
-          <RequestConfirmation what="entry orbit"/>
-          <ForceSuccess>
-            <AwaitConfirmation timeout_s="{confirm_timeout_s}" retry_s="3.0" release_on_change="true"/>
-          </ForceSuccess>
-
-          <!-- The transit one gate at a time: drive to the checkpoint past the next gate, ask,
-               repeat. The plan is kept between stretches unless the field changed. Anything that
-               gives up inside ends the loop, and the TransitComplete after it then fails the
-               mission instead of orbiting an exit the boat never reached. -->
-          <ForceSuccess>
-            <KeepRunningUntilFailure name="transit">
-              <Sequence>
-                <Inverter>
-                  <TransitComplete/>
-                </Inverter>
-                <RetryUntilSuccessful num_attempts="{plan_attempts}">
-                  <Sequence>
-                    <PlanGlobalPassage orbit_radius_m="{orbit_radius_m}" orbit_min_m="{orbit_min_m}"
-                                       overshoot_deg="{overshoot_deg}"/>
-                    <DrivePlanPhase lookahead_m="{lookahead_m}" blocked_timeout_s="{blocked_timeout_s}"
-                                    phase="transit" stop_at_checkpoints="true"/>
-                  </Sequence>
-                </RetryUntilSuccessful>
-                <IfThenElse>
-                  <AtCheckpoint/>
-                  <Sequence>
-                    <RequestConfirmation what="gate"/>
-                    <ForceSuccess>
-                      <AwaitConfirmation timeout_s="{confirm_timeout_s}" retry_s="3.0"
-                                         release_on_change="true"/>
-                    </ForceSuccess>
-                  </Sequence>
-                  <AlwaysSuccess/>
-                </IfThenElse>
-              </Sequence>
-            </KeepRunningUntilFailure>
-          </ForceSuccess>
-          <TransitComplete/>
-
-          <RetryUntilSuccessful num_attempts="{plan_attempts}">
-            <Sequence>
-              <PlanGlobalPassage orbit_radius_m="{orbit_radius_m}" orbit_min_m="{orbit_min_m}"
-                                 overshoot_deg="{overshoot_deg}"/>
-              <DrivePlanPhase lookahead_m="{lookahead_m}" blocked_timeout_s="{blocked_timeout_s}"
-                              phase="exit_orbit"/>
-            </Sequence>
-          </RetryUntilSuccessful>
-        </Sequence>
-      </ReactiveSequence>
-
-      <!-- =================================================================== ADVANCED -->
-      <ReactiveSequence name="guard_band_advanced">
-        <ResolveBuoyStates/>
-        <PublishSafePassageReport min_period_s="1.0"/>
-
-        <Sequence name="passage">
-          <!-- handbook 3.3.2: the aircraft reports before the boat transits -->
-          <WaitForField/>
-          <RetryUntilSuccessful num_attempts="{plan_attempts}">
-            <Sequence>
-              <PlanGlobalPassage orbit_radius_m="{orbit_radius_m}" orbit_min_m="{orbit_min_m}"
-                                 overshoot_deg="{overshoot_deg}"/>
-              <DrivePlanPhase lookahead_m="{lookahead_m}" blocked_timeout_s="{blocked_timeout_s}"
-                              phase="approach"/>
-              <DrivePlanPhase lookahead_m="{lookahead_m}" blocked_timeout_s="{blocked_timeout_s}"
-                              phase="entry_orbit"/>
-              <DrivePlanPhase lookahead_m="{lookahead_m}" blocked_timeout_s="{blocked_timeout_s}"
-                              phase="transit"/>
-              <DrivePlanPhase lookahead_m="{lookahead_m}" blocked_timeout_s="{blocked_timeout_s}"
-                              phase="exit_orbit"/>
-            </Sequence>
-          </RetryUntilSuccessful>
-        </Sequence>
-      </ReactiveSequence>
-    </IfThenElse>
+      <Sequence name="passage">
+        <WaitForField/>
+        <RetryUntilSuccessful num_attempts="{plan_attempts}">
+          <Sequence>
+            <PlanGlobalPassage orbit_radius_m="{orbit_radius_m}" orbit_min_m="{orbit_min_m}"
+                               overshoot_deg="{overshoot_deg}"/>
+            <DrivePlanPhase lookahead_m="{lookahead_m}" blocked_timeout_s="{blocked_timeout_s}"
+                            phase="approach"/>
+            <DrivePlanPhase lookahead_m="{lookahead_m}" blocked_timeout_s="{blocked_timeout_s}"
+                            phase="entry_orbit"/>
+            <DrivePlanPhase lookahead_m="{lookahead_m}" blocked_timeout_s="{blocked_timeout_s}"
+                            phase="transit"/>
+            <DrivePlanPhase lookahead_m="{lookahead_m}" blocked_timeout_s="{blocked_timeout_s}"
+                            phase="exit_orbit"/>
+          </Sequence>
+        </RetryUntilSuccessful>
+      </Sequence>
+    </ReactiveSequence>
   </BehaviorTree>
 
   <TreeNodesModel>
@@ -132,8 +43,6 @@
       <input_port name="lookahead_m" default="2.5">pure-pursuit lookahead along the path, metres</input_port>
       <input_port name="blocked_timeout_s" default="15.0">fail a phase after being blocked this long, then re-plan, seconds</input_port>
       <input_port name="plan_attempts" default="4">re-plan attempts per phase (a whole number)</input_port>
-      <input_port name="plan_max_age_s" default="15.0">Disruptive only: stop when the aircraft's field is older than this, seconds</input_port>
-      <input_port name="confirm_timeout_s" default="120.0">Disruptive only: wait this long for the aircraft's answer at each checkpoint, seconds</input_port>
     </SubTree>
   </TreeNodesModel>
 

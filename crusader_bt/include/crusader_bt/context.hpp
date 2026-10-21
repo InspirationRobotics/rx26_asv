@@ -80,56 +80,17 @@ struct Context
   // (nav::fusePassage), with its beacon states from here. entry/exitp come from
   // the plan too; bt_runner_node's refuseLocked says why.
   std::vector<nav::PlanBuoy> plan;
-  std::uint32_t plan_version = 0;             ///< bumps on every new plan
-  bool plan_fresh = false;                    ///< aged like pose_fresh
-  double plan_age_s = 0.0;                    ///< seconds since the last plan
   std::vector<nav::Buoy> obstacles;           ///< tracked, but not in the plan
 
-  // ---- the passage the BOAT planned ----
-  //
-  // The aircraft sends the buoys and their colours; which pairs are gates, and in
-  // what order, nav::planPassage works out here over the FUSED `buoys`.
-  // Re-planned every tick, because a confirmation can bring new colours.
-  nav::Passage passage;
-
-  /// Gates already driven, as (red_id, green_id). BY BUOY IDS, NOT BY COUNT: a
-  /// confirmation can recolour the field and reorder the plan under the boat,
-  /// and "start at index two" then skips a gate never driven. Ids survive a
-  /// reorder and the pair swapping colours.
+  /// Gates already driven, as (red_id, green_id): by buoy ids, so a replan that reorders the
+  /// field cannot skip one.
   std::vector<std::pair<int, int>> cleared_gates;
-
-  // ---- the confirmation handshake ----
-  //
-  // Having crossed a gate, the boat publishes gate_reached(gate_seq) and waits
-  // for an ack carrying the SAME seq before driving the next one ("is the next
-  // pair still where you said?"); the aircraft acks and retransmits the field.
-  // Matching the seq is what tells a retransmission on a lossy radio from the
-  // answer to the next request.
-  std::uint8_t gate_seq = 0;
-  int gate_red_id = -1;                       ///< the gate being driven now
-  int gate_green_id = -1;
-  bool have_confirmation = false;             ///< an ack for gate_seq arrived
-  /// Every gate in `passage` is in `cleared_gates`: go to the exit. The boat
-  /// decides this from its own plan; it holds the whole field.
-  ///
-  /// Proximity to the exit is not a substitute: the boat must clear every gate
-  /// first, and the exit buoy can sit well inside any sane arrival radius of
-  /// the last one.
-  bool passage_complete = false;
-  /// Did the boat finish the gate it last asked about?
-  ///
-  /// RequestConfirmation advances the sequence ONLY when this is set, so a leg
-  /// that failed re-asks under the SAME seq and the aircraft's idempotent
-  /// answer gives the same reply. Without it every failure inside the leg --
-  /// a confirmation timeout, an unusable pair, a PlanChanged re-task -- burns
-  /// a sequence number. (cleared_gates, not this, stops a gate being skipped.)
-  bool gate_cleared = false;
 
   // ---- Task 3: the docking bays ----
   //
   // `dock` is written by the runner through ingestDockObservation() below;
   // everything after it by the Task 3 leaves.
-  int tier = 0;                               ///< goal tier: 0 Core, 1 Adv, 2 Disr (SetTier changes it)
+  int tier = 0;                               ///< goal tier: 0 Core, 1 Adv, 2 Disr
   /// RoboCommand's newest RunStart, on `now_s`'s clock. NOT reset per goal: a RunStart that
   /// arrives before the operator presses START must still count (WaitForRunStart).
   runstart::Latch run_start;
@@ -162,13 +123,9 @@ struct Context
   int chosen_track = -1;                      ///< committed by CommitSafeBay
   int chosen_bay = 0;                         ///< its 1-based number
   dock::Berth berth;                          ///< for the chosen bay
-  int fired_window = -1;                      ///< DockWindow.index we put out
-  /// RoboCommand's ReadinessConfirm for the docking report, from
-  /// /crsd/ocs_command. The light is what the leaves wait on; this only stops
-  /// the report being re-sent.
+  /// RoboCommand's ReadinessConfirm for the docking report (/crsd/ocs_command): stops the
+  /// report being re-sent. The light is what the leaves wait on.
   bool readiness_confirmed = false;
-  dock::Request request;                      ///< decoded, held, not yet sent
-  bool have_request = false;
 
   /// Where the boat was when the goal was accepted. "Go home" in a mission
   /// means "back to where this attempt started", not the autopilot's HOME —
@@ -243,7 +200,6 @@ struct Context
     double transit_s = 0.0;                  ///< progress along plan.legs[Transit] at the last stop
     std::vector<nav::Vec2> traj;             ///< the transit as driven, first point = its start
     std::vector<nav::Vec2> entry_ring;       ///< the ring the boat orbited (or is about to)
-    bool at_checkpoint = false;              ///< the last transit stretch stopped at a gate
     int plans = 0;
   };
   GlobalPassage global_passage;
@@ -297,22 +253,12 @@ struct Context
   /// When current_task last became TASK_NONE (announceTask), on now_s's clock; far in the past
   /// until it has, so the first attempt of a run never waits.
   double none_since_s = -1e9;
-  std::function<void()> publish_report;
   std::function<void(int)> consume_buoy;      ///< mark a buoy dealt with
-  /// Tell the aircraft a gate is cleared and ask for the next pair. Publishes
-  /// std_msgs/UInt8 on crsd/gate_reached; rxl_link_node puts it on the air.
-  std::function<void(std::uint8_t)> report_gate_reached;
+  /// One RoboCommand report: (RxReport oneof name, that message as protobuf JSON), to
+  /// /crsd/robocommand/report for ocs_client.
+  std::function<void(const std::string &, const std::string &)> report;
 
   // ---- Task 3 outputs ----
-  //
-  // The three RoboCommand reports go out as JSON for the OCS to relay, like
-  // the Task 1 report. Field names are rx_reports.proto's.
-  std::function<void(int)> report_docking;          ///< DockingReport.bay_id
-  std::function<void(int)> report_firefighting;     ///< FirefightingReport.window_id
-  /// ResourceDeliveryRequest to RoboCommand.
-  std::function<void(const dock::Request &)> report_request;
-  /// The same request to the UAV, over the radio.
-  std::function<void(const dock::Request &)> relay_request;
   /// The water cannon: fire or not, aimed at a point in camera_link.
   std::function<void(bool, double, double, double)> cannon;
 
@@ -350,11 +296,8 @@ enum class PoseEvent
 
 /// One /crsd/pose. CALL UNDER ctx.mu.
 ///
-/// nav_mode off pins the origin at the first fix. Shadow and on do NOT: a
-/// first-fix origin is not the TF frame, so the planner would get coordinates in
-/// a plane the costmap does not share — a silent offset. The boat stays unplaced
-/// (pose_fresh false, as it requires origin_set) until applyDatum places it from
-/// the fix kept here.
+/// Without a datum, nav_mode off pins the origin at the first fix. Shadow and on wait for
+/// /crsd/datum: a first-fix origin is not the costmap's frame, a silent offset.
 inline PoseEvent ingestPose(Context & c, nav::LatLon fix, double heading_deg)
 {
   if (!std::isfinite(fix.lat) || !std::isfinite(fix.lon)) {return PoseEvent::Bad;}
@@ -378,22 +321,17 @@ enum class DatumEvent
   Adopted,    ///< it is now the origin (it came before any pose pinned one)
   Unchanged,  ///< the same datum as the origin, to 1 cm
   Mismatch,   ///< a DIFFERENT datum, the first time: datum_mismatch is now set
-  Ignored     ///< non-finite, a mismatch already reported, or nav_mode off
+  Ignored     ///< non-finite, a mismatch already reported, or off with a first-fix pin
 };
 
-/// A datum arrived (/crsd/datum, or the offros "datum" line). CALL UNDER ctx.mu.
+/// A /crsd/datum arrived. CALL UNDER ctx.mu.
 ///
-/// NEVER RE-PINS MID-RUN. A datum more than 0.01 m from the adopted origin sets
-/// datum_mismatch instead: the DockBook, `home` and the gate bookkeeping hold
-/// local coordinates, and moving the origin under them would teleport the field.
-/// The leg holds until bt_runner is restarted.
-///
-/// IGNORED IN OFF: off pins the first fix and shares no costmap frame. Without
-/// this, a boat in off whose container merely runs nav_frames_node would log a
-/// spurious "datum changed, restart bt_runner" ERROR.
+/// Adopted whenever no origin is set yet, in every nav_mode. Never re-pins mid-run: a datum
+/// more than 0.01 m from the origin in use sets datum_mismatch (the dock book and `home` hold
+/// local coordinates). In off a first-fix origin shares no costmap frame, so a later datum is
+/// ignored there rather than reported as a mismatch.
 inline DatumEvent applyDatum(Context & c, nav::LatLon datum)
 {
-  if (c.nav_mode == path::Mode::Off) {return DatumEvent::Ignored;}
   if (!std::isfinite(datum.lat) || !std::isfinite(datum.lon)) {return DatumEvent::Ignored;}
   if (!c.origin_set) {
     c.origin = datum;
@@ -407,7 +345,9 @@ inline DatumEvent applyDatum(Context & c, nav::LatLon datum)
     c.datum_from_topic = true;          // a first-fix pin that equals the datum IS the frame
     return DatumEvent::Unchanged;
   }
-  if (c.datum_mismatch) {return DatumEvent::Ignored;}
+  if (c.datum_mismatch || (c.nav_mode == path::Mode::Off && !c.datum_from_topic)) {
+    return DatumEvent::Ignored;
+  }
   c.datum_mismatch = true;
   return DatumEvent::Mismatch;
 }
@@ -425,20 +365,9 @@ inline bool hazardsPublishable(const Context & c)
 /// THE ONE FUNCTION both the hazard publisher and the leaves call, so the costmap
 /// and the BT's own local checks can never disagree about the known field.
 ///
-/// SIDE FENCES (path::sideFences) join ONLY in nav_mode on, where the planner can steer
-/// round them. In off a known hazard on a straight leg HOLDS the boat, and shadow drives the
-/// legacy legs, so a fence there would stop the boat at a wall nothing will go round. They
-/// come from ctx.passage, so only a Task 1 field produces one.
 inline std::vector<path::Hazard> knownHazards(const Context & c)
 {
-  std::vector<path::Hazard> hz =
-    path::buildHazards(c.buoys, c.obstacles, c.dock, c.dock_min_obs, c.nav);
-  if (c.nav_mode == path::Mode::On && c.have_entry && c.have_exit) {
-    const std::vector<path::Hazard> fences =
-      path::sideFences(c.buoys, c.passage, c.entry, c.exitp, c.nav);
-    hz.insert(hz.end(), fences.begin(), fences.end());
-  }
-  return hz;
+  return path::buildHazards(c.buoys, c.obstacles, c.dock, c.dock_min_obs, c.nav);
 }
 
 // ------------------------------------------------------------------ nav_mode
@@ -470,27 +399,6 @@ inline const char * navModeName(path::Mode m)
 }
 
 // ---------------------------------------------------------------------- tier
-
-/// "core" | "advanced" | "disruptive" (or "0" | "1" | "2") as 0 | 1 | 2; false for anything else.
-/// TierIs and SetTier share it, so the two cannot disagree about a spelling.
-inline bool parseTier(const std::string & s, int * out)
-{
-  if (s == "core" || s == "0") {
-    *out = 0;
-  } else if (s == "advanced" || s == "1") {
-    *out = 1;
-  } else if (s == "disruptive" || s == "2") {
-    *out = 2;
-  } else {
-    return false;
-  }
-  return true;
-}
-
-inline const char * tierName(int tier)
-{
-  return tier <= 0 ? "core" : tier == 1 ? "advanced" : "disruptive";
-}
 
 // ----------------------------------------------------------------- leg status
 //
@@ -536,6 +444,47 @@ inline std::string jsonLatLon(const Context & c, bool have, nav::Vec2 p)
   if (!have || !c.origin_set) {return "null";}
   const nav::LatLon ll = nav::toLatLon(p, c.origin);
   return "[" + jsonNum(ll.lat, 7) + "," + jsonNum(ll.lon, 7) + "]";
+}
+
+/// RxReport's beacon names for a buoy state.
+inline const char * beaconStateName(nav::Beacon b)
+{
+  switch (b) {
+    case nav::Beacon::Off: return "BEACON_STATE_OFF";
+    case nav::Beacon::FlashingRed: return "BEACON_STATE_FLASHING_RED";
+    case nav::Beacon::FlashingGreen: return "BEACON_STATE_FLASHING_GREEN";
+    case nav::Beacon::FlashingBlue: return "BEACON_STATE_FLASHING_BLUE";
+    case nav::Beacon::SteadyBlue: return "BEACON_STATE_STEADY_BLUE";
+    default: return "BEACON_STATE_UNKNOWN";
+  }
+}
+
+/// `{"latitude":..,"longitude":..}` of a local point. CALL UNDER ctx.mu, with origin_set.
+inline std::string jsonPosition(const Context & c, nav::Vec2 p)
+{
+  const nav::LatLon ll = nav::toLatLon(p, c.origin);
+  return "{\"latitude\":" + jsonNum(ll.lat, 7) + ",\"longitude\":" + jsonNum(ll.lon, 7) + "}";
+}
+
+/// SafePassageReport as protobuf JSON: every fused buoy, and ENTRY / EXIT when known. A
+/// position we do not have is omitted, never sent as (0, 0). CALL UNDER ctx.mu, with origin_set.
+inline std::string safePassageReportJson(const Context & c)
+{
+  std::string o = "{\"buoys\":[";
+  for (std::size_t i = 0; i < c.buoys.size(); ++i) {
+    o += (i ? "," : "") + std::string("{\"position\":") + jsonPosition(c, c.buoys[i].p) +
+      ",\"state\":\"" + beaconStateName(c.buoys[i].state) + "\"}";
+  }
+  o += "]";
+  if (c.have_entry) {o += ",\"entry_position\":" + jsonPosition(c, c.entry);}
+  if (c.have_exit) {o += ",\"exit_position\":" + jsonPosition(c, c.exitp);}
+  return o + "}";
+}
+
+/// Send one RoboCommand report through the runner. TAKES NO LOCK.
+inline void sendReport(Context & c, const std::string & kind, const std::string & body_json)
+{
+  if (c.report) {c.report(kind, body_json);}
 }
 
 /// The leg status as one JSON object, `path` decimated to at most `max_path`
@@ -771,15 +720,12 @@ inline void resetTask3(Context & c)
   c.dock = dock::DockBook{};
   c.dock_hits = 0;
   c.task3_phase.clear();
-  c.fired_window = -1;
   c.survey_attempt = 0;
   c.survey_looks = 0;
   c.chosen_track = -1;
   c.chosen_bay = 0;
   c.berth = dock::Berth{};
   c.readiness_confirmed = false;
-  c.request = dock::Request{};
-  c.have_request = false;
 }
 
 /// A place to go, passed BETWEEN LEAVES on the blackboard: a compute leaf writes

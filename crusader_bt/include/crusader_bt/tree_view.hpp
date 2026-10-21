@@ -1,20 +1,5 @@
-// tree_view.hpp — the whole tree, with every node's status, whenever it changes.
-//
-// BehaviorTree.CPP's StdCoutLogger prints one line per TRANSITION, which is
-// useless for "where is it now, and what has it already done?". This renders the
-// SHAPE with the STATE on it, and reprints only when something changed:
-//
-//     [ ok ] guard_band            ReactiveSequence
-//     [ ok ]   IsAutonomous
-//     [ >> ]   tour                Sequence
-//     [ ok ]     SetTask
-//     [ ok ]     NavigateTo        target=fix
-//     [ >> ]     NavigateTo        target=fix      <- here
-//     [    ]     CircleBuoy        anchor=fix
-//     [    ]     NavigateTo        target=home
-//
-// Groot2 draws this live but only in the PRO build; this needs nothing, works
-// over ssh, and goes in the log so a run can be read back afterwards.
+// tree_view.hpp — the tree's shape with every node's status: a log rendering reprinted only on
+// change (BT.CPP's own logger prints one line per transition), and JSON for /crsd/bt_status.
 #ifndef CRUSADER_BT__TREE_VIEW_HPP_
 #define CRUSADER_BT__TREE_VIEW_HPP_
 
@@ -56,13 +41,22 @@ public:
   /// The tree as JSON, for a GUI to draw. Structured rather than rendered text: a
   /// viewer that parses indentation breaks when a node is renamed and cannot style
   /// a node by its KIND. `kind` is the BT.CPP family (control, decorator or leaf).
-  std::string json(double elapsed_s)
+  /// Every node as a JSON array of {d, name, type, kind, status}, depth-first.
+  std::string nodesJson()
   {
-    std::string out = "{\"elapsed_s\":" + fmt(elapsed_s) + ",\"nodes\":[";
+    std::string out = "[";
     bool first = true;
     jsonWalk(root_, 0, out, first);
-    out += "]}";
-    return out;
+    return out + "]";
+  }
+
+  /// The deepest RUNNING node's name ("" when nothing runs): where the mission is now.
+  std::string runningNode()
+  {
+    std::string best;
+    int best_depth = -1;
+    deepest(root_, 0, best, best_depth);
+    return best;
   }
 
   std::string render(bool colour = true)
@@ -91,13 +85,6 @@ private:
       case BT::NodeStatus::SKIPPED: return "\033[90m[skip]\033[0m";
       default: return "\033[90m[    ]\033[0m";
     }
-  }
-
-  static std::string fmt(double v)
-  {
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%.2f", v);
-    return buf;
   }
 
   static const char * statusName(BT::NodeStatus s)
@@ -149,6 +136,20 @@ private:
       for (auto * c : ctrl->children()) {jsonWalk(c, depth + 1, out, first);}
     } else if (dec) {
       jsonWalk(dec->child(), depth + 1, out, first);
+    }
+  }
+
+  static void deepest(BT::TreeNode * node, int depth, std::string & best, int & best_depth)
+  {
+    if (node == nullptr || node->status() != BT::NodeStatus::RUNNING) {return;}
+    if (depth > best_depth) {
+      best_depth = depth;
+      best = node->name();
+    }
+    if (auto * ctrl = dynamic_cast<BT::ControlNode *>(node)) {
+      for (auto * c : ctrl->children()) {deepest(c, depth + 1, best, best_depth);}
+    } else if (auto * dec = dynamic_cast<BT::DecoratorNode *>(node)) {
+      deepest(dec->child(), depth + 1, best, best_depth);
     }
   }
 

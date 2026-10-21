@@ -327,8 +327,10 @@ public:
   : CrusaderSyncAction(n, c) {}
   static BT::PortsList providedPorts()
   {
-    return {BT::InputPort<bool>("need_others_red", false,
-                                "the strict rule; the tree has already applied it")};
+    return {
+      BT::InputPort<bool>("need_others_red", false,
+                          "the strict rule; the tree has already applied it"),
+      BT::OutputPort<int>("bay", "the committed bay's number, 1-based left to right")};
   }
 
   BT::NodeStatus tick() override
@@ -350,6 +352,7 @@ public:
       RCLCPP_WARN(log(), "CommitSafeBay: %s", c.why.c_str());
       return BT::NodeStatus::FAILURE;
     }
+    setOutput("bay", c.bay_number);
     RCLCPP_INFO(log(), "committed to bay %d  [%s]", c.bay_number, c.why.c_str());
     return BT::NodeStatus::SUCCESS;
   }
@@ -407,19 +410,21 @@ class ReportDocking : public CrusaderSyncAction
 public:
   ReportDocking(const std::string & n, const BT::NodeConfig & c)
   : CrusaderSyncAction(n, c) {}
-  static BT::PortsList providedPorts() {return {};}
+  static BT::PortsList providedPorts()
+  {
+    return {BT::InputPort<int>("bay", "the bay docked in (CommitSafeBay's)")};
+  }
 
   BT::NodeStatus tick() override
   {
-    int bay = 0;
+    const int bay = getInput<int>("bay").value_or(0);
+    if (bay <= 0) {return BT::NodeStatus::FAILURE;}
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
-      bay = ctx_->chosen_bay;
       ctx_->readiness_confirmed = false;
       ctx_->task3_phase = "DOCKED";
     }
-    if (bay <= 0) {return BT::NodeStatus::FAILURE;}
-    if (ctx_->report_docking) {ctx_->report_docking(bay);}
+    sendReport(*ctx_, "docking", dock::dockingReportJson(bay));
     RCLCPP_INFO(log(), "REPORTED: docked in bay %d", bay);
     return BT::NodeStatus::SUCCESS;
   }
@@ -441,6 +446,7 @@ public:
   static BT::PortsList providedPorts()
   {
     return {
+      BT::InputPort<int>("bay", "the bay docked in, for re-sending the docking report"),
       BT::InputPort<double>("timeout_s", 60.0, "give up waiting for the light"),
       BT::InputPort<double>("resend_s", 10.0, "re-send the docking report this often")};
   }
@@ -458,7 +464,7 @@ public:
 
   BT::NodeStatus onRunning() override
   {
-    int bay = 0;
+    const int bay = getInput<int>("bay").value_or(0);
     bool resend = false;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
@@ -468,13 +474,12 @@ public:
         RCLCPP_INFO(log(), "FIRE: window %d is steady RED", ctx_->dock_target_window);
         return BT::NodeStatus::SUCCESS;
       }
-      bay = ctx_->chosen_bay;
-      resend = !ctx_->readiness_confirmed &&
+      resend = bay > 0 && !ctx_->readiness_confirmed &&
         since(last_) >= getInput<double>("resend_s").value_or(10.0);
     }
     if (resend) {
       last_ = Clock::now();
-      if (ctx_->report_docking) {ctx_->report_docking(bay);}
+      sendReport(*ctx_, "docking", dock::dockingReportJson(bay));
       RCLCPP_INFO(log(), "no light and no confirmation yet: re-sent docking report (bay %d)", bay);
     }
     if (since(t0_) >= getInput<double>("timeout_s").value_or(60.0)) {
@@ -507,6 +512,7 @@ public:
   static BT::PortsList providedPorts()
   {
     return {
+      BT::OutputPort<int>("window", "DockWindow.index of the window put out"),
       BT::InputPort<double>("timeout_s", 60.0, "give up"),
       BT::InputPort<double>("min_green_s", 0.4, "GREEN this long after RED is a hit"),
       BT::InputPort<double>("max_aim_age_s", 1.0, "do not fire at an older aim point")};
@@ -552,9 +558,9 @@ public:
         y = w->y;
         z = w->z;
       }
-      if (hit) {ctx_->fired_window = window_;}
     }
     if (hit) {
+      setOutput("window", window_);
       stop();
       RCLCPP_INFO(log(), "HIT: window %d is GREEN after %.1fs of spray", window_, since(t0_));
       return BT::NodeStatus::SUCCESS;
@@ -604,21 +610,22 @@ public:
   : CrusaderSyncAction(n, c) {}
   static BT::PortsList providedPorts()
   {
-    return {BT::InputPort<int>("window_id_base", 1,
+    return {
+      BT::InputPort<int>("window", "DockWindow.index put out (SprayUntilHit's)"),
+      BT::InputPort<int>("window_id_base", 1,
         "RoboCommand's window_id for DockWindow.index 0 - CONFIRM with RoboNation")};
   }
 
   BT::NodeStatus tick() override
   {
     const int base = getInput<int>("window_id_base").value_or(1);
-    int w = -1;
+    const int w = getInput<int>("window").value_or(-1);
+    if (w < 0) {return BT::NodeStatus::FAILURE;}
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
-      w = ctx_->fired_window;
       ctx_->task3_phase = "FIRE OUT";
     }
-    if (w < 0) {return BT::NodeStatus::FAILURE;}
-    if (ctx_->report_firefighting) {ctx_->report_firefighting(w + base);}
+    sendReport(*ctx_, "firefighting", dock::firefightingReportJson(w + base));
     RCLCPP_INFO(log(), "REPORTED: fire out in window_id %d (index %d)", w + base, w);
     return BT::NodeStatus::SUCCESS;
   }
@@ -640,6 +647,7 @@ public:
   static BT::PortsList providedPorts()
   {
     return {
+      BT::OutputPort<dock::Request>("request", "the decoded request"),
       BT::InputPort<double>("timeout_s", 80.0, "the code runs for 60 s after the hit"),
       BT::InputPort<double>("hold_s", 5.0, "the same answer for this long"),
       BT::InputPort<int>("min_frames", 20, "and across this many new frames")};
@@ -651,7 +659,6 @@ public:
     hold_.reset();
     std::lock_guard<std::mutex> lk(ctx_->mu);
     seq_ = ctx_->dock_seq;
-    ctx_->have_request = false;
     ctx_->task3_phase = "DECODING";
     return BT::NodeStatus::RUNNING;
   }
@@ -675,14 +682,11 @@ public:
         seq_ = ctx_->dock_seq;
         const dock::Request r = dock::requestFrom(ctx_->dock_pattern, ctx_->dock_colours);
         done = hold_.update(r, ctx_->dock_t, hold, frames);
-        if (done) {
-          ctx_->request = hold_.cand;
-          ctx_->have_request = true;
-          got = hold_.cand;
-        }
+        if (done) {got = hold_.cand;}
       }
     }
     if (done) {
+      setOutput("request", got);
       RCLCPP_INFO(log(), "decoded: %s (held %d frames)", got.why.c_str(), hold_.frames);
       return BT::NodeStatus::SUCCESS;
     }
@@ -700,26 +704,27 @@ private:
   std::uint32_t seq_ = 0;
 };
 
-/// ResourceDeliveryRequest to RoboCommand, and the same request to the UAV.
-class ReportResourceRequest : public CrusaderSyncAction
+/// ResourceDeliveryRequest to RoboCommand.
+class ReportResourceDelivery : public CrusaderSyncAction
 {
 public:
-  ReportResourceRequest(const std::string & n, const BT::NodeConfig & c)
+  ReportResourceDelivery(const std::string & n, const BT::NodeConfig & c)
   : CrusaderSyncAction(n, c) {}
-  static BT::PortsList providedPorts() {return {};}
+  static BT::PortsList providedPorts()
+  {
+    return {BT::InputPort<dock::Request>("request", "the decoded request (DecodeResourceRequest's)")};
+  }
 
   BT::NodeStatus tick() override
   {
-    dock::Request r;
+    const auto r = getInput<dock::Request>("request");
+    if (!r || !r.value().ok) {return BT::NodeStatus::FAILURE;}
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
-      if (!ctx_->have_request) {return BT::NodeStatus::FAILURE;}
-      r = ctx_->request;
       ctx_->task3_phase = "REPORTED";
     }
-    if (ctx_->report_request) {ctx_->report_request(r);}
-    if (ctx_->relay_request) {ctx_->relay_request(r);}
-    RCLCPP_INFO(log(), "REPORTED + RELAYED: %s", r.why.c_str());
+    sendReport(*ctx_, "resource_delivery", dock::resourceRequestJson(r.value()));
+    RCLCPP_INFO(log(), "REPORTED: %s", r.value().why.c_str());
     return BT::NodeStatus::SUCCESS;
   }
 };
@@ -743,7 +748,7 @@ void registerTask3Nodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<SprayUntilHit>("SprayUntilHit");
   factory.registerNodeType<ReportFirefighting>("ReportFirefighting");
   factory.registerNodeType<DecodeResourceRequest>("DecodeResourceRequest");
-  factory.registerNodeType<ReportResourceRequest>("ReportResourceRequest");
+  factory.registerNodeType<ReportResourceDelivery>("ReportResourceDelivery");
 }
 
 }  // namespace crusader_bt
