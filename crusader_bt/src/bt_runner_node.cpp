@@ -118,7 +118,11 @@ public:
     }
     ctx_ = std::make_shared<Context>();
     ctx_->node = this;
-    ctx_->publish_setpoints = declare_parameter<bool>("publish_setpoints", false);
+    // Copied into the context once, so read_only: a live set would succeed and change nothing.
+    rcl_interfaces::msg::ParameterDescriptor posture;
+    posture.read_only = true;
+    posture.description = "fixed at startup: change it in crusader_params.yaml and restart bt_runner_node";
+    ctx_->publish_setpoints = declare_parameter<bool>("publish_setpoints", false, posture);
     // The fixed-nozzle shot may squirt: Gate G7, separate from moving (G1).
     ctx_->fire_pump = declare_parameter<bool>("fire_pump", false);
     // The sticks for the MANUAL fire tree (StrafeKeep): which RC channel is

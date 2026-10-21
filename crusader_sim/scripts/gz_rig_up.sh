@@ -33,7 +33,8 @@
 # SIM_CAMERA_ARGS adds ROS args to sim_camera, e.g. "-p yolo_imgsz:=1920 -p yolo_conf:=0.1".
 #
 # Everything downstream — telemetry_bridge, rfd_link_node, target_tracker, gcs_bridge,
-# bt_runner — is the boat's code, unmodified, same params file. The laptop's ground station
+# bt_runner — is the boat's code, unmodified, same params file with the sim's values layered on
+# top from /tmp/sim_params.yaml. The laptop's ground station
 # connects to it: BOAT_GUI.cmd --boat 127.0.0.1. TREE (a built-in tree name, default
 # task1_global) is the mission gz_task1.sh sends.
 # ROS's setup.bash reads unset variables, so strict mode goes on AFTER it
@@ -78,6 +79,28 @@ TREE="${TREE:-task1_global}"       # sent by gz_task1.sh as the RunMission name
 export GZ_PARTITION=crusader_sim
 export RX26_SRC=$SRC
 
+# The sim's own values. A bare `-p k:=v` is a /** override, and $CFG's node-named section beats
+# it whatever the order on the line, so a key $CFG also sets (model, rfd_endpoint, ocs_host,
+# publish_setpoints, nav_mode) silently kept the boat's value. They live in this node-named file
+# instead, read after $CFG by every boat node; bt_runner's section is added once NAV_MODE is known.
+SIM_PARAMS=/tmp/sim_params.yaml
+cat > "$SIM_PARAMS" <<EOF
+camera_node:
+  ros__parameters:
+    source: "topic"
+    model: "none"
+telemetry_bridge:
+  ros__parameters:
+    mav_endpoint: "udp:127.0.0.1:14551"
+rfd_link_node:
+  ros__parameters:
+    rfd_endpoint: "$RADIO_EP"
+ocs_client:
+  ros__parameters:
+    ocs_host: "$OCS_HOST"
+EOF
+BOAT_PARAMS=(--params-file "$CFG" --params-file "$SIM_PARAMS")
+
 bash "$SRC/crusader_sim/scripts/gz_rig_down.sh" >/dev/null 2>&1
 sleep 1
 
@@ -119,18 +142,15 @@ echo "=== the boat's stack ==="
 # the GCS Sensors tab's picture: the boat's camera_node on sim_camera's oak/rgb + oak/depth,
 # model none (sim_camera already publishes the detections); it encodes only while watched
 up camera_node /tmp/camera.log \
-  ros2 run crusader_perception camera_node --ros-args --params-file "$CFG" \
-  -p source:=topic -p model:=none
+  ros2 run crusader_perception camera_node --ros-args "${BOAT_PARAMS[@]}"
 up telemetry_bridge /tmp/tb.log \
-  ros2 run crusader_behavior telemetry_bridge --ros-args --params-file "$CFG" \
-  -p mav_endpoint:=udp:127.0.0.1:14551
+  ros2 run crusader_behavior telemetry_bridge --ros-args "${BOAT_PARAMS[@]}"
 up lidar_node /tmp/lidar.log \
-  ros2 run crusader_perception lidar_node --ros-args --params-file "$CFG"
+  ros2 run crusader_perception lidar_node --ros-args "${BOAT_PARAMS[@]}"
 # rfd_endpoint is the RFD900 (/dev/crsd-rfd) on the boat; here the UDP form sim_uav talks to.
 # --radio-endpoint overrides it (a Windows-side radio relay needs udpin:0.0.0.0:14555)
 up rfd_link_node /tmp/rfd.log \
-  ros2 run crusader_link rfd_link_node --ros-args --params-file "$CFG" \
-  -p rfd_endpoint:="$RADIO_EP"
+  ros2 run crusader_link rfd_link_node --ros-args "${BOAT_PARAMS[@]}"
 if [ "$RADIO_EP" != "$RADIO_EP_DEFAULT" ] && [ "$UAV" = 1 ]; then
   echo "  *** radio endpoint is $RADIO_EP but sim_uav is still on: if the real Ekko is the source, add --no-uav (two transmitters make the plan alternate)"
 fi
@@ -140,7 +160,7 @@ else
   echo "  sim_uav              -- off (--no-uav): the boat is on its own camera"
 fi
 up target_tracker /tmp/tt.log \
-  ros2 run crusader_world_model target_tracker --ros-args --params-file "$CFG"
+  ros2 run crusader_world_model target_tracker --ros-args "${BOAT_PARAMS[@]}"
 
 # Nav2 avoidance (docs/nav2_avoidance_spec.md 10.1). The nav stack goes up BEFORE
 # bt_runner, which plans through it. NAV_MODE (env, default on): off = the legacy
@@ -177,21 +197,26 @@ else
 fi
 
 up gcs_bridge /tmp/gcs.log \
-  ros2 run crusader_groundstation gcs_bridge --ros-args --params-file "$CFG"
+  ros2 run crusader_groundstation gcs_bridge --ros-args "${BOAT_PARAMS[@]}"
 # the boat's heartbeat to the Operator Control Station, only when asked for: the OCS is a
 # laptop on the team network and the sim has no business dialling it unless told where it is.
-# The params file gives the rest (ocs_port 37564, team_id, vehicle_id); -p wins over it.
+# $SIM_PARAMS gives ocs_host; $CFG the rest (ocs_port 37564, team_id, vehicle_id).
 if [ -n "$OCS_HOST" ]; then
   up ocs_client /tmp/ocs_client.log \
-    ros2 run crusader_groundstation ocs_client --ros-args --params-file "$CFG" -p ocs_host:="$OCS_HOST"
+    ros2 run crusader_groundstation ocs_client --ros-args "${BOAT_PARAMS[@]}"
 else
   echo "  ocs_client           -- off (--ocs-host IP starts it)"
 fi
 sleep 6
+cat >> "$SIM_PARAMS" <<EOF
+bt_runner_node:
+  ros__parameters:
+    publish_setpoints: true
+    default_timeout_s: 400.0
+    nav_mode: "$NAV_MODE"
+EOF
 up bt_runner /tmp/bt.log \
-  ros2 run crusader_bt bt_runner_node --ros-args --params-file "$CFG" "${BT_TUNE[@]}" \
-  -p publish_setpoints:=true -p default_timeout_s:=400.0 \
-  -p nav_mode:="$NAV_MODE"
+  ros2 run crusader_bt bt_runner_node --ros-args "${BOAT_PARAMS[@]}" "${BT_TUNE[@]}"
 sleep 6
 
 # planner_server leaves 'activating' only once TF map -> base_footprint exists,
