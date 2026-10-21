@@ -788,8 +788,8 @@ protected:
 ///
 /// Not decoration: BT.CPP's SyncActionNode::executeTick THROWS if the leaf
 /// returns RUNNING, the right guard for an instantaneous leaf, and the NodeType
-/// differs from CrusaderCondition's, so Groot and tools/bt_view.py draw a thing
-/// that publishes differently from a thing that answers a question.
+/// differs from CrusaderCondition's, so Groot draws a thing that publishes
+/// differently from a thing that answers a question.
 ///
 /// If it publishes, writes a port, or changes anything: this one.
 /// If it only reads state and answers yes/no: CrusaderCondition.

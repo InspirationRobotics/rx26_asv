@@ -40,7 +40,7 @@ vehicle move. First run: 60 m north, arrived within 2.8 m in 16 s.
 
 It also proves the half of the interlock we do not control: **a setpoint sent in
 HOLD is ignored by the autopilot.** `telemetry_bridge` refuses to send outside
-`shared.autonomous_modes`, and ArduPilot refuses to act if something does.
+`autonomous_modes` (the params file's `/**`), and ArduPilot refuses to act if something does.
 Neither alone is the safety story; both together are.
 
 ## What it is faithful about, and what it is not

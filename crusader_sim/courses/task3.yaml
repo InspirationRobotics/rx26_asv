@@ -1,7 +1,7 @@
 # Task 3 Coordinated Logistics — the USV's half: the dock and the "fire".
 #
-# Dock geometry mirrors tools/task3_sim/world.py (the team's no-ROS Task 3 sim)
-# so the Task 3 tree sees the same course in both: dock back edge 20 m north of
+# Dock geometry from the team's former no-ROS Task 3 sim (tools/task3_sim/world.py in
+# git history): dock back edge 20 m north of
 # the start, bays opening SOUTH (world.py facing 180 compass = ENU yaw -90).
 # Handbook: 3.3.4 + docking-bay-structure.md; see gen_world.dock() for sources.
 #

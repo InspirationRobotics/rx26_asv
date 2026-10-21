@@ -1,242 +1,93 @@
-# RobotX 2026 — Crusader Software Package (v0.5)
+# RobotX 2026: Crusader
 
-Team Inspiration's codebase for the 2026 RobotX competition. We run a single ASV
-(autonomous surface vessel), **Crusader**: a holonomic 4×T200 boat on ArduRover/Pixhawk
-with a Jetson Orin Nano companion computer running ROS 2 Humble in the `asv` Docker
-container.
-
-**What runs today:** the status, telemetry and safety layer — four nodes that have all
-been on the water — plus `crusader_perception`, which owns the OAK-D and publishes
-detections rather than frames. **What is written but unproven:** the world model's fusion
-and target tracking, and the ground station that renders the whole boat to a laptop —
-bench-driven from invented detections, never on the water, and deliberately out of
-`core.launch.py`. The occupancy grid is still unwritten. **What is elsewhere:** the MID360 only. A second
-container drives that LiDAR and publishes its point cloud; consuming it is the unwritten
-half of perception.
-
-Before developing ANY code, read [Format](#format) and the standing
-[safety constraints](#safety-constraints-non-negotiable). Before your **first day**, follow
-[docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md).
+Team Inspiration's code for the 2026 RobotX competition's ASV, **Crusader**: a holonomic
+4×T200 boat on ArduRover/Pixhawk with a Jetson Orin Nano running ROS 2 Humble in the `asv`
+container. Before your first day, follow [setup/README.md](setup/README.md); before writing
+code, read [Standards](#standards) and the [safety constraints](#safety-constraints).
 
 ## Packages
 
-Thirteen packages, laid out along the architecture: perception → world model → cognition →
-behavior, with a shared library underneath, a ground station beside it and a bringup
-package on top. All but `crusader_sim` (laptop only) build and run in the `asv` container
-(`--packages-up-to crusader_bringup`).
+All but `crusader_sim` (laptop only) build on the boat with
+`colcon build --packages-up-to crusader_bringup`. Each package README says what it runs and
+on which topics.
 
-| Package | Contains | State |
-|---|---|---|
-| [`crusader_msgs`](crusader_msgs/README.md) | Message definitions. Depends on nothing but `std_msgs`, so any image can build it cheaply | 25 msgs + 1 action |
-| [`crusader_common`](crusader_common/README.md) | Shared plumbing: params loader, node lifecycle, stream cache, drop latch, geodesy. No nodes | library |
-| [`crusader_fcu`](crusader_fcu/README.md) | `telemetry_bridge` — the only thing that speaks MAVLink. Localization source *and* Movement actuator | **field** |
-| [`crusader_perception`](crusader_perception/README.md) | Owns the OAK-D and detects in it: `oakd_publisher` → raw frames; `buoy_detector` → `oak/detections` in `camera_link`. Not launched — the two contend for the camera | 2 nodes |
-| [`crusader_world_model`](crusader_world_model/README.md) | `target_tracker` → earth-anchored target tracks on `crsd/world_targets`. **Camera-only by default** (`use_lidar: false`); LiDAR fusion is a switch, on for open water. Sensor-agnostic, driven off-boat by `tools/bench/bench_world_model.py`. Occupancy grid still unwritten | 1 node |
-| [`crusader_behavior`](crusader_behavior/README.md) | `safety/` RC-loss force-disarm watchdog; `indicator/` LED status stack | **field** |
-| [`crusader_groundstation`](crusader_groundstation/README.md) | `ground_station` — one web page on `:8090`: node control, telemetry, the camera and LiDAR viewers, the map, live parameter tuning, and host power. The one package allowed to *know about* every other while importing none | 1 node |
-| [`crusader_bt`](crusader_bt/README.md) | Cognition: `bt_runner_node` takes one coarse action per mission and ticks a behaviour tree of primitive leaves | **field** |
-| `crusader_link` | The boat's end of the UAV link: `rxl_link_node` decodes RXL and Ekko's TUNNEL frames off the radio | **field** |
-| [`crusader_nav`](crusader_nav/README.md) | Nav2 avoidance: `nav_frames_node` (datum, map→base_footprint) and `nav.launch.py` (planner + costmap) | **field** |
-| [`crusader_nav_layers`](crusader_nav_layers/README.md) | Nav2 costmap plugin: `HazardLayer` draws the tree's known hazards LETHAL | **field** |
-| [`crusader_sim`](crusader_sim/README.md) | Gazebo + ArduRover SITL sim of Crusader and the course. Sim only: nothing runs on the boat | sim |
-| [`crusader_bringup`](crusader_bringup/README.md) | Launch files + the params YAML. Ships no code; build entry point | — |
+| Package | Contains |
+|---|---|
+| [`crusader_msgs`](crusader_msgs/README.md) | the typed contracts: messages and the RunMission action |
+| [`crusader_common`](crusader_common/README.md) | `declare_params`, `run_node`, `StreamCache`, `geo`. No nodes |
+| [`crusader_behavior`](crusader_behavior/README.md) | `telemetry_bridge` (the only MAVLink speaker), `rc_watchdog`, `led_status_node`, `led_node` |
+| [`crusader_perception`](crusader_perception/README.md) | `camera_node` (the OAK-D: buoy or dock model), `lidar_node` (the MID360: clusters, the Nav2 cloud, proximity, the Task 3 wall) |
+| [`crusader_world_model`](crusader_world_model/README.md) | `target_tracker`: detections and clusters to earth-anchored tracks |
+| [`crusader_bt`](crusader_bt/README.md) | `bt_runner_node`: runs the built-in tree a RunMission goal names |
+| [`crusader_link`](crusader_link/README.md) | `rfd_link_node`: the RFD900 mesh to Ekko, the UAV (TUNNEL v3) |
+| [`crusader_nav`](crusader_nav/README.md), [`crusader_nav_layers`](crusader_nav_layers/README.md) | Nav2 avoidance: the datum and TF, `planner_server`, the known-hazard costmap layer |
+| [`crusader_groundstation`](crusader_groundstation/README.md) | `gcs_bridge` on the boat, `gcs_app` on the laptop, `ocs_client` to the OCS |
+| [`crusader_bringup`](crusader_bringup/README.md) | `core.launch.py` and `crusader_params.yaml`; the build entry point |
+| [`crusader_sim`](crusader_sim/README.md) | Gazebo Harmonic + ArduRover SITL with the boat's own nodes |
 
-Every package has its own README with its design rationale and a change-impact table.
+Beside them: `tools/` (config guards, preflight, param_guard, rebuild, squirt_cal, SITL
+checks, udev, systemd), `scripts/` (MAVProxy and Livox start), `setup/` (per machine),
+`params/` (the ArduRover baseline), `firmware/` (the LED Arduino), `docs/` (an archive).
 
-## Structure
+The repo is one source dir in a colcon workspace (`~/robotx_ws/src/rx26_asv` on the Jetson),
+never the workspace: the root is not a package, so colcon finds every package below it.
 
-This repo is **a set of source dirs inside a colcon workspace**, not the workspace itself.
-On the Jetson it lives at `~/robotx_ws/src/rx26_asv`, alongside any other package sources.
-The repo root is deliberately **not** a colcon package — that is what lets `colcon build`
-discover every package instead of stopping at the first one it finds.
+## Running
 
-```
-~/robotx_ws/                    # colcon WORKSPACE (not this repo; holds build/ install/ log/)
-|-- src/
-     |-- rx26_asv/              # <- THIS REPO
-     |    |-- crusader_msgs/        # ament_cmake: msg/ + CMakeLists
-     |    |-- crusader_common/      # ament_python: the shared library
-     |    |-- crusader_fcu/         # ament_python: telemetry_bridge
-     |    |-- crusader_perception/  # ament_python: OAK-D driver + buoy detection
-     |    |-- crusader_world_model/ # ament_python: fusion + target tracking
-     |    |-- crusader_groundstation/# ament_python: the operator's web page
-     |    |-- crusader_behavior/    # ament_python: safety/ + indicator/
-     |    |-- crusader_bt/          # ament_cmake: behaviour trees + bt_runner_node
-     |    |-- crusader_link/        # ament_python: UAV link (rxl_link_node)
-     |    |-- crusader_nav/         # ament_python: Nav2 launch + nav_frames_node
-     |    |-- crusader_nav_layers/  # ament_cmake: HazardLayer costmap plugin
-     |    |-- crusader_sim/         # ament_python: Gazebo + SITL, laptop only
-     |    |-- crusader_bringup/     # ament_cmake: launch/ + config/
-     |    |-- docs/                 # setup guide, operations manual, G1 bench procedure
-     |    |-- firmware/             # Arduino sketch flashed to the LED controller
-     |    |-- params/               # known-good ArduRover baseline (param_guard diffs it)
-     |    |-- scripts/              # start_mavproxy.sh — the sole Pixhawk owner
-     |    |-- setup/                # installation scripts per machine role
-     |    |-- tools/                # udev, systemd, preflight, param_guard, rebuild, oak_view
-     |    |-- Dockerfile            # `asv` image (ROS 2 + CUDA/TensorRT; no device SDKs)
-     |-- <livox container sources, robotx_2026, ...>    # COLCON_IGNORE what you don't build
-```
+| What | How |
+|---|---|
+| The always-on stack | `ros2 launch crusader_bringup core.launch.py` (systemd `crsd-ros` on the boat) |
+| The ground station | `tools/scripts/BOAT_GUI.cmd` on the laptop, then http://localhost:8090 |
+| Anything else (camera_node, target_tracker, bt_runner_node, ocs_client) | the Nodes tab |
+| Nav2 avoidance | `ros2 launch crusader_nav nav.launch.py datum_source:=param ...` |
+| A mission | the Mission tab, or `ros2 action send_goal /crsd/run_mission crusader_msgs/action/RunMission "{name: competition, tier: 1}"` |
+| Rebuild after any edit | `tools/scripts/rebuild.sh` on the Jetson host |
+| Before every session | `tools/scripts/preflight.py` |
 
-## The stack
+MAVProxy owns the Pixhawk serial link and is started by systemd outside ROS
+(`scripts/start_mavproxy.sh`); nothing else opens `/dev/crsd-pixhawk`. The MID360 driver runs
+in the separate `livox` container and publishes `/livox/lidar`.
 
-| Node | Package | Role |
-|---|---|---|
-| `telemetry_bridge` | `crusader_fcu` | THE single consumer of MAVProxy's rebroadcast, and THE single MAVLink sender |
-| `rc_watchdog` | `crusader_behavior` | force-disarm on RC-transmitter link loss |
-| `pixhawk_led_status_node` | `crusader_behavior` | autopilot + RC state → `/crsd/led_state` |
-| `led_node` | `crusader_behavior` | `/crsd/led_state` → LED Arduino over serial |
+## Safety constraints
 
-```bash
-ros2 launch crusader_bringup core.launch.py
-```
+1. **One Pixhawk owner.** MAVProxy holds the serial link; `telemetry_bridge` consumes its UDP
+   rebroadcast and refuses a serial endpoint. No other node opens a MAVLink connection.
+2. **The RC e-stop is the only safety path.** The SB switch kills the motors in any mode.
+   WiFi, SSH and the ground station are conveniences, never safety mechanisms.
+3. **Moving and squirting are gated.** `bt_runner_node`'s `publish_setpoints` (Gate G1) and
+   `fire_pump` (Gate G7) are false in the params file.
+4. **Steering inversion is fixed in `SERVOx_*`, never `RCx_REVERSED`**: autonomous modes
+   bypass RC settings. `COMPASS_USE=0` stays.
+5. **Never loosen `ARMING_*` or safety params to make testing easier.** `param_guard.py`
+   hard-fails on the protected set.
+6. **Fail loudly, and keep silence silent.** A dead stream stops being republished rather than
+   being replayed with a fresh timestamp.
 
-MAVProxy owns the Pixhawk serial link and is started by systemd outside ROS — nothing
-else may open `/dev/crsd-pixhawk`.
+## Standards
 
-Everything else is started **by hand**, for two different reasons. The OAK-D pair contend
-for one camera, so which of them runs is an operator choice. The rest have simply never run
-on the boat, and `core.launch.py` is for what has.
-
-| Started by hand | Package | Why not launched |
-|---|---|---|
-| `oakd_publisher` *or* `buoy_detector` | `crusader_perception` | one camera, one client — an operator choice per session |
-| `lidar_cluster_node` | `crusader_perception` | unproven on the boat |
-| `target_tracker` | `crusader_world_model` | unproven on the boat |
-| `ground_station` | `crusader_groundstation` | unproven; also a display, so it is started when a human wants to watch |
-
-## Usage
-
-### First-time setup
-
-| You are on… | Run | Details |
-|---|---|---|
-| Dev laptop (Windows) | `powershell -ExecutionPolicy Bypass -File setup\install_dev.ps1` | [setup/README.md](setup/README.md) |
-| Dev laptop (Linux/macOS) | `bash setup/install_dev.sh` | ” |
-| Jetson host | `sudo bash setup/install_jetson_host.sh` | udev → systemd → checks |
-| Inside `asv` container | `bash /root/robotx_ws/src/rx26_asv/setup/install_container.sh` | deps → colcon → smoke |
-
-### Building
-
-```bash
-# from the Jetson host — THE one blessed rebuild path:
-tools/scripts/rebuild.sh
-```
-
-It runs `colcon build --packages-up-to crusader_bringup`, which builds every package we
-ship because bringup depends on all of them. **A new package must be added to
-`crusader_bringup/package.xml`'s exec_depends** or it silently stops being built.
-
-## Safety constraints (non-negotiable)
-
-These come from field test lessons; tooling enforces most of them, but you
-are expected to know them:
-
-1. **One Pixhawk owner.** MAVProxy holds the serial link; everything else consumes its UDP
-   rebroadcast. `crusader_fcu` rejects a non-udp/tcp endpoint at startup, and no other
-   package may open a MAVLink connection at all.
-2. **RC e-stop is the only safety path.** ELRS SB-switch kills motors in any mode at km
-   range. WiFi/SSH/Ctrl+C is a convenience, never a safety mechanism.
-3. **RC-override mechanisms are bench-only until Gate G1** (the autonomy-drop switch).
-   The enforcement point exists in `telemetry_bridge`; nothing has passed the gate.
-4. **Steering inversion is fixed in `SERVOx_*`, never `RCx_REVERSED`** — autonomous modes
-   bypass RC settings entirely. `COMPASS_USE=0` stays as it is.
-5. **Never loosen `ARMING_*`/safety params to make testing easier.** `param_guard.py`
-   hard-fails on the protected set; fix the testing friction instead.
-6. **Fail loudly.** A silently-inactive mechanism is a safety issue, not a wasted
-   experiment. Silence must stay silent: a dead MAVLink stream stops being republished
-   rather than being replayed with a fresh timestamp.
-
-## Format
-
-### Best practices / standards for development
-
-1. **Nothing ships until it has run on the boat.** A node that compiles and has never
-   moved the vehicle does not belong in `setup.py`'s entry points or `core.launch.py`.
-   v0.5 exists because that rule was not applied for four phases.
-2. Verification is on the bench and on the water; tests back that up, they do not replace
-   it. CI runs `tools/scripts/check_config.py` (guards the two config files that can ground
-   the boat) and the ROS-free unit tests, and the build job proves every package imports and that the params file resolves from a real install space. If pushing
-   unverified code is unavoidable (e.g. remote push to enable on-boat testing), mark it
-   with a `NOTE:` comment at the top of the file or function.
-3. Split ROS nodes into pure-logic `*_core.py` + thin `*_node.py` wrappers, so the logic
-   can be read without rclpy between you and it. Safety logic in particular belongs in the
-   core.
-4. Imports are absolute, never relative.
-5. **Respect the package boundaries.** `crusader_common` may not import a domain package.
-   `indicator/` may not be imported by `safety/`. Testable code (`crusader_world_model`)
-   may not depend on untestable code (`crusader_perception`). CI checks that every
-   cross-package import is declared in `package.xml`.
-6. Parameters live in `crusader_bringup/config/crusader_params.yaml`, never hardcoded —
-   every param is `[RO]` or `[DYN]` ([config/README.md](crusader_bringup/config/README.md)).
-7. Header docstring per file (purpose), docstrings per class/function (args, types,
-   returns), `#` comments for the convoluted parts.
-
-### Versioning
-
-Current version: **0.5.0**. Phase versioning (`0.N` = phases 0–N delivered) is retired —
-it counted code written, not capability proven, which is exactly the failure v0.5 corrects.
-Plain semver from here: minor for a confirmed change in one area, major for core changes.
-At competition freeze this becomes `1.0.0`.
+1. `core.launch.py` holds only what has run on the boat.
+2. A node's logic lives in a ROS-free `*_core.py` (or header) with tests; the node is a thin
+   wrapper. Safety rules in particular belong in the core.
+3. A node declares every parameter, with its default, in code (`PARAMS` +
+   `crusader_common.node_main.declare_params`); `crusader_params.yaml` lists only what this
+   boat sets. `tools/scripts/check_config.py` fails a key no node declares or of the wrong type.
+4. Imports are absolute. `crusader_common` imports no package of ours.
+5. A file starts with what it is for; comments say why, not what. A package README stays under
+   15 lines.
+6. CI (`.github/workflows/ci.yml`): check_config, shell and Python syntax, the header-only C++
+   tests, then a full `colcon build`, every entry point importing, `colcon test` (every
+   built-in tree loads) and `pytest`.
 
 ## Dependencies
 
-**Hardware:** Crusader — Jetson Orin Nano; Pixhawk (ArduRover 4.6.3, `FRAME_TYPE=2` OmniX);
-4×T200; RTK GPS + dual-antenna moving-baseline heading (compass disabled by design);
-ELRS RC (e-stop path); 5.8GHz Ubiquiti + 915MHz telemetry; LED status strip
-(RED e-stop / YELLOW manual / GREEN autonomous). The OAK-D LR is driven from `asv` by
-`crusader_perception`; the Livox MID360 is on the same Jetson but driven by the **livox
-container**.
+Hardware: Jetson Orin Nano; Pixhawk (ArduRover 4.6.3, `FRAME_TYPE=2` OmniX); 4×T200; RTK GPS
+with dual-antenna heading (compass off by design); ELRS RC; Ubiquiti 5.8 GHz and an RFD900
+mesh to Ekko; OAK-D LR; Livox MID360; the LED mast (RED e-stop, YELLOW manual, GREEN
+autonomous).
 
-**Software:** Ubuntu/JetPack 6 on the Jetson; ROS 2 Humble + CUDA/TensorRT + depthai +
-MAVProxy/pymavlink/pyserial inside the `asv` container, base
-`ultralytics/ultralytics:latest-jetson-jetpack6`; no Livox SDK, by design. Plain
-Python ≥3.10 + pyyaml anywhere. Install via [setup/](setup/README.md).
+Software: JetPack 6; the `asv` image (`Dockerfile`: ROS 2 Humble, CUDA/TensorRT, depthai,
+ultralytics, MAVProxy, pymavlink) on `ultralytics/ultralytics:latest-jetson-jetpack6`. The
+laptop needs Python 3.10+ only for the ground station.
 
-## Glossary
-
-| Term | Meaning here |
-|---|---|
-| **ASV / USV** | Autonomous/unmanned surface vessel — the boat |
-| **GUIDED / MANUAL** | ArduRover modes. GUIDED = autopilot drives to pushed setpoints (cannot strafe on this frame — it turns instead) |
-| **MAVProxy rebroadcast** | MAVProxy owns the Pixhawk serial link and re-serves telemetry on UDP: **14551** ROS (`telemetry_bridge`), **14552** reserved for `batt_watchdog --dry-run` (the automatic poweroff was removed 2026-09-05), **14550** GCS + broadcast and ad-hoc tooling. The only way anything else talks to the autopilot. Every long-lived consumer gets its own port — a `udpin` bind steals datagrams, so sharing one means the loser gets silence rather than an error |
-| **`asv` container** | Where this whole repo runs, OAK-D included. Has ROS 2, CUDA/TensorRT, depthai, MAVProxy |
-| **livox container** | The only other container. Drives the MID360 and nothing else; publishes its `PointCloud2` |
-| **Autonomy-drop switch** | RC-channel-triggered software latch that kills any RC override within one control cycle, working beyond WiFi range. Gate G1 deliverable |
-| **Preflight** | `tools/scripts/preflight.py` — the do-not-arm gate run before every session |
-| **Rebuild discipline** | Every edit needs `tools/scripts/rebuild.sh`. "The change did nothing" = you skipped it |
-
-## Removed in v0.5
-
-The repo carried ~6,000 lines that had never run on the boat, which made it impossible to
-tell the proven parts from the aspirational ones. Removed: the perception pipeline, LiDAR
-fusion, the occupancy grid and APF avoidance advisory, the mission planner and RoboCommand
-protobuf link, inter-vehicle comms, the Mission-3 actuators, `gate_navigator`, `dp_hold`,
-and the keep-out fence uploader. All of it is in git history at `8c4ffa5`.
-
-The field-proven
-`gate_navigator` and `dp_hold` algorithms live in
-[robotx_2026](https://github.com/InspirationRobotics/robotx_2026), which completed
-prequal — that is the version to port from when mission work restarts.
-
-## Future development
-
-- **Topic contract with the livox container** — the observable half is settled
-  (measured 2026-09-03): `/livox/lidar` is `sensor_msgs/PointCloud2` at 10.0 Hz,
-  ~20k points/msg, RELIABLE/VOLATILE, frame `livox_frame`; `/livox/imu` is
-  `sensor_msgs/Imu` at 200.0 Hz, same frame. Both are visible from inside `asv` —
-  the containers share host network and the default `ROS_DOMAIN_ID`, so nothing needs
-  bridging. What still blocks the LiDAR half of `crusader_perception` is the **frame
-  convention**, not the plumbing: `livox_frame` is the raw upside-down sensor frame
-  (+y starboard, +z down) and nothing has yet agreed where the negation to REP-103
-  body happens.
-- **A G2-style bench check for the CAMERA's orientation.** Its mounting *translation* is in
-  `Resources.md` and now in `target_tracker`'s `cam_x/y/z`, on the same hull-bottom datum as
-  the LiDAR. Its *orientation* is recorded as "not yet bench-confirmed", which is the same
-  state the LiDAR was in when `Resources.md` described it with a left-handed frame that
-  could not exist. Until the camera gets its own G2, `cam_yaw_deg`/`cam_pitch_deg` are an
-  assumption and `fuse_bearing_deg` has to stay wide to cover it.
-- **Gate G1**: build + sign off the RC autonomy-drop switch. The enforcement point exists;
-  the bench harness needs rewriting ([docs/G1_bench_procedure.md](docs/G1_bench_procedure.md)).
-- Rebuild the occupancy grid in `crusader_world_model` on top of the tracks, verified
-  off-boat before it ever sees a camera.
-- Decide the shape of Cognition, then give it a package.
+Versions (each `package.xml`): minor for a confirmed change in one area, major for core
+changes; `1.0.0` at competition freeze.

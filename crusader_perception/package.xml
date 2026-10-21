@@ -19,6 +19,7 @@
   <depend>crusader_common</depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
   <!-- depthai and ultralytics are pip packages installed by the Dockerfile: no rosdep key -->
 
   <export>

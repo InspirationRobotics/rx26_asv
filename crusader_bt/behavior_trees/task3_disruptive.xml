@@ -2,7 +2,7 @@
 <!-- MISSION: Task 3 Coordinated Logistics, USV half (find the bay, dock, fire, decode). -->
 <!--
   The tree is Task3Disruptive, in lib/task3_disruptive.xml. This adds the autonomy guard and the
-  task heartbeat, so TREE=task3_disruptive.xml keeps working in the sim and lake rigs.
+  task heartbeat, so it runs on its own as RunMission name task3_disruptive.
   Every tunable is written out with its default.
 -->
 <root BTCPP_format="4" main_tree_to_execute="Main">

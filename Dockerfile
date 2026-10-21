@@ -14,7 +14,7 @@
 #
 # So depthai belongs here and the Livox SDK does not. That is the reverse of the
 # original plan, in which a single sensor container owned both devices and this
-# image was forbidden depthai: `buoy_detector` needs the camera AND TensorRT in
+# image was forbidden depthai: `camera_node` needs the camera AND TensorRT in
 # one process, because shipping 1.28 MB frames across a container boundary to
 # produce a few hundred bytes of detection is the wrong trade. The absence guard
 # below now protects the boundary that is actually real.

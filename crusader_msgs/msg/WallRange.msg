@@ -1,4 +1,4 @@
-# The vertical wall ahead of the boat, from the LiDAR (wall_range_node), and the
+# The vertical wall ahead of the boat, from the LiDAR (lidar_node), and the
 # slip fingers either side of the boat if it is in one. One message per sweep,
 # valid or not.
 #

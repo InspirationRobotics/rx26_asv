@@ -839,7 +839,8 @@ class GcsBridge(Node):
         try:
             with open(self.p["params_file"], encoding="utf-8") as f:
                 doc = yaml.safe_load(f) or {}
-            return dict((doc.get(name) or {}).get("ros__parameters") or {})
+            sections = (doc.get("/**") or {}, doc.get(name) or {})
+            return {k: v for s in sections for k, v in (s.get("ros__parameters") or {}).items()}
         except (OSError, yaml.YAMLError):
             return {}
 

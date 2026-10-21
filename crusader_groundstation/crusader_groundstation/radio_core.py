@@ -1,9 +1,8 @@
 """radio_core -- the Radio tab's record of the mesh, with no ROS in it.
 
-Plain Python, like proximity_core and rxl_codec, so tools/bench/bench_radio.py
-can drive it on a laptop with its own clock.
+Plain Python, so it runs on a laptop with its own clock.
 
-WHAT IT KEEPS. Every RadioFrame rxl_link_node publishes (what the boat put on
+WHAT IT KEEPS. Every RadioFrame rfd_link_node publishes (what the boat put on
 the air and what it heard) in a bounded ring with log_buffer's cursor contract,
 plus two summaries the page cannot work out from a partial scroll-back:
 
@@ -11,13 +10,7 @@ plus two summaries the page cannot work out from a partial scroll-back:
   * per PERIODIC message: how often it is arriving, against the rate its sender
     is meant to send it at.
 
-WHY TWO PERIODIC MESSAGES. The aircraft may speak either of two formats: Ekko's
-telemetry_bridge sends LIGHTS (TUNNEL 0x8005, the v3 whole-map heartbeat) at
-1 Hz, while the RXL design in rxl_codec has it send SAFE_PASSAGE at 0.2 Hz.
-Scoring both lets the tab tell "the aircraft is quiet" from "the aircraft is
-talking, in the other format".
-
-THE RATES ARE ESTIMATES, AND THE TAB SAYS SO. Neither format carries a sequence
+THE RATES ARE ESTIMATES, AND THE TAB SAYS SO. TUNNEL carries no sequence
 number, so a lost packet cannot be counted; only a rate below the expected one
 can be seen.
 """
@@ -32,7 +25,6 @@ NAMES = {1: "Ekko", 2: "Crusader", 3: "Graey", 42: "Crusader (link node)",
 #: (message name, expected Hz, who sends it). The Radio tab scores each one.
 PERIODIC = (
     ("LIGHTS", 1.0, "Ekko's telemetry_bridge, TUNNEL 0x8005"),
-    ("SAFE_PASSAGE", 0.2, "the RXL design, native 42011"),
 )
 
 #: How far back the rates and the longest silence look, in seconds.

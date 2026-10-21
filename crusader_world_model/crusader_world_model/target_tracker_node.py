@@ -86,16 +86,18 @@ PARAMS = {
     "cam_pitch_deg": 0.0,               # + = aimed down
     # fusion gates: the five after use_lidar are inert while it is false
     "use_lidar": False,                 # false = camera-only; true for open water
-    "fuse_bearing_deg": 6.0,
+    "fuse_bearing_deg": 6.0,            # loose for the unmeasured camera extrinsic
     "fuse_range_m": 4.0,
     "fuse_range_frac": 0.25,
     "min_confidence": 0.5,
     "track_unlabeled": True,            # keep LiDAR-only clusters as tracks
     # tracking gates
-    "assoc_radius_m": 3.0,
+    "assoc_radius_m": 3.0,              # too wide merges a gate pair; duplicates strung
+                                        # along a bearing at range: widen it
     "pos_alpha": 0.3,
     "vel_alpha": 0.2,
-    "confirm_hits": 3,
+    "confirm_hits": 3,                  # with track_timeout_s 0, all that stands between
+                                        # a false positive and a permanent phantom
     "tentative_timeout_s": 3.0,
     "track_timeout_s": 0.0,             # 0 = confirmed tracks never expire
     "max_tracks": 64,                   # runaway guard, not a normal path

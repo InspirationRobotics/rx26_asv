@@ -28,9 +28,8 @@
   Gains and the 120 us cap are dp_hold's tune on this hull. Re-calibrate on the
   real dock.
 
-  HOW TO RUN IT. bt_runner_node with tree_file pointing here, the boat in
-  MANUAL, then the SafePassage goal as for every tree. In the sim:
-  tools/task3_sim/sim.py with its fire and fire-pump flags (its README).
+  HOW TO RUN IT. The boat in MANUAL, then a RunMission goal named
+  task3_fire_manual.
 
   TWO SWITCHES, both off by default, both on bt_runner_node:
     publish_setpoints  may the tree take the STICKS (Gate G1)

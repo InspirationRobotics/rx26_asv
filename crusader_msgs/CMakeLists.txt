@@ -25,7 +25,6 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   # PassagePlan, which contains an array of it.
   "msg/PassageBuoy.msg"
   "msg/PassagePlan.msg"
-  "msg/GatePair.msg"
   "msg/RadioFrame.msg"
   # Task 3: what the dock detector saw in one frame. Adopted unchanged from the
   # CV side's draft (firefighting-cv specs/msg). Contained types first.
@@ -47,7 +46,6 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/RadioSend.msg"
   # Actions. Same rule as above: a file not listed here is silently not
   # generated, and the import fails at node start, on the boat.
-  "action/SafePassage.action"
   "action/RunMission.action"
   DEPENDENCIES std_msgs action_msgs
 )

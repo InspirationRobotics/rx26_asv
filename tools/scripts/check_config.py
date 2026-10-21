@@ -12,7 +12,9 @@ What it guards, and why each one is here:
 1. config/crusader_params.yaml must parse under RCL's rules, which are stricter
    than PyYAML's and fail CLOSED: an illegal file kills every node in the launch
    at rclpy.init(), LEDs included, so the boat is dark rather than obviously
-   broken.
+   broken. Every key in it must be a parameter its node declares, of the declared
+   type: ROS ignores a misspelt key without a word and refuses a wrong type (1 for
+   a double) at startup.
 
 2. Every package.xml must be well-formed XML, and every package must be in
    crusader_bringup's exec_depends. Both fail only ON THE JETSON, after a copy:
@@ -33,6 +35,8 @@ What it guards, and why each one is here:
    listening to, and the boat looks healthy throughout. See check_nav.
 """
 import ast
+import functools
+import importlib
 import importlib.util
 import math
 import re
@@ -45,28 +49,26 @@ PARAMS_YAML = REPO / "crusader_bringup" / "config" / "crusader_params.yaml"
 PARAMS_BASELINE = REPO / "params" / "working_crusader.params"
 NAV2_PARAMS = REPO / "crusader_nav" / "config" / "nav2_params.yaml"
 
-# Every node that reads crusader_params.yaml. A section for a node that no longer
-# exists is a parameter set nobody reviews, reading as a capability the boat still
-# has; a node with no section fails at startup instead.
-#
-# ONE STRING, SPLIT ON WHITESPACE, deliberately: in a set literal a missing comma
-# silently joins two names ({"a" "b", "c"} == {"ab", "c"}), and the check then
-# blames the YAML for a bug in this file.
-CONFIG_DRIVEN_NODES = set("""
-    telemetry_bridge
-    led_node
-    led_status_node
-    rc_watchdog
-    ocs_client
-    camera_node
-    lidar_node
-    target_tracker
-    gcs_bridge
-    bt_runner_node
-    rfd_link_node
-    nav_frames_node
-    squirt_cal
-""".split())
+# Every node that reads crusader_params.yaml, and the source that declares its parameters
+# (PARAMS in a Python node; declare_parameter and NavParams in bt_runner_node). A section
+# for a node not listed here is a parameter set nobody reviews. squirt_cal is a bench
+# tool whose loader insists on every key itself (squirt_core.load_config).
+NODE_SOURCES = {
+    "telemetry_bridge": "crusader_behavior/crusader_behavior/telemetry_bridge.py",
+    "led_node": "crusader_behavior/crusader_behavior/led_node.py",
+    "led_status_node": "crusader_behavior/crusader_behavior/led_status_node.py",
+    "rc_watchdog": "crusader_behavior/crusader_behavior/rc_watchdog.py",
+    "ocs_client": "crusader_groundstation/crusader_groundstation/ocs_client_node.py",
+    "gcs_bridge": "crusader_groundstation/crusader_groundstation/gcs_bridge.py",
+    "camera_node": "crusader_perception/crusader_perception/camera_node.py",
+    "lidar_node": "crusader_perception/crusader_perception/lidar_node.py",
+    "target_tracker": "crusader_world_model/crusader_world_model/target_tracker_node.py",
+    "nav_frames_node": "crusader_nav/crusader_nav/nav_frames_node.py",
+    "rfd_link_node": "crusader_link/crusader_link/rfd_link_node.py",
+    "bt_runner_node": "crusader_bt/src/bt_runner_node.cpp",
+    "squirt_cal": None,
+}
+SHARED = "/**"          # rcl's every-node section: one value for each node that declares it
 
 # Packages deliberately NOT in crusader_bringup's closure: they run on the laptop
 # (in WSL) and must never be built on the boat. Without this the reachability
@@ -109,16 +111,16 @@ def ok(check, detail=""):
 
 # ------------------------------------------------------------- ocs_client
 
-def check_ocs_client(cfg):
+def check_ocs_client(ocs):
     """Where the OCS link may be aimed (docs: OCS/docs/VEHICLE_LINK.md, Discovery).
 
-    The boat must never be pointed at RoboCommand's course networks, and a bad
-    fallback list fails quietly: ocs_client drops the entry with one log line and
-    waits for a beacon that may never come. The rules are ocs_link's own
-    (check_fallback_hosts, on_course_network), so file and code cannot disagree.
+    `ocs` is ocs_client's effective parameters. The boat must never be pointed at
+    RoboCommand's course networks, and a bad fallback list fails quietly: ocs_client
+    drops the entry with one log line and waits for a beacon that may never come. The
+    rules are ocs_link's own (check_fallback_hosts, on_course_network), so file and
+    code cannot disagree.
     """
     try:
-        ocs = cfg["ocs_client"]["ros__parameters"]
         host, port = ocs["ocs_host"], ocs["ocs_port"]
     except KeyError as e:
         fail("ocs_client target", f"missing key {e}")
@@ -171,17 +173,23 @@ def check_ocs_client(cfg):
 
 # ---------------------------------------------------------------- params YAML
 
-def check_params_yaml():
+def load_params_yaml():
+    """crusader_params.yaml parsed, or None after reporting why not."""
     import yaml
     try:
-        text = PARAMS_YAML.read_text(encoding="utf-8")
-        cfg = yaml.safe_load(text)
+        return yaml.safe_load(PARAMS_YAML.read_text(encoding="utf-8"))
     except FileNotFoundError:
         fail("params yaml present", f"{PARAMS_YAML} not found")
-        return
     except yaml.YAMLError as e:
         fail("params yaml parses", str(e))
+    return None
+
+
+def check_params_yaml():
+    cfg = load_params_yaml()
+    if cfg is None:
         return
+    text = PARAMS_YAML.read_text(encoding="utf-8")
 
     # Rule 1: every top-level key is a node whose only child is ros__parameters.
     bad = [name for name, section in cfg.items()
@@ -194,80 +202,54 @@ def check_params_yaml():
         ok("rcl rule 1: every section is <node>/ros__parameters")
 
     # Rule 2: no YAML anchors or aliases anywhere (rcl parses tokens, not docs).
+    # `/**:` is rcl's wildcard, not an alias.
     anchored = [n for n, line in enumerate(text.splitlines(), 1)
-                if "&" in line.split("#", 1)[0] or "*" in line.split("#", 1)[0]]
+                if re.search(r"(^|[\s\[{,:])[&*]\w", line.split("#", 1)[0])]
     if anchored:
         fail("rcl rule 2: no anchors/aliases",
              f"lines {anchored} — write the value out literally instead")
     else:
         ok("rcl rule 2: no YAML anchors/aliases")
 
-    # Section set matches the shipped nodes, in both directions.
-    sections = set(cfg) - {"shared"}
-    if sections != CONFIG_DRIVEN_NODES:
-        missing = CONFIG_DRIVEN_NODES - sections
-        extra = sections - CONFIG_DRIVEN_NODES
-        fail("config sections match the shipped nodes",
-             f"missing={sorted(missing)} stale={sorted(extra)} "
-             "(missing = named here but no YAML section; stale = a YAML section "
-             "this list does not know about. Check `ros2 pkg executables` before "
-             "deleting either — the node may still ship and just not be running)")
+    sections = set(cfg) - {SHARED}
+    if sections - set(NODE_SOURCES):
+        fail("config sections are shipped nodes",
+             f"{sorted(sections - set(NODE_SOURCES))}: a section NODE_SOURCES does not "
+             "know. Check `ros2 pkg executables` before deleting it — the node may still "
+             "ship and just not be running")
     else:
-        ok("config sections match the shipped nodes")
+        ok("config sections are shipped nodes", f"{len(sections)} sections")
 
-    # Shared values that must stay equal across sections (rcl forbids anchors,
-    # so they are written out literally and pinned here instead).
-    #
-    # Both directions: the bridge's republish budget and every consumer's
-    # stop-acting age. A comment cannot make a new consumer use the same number;
-    # this finds the drift (the frozen-pose failure) while it is still a diff.
-    try:
-        want = cfg["shared"]["ros__parameters"]["pose_timeout_s"]
-        pinned = [("telemetry_bridge", "stream_timeout_s")]
-        pinned += [(name, "pose_timeout_s") for name in sorted(cfg)
-                   if name != "shared"
-                   and "pose_timeout_s" in cfg[name]["ros__parameters"]]
-        differing = {f"{n}.{k}": cfg[n]["ros__parameters"][k]
-                     for n, k in pinned if cfg[n]["ros__parameters"][k] != want}
-        if differing:
-            fail("shared pose_timeout_s",
-                 f"shared={want} but {differing}; a consumer trusting a pose "
-                 "longer than the bridge vouches for it is the frozen-pose "
-                 "failure this value exists to prevent")
-        else:
-            ok("shared pose_timeout_s consistent",
-               f"{len(pinned)} section(s) pinned at {want}")
-    except KeyError as e:
-        fail("shared pose_timeout_s", f"missing key {e}")
+    check_declared(cfg)
+
+    # The pose age, one value in /** for every node that declares pose_timeout_s; the two
+    # stream_timeout_s are the bridge's republish budget and the runner's stop-acting age.
+    # A consumer trusting a pose longer than the bridge vouches for it is the frozen-pose
+    # failure.
+    want = cfg.get(SHARED, {}).get("ros__parameters", {}).get("pose_timeout_s")
+    pinned = {f"{n}.stream_timeout_s": _effective(cfg, n)["stream_timeout_s"]
+              for n in ("telemetry_bridge", "bt_runner_node")}
+    _ensure("pose timeout consistent",
+            (want is None and f"{SHARED} has no pose_timeout_s")
+            or ({k: v for k, v in pinned.items() if v != want}
+                and f"{SHARED}.pose_timeout_s = {want} but {pinned}"),
+            f"{want} s everywhere")
 
     # One camera, one mounting: bt_runner_node places the Task 3 bays and
     # target_tracker the buoys, each with its own copy of the extrinsic. If they
     # differ the two worlds disagree and neither looks wrong on its own.
-    try:
-        keys = ("cam_x", "cam_y", "cam_yaw_deg", "cam_pitch_deg")
-        tt = cfg["target_tracker"]["ros__parameters"]
-        bt = cfg["bt_runner_node"]["ros__parameters"]
-        differing = {k: (tt[k], bt[k]) for k in keys if tt[k] != bt[k]}
-        if differing:
-            fail("camera extrinsic consistent",
-                 f"target_tracker vs bt_runner_node {differing}")
-        else:
-            ok("camera extrinsic consistent",
-               "target_tracker and bt_runner_node agree on " + ", ".join(keys))
-    except KeyError as e:
-        fail("camera extrinsic consistent", f"missing key {e}")
+    keys = ("cam_x", "cam_y", "cam_yaw_deg", "cam_pitch_deg")
+    tt, bt = _effective(cfg, "target_tracker"), _effective(cfg, "bt_runner_node")
+    differing = {k: (tt[k], bt[k]) for k in keys if tt[k] != bt[k]}
+    _ensure("camera extrinsic consistent",
+            differing and f"target_tracker vs bt_runner_node {differing}",
+            "target_tracker and bt_runner_node agree on " + ", ".join(keys))
 
     # A leg-topic mismatch is a blank path on the map, not an error.
-    try:
-        leg = _module_literals(GCS_BRIDGE)["LEG_TOPIC"]
-        bt_leg = cfg["bt_runner_node"]["ros__parameters"]["nav_leg_topic"]
-        if leg != bt_leg:
-            fail("leg topic bt_runner -> gcs_bridge",
-                 f"bt_runner_node.nav_leg_topic {bt_leg!r} != gcs_bridge.LEG_TOPIC {leg!r}")
-        else:
-            ok("leg topic bt_runner -> gcs_bridge", leg)
-    except KeyError as e:
-        fail("leg topic bt_runner -> gcs_bridge", f"missing key {e}")
+    _same("leg topic bt_runner -> gcs_bridge",
+          ("bt_runner_node.nav_leg_topic", bt["nav_leg_topic"]),
+          ("gcs_bridge.LEG_TOPIC", _module_literals(GCS_BRIDGE)["LEG_TOPIC"]),
+          "the map shows no planned path")
 
     # UDP port discipline on the MAVLink links. The boat owns 1455x so a --out
     # line names its vehicle. The flight stack's port is never taken by anything
@@ -278,64 +260,51 @@ def check_params_yaml():
         m = re.search(r":(\d+)\s*$", str(endpoint))
         return int(m.group(1)) if m else None
 
-    try:
-        mav_ep = cfg["telemetry_bridge"]["ros__parameters"]["mav_endpoint"]
-        rxl_ep = cfg["rfd_link_node"]["ros__parameters"]["rfd_endpoint"]
-    except KeyError as e:
-        fail("mavlink udp ports", f"missing key {e}")
+    mav_ep = _effective(cfg, "telemetry_bridge")["mav_endpoint"]
+    rxl_ep = _effective(cfg, "rfd_link_node")["rfd_endpoint"]
+    # A NON-UDP endpoint is the RFD900 on its FTDI cable, owned directly by
+    # the link node as the mesh needs. No port to check then -- only that it
+    # names a device at all.
+    net = str(rxl_ep).startswith(("udp:", "udpin:", "udpout:", "tcp:"))
+    mav_p, rxl_p = _udp_port(mav_ep), _udp_port(rxl_ep)
+    if not net and str(rxl_ep).startswith("/dev/"):
+        ok("mavlink udp ports", f"rfd_link on the radio at {rxl_ep}")
+    elif not net:
+        fail("mavlink udp ports",
+             f"rfd_endpoint {rxl_ep!r} is neither a udp endpoint nor a "
+             "/dev device; pymavlink would read it as a file name and the "
+             "link would be silent rather than refused")
+    elif mav_p is None or rxl_p is None:
+        fail("mavlink udp ports",
+             f"could not read a port from {mav_ep!r} / {rxl_ep!r}")
+    elif mav_p == rxl_p:
+        fail("mavlink udp ports",
+             f"rfd_link_node and telemetry_bridge both on {mav_p} — the "
+             "second to bind steals the first's datagrams and the boat "
+             "loses pose with nothing logging an error")
+    elif not (14550 <= rxl_p <= 14559):
+        fail("mavlink udp ports",
+             f"rfd_endpoint port {rxl_p} is outside the boat's 1455x range "
+             "(the aircraft owns 1454x)")
+    elif not str(rxl_ep).startswith("udpin:"):
+        fail("mavlink udp ports",
+             f"rfd_endpoint {rxl_ep!r} must be udpin: to BIND and listen; "
+             "'udp:' is an outbound client that receives nothing, silently")
     else:
-        # A NON-UDP endpoint is the RFD900 on its FTDI cable, owned directly by
-        # the link node as the mesh needs. No port to check then -- only that it
-        # names a device at all.
-        net = str(rxl_ep).startswith(("udp:", "udpin:", "udpout:", "tcp:"))
-        mav_p, rxl_p = _udp_port(mav_ep), _udp_port(rxl_ep)
-        if not net and str(rxl_ep).startswith("/dev/"):
-            ok("mavlink udp ports", f"rfd_link on the radio at {rxl_ep}")
-        elif not net:
-            fail("mavlink udp ports",
-                 f"rfd_endpoint {rxl_ep!r} is neither a udp endpoint nor a "
-                 "/dev device; pymavlink would read it as a file name and the "
-                 "link would be silent rather than refused")
-        elif mav_p is None or rxl_p is None:
-            fail("mavlink udp ports",
-                 f"could not read a port from {mav_ep!r} / {rxl_ep!r}")
-        elif mav_p == rxl_p:
-            fail("mavlink udp ports",
-                 f"rfd_link_node and telemetry_bridge both on {mav_p} — the "
-                 "second to bind steals the first's datagrams and the boat "
-                 "loses pose with nothing logging an error")
-        elif not (14550 <= rxl_p <= 14559):
-            fail("mavlink udp ports",
-                 f"rfd_endpoint port {rxl_p} is outside the boat's 1455x range "
-                 "(the aircraft owns 1454x)")
-        elif not str(rxl_ep).startswith("udpin:"):
-            fail("mavlink udp ports",
-                 f"rfd_endpoint {rxl_ep!r} must be udpin: to BIND and listen; "
-                 "'udp:' is an outbound client that receives nothing, silently")
-        else:
-            ok("mavlink udp ports", f"telemetry_bridge {mav_p}, rfd_link {rxl_p}")
+        ok("mavlink udp ports", f"telemetry_bridge {mav_p}, rfd_link {rxl_p}")
 
     # Distinct HTTP ports (see PORT_OWNERS).
     seen = {}
-    clash = False
     for node, key in PORT_OWNERS:
-        try:
-            values = (_effective(cfg, node, GCS_BRIDGE) if node == "gcs_bridge"
-                      else cfg[node]["ros__parameters"])
-            port = values[key]
-        except KeyError as e:
-            fail("http ports distinct", f"missing key {e}")
-            clash = True
-            continue
+        port = _effective(cfg, node)[key]
         if port in seen:
             fail("http ports distinct",
                  f"{node}.{key} and {seen[port]} both bind {port} — the second "
                  "to start dies with address-in-use, which reads like a crash")
-            clash = True
+            break
         seen[port] = f"{node}.{key}"
-    if not clash:
-        ok("http ports distinct", ", ".join(f"{p}={n}" for p, n in
-                                            sorted(seen.items())))
+    else:
+        ok("http ports distinct", ", ".join(f"{p}={n}" for p, n in sorted(seen.items())))
 
     # Every TaskAttempt token in a built-in tree must be in RoboCommand's RxTask enum: ParseDict
     # rejects the whole heartbeat frame on an unknown enum name.
@@ -351,31 +320,61 @@ def check_params_yaml():
     except Exception as e:  # noqa: BLE001
         fail("TaskAttempt tokens are real RxTasks", f"{type(e).__name__}: {e}")
 
-    check_ocs_client(cfg)
+    check_ocs_client(_effective(cfg, "ocs_client"))
 
-    # camera_node's YAML values for the camera controls, against oak_controls' ranges and
-    # choices: one outside them stops the node at startup (ROS refuses it at declaration).
-    # Imported off the SOURCE TREE so this runs on a laptop; oak_controls needs no ROS.
-    try:
-        sys.path.insert(0, str(REPO / "crusader_perception"))
-        from crusader_perception import oak_controls
-    except Exception as e:
-        fail("oak camera profile", f"could not import oak_controls: {e}")
-    else:
-        node = cfg.get("camera_node", {}).get("ros__parameters", {})
-        problems = []
-        for name, value in dict(oak_controls.defaults(), **node).items():
-            control = oak_controls.BY_NAME.get(name)
-            if control is None:
-                continue
-            if control.choices and str(value).lower() not in control.choices:
-                problems.append(f"{name}={value!r} is not one of " + "/".join(control.choices))
-            if control.lo is not None and not (control.lo <= value <= control.hi):
-                problems.append(f"{name}={value} is outside [{control.lo}, {control.hi}]")
-        if problems:
-            fail("oak camera profile", "; ".join(problems))
-        else:
-            ok("oak camera profile", f"{len(oak_controls.ALL)} controls in range")
+    # camera_node's camera controls against oak_controls' ranges and choices: one outside
+    # them stops the node at startup (ROS refuses it at declaration).
+    oak_controls = _import("crusader_perception", "oak_controls")
+    cam = _effective(cfg, "camera_node")
+    problems = []
+    for control in oak_controls.ALL:
+        value = cam[control.name]
+        if control.choices and str(value).lower() not in control.choices:
+            problems.append(f"{control.name}={value!r} is not one of " + "/".join(control.choices))
+        if control.lo is not None and not (control.lo <= value <= control.hi):
+            problems.append(f"{control.name}={value} is outside [{control.lo}, {control.hi}]")
+    _ensure("oak camera profile", "; ".join(problems),
+            f"{len(oak_controls.ALL)} controls in range")
+
+
+def check_declared(cfg):
+    """Every YAML key is a parameter its node declares, of the declared type.
+
+    ROS ignores an override nobody declares, so a misspelt key is a default silently in
+    force; it refuses one of the wrong type at startup (InvalidParameterTypeException), so
+    the node never comes up. A /** value set again in a node section is two values for
+    what must be one.
+    """
+    problems = []
+    shared = cfg.get(SHARED, {}).get("ros__parameters", {})
+    nodes = [n for n, src in NODE_SOURCES.items() if src]
+    for node in nodes:
+        if f'"{node}"' not in (REPO / NODE_SOURCES[node]).read_text():
+            problems.append(f"{NODE_SOURCES[node]} no longer names the node {node!r}")
+
+    def type_problem(label, value, default):
+        have, want = _ros_type(value), _ros_type(default)
+        if have and want and have != want:
+            return f"{label} is {have}, declared {want}"
+        return None
+
+    for key, value in shared.items():
+        users = [n for n in nodes if key in _declared(n)]
+        if not users:
+            problems.append(f"{SHARED}.{key}: no node declares it")
+        problems += [p for n in users
+                     if (p := type_problem(f"{SHARED}.{key} (for {n})", value, _declared(n)[key]))]
+    for node in nodes:
+        declared = _declared(node)
+        for key, value in cfg.get(node, {}).get("ros__parameters", {}).items():
+            if key not in declared:
+                problems.append(f"{node}.{key}: not declared")
+            elif key in shared:
+                problems.append(f"{node}.{key} sets the {SHARED} value again")
+            elif p := type_problem(f"{node}.{key}", value, declared[key]):
+                problems.append(p)
+    _ensure("every key is a declared parameter of its type", "; ".join(problems),
+            f"{len(nodes)} nodes")
 
 
 # ------------------------------------------------------------------ the pump
@@ -398,16 +397,17 @@ def check_pump():
       value (SERVOn_TRIM = pump_off_pwm): the autopilot ENDS every burst by
       returning the output to TRIM, so a wrong TRIM is a pump that never stops.
     """
-    import yaml
+    cfg = load_params_yaml()
+    if cfg is None:
+        return
+    tb = _effective(cfg, "telemetry_bridge")
+    sq = _effective(cfg, "squirt_cal")
+    led = _effective(cfg, "led_status_node")
     try:
-        cfg = yaml.safe_load(PARAMS_YAML.read_text(encoding="utf-8"))
-        tb = cfg["telemetry_bridge"]["ros__parameters"]
-        sq = cfg["squirt_cal"]["ros__parameters"]
-        led = cfg["led_status_node"]["ros__parameters"]
         ch, servo = int(tb["pump_rc_channel"]), int(tb["pump_servo_channel"])
         on, off = int(tb["pump_on_pwm"]), int(tb["pump_off_pwm"])
         drop, estop = int(tb["drop_channel"]), int(tb["estop_channel"])
-    except (KeyError, OSError, yaml.YAMLError) as e:
+    except KeyError as e:
         fail("pump path", f"cannot read the pump config: {e}")
         return
     problems = []
@@ -426,8 +426,7 @@ def check_pump():
         problems.append(f"pump_on_pwm {on} and pump_off_pwm {off} are too close to "
                         "tell apart")
     if tb["pump_allow_disarmed"]:
-        problems.append("pump_allow_disarmed is true in the YAML (bench only, by a "
-                        "-p override)")
+        problems.append("pump_allow_disarmed is true (bench only, by a -p override)")
     if servo:
         spec = importlib.util.spec_from_file_location(
             "param_guard", Path(__file__).parent / "param_guard.py")
@@ -517,9 +516,106 @@ def _module_literals(path):
     return out
 
 
-def _effective(cfg, node, path):
-    """The values a Python node runs with: its PARAMS defaults under its YAML section."""
-    return dict(_module_literals(path).get("PARAMS", {}), **cfg[node]["ros__parameters"])
+def _effective(cfg, node):
+    """The values a node runs with: its declared defaults, then /**, then its own section."""
+    declared = _declared(node) if NODE_SOURCES.get(node) else {}
+    shared = {k: v for k, v in cfg.get(SHARED, {}).get("ros__parameters", {}).items()
+              if k in declared}
+    out = dict(declared)
+    out.update(shared)
+    out.update(cfg.get(node, {}).get("ros__parameters", {}))
+    return out
+
+
+@functools.lru_cache(maxsize=None)
+def _declared(node):
+    """{name: default} for every parameter a node declares, read from its source."""
+    path = REPO / NODE_SOURCES[node]
+    return _cpp_declared(path) if path.suffix == ".cpp" else _py_declared(path)
+
+
+def _py_declared(path):
+    """A Python node's PARAMS without importing the node (it imports rclpy). A
+    `**module.PARAMS` entry is read from that sibling module the same way; any other
+    non-literal (ocs_link's constants, oak_controls.defaults()) is evaluated against the
+    pure-Python module the node imports it from."""
+    tree = ast.parse(path.read_text())
+    imports = {a.asname or a.name: (s.module, a.name) for s in tree.body
+               if isinstance(s, ast.ImportFrom) and s.module for a in s.names}
+    params = next(s.value for s in tree.body if isinstance(s, ast.Assign)
+                  and getattr(s.targets[0], "id", None) == "PARAMS")
+    out = {}
+    for key, value in zip(params.keys, params.values):
+        if key is None and isinstance(value, ast.Attribute) and value.attr == "PARAMS":
+            out.update(_py_declared(path.with_name(value.value.id + ".py")))
+            continue
+        try:
+            v = ast.literal_eval(value)
+        except ValueError:
+            names = {n.id for n in ast.walk(value) if isinstance(n, ast.Name)} & set(imports)
+            scope = {n: _import(*imports[n]) for n in names}
+            v = eval(compile(ast.Expression(value), str(path), "eval"), scope)
+        if key is None:
+            out.update(v)
+        else:
+            out[ast.literal_eval(key)] = v
+    return out
+
+
+def _import(module, name):
+    """`from module import name`, off the source tree (each package dir on sys.path)."""
+    for pkg in REPO.glob("crusader_*/"):
+        if str(pkg) not in sys.path:
+            sys.path.insert(0, str(pkg))
+    try:
+        return importlib.import_module(f"{module}.{name}")
+    except ImportError:
+        return getattr(importlib.import_module(module), name)
+
+
+CPP_TYPES = {"double": float, "int64_t": int, "int": int, "bool": bool, "std::string": str}
+
+
+def _cpp_declared(path):
+    """bt_runner_node's parameters: every declare_parameter<T>("name", default), nav_mode
+    (dynamically typed, so None), and the nav_* planner knobs at NavParams' defaults."""
+    def strip(text):
+        return re.sub(r"//[^\n]*", "", text)
+
+    src = strip(path.read_text())
+    out = {}
+    for t, name, default in re.findall(
+            r'declare_parameter<([\w:<> ]+)>\(\s*"(\w+)",\s*(.+?)(?:,\s*\w+)?\);', src, re.S):
+        element = CPP_TYPES[re.sub(r"^std::vector<(.+)>$", r"\1", t.strip())]
+        text = re.sub(r"^std::vector<.+?>+(?=\{)", "", default.strip())
+        text = re.sub(r"\btrue\b", "True", re.sub(r"\bfalse\b", "False", text))
+        v = ast.literal_eval(text.replace("{", "[").replace("}", "]"))
+        out[name] = [element(x) for x in v] if isinstance(v, list) else element(v)
+    out.update((name, None) for name in re.findall(r'declare_parameter\(\s*"(\w+)"', src))
+    include = path.parents[1] / "include" / "crusader_bt"
+    struct = re.search(r"struct NavParams\s*\{(.*?)\n\};",
+                       strip((include / "path_math.hpp").read_text()), re.S).group(1)
+    members = {}
+    for kind, decl in re.findall(r"\b(double|int)\s+([^;(]+);", struct):
+        for part in decl.split(","):
+            member, value = (s.strip() for s in part.split("="))
+            members[member] = CPP_TYPES[kind](float(value))
+    for name, member in re.findall(r'(?:real|whole)Knob\("(\w+)",\s*&NavParams::(\w+)',
+                                   (include / "nav_params.hpp").read_text()):
+        out[name] = members[member]
+    return out
+
+
+def _ros_type(v):
+    """The ROS parameter type a value declares or sets; None where it cannot be told."""
+    if isinstance(v, bool):
+        return "bool"
+    if isinstance(v, (int, float, str)):
+        return {int: "integer", float: "double", str: "string"}[type(v)]
+    if isinstance(v, (list, tuple)) and v:
+        kinds = {_ros_type(x) for x in v}
+        return f"{kinds.pop()}[]" if len(kinds) == 1 else "mixed[]"
+    return None
 
 
 def _baseline_params():
@@ -558,8 +654,10 @@ def check_nav():
     known to agree.
     """
     import yaml
+    cfg = load_params_yaml()
+    if cfg is None:
+        return
     try:
-        cfg = yaml.safe_load(PARAMS_YAML.read_text(encoding="utf-8"))
         nav2_text = NAV2_PARAMS.read_text(encoding="utf-8")
         nav2 = yaml.safe_load(nav2_text)
     except (OSError, yaml.YAMLError) as e:
@@ -582,13 +680,11 @@ def check_nav():
         planner = nav2["planner_server"]["ros__parameters"]
         lifecycle = nav2["nav_lifecycle"]["ros__parameters"]
         hazard_topic = cm["hazard_layer"]["topic"]
-        bt = cfg["bt_runner_node"]["ros__parameters"]
-        frames_src = REPO / "crusader_nav" / "crusader_nav" / "nav_frames_node.py"
-        frames = _effective(cfg, "nav_frames_node", frames_src)
-        datum_topic = _module_literals(frames_src)["DATUM_TOPIC"]
-        lidar_src = REPO / "crusader_perception" / "crusader_perception" / "lidar_node.py"
-        lidar = _effective(cfg, "lidar_node", lidar_src)
-        lidar["nav_cloud_topic"] = _module_literals(lidar_src)["NAV_CLOUD_TOPIC"]
+        bt = _effective(cfg, "bt_runner_node")
+        frames = _effective(cfg, "nav_frames_node")
+        datum_topic = _module_literals(REPO / NODE_SOURCES["nav_frames_node"])["DATUM_TOPIC"]
+        lidar = _effective(cfg, "lidar_node")
+        lidar["nav_cloud_topic"] = _module_literals(REPO / NODE_SOURCES["lidar_node"])["NAV_CLOUD_TOPIC"]
         inscribed = cm["robot_radius"] * math.cos(math.pi / 16)
         half_window = min(cm["width"], cm["height"]) / 2.0
         hard, soft, clip = bt["nav_hard_m"], bt["nav_soft_m"], bt["nav_clip_radius_m"]

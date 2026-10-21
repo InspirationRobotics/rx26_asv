@@ -75,7 +75,7 @@ so subtract 24 cm to get height above the waterline:
     LiDAR   52 cm datum  ->  28 cm above waterline
     Camera  65 cm datum  ->  41 cm above waterline
 
-This number is also `lidar_cluster_node.water_z` verbatim — it is exactly the
+This number is also `lidar_node.water_z` verbatim — it is exactly the
 measurement docs/G2 step 4 asks for, and the parameter sat at a 0.10 placeholder
 until now. At 0.10 the reject line (water_z + water_margin) sat 1 cm above the
 real waterline, so water returns passed straight into clustering.

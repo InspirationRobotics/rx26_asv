@@ -206,7 +206,7 @@ def report():
     print()
     if fails:
         print("==== SITL HEADING+SPEED: FAIL ({}) ====".format(", ".join(fails)))
-        print("Fix guided_hs_core's docstring and tools/task3_sim/world.py Boat to match")
+        print("Fix guided_hs_core's docstring to match")
         print("what was measured BEFORE the tree drives the boat.")
         return 1
     print("==== SITL HEADING+SPEED: PASS ====")

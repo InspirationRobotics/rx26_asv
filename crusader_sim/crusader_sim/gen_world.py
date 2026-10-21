@@ -176,8 +176,8 @@ def robobuoy(e, body_mesh):
 def dock(e):
     """Docking cubes + one Docking Bay Structure per bay.
 
-    Geometry mirrors tools/task3_sim/world.py (W: Scenario's dock fields,
-    WINDOW_SLOTS) so the Task 3 tree sees the same course in both sims: 0.5 m
+    Geometry from the team's former no-ROS Task 3 sim (tools/task3_sim/world.py in git
+    history: Scenario's dock fields, WINDOW_SLOTS): 0.5 m
     cubes; three 1.5 m slips between 0.5 m fingers 2.0 m long; a main deck
     1.0 m deep; deck 0.3 m above the water (ASSUMED there too). Each bay's
     structure is a 1.0 x 1.0 m white face on the deck's front edge, facing

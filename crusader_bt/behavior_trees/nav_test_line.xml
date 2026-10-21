@@ -8,13 +8,13 @@
   a goal: send the goal with the approach lat/lon as the destination and watch the
   boat plan round it.
 
-      ros2 action send_goal /crsd/safe_passage crusader_msgs/action/SafePassage \
-        "{tier: 0, timeout_s: 300, approach_latitude: 1.2806, approach_longitude: 103.8560594}"
+      ros2 action send_goal /crsd/run_mission crusader_msgs/action/RunMission
+        "{name: nav_test_line, timeout_s: 300, approach_latitude: 1.2806, approach_longitude: 103.8560594}"
 
   Nothing else is in the tree on purpose: no perception, no confirmation handshake,
   no orbit, so whatever the boat does is the planned leg. NavigateTo plans around
   every known object, holds when it cannot, and FAILS after 15 s blocked, which
-  fails the tree and ends the mission with a clear result (NO_ENTRY). The mission
+  fails the tree and ends the mission with OUTCOME_FAILURE. The mission
   timeout and cancel live in bt_runner_node, not here. Run it with bt_runner's
   nav_mode on (or shadow, to see the plan drawn and the legacy leg driven).
 

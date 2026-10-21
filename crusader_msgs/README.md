@@ -1,68 +1,10 @@
-# `crusader_msgs` — ROS 2 message package
+# crusader_msgs
 
-The typed contracts between nodes: 25 messages in `msg/` and one action,
-`action/SafePassage.action`.
+The typed contracts between nodes: `msg/` and `action/RunMission.action`. Each file's header
+says who produces it, who consumes it and on which topic.
 
-## Messages
-
-| Message | Producer → consumer | Notes |
-|---|---|---|
-| `LatLonHead` | `telemetry_bridge` → any consumer | lat/lon/heading + `ground_speed`, taken from `GLOBAL_POSITION_INT`'s own vx/vy so nobody has to finite-difference position. `heading` is NaN when GPS yaw is unresolved — that is a value to check, not to smooth over |
-| `Attitude` | `telemetry_bridge` → mapping/fusion | roll/pitch/yaw + body rates [rad, rad/s] from `ATTITUDE`, in the **autopilot's** NED axes, not REP-103. Its own topic because `ATTITUDE` and `GLOBAL_POSITION_INT` are separate MAVLink streams that go stale separately. `yaw` is the same EKF estimate `LatLonHead.heading` carries in degrees |
-| `FcuStatus` | `telemetry_bridge` → LED status, watchdog | mode string, armed flag, system status, from `HEARTBEAT` |
-| `RcChannels` | `telemetry_bridge` → LED status, watchdog; and any override publisher → `telemetry_bridge` | 18 raw PWM values. Also the TX direction: an override publisher fills channels 1–8 |
-| `Detection3D` | inside `Detection3DArray` | one object: label, confidence, position, source bbox. Position is REP-103 body axes (x forward, y left, z up) in the frame the array declares — never optical axes |
-| `Detection3DArray` | `buoy_detector` → fusion, world model | everything one camera frame saw. **Published every frame, empty or not**: empty means "alive, saw nothing", silence means the producer died |
-| `Cluster3D` | inside `Cluster3DArray` | one LiDAR object: centroid, AABB extent, point count, range. **No label and no confidence** — a cluster is a thing that is *there*, which is all the LiDAR can say; naming it is the camera's job |
-| `Cluster3DArray` | `lidar_cluster_node` → fusion, world model | one accumulated window, **nearest first** so a consumer that truncates keeps the near ones. Same every-window-empty-or-not contract as `Detection3DArray` |
-| `TrackedTarget` | inside `TrackedTargetArray` | one object anchored to the **earth**, not to the boat: lat/lon, world x/y/z, majority-vote label, which sensors have contributed, and how much to believe it. `id` is never reused, so a stored reference cannot be silently re-pointed at a different buoy |
-| `TrackedTargetArray` | `target_tracker` → the ground station's Map tab, `bt_runner_node` | the world model's current picture, nearest first, carrying the world-frame origin its metres are relative to. Same every-update-empty-or-not contract. Boat state is deliberately **not** in it — subscribe to `/crsd/pose` and `/crsd/attitude`, so one stream's staleness cannot hide behind another's freshness |
-| `RadioFrame` | `rxl_link_node` → the ground station's Radio tab | one frame the boat put on the RFD900 mesh or heard on it, decoded into a readable line. **A record, nothing acts on it.** Field for field the same as rx26_uav's `uav_msgs/RadioFrame` |
-| `DockObservation` | the Task 3 dock detector → `bt_runner_node` | everything one camera frame saw of the docking bays, plus the timing layer's verdict (`target_pattern`, `target_colours`, `last_event`). **Published every frame, empty or not.** Stamped at the camera instant. Adopted unchanged from the CV side's draft (firefighting-cv `specs/msg`, pinned in each file) |
-| `DockBay` | inside `DockObservation` | one bay face: indicator colour, windows, face plane, bearing. **`bay_index` is left-to-right in THIS frame, not an id** — identity comes from position (`crusader_bt/dock_math.hpp`). Its colour numbering puts OFF at 1: it is **not** RoboCommand's `Color` |
-| `DockWindow` | inside `DockBay` | one target window: slot `index` (from the bay's geometry, never its colour), light `state`, aim point in `camera_link` |
-| `PumpCommand` | `tools/squirt_cal` (later the Task 3 tree) → `telemetry_bridge` | a pump burst of `duration_s`, or 0 = OFF. **A request**: the bridge refuses anything its own checks do not allow, and the autopilot times the burst (DO_REPEAT_SERVO, one cycle), so nothing upstream can leave the pump on |
-| `PumpState` | `telemetry_bridge` → `tools/squirt_cal` | the pump output's PWM as the Pixhawk reports it (SERVO_OUTPUT_RAW), the pilot's pump channel, and what happened to the last request |
-| `GuidedHeadingSpeed` | the fire tree (`bt_runner_node`) → `telemetry_bridge` | hold this compass heading at this signed speed, in GUIDED. The bridge sends `SET_ATTITUDE_TARGET` only in GUIDED **and** while the drop latch allows it, clamps the speed, and stops the boat itself if commands go quiet. Astern and a chosen heading: what the fixed-nozzle shot needs and position setpoints cannot give |
-| `WallRange` | `wall_range_node` → `tools/squirt_cal` (later the Task 3 tree) | the vertical wall ahead from the LiDAR: perpendicular range, angle to square up, and the slip fingers either side. One per sweep, valid or not |
-| `GuidedSetpoint` | `bt_runner_node` → `telemetry_bridge` on `/crsd/guided_setpoint` | a GUIDED position setpoint, sent on as `SET_POSITION_TARGET_GLOBAL_INT`. **The only sanctioned GUIDED TX path** |
-| `ObstacleDistance` | `proximity_bridge` → `telemetry_bridge`, ground station | nearest obstacle per sector, ready for MAVLink `OBSTACLE_DISTANCE`; only the bridge puts it on the wire |
-| `Hazard` | inside `HazardArray` | one known hazard in the `map` frame (ENU metres from `/crsd/datum`), drawn LETHAL at its physical size plus `keepout_m` |
-| `HazardArray` | `bt_runner_node` → the costmap's `HazardLayer` | the WHOLE known-hazard set: each message replaces the last, so a hazard that is gone disappears with no delete. `frame_id` must be `map` |
-| `PassagePlan` | `rxl_link_node` → `bt_runner_node` on `/crsd/passage_plan` | the Task 1 passage as the UAV sees it, from `RXL_SAFE_PASSAGE` (42011) |
-| `PassageBuoy` | inside `PassagePlan` | one passage buoy as the UAV reported it. **Not a `TrackedTarget`**: the boat has not seen it itself |
-| `GatePair` | `rxl_link_node` → `bt_runner_node` on `/crsd/next_gate` | the aircraft's acknowledgement of a confirmation request, from `RXL_NEXT_BUOY_SET` (42019) |
-
-Every message carries a `std_msgs/Header`. **The stamp is the time the MAVLink frame was
-RECEIVED**, not the time it was republished — a consumer judging freshness needs the age
-the data actually has.
-
-## Design choice
-
-Typed ROS messages, drift caught at build time, rather than the legacy socket-and-dict
-approach. The cost is that a producer/consumer pair must be rebuilt together; `colcon
-build --packages-up-to crusader_bringup` rebuilds everything downstream of a message
-change, which is why the blessed rebuild path uses that form.
-
-## Adding a message
-
-Add the `.msg` file **and** the entry in `CMakeLists.txt` — a file that is not listed is
-silently not generated, and the import failure shows up at node start on the boat rather
-than at build time.
-
-Messages for capabilities this repo does not have are not kept "for later": re-add one
-when the node that fills it is landing (the v0.5 strip's removals are in git at `8c4ffa5`).
-
-Keep the dependency list at `std_msgs` and nothing more. Nothing outside `asv` builds this
-today — the livox container publishes a stock `PointCloud2` — but the moment one needs to,
-a heavier dependency list is what makes that expensive, and this package is small enough
-that staying cheap costs nothing.
-
-## Change impact
-
-| You changed | Re-run |
-|---|---|
-| any `.msg` field | full `colcon build` (`tools/scripts/rebuild.sh`), then restart every node — a mismatched message is a silent deserialization failure |
-| `LatLonHead.ground_speed` | `telemetry_bridge` is its only producer — check it still populates the field |
-| `Attitude` axes or units | `crusader_common/geo.py:body_to_world_ypr` **and its transpose `world_to_body_ypr`** are the only things that interpret them; re-check the FRD conversion, then anything mapping detections |
-| `TrackedTarget`/`TrackedTargetArray` | `target_tracker` fills them; `ground_station` and `bt_runner_node` read them — rebuild all three, and re-run `tools/bench/bench_world_model.py`, which needs no hardware |
+Add the file **and** its line in `CMakeLists.txt`: an unlisted file is silently not generated,
+and the import fails at node start, on the boat. A changed field needs the whole stack rebuilt
+(`tools/scripts/rebuild.sh`) and every node restarted: a mismatched message is a silent
+deserialisation failure. Dependencies stay `std_msgs` and `action_msgs`. Messages for
+capabilities the repo does not have are not kept for later.

@@ -433,13 +433,11 @@ class ShippedConfig(unittest.TestCase):
         self.assertEqual(sorted(set(self.params) - self.spec), [])
 
     def test_the_shipped_values_are_the_auto_discovery_setup(self):
-        p = self.params
-        self.assertEqual(p["ocs_host"], "auto")
-        self.assertEqual(p["ocs_discovery_port"], 37565)
-        self.assertEqual(p["ocs_fallback_hosts"], ["192.168.100.107", "192.168.8.107"])
-        self.assertEqual(ol.check_fallback_hosts(p["ocs_fallback_hosts"])[1], [])
-        self.assertEqual(ol.DEFAULT_FALLBACK_HOSTS, tuple(p["ocs_fallback_hosts"]))
-        self.assertEqual(ol.DEFAULT_DISCOVERY_PORT, p["ocs_discovery_port"])
+        self.assertEqual(self.params["ocs_host"], "auto")
+        self.assertNotIn("ocs_discovery_port", self.params)    # ocs_link's, one place
+        self.assertNotIn("ocs_fallback_hosts", self.params)
+        self.assertEqual(ol.DEFAULT_DISCOVERY_PORT, 37565)
+        self.assertEqual(ol.check_fallback_hosts(list(ol.DEFAULT_FALLBACK_HOSTS))[1], [])
 
     def test_the_beacon_team_is_the_nodes_team_id(self):
         self.assertEqual(self.params["team_id"], "ASTA")
@@ -458,11 +456,8 @@ class ShippedConfig(unittest.TestCase):
                 with open(path, encoding="utf-8", errors="replace") as fh:
                     if "37565" in fh.read():
                         hits.append(os.path.relpath(path, REPO))
-        self.assertEqual(sorted(hits), sorted([
-            os.path.join("crusader_bringup", "config", "crusader_params.yaml"),
-            os.path.join("crusader_groundstation", "crusader_groundstation",
-                         "ocs_link.py"),
-        ]))
+        self.assertEqual(hits, [os.path.join("crusader_groundstation",
+                                             "crusader_groundstation", "ocs_link.py")])
 
 
 class CheckConfigRule(unittest.TestCase):
@@ -484,7 +479,7 @@ class CheckConfigRule(unittest.TestCase):
         base.update(params)
         self.mod.failures[:] = []
         with contextlib.redirect_stdout(io.StringIO()):
-            self.mod.check_ocs_client({"ocs_client": {"ros__parameters": base}})
+            self.mod.check_ocs_client(base)
         return [detail for _check, detail in self.mod.failures]
 
     def test_the_shipped_shape_passes(self):

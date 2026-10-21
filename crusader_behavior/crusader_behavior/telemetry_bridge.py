@@ -34,26 +34,26 @@ PARAMS = {
     "mav_endpoint": "udp:127.0.0.1:14551",
     "fcu_sysid": 2,
     "autonomous_modes": ["GUIDED", "AUTO", "LOITER", "RTL"],
-    "mode_timeout_s": 1.0,
+    "mode_timeout_s": 1.0,              # no HEARTBEAT this long: mode UNKNOWN, never autonomous
     "drop_channel": 9,
     "drop_threshold": 1700,
     "drop_invert": False,
-    "rc_stale_timeout": 1.0,
-    "stream_timeout_s": 1.0,
+    "rc_stale_timeout": 1.0,            # no RC this long trips the drop latch
+    "stream_timeout_s": 1.0,            # = /** pose_timeout_s (check_config)
     "pump_servo_channel": 0,
     "pump_rc_channel": 10,
     "pump_on_pwm": 2000,
     "pump_off_pwm": 1000,
-    "pump_max_burst_s": 1.0,
-    "pump_min_gap_s": 1.0,
-    "pump_allow_disarmed": False,
-    "hs_max_speed_mps": 0.4,
+    "pump_max_burst_s": 1.0,            # squirt_cal fires 0.2-0.5 s
+    "pump_min_gap_s": 1.0,              # from one burst's end to the next
+    "pump_allow_disarmed": False,       # bench only, by -p; check_config fails it in the YAML
+    "hs_max_speed_mps": 0.4,            # heading+speed clamp, either direction
     "hs_wp_speed_mps": 1.0,
-    "hs_deadman_s": 0.5,
+    "hs_deadman_s": 0.5,                # no heading+speed command this long: one stop
     "override_channels": [1, 3, 4],
-    "override_max_us": 150,
-    "override_deadman_s": 0.5,
-    "override_modes": ["MANUAL"],
+    "override_max_us": 150,             # about 1500 (dp_hold ran 120)
+    "override_deadman_s": 0.5,          # no override this long: released
+    "override_modes": ["MANUAL"],       # an override in an autopilot mode fights the autopilot
     "estop_channel": 7,
     "estop_threshold": 1200,
 }

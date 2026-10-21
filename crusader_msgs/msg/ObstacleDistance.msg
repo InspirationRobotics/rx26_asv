@@ -1,5 +1,5 @@
 # A sector map of the nearest obstacle in each direction, ready to be sent to
-# the autopilot as MAVLink OBSTACLE_DISTANCE. Published by proximity_bridge;
+# the autopilot as MAVLink OBSTACLE_DISTANCE. Published by lidar_node;
 # telemetry_bridge is the only thing that puts it on the wire, same as every
 # other autopilot-bound message in this repo.
 #

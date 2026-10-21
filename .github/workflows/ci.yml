@@ -4,217 +4,97 @@ on:
   pull_request:
 
 jobs:
-  config:
-    name: config guards
-    runs-on: ubuntu-latest
+  checks:
+    name: config, syntax, header-only C++ tests
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
       - run: pip install pyyaml
-      # Static guards on the two files that can ground the boat: the ROS params
-      # YAML (an rcl-illegal file kills every node at rclpy.init()) and the
-      # known-good ArduRover param baseline (a dump the parser mis-reads makes
-      # preflight's param diff pass unconditionally).
-      - name: config + param baseline guards
+      # The params YAML (rcl-legal, every key declared by its node with its type), the
+      # cross-checks between it, nav2_params.yaml and the autopilot baseline, the package
+      # manifests and the tree XML. No ROS.
+      - name: check_config
         run: python3 tools/scripts/check_config.py
-
-  core-tests:
-    name: plain-python core tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-      - run: pip install numpy
-      # The rules that decide when water comes out (pump_core) and when the
-      # tree may drive the boat (guided_hs_core), the range the boat positions
-      # itself by (wall_fit_core), the calibration session against a simulated
-      # boat (tools/squirt_cal), and the Task 3 sim's world (the nozzle, the
-      # LiDAR, the bridge's gates). No ROS in any of them.
-      - name: pump/guided_hs/override cores, wall_fit, dock_obs, squirt_cal, task3_sim world
-        run: |
-          for t in crusader_fcu/test/test_pump_core.py \
-                   crusader_fcu/test/test_guided_hs_core.py \
-                   crusader_fcu/test/test_override_core.py \
-                   crusader_perception/test/test_wall_fit_core.py \
-                   crusader_perception/test/test_dock_obs_core.py \
-                   tools/squirt_cal/test_*.py \
-                   tools/task3_sim/test_world.py; do
-            echo "== $t"
-            python3 "$t" || exit 1
-          done
-      # The maths the behaviour trees drive, dock and aim by: header-only C++,
-      # stdlib only - no ROS, no BehaviorTree.CPP.
-      - name: nav_math, dock_math, fire_math
-        run: |
-          for t in test_nav_math test_dock_math test_fire_math; do
-            echo "== $t"
-            g++ -std=c++17 -O2 -Wall -Wextra -I crusader_bt/include \
-                -o "/tmp/$t" "crusader_bt/test/$t.cpp" || exit 1
-            "/tmp/$t" || exit 1
-          done
-
-  build:
-    name: colcon build (ros:humble)
-    runs-on: ubuntu-latest
-    container: ros:humble
-    steps:
-      - uses: actions/checkout@v4
-      - name: build every crusader package
+      - name: python compile, shell syntax, executable bits
         shell: bash
         run: |
-          # Reproduce the Jetson's workspace SHAPE: the repo is one source dir
-          # inside a colcon workspace, not the workspace root. That nesting is
-          # what the discovery guard below actually tests.
-          mkdir -p /root/robotx_ws/src
-          cp -r . /root/robotx_ws/src/rx26_asv
-          cd /root/robotx_ws
-          source /opt/ros/humble/setup.bash
-
-          # Guard the failure this layout exists to prevent: if the repo root
-          # ever becomes a package, colcon stops descending and the packages
-          # below it are silently skipped. With seven packages that would be
-          # very easy to miss, so name every one.
-          colcon list --names-only | sort > /tmp/pkgs.txt
-          echo "discovered packages:"; cat /tmp/pkgs.txt
-          for p in crusader_msgs crusader_common crusader_fcu crusader_behavior                    crusader_perception crusader_world_model crusader_bringup; do
-            grep -qx "$p" /tmp/pkgs.txt || {
-              echo "ERROR: colcon did not discover package '$p'" >&2; exit 1; }
+          python3 -m py_compile $(git ls-files 'tools/*.py')
+          fail=0
+          for f in $(git ls-files '*.sh'); do
+            bash -n "$f" || { echo "SYNTAX FAIL: $f" >&2; fail=1; }
           done
-
-          # --packages-up-to bringup proves the dependency graph too: if a
-          # package is missing from bringup's exec_depends it never gets built
-          # here, and the executable check below catches it.
-          colcon build --packages-up-to crusader_bringup                        --event-handlers console_cohesion+
-
-          source install/setup.bash
-
-          # Every entry point must actually import. A console_script pointing at
-          # a module that moved builds clean and dies at `ros2 run` — on the
-          # boat, at the worst moment. This is the check that the seven-package
-          # split most needs, since imports now cross package boundaries.
-          ros2 pkg executables > /tmp/execs.txt
-          cat /tmp/execs.txt
-          for e in "crusader_fcu telemetry_bridge" \
-                   "crusader_behavior rc_watchdog" \
-                   "crusader_behavior led_node" \
-                   "crusader_behavior pixhawk_led_status_node" \
-                   "crusader_perception oakd_publisher" \
-                   "crusader_perception buoy_detector" \
-                   "crusader_perception lidar_cluster_node" \
-                   "crusader_perception oak_detector" \
-                   "crusader_perception wall_range_node" \
-                   "crusader_world_model target_tracker" \
-                   "crusader_groundstation ground_station"; do
-            grep -qx "$e" /tmp/execs.txt || {
-              echo "MISSING executable: $e" >&2; exit 1; }
-          done          python3 - <<'PY'
-          import importlib, sys
-          mods = ["crusader_common.config", "crusader_common.node_main",
-                  "crusader_common.param_utils", "crusader_common.stream_cache",
-                  "crusader_common.drop_latch", "crusader_common.geo",
-                  "crusader_fcu.telemetry_bridge", "crusader_fcu.pump_core",
-                  "crusader_behavior.safety.rc_heartbeat_core",
-                  "crusader_behavior.safety.rc_heartbeat_watchdog",
-                  "crusader_behavior.indicator.led_node",
-                  "crusader_behavior.indicator.pixhawk_led_status_node",
-                  "crusader_perception", "crusader_world_model",
-                  # oak_pipeline only: it is the one perception module that is
-                  # SAFE TO IMPORT ANYWHERE (every `import depthai` inside it is
-                  # function-local), so a break in it must fail here rather than
-                  # at runtime on the boat. The two node modules deliberately
-                  # are not listed — they pull numpy/sensor_msgs, and this job's
-                  # value is proving the ament/entry-point wiring, not the SDK.
-                  "crusader_perception.oak_pipeline",
-                  "crusader_msgs.msg"]
-          bad = []
-          for m in mods:
-              try:
-                  importlib.import_module(m)
-              except Exception as e:
-                  bad.append(f"{m}: {type(e).__name__}: {e}")
-          for b in bad:
-              print("IMPORT FAIL:", b)
-          sys.exit(1 if bad else 0)
-          PY
-
-          # The params file must resolve from the INSTALL space, where lib/ and
-          # share/ are siblings in DIFFERENT packages. Path arithmetic cannot
-          # reach it; this is the check that proves ament resolution still does.
-          python3 -c "
-          from crusader_common import config
-          p = config.DEFAULT_CONFIG_PATH
-          assert p.is_file(), f'params not resolved from the install space: {p}'
-          assert 'crusader_bringup' in str(p), f'resolved to the wrong package: {p}'
-          assert config.node_params('telemetry_bridge'), 'params file loaded empty'
-          print('params resolved from install space:', p)"
-
-  dockerfile:
-    name: dockerfile paths
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: COPY sources exist
-        # The image itself cannot be built here — the base is arm64 and these
-        # runners are x86_64. What CI *can* catch is the failure that actually
-        # happened: a file moved in the repo and the Dockerfile's COPY kept
-        # pointing at the old path, so `docker build` broke on the Jetson with
-        # nothing upstream noticing.
+          # Checked in the INDEX: a Windows checkout commits a script 100644 unnoticed,
+          # and systemd then refuses ExecStart=start_mavproxy.sh on the Jetson.
+          while read -r mode _ _ path; do
+            [ "$mode" = 100755 ] || { echo "NOT EXECUTABLE ($mode): $path" >&2; fail=1; }
+          done < <(git ls-files -s '*.sh')
+          exit $fail
+      # The image is arm64 and cannot be built here; a COPY of a moved file can be caught.
+      - name: Dockerfile COPY sources exist
         run: |
           python3 - <<'PY'
           import os, sys
           bad = []
           for n, line in enumerate(open("Dockerfile"), 1):
-              s = line.strip()
-              if not s.upper().startswith("COPY "):
+              words = line.split()
+              if not words or words[0].upper() != "COPY" or any(w.startswith("--from") for w in words):
                   continue
-              args = [a for a in s.split()[1:] if not a.startswith("--")]
-              if any(a.startswith("--from") for a in s.split()):
-                  continue          # copying from another stage, not the context
-              for src in args[:-1]:
-                  if "$" in src or "*" in src:
-                      continue      # variable/glob — cannot check statically
-                  if not os.path.exists(src):
-                      bad.append((n, src))
-          for n, src in bad:
-              print(f"Dockerfile:{n}: COPY source does not exist: {src}")
+              srcs = [w for w in words[1:] if not w.startswith("--")][:-1]
+              bad += [(n, s) for s in srcs if "$" not in s and "*" not in s and not os.path.exists(s)]
+          for n, s in bad:
+              print(f"Dockerfile:{n}: COPY source does not exist: {s}")
           sys.exit(1 if bad else 0)
           PY
+      # The maths the trees drive, dock, aim and plan by: stdlib-only headers.
+      - name: header-only C++ tests
+        run: |
+          for t in nav_math dock_math fire_math path_math side_fences global_passage \
+                   planned_leg nav_params run_start; do
+            echo "== $t"
+            g++ -std=c++17 -O2 -Wall -Wextra -I crusader_bt/include \
+                -o "/tmp/$t" "crusader_bt/test/test_$t.cpp" && "/tmp/$t" || exit 1
+          done
+          g++ -std=c++17 -O2 -Wall -Wextra -I crusader_nav_layers/include \
+              -o /tmp/raster crusader_nav_layers/test/test_raster.cpp && /tmp/raster
 
-  tools-lint:
-    name: tools syntax check
-    runs-on: ubuntu-latest
+  build-test:
+    name: colcon build + tests (ros:humble)
+    runs-on: ubuntu-22.04
+    container: ros:humble
     steps:
       - uses: actions/checkout@v4
-      - name: python compile + shell -n
+      - name: build, entry points, tests
+        shell: bash
         run: |
-          # tools/*.py too, not just tools/scripts/*.py — the bench viewers
-          # (oak_view, lidar_view, mjpeg_server) were never compiled here, so a
-          # syntax error in one would have surfaced on the Jetson at the moment
-          # someone reached for it. py_compile does not import, so their
-          # numpy/cv2/rclpy dependencies do not need to exist on the runner.
-          python3 -m py_compile tools/*.py tools/scripts/*.py tools/squirt_cal/*.py
-          # Every tracked shell script, so a new one is covered the day it lands
-          # rather than the day someone remembers to add it here. setup/*.sh in
-          # particular carries the repo-vs-workspace path derivation and the
-          # "not a colcon workspace" guard.
-          fail=0
-          for f in $(git ls-files '*.sh'); do
-            echo "  bash -n $f"
-            bash -n "$f" || { echo "SYNTAX FAIL: $f" >&2; fail=1; }
-          done
-          # Executable bit, checked in the INDEX not the worktree: contributors
-          # on Windows have core.filemode=false, so a script can be committed
-          # 100644 and nobody notices until the Jetson says "Permission denied"
-          # — or worse, until systemd refuses to start crsd-mavproxy, which
-          # ExecStart's start_mavproxy.sh directly.
-          while read -r mode _ _ path; do
-            case "$mode" in
-              100755) ;;
-              *) echo "NOT EXECUTABLE ($mode): $path" >&2; fail=1 ;;
-            esac
-          done < <(git ls-files -s '*.sh')
-          exit $fail
+          # The Jetson's workspace SHAPE: the repo is one source dir inside a colcon
+          # workspace. If the repo root ever became a package, colcon would stop
+          # descending and skip every package below it without a word.
+          mkdir -p /root/robotx_ws/src
+          cp -r . /root/robotx_ws/src/rx26_asv
+          cd /root/robotx_ws
+          source /opt/ros/humble/setup.bash
+
+          apt-get update -qq
+          apt-get install -y -qq python3-pip > /dev/null
+          rosdep update --rosdistro humble > /dev/null
+          rosdep install -y -q --rosdistro humble --ignore-src --from-paths src/rx26_asv/crusader_*
+          pip3 install -q pymavlink pytest
+
+          # --packages-up-to bringup proves the dependency graph: a package missing from
+          # bringup's closure is not built, and the entry-point check below fails.
+          colcon build --packages-up-to crusader_bringup --event-handlers console_cohesion+
+          source install/setup.bash
+
+          # Every console script must import: one pointing at a moved module builds clean
+          # and dies at `ros2 run`, on the boat.
+          python3 src/rx26_asv/tools/scripts/check_entry_points.py
+
+          # The C++ tests, and every built-in tree loading through bt_tree_check.
+          colcon test --packages-select crusader_bt crusader_nav_layers \
+                      --event-handlers console_cohesion+
+          colcon test-result --verbose
+
+          cd src/rx26_asv && python3 -m pytest -q

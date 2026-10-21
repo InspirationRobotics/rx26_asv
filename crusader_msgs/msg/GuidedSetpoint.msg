@@ -14,7 +14,7 @@
 #
 # Restored 2026-09-05 from 8c4ffa5 (removed unverified in the v0.5 strip at
 # 45cdefa). The wire format and type mask are unchanged and field-exercised —
-# see POSITION_ONLY_TYPE_MASK in crusader_fcu/telemetry_bridge.py.
+# see POSITION_ONLY_TYPE_MASK in crusader_behavior/telemetry_bridge.py.
 std_msgs/Header header
 float64 latitude
 float64 longitude

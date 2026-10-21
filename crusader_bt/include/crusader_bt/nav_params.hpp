@@ -7,8 +7,8 @@
 //
 // WHY. path::NavParams was filled ONCE at construction, so a later
 // `ros2 param set /bt_runner_node nav_hard_m 1.2` (or the ground station's Tuning
-// tab) changed the PARAMETER and left the planner on the old number: the
-// declared-but-ignored posture crusader_common.param_utils calls the worst there is.
+// tab) changed the PARAMETER and left the planner on the old number: a parameter that
+// is declared and then ignored, the worst posture there is.
 //
 // So bt_runner_node re-reads every key below into ctx_->nav when a mission goal is
 // ACCEPTED (never mid-mission), and refuses a value the planner cannot work with

@@ -87,7 +87,7 @@ class TrackerParams:
     fuse_range_m: float = 4.0        # absolute range-agreement gate
     fuse_range_frac: float = 0.25    # ... or this fraction of the camera range,
                                      # whichever is larger. See _range_gate.
-    min_confidence: float = 0.50     # re-threshold above buoy_detector's own
+    min_confidence: float = 0.50     # re-threshold above the detector's own
     track_unlabeled: bool = True     # keep LiDAR-only clusters as tracks.
                                      # Inert while use_lidar is False: there
                                      # are no LiDAR-only sightings to keep.

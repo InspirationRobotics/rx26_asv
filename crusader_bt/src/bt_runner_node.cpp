@@ -145,7 +145,7 @@ public:
     nav_set_cb_ = add_on_set_parameters_callback(&BtRunner::checkNavSet);
 
     // Latched: a subscriber that starts mid-mission must learn the current
-    // value, not sit on a default. A late proximity_bridge defaulting
+    // value, not sit on a default. A late lidar_node defaulting
     // avoidance_enable to off would silently disarm avoidance.
     auto latched = rclcpp::QoS(1).reliable().transient_local();
     setpoint_pub_ = create_publisher<crusader_msgs::msg::GuidedSetpoint>(

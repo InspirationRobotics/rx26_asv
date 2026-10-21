@@ -19,11 +19,7 @@ setup(
     license="MIT",
     entry_points={
         "console_scripts": [
-            # HAS NOT RUN ON THE BOAT. Listed here, against the letter of README
-            # "Format" rule 1 (as lidar_cluster_node is), because a node with no
-            # entry point cannot be started by `ros2 run` at all, which makes the
-            # bench session that would earn it a place impossible. Not in
-            # core.launch.py, and it carries a NOTE at the top of its file.
+            # Not yet run on the boat, so not in core.launch.py; the Nodes tab starts it.
             "target_tracker = crusader_world_model.target_tracker_node:main",
         ],
     },

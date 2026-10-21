@@ -2,7 +2,7 @@
 <!-- MISSION: Task 1 Safe Passage, Core tier (no aircraft). -->
 <!--
   The tree is Task1Core, in lib/task1_safe_passage.xml. This adds the autonomy guard and the
-  task heartbeat, so TREE=task1_safe_passage.xml keeps working in the sim and lake rigs.
+  task heartbeat, so it runs on its own as RunMission name task1_safe_passage.
   Every tunable is written out with its default.
 -->
 <root BTCPP_format="4" main_tree_to_execute="Main">

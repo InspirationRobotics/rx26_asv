@@ -45,7 +45,7 @@ DEFAULTS = dict(
     port=8094,
     log_dir="/root/robotx_ws/logs/squirt_cal",
     snapshot_topic="/crsd/camera/raw/compressed",
-    wall_range_topic="/crsd/wall_range",   # = wall_range_node.wall_topic
+    wall_range_topic="/crsd/wall_range",   # = lidar_node's wall topic
     pump_rc_channel=10,          # = telemetry_bridge.pump_rc_channel (log-only fallback)
     pump_on_threshold_us=1700,
     burst_choices_s=[0.2, 0.3, 0.5],

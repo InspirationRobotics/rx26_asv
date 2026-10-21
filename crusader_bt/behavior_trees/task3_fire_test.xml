@@ -5,8 +5,7 @@
   the calibrated range, point at the upper-left window, wait until the hull is
   still, fire. Repeat until the window goes out or N shots.
 
-  Run it with bt_runner_node's tree_file pointing here (the same SafePassage
-  action as every tree), or in the sim: tools/task3_sim, scenario fire_test.
+  Run it with a RunMission goal named task3_fire_test.
 
   THE NUMBERS come from tools/squirt_cal at the pool on 2026-09-25: the upper-
   left window's TOP EDGE was hit with the LiDAR wall range at 3.1 to 3.4 m

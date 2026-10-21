@@ -1,102 +1,67 @@
 # ============================================================================
-# Crusader — SINGLE SOURCE OF TRUTH for all ROS-side parameters.
+# Crusader: the ROS parameters this boat runs with.
 #
-# Standard ROS 2 parameter file (launch: parameters=[...]; one node:
-# --ros-args --params-file). Node code also loads it for its declaration
-# defaults (crusader_common/config.py), so a code default cannot drift.
+# Every node declares all of its parameters, with defaults, in code: PARAMS in the
+# Python nodes, declare_parameter and NavParams in bt_runner_node. A section here
+# lists what is set for THIS boat (wiring, mountings, the gates, the tuned planner);
+# the rest are the code's. tools/scripts/check_config.py fails a key its node does
+# not declare (ROS would ignore it without a word) and one of the wrong type (1 for a
+# double stops the node at startup).
 #
-# Posture, enforced in code via ParameterDescriptor:
-#   [RO]  read_only — `ros2 param set` is REJECTED; change here + restart the
-#         node (no rebuild: params load at start).
-#   [DYN] dynamic — accepted at runtime via `ros2 param set`, range-validated.
+# [DYN] = applied live from `ros2 param set` or the GCS Params tab. Everything else is
+# read once at start: change it here and restart the node (no rebuild).
 #
-# ---------------------------------------------------------------------------
-# TWO HARD FORMAT RULES — rcl's parser is stricter than PyYAML. Break either and
-# EVERY node in the launch dies at rclpy.init() with "Couldn't parse params
-# file" — the whole stack grounded, LEDs included:
+# TWO HARD FORMAT RULES: rcl's parser is stricter than PyYAML. Break either and
+# EVERY node in the launch dies at rclpy.init() with "Couldn't parse params file",
+# the LEDs included:
 #   1. NO YAML anchors/aliases (&name / *name): rcl parses tokens, not YAML.
-#      Values that MUST stay equal across sections are written out LITERALLY;
-#      check_config.py pins them — change every copy it names.
-#   2. EVERY top-level key is a node whose only child is `ros__parameters:`
-#      (else "Cannot have a value before ros__parameters"). Hence `shared`
-#      carries that level too; no node is named `shared`, so rcl ignores it.
-# tools/scripts/check_config.py enforces both. Do not "tidy" back into anchors.
+#   2. EVERY top-level key is a node name, or /** for every node, whose only child is
+#      ros__parameters.
+# check_config.py enforces both.
 # ============================================================================
 
-# Canonical values for anything duplicated below. NOT a real node (rule 2).
-shared:
+# Every node that declares one of these takes this value, so no two can differ.
+# check_config fails a node section that sets one again.
+/**:
   ros__parameters:
-    # Age at which a /crsd/pose sample stops being usable: telemetry_bridge stops
-    # republishing a dead MAVLink stream, and every consumer stops acting on the
-    # last pose it saw. One value: a consumer trusting a pose longer than the
-    # bridge vouches for it is the frozen-pose failure this guards against.
+    # Age at which a /crsd/pose sample stops being usable. telemetry_bridge's and
+    # bt_runner_node's stream_timeout_s must equal it (check_config): a consumer
+    # trusting a pose longer than the bridge vouches for it is the frozen-pose failure.
     pose_timeout_s: 1.0
-
-    # THE flight modes that mean "we are driving, not the pilot". One list, so
-    # what the boat obeys (telemetry_bridge, bt_runner), shows (mast GREEN —
-    # mandatory per 5.3.1) and reports (ocs_client STATE_AUTO) stay one fact.
-    # Uppercase: mode_string_v10 returns "GUIDED". LOITER gets ArduPilot's simple
-    # avoidance only; BendyRuler/Dijkstra runs in AUTO, GUIDED and RTL alone.
+    # The flight modes that mean "we are driving, not the pilot": what the boat obeys
+    # (telemetry_bridge, bt_runner_node), shows (mast GREEN, mandatory per 5.3.1) and
+    # reports (ocs_client STATE_AUTO). Uppercase, as mode_string_v10 returns them.
+    # LOITER gets ArduPilot's simple avoidance only; BendyRuler/Dijkstra runs in AUTO,
+    # GUIDED and RTL alone.
     autonomous_modes: ["GUIDED", "AUTO", "LOITER", "RTL"]
 
+# ---- telemetry_bridge: the one MAVLink gateway, and the boat's RC wiring ----
 telemetry_bridge:
   ros__parameters:
-    mav_endpoint: "udp:127.0.0.1:14551"   # [RO] MAVProxy rebroadcast, never serial
-    fcu_sysid: 2                           # [RO] the autopilot's SYSID_THISMAV; Ekko is 1
-    # The AUTONOMY INTERLOCK, = shared.autonomous_modes: the pilot leaving these
-    # modes on SC is the autonomy drop. ArduPilot independently ignores
-    # SET_POSITION_TARGET_* outside GUIDED/AUTO/RTL.
-    autonomous_modes: ["GUIDED", "AUTO", "LOITER", "RTL"]   # [RO]
-    mode_timeout_s: 1.0                    # [RO] s without HEARTBEAT before the
-                                           #      mode counts as UNKNOWN, which
-                                           #      is never autonomous. Fails closed.
-    # --- RC drop latch: governs the RC-OVERRIDE path only ---
-    # NOT ch7: that is the SB arm/e-stop switch (OPERATIONS.md §6: up ~1995 =
-    # arm), so arming would trip this >= drop_threshold latch and block every
-    # override. ch9 has no switch yet (SD proposed): it reads ~1500 and NEVER
-    # TRIPS, so today the kills are SC (mode) and SB (e-stop). The GUIDED path
-    # is gated on the MODE, not this latch.
-    drop_channel: 9                        # [RO] autonomy-drop RC channel (1..18)
-    drop_threshold: 1700                   # [RO] us; crossing trips the latch
-    drop_invert: false                     # [RO]
-    rc_stale_timeout: 1.0                  # [RO] s without RC -> trip
-    stream_timeout_s: 1.0                  # [RO] = shared.pose_timeout_s; s
-                                           #      before a stale MAVLink stream
-                                           #      stops being republished
-    # --- the water pump: /crsd/pump_cmd -> DO_REPEAT_SERVO (crusader_fcu/pump_core) ---
-    # 0 (no pump path, every burst refused) until docs/G7_pump_bench.md is done;
-    # then the Pixhawk output with SERVOn_FUNCTION = 50 + pump_rc_channel (RCIN10
-    # = 60) and SERVOn_TRIM = pump_off_pwm: the autopilot ends each burst at TRIM.
-    pump_servo_channel: 0                  # [RO] Pixhawk output 1..16; 0 = none
-    pump_rc_channel: 10                    # [RO] the pilot's pump switch. NOT 9:
-                                           #      that is drop_channel above
-    pump_on_pwm: 2000                      # [RO] us; MEASURE on the bench (G7)
-    pump_off_pwm: 1000                     # [RO] us; MUST equal SERVOn_TRIM
-    pump_max_burst_s: 1.0                  # [RO] squirt_cal fires 0.2-0.5 s
-    pump_min_gap_s: 1.0                    # [RO] s from one burst's end to the next
-    pump_allow_disarmed: false             # [RO] bench only, and only by a -p
-                                           #      override on the command line
-    # --- GUIDED heading+speed: /crsd/guided_heading_speed -> SET_ATTITUDE_TARGET ---
-    # The fixed-nozzle shot's station keeping (crusader_fcu/guided_hs_core).
-    # Gated by the MODE (GUIDED only) AND the drop latch; a stop is sent when
-    # commands go quiet for hs_deadman_s or the latch trips.
-    hs_max_speed_mps: 0.4                  # [RO] clamp, either direction
-    hs_wp_speed_mps: 1.0                   # [RO] = WP_SPEED: thrust 1.0 means this
-                                           #      (check_config pins it to the baseline)
-    hs_deadman_s: 0.5                      # [RO] s without a command -> one stop
-    # /crsd/rc_override (software on the sticks; the fixed-nozzle shot strafes,
-    # and only MANUAL strafes on this OmniX hull): forwarded only in
-    # override_modes on override_channels (SB ch7, SC ch8 and the pump stay the
-    # pilot's), clamped, released after override_deadman_s. crusader_fcu/override_core.py.
-    override_channels: [1, 3, 4]           # [RO] steer, throttle, lateral
-    override_max_us: 150                   # [RO] us about 1500 (dp_hold ran 120)
-    override_deadman_s: 0.5                # [RO] s without an override -> release
-    override_modes: ["MANUAL"]             # [RO]
-    estop_channel: 7                       # [RO] = pixhawk_led_status_node's:
-    estop_threshold: 1200                  # [RO]   SB, below = e-stop or RC lost.
-                                           #        The e-stop stops MOTORS, not
-                                           #        pass-through outputs, so the
-                                           #        bridge sends the pump OFF
+    mav_endpoint: "udp:127.0.0.1:14551"    # MAVProxy's rebroadcast, never the serial port
+    fcu_sysid: 2                           # the autopilot's SYSID_THISMAV; Ekko is 1
+    # The RC drop latch governs the RC-OVERRIDE path only. NOT ch7: that is the SB
+    # arm/e-stop switch (up ~1995 = arm), so arming would trip it and block every
+    # override. ch9 has no switch yet (SD proposed): it reads ~1500 and NEVER TRIPS, so
+    # today the kills are SC (mode) and SB (e-stop). GUIDED is gated on the MODE.
+    drop_channel: 9
+    drop_threshold: 1700                   # us; crossing trips the latch
+    # The water pump: /crsd/pump_cmd -> DO_REPEAT_SERVO. 0 (every burst refused) until
+    # docs/G7_pump_bench.md is done; then the Pixhawk output with SERVOn_FUNCTION =
+    # 50 + pump_rc_channel and SERVOn_TRIM = pump_off_pwm: the autopilot ends each
+    # burst at TRIM (check_config checks both against the baseline).
+    pump_servo_channel: 0                  # Pixhawk output 1..16; 0 = none
+    pump_rc_channel: 10                    # the pilot's pump switch; = squirt_cal's
+    pump_on_pwm: 2000                      # us; MEASURE on the bench (G7)
+    pump_off_pwm: 1000                     # us; MUST equal SERVOn_TRIM
+    hs_wp_speed_mps: 1.0                   # = WP_SPEED: heading+speed thrust 1.0 means this
+    # /crsd/rc_override (the fixed-nozzle shot strafes; only MANUAL strafes on this
+    # OmniX hull). SB ch7, SC ch8, the pump and the drop switch stay the pilot's.
+    override_channels: [1, 3, 4]           # steer, throttle, lateral
+    estop_channel: 7                       # SB; = led_status_node's. Below the threshold =
+    estop_threshold: 1200                  # e-stop or RC lost: the e-stop stops MOTORS, not
+                                           # pass-through outputs, so the bridge sends the
+                                           # pump OFF
 
 # ---- Task 3 fixed nozzle: the calibration tool (tools/squirt_cal) ----
 # A bench tool, not a node in the launch file: python3 tools/squirt_cal/squirt_cal.py
@@ -106,7 +71,7 @@ squirt_cal:
     port: 8094                             # the phone opens http://<jetson>:8094
     log_dir: "/root/robotx_ws/logs/squirt_cal"   # bind-mounted: one dir per session
     snapshot_topic: "/crsd/camera/raw/compressed"   # camera_node; "" = no camera frames
-    wall_range_topic: "/crsd/wall_range"   # = wall_range_node.wall_topic
+    wall_range_topic: "/crsd/wall_range"   # = lidar_node's wall topic
     pump_rc_channel: 10                    # = telemetry_bridge.pump_rc_channel
     pump_on_threshold_us: 1700             # pilot switch reads ON above this
     burst_choices_s: [0.2, 0.3, 0.5]
@@ -144,17 +109,21 @@ squirt_cal:
 # ---- LED status stack ----
 led_node:
   ros__parameters:
-    port: "/dev/crsd-led"                  # [RO] udev symlink (tools/udev), not by-id
-    baud: 115200                           # [RO] must match firmware/LED.ino Serial.begin
-    reconnect_s: 3.0                       # [RO] serial reconnect retry period [s]
+    port: "/dev/crsd-led"                  # udev symlink (tools/udev), not by-id
+    baud: 115200                           # must match firmware/LED.ino Serial.begin
 
 led_status_node:
   ros__parameters:
-    autonomous_modes: ["GUIDED", "AUTO", "LOITER", "RTL"]   # [RO] = telemetry_bridge's
-    estop_channel: 7                       # [RO] SB e-stop switch channel (RC reference)
-    estop_threshold: 1200                  # [RO] us; below = e-stopped (RC loss reads 0)
-    autonomy_hold_s: 1.0                   # [RO] stay GREEN this long after last autonomy beat
-    rate_hz: 5.0                           # [RO] LED state evaluation rate
+    estop_channel: 7                       # = telemetry_bridge's (check_config)
+    estop_threshold: 1200
+
+# ---- rc_watchdog: force-disarm on RC-transmitter link loss ----
+# Reads telemetry_bridge's /crsd/rc_channels and /crsd/fcu_status and disarms through it
+# (/crsd/force_disarm). Defense in depth beside ArduPilot FS_THR/FS_GCS and the SB e-stop.
+rc_watchdog:
+  ros__parameters:
+    rc_channel: 7                          # SB, whose valid PWM is the RC heartbeat
+    reset_channel: 7                       # its low->high toggle clears an enable_latch kill
 
 # ---- crusader_perception: camera_node (the OAK-D) and lidar_node (the MID360) ----
 # Every parameter and its default is in the node's PARAMS (oak_detector_core, dock_model and
@@ -246,306 +215,164 @@ gcs_bridge:
                                                   # container (it says so at startup)
     allow_power: true                      # shutdown/reboot from the Nodes tab, locked while armed
 
-# ---- rc_heartbeat_watchdog: force-disarm on RC-transmitter link loss (safety) ----
-# Reads telemetry_bridge's /crsd/rc_channels and /crsd/fcu_status and routes a
-# force-disarm back through it (/crsd/force_disarm) — no MAVLink conn of its own.
-# Defense in depth beside ArduPilot FS_THR/FS_GCS and the hardware SB e-stop.
-# All [RO]. rc_channel/reset_channel read ch7 (SB), as telemetry_bridge and
-# pixhawk_led do.
-rc_watchdog:
-  ros__parameters:
-    heartbeat_timeout: 1.0                 # [RO] s of stale monitored-channel PWM -> RC link lost
-    rc_channel: 7                          # [RO] channel whose valid PWM is the RC heartbeat
-    min_valid_pwm: 900                     # [RO] us; below = no pulses (RC loss reads 0)
-    require_armed: true                    # [RO] only force-disarm when armed
-    link_timeout: 3.0                      # [RO] s without any bridge topic -> gateway deemed down
-    enable_latch: false                    # [RO] true = hold kill until RC reset toggle clears it
-    reset_channel: 7                       # [RO] channel whose low->high toggle clears the latch
-    reset_low_pwm: 1300                    # [RO] us; reset switch "low" below this
-    reset_high_pwm: 1700                   # [RO] us; reset switch "high" above this
-
 # ---- ocs_client: the heartbeat to the Operator Control Station ----
-# NOT PROVEN ON THE BOAT — started by hand, absent from core.launch.py. Sends an
-# RxReport heartbeat as length-prefixed JSON over one TCP connection that also
-# carries OCS commands back down. Commands are republished to /crsd/ocs_command
-# and NEVER acted on here: the RC e-stop remains the only safety path.
-# All [RO]: ocs_host in particular must not be changeable from a laptop mid-run.
+# Started by hand, absent from core.launch.py. Commands from the OCS are republished on
+# /crsd/ocs_command and NEVER acted on here: the RC e-stop is the only safety path.
+# Discovery: "auto" dials the newest OCS beacon (ocs_link's discovery port), else
+# ocs_link's fallback hosts; NEVER a RoboCommand course address (192.168.65-68.x,
+# check_config fails it).
 ocs_client:
   ros__parameters:
-    ocs_host: "auto"                       # [RO] "auto" = while not connected,
-                                           #      dial the source of the newest
-                                           #      OCS UDP beacon (under 5 s old,
-                                           #      carrying team_id) at the port it
-                                           #      names; with none, try
-                                           #      ocs_fallback_hosts in turn. Once
-                                           #      connected it STAYS until the
-                                           #      link drops, so two OCS laptops
-                                           #      cannot make it flap (first
-                                           #      reached wins).
-                                           #      Or a fixed IP, dialled and
-                                           #      nothing else (no listener).
-                                           #      NOT 127.0.0.1 — that is this
-                                           #      Jetson. NEVER 192.168.65-68.x:
-                                           #      RoboCommand's course networks
-                                           #      (check_config fails it; the OCS
-                                           #      never beacons there either).
-    ocs_port: 37564                        # [RO] = [tcp] port in the OCS
-                                           #      bridge.toml. Clear of 14559
-                                           #      (gcs_bridge). With "auto" this
-                                           #      is used for fallback hosts; a
-                                           #      beacon carries its own.
-    ocs_discovery_port: 37565              # [RO] UDP port LISTENED on for the
-                                           #      beacon ("auto" only) =
-                                           #      [discovery] port in the OCS
-                                           #      bridge.toml. 0 = do not listen
-                                           #      (fallback hosts only). Bound
-                                           #      without SO_REUSEADDR so it cannot
-                                           #      steal another process's
-                                           #      datagrams; if taken, the node
-                                           #      logs it and uses the fallback
-                                           #      list.
-    ocs_fallback_hosts: ["192.168.100.107", "192.168.8.107"]   # [RO] tried in
-                                           #      turn when no beacon is heard
-                                           #      (AP drops broadcasts, OCS not
-                                           #      beaconing): lab WiFi, then the
-                                           #      Rocket network. IPv4 literals
-                                           #      only, at least one, none on a
-                                           #      course network. The last host
-                                           #      that answered goes first. A new
-                                           #      laptop is still found by its
-                                           #      beacon.
-    vehicle_id: "USV1"                     # [RO] MUST match a [[vehicle]] id in
-                                           #      the OCS bridge.toml, or the OCS
-                                           #      drops every frame with
-                                           #      "not a configured vehicle"
-    team_id: "ASTA"                        # [RO] = bridge.toml team_id
-    rate_hz: 2.0                           # [RO] the handbook mandates 2 Hz per
-                                           #      active vehicle; the OCS rate
-                                           #      governor reserves budget for it
-    fake_telemetry: false                  # [RO] true = invent a circle, for
-                                           #      bench work with no Pixhawk
-                                           #      (warns the whole time). NEVER
-                                           #      true for a scored run.
-    pose_timeout_s: 1.0                    # [RO] = shared.pose_timeout_s; stale
-                                           #      -> no heartbeat, not a
-                                           #      fabricated position
-    attitude_timeout_s: 1.0                # [RO] stale -> roll/pitch omitted, the
-                                           #      rest of the heartbeat still goes
-    status_timeout_s: 1.0                  # [RO] stale -> no heartbeat: without
-                                           #      armed/mode the state is
-                                           #      unknowable, and the OCS
-                                           #      validator refuses STATE_UNKNOWN
+    ocs_host: "auto"                       # or a fixed OCS IP on the team subnet
+    ocs_port: 37564                        # = [tcp] port in the OCS bridge.toml
+    vehicle_id: "USV1"                     # MUST match a [[vehicle]] id in bridge.toml, or
+                                           # the OCS drops every frame
+    team_id: "ASTA"                        # = bridge.toml team_id
 
-# ---- Missions: bt_runner_node — one coarse action outside, a tree inside ----
-# Runs the built-in tree a RunMission goal names (crusader_bt/behavior_trees/<name>.xml).
+# ---- Missions: bt_runner_node runs the built-in tree a RunMission goal names ----
+# (crusader_bt/behavior_trees/<name>.xml). The two gates are read once at start.
 bt_runner_node:
   ros__parameters:
-    action_name: "/crsd/run_mission"        # [RO] the RunMission action
-    tick_hz: 10.0                           # [RO] tree tick rate. ALSO the cancel
-                                            #      latency and the guard band's
-                                            #      flight-mode re-check rate.
-    default_timeout_s: 600.0                # [RO] used when the goal sends 0. It
-                                            #      lives in the RUNNER, not the
-                                            #      XML, so a tree that never
-                                            #      terminates cannot strand the boat.
-    mode_grace_s: 3.0                       # [RO] missing HEARTBEAT tolerated at
-                                            #      goal start (15 beats at 5 Hz).
-    stream_timeout_s: 1.0                   # [RO] = shared.pose_timeout_s. Older
-                                            #      and the tree is told the pose
-                                            #      is stale rather than acting on it.
-    assoc_radius_m: 5.0                     # [RO] how near a tracked contact must
-                                            #      be to count as a plan buoy. Too
-                                            #      large and two buoys claim one
-                                            #      contact; the global greedy
-                                            #      fusion cannot double-claim, but
-                                            #      CAN pair the wrong two.
-    publish_setpoints: false                # [RO] FALSE = this node CANNOT move
-                                            #      the boat. Legs still poll for
-                                            #      arrival, so a human can drive
-                                            #      and the tree follows — the
-                                            #      read-only water test. Turning it
-                                            #      true is a G1 gate.
-    fire_pump: false                        # [RO] FALSE = FireBurst runs DRY: it
-                                            #      lines up, logs "FIRE #n (DRY)"
-                                            #      and never asks for the pump.
-                                            #      Separate from publish_setpoints:
-                                            #      moving is G1, water is G7.
-    # The sticks for the MANUAL fire tree (StrafeKeep -> /crsd/rc_override), in
-    # the order [ahead, lateral, yaw]: dp_hold's map and its measured neutrals.
-    # G1 row O9 checks each DIRECTION; flip one with stick_reverse.
-    stick_channels: [3, 4, 1]               # [RO] throttle, lateral, steer
-    stick_neutral_us: [1495, 1495, 1489]    # [RO] = RC3/RC4/RC1_TRIM
-    stick_reverse: [false, false, false]    # [RO]
-    autonomous_modes: ["GUIDED", "AUTO", "LOITER", "RTL"]
-                                            # [RO] = shared.autonomous_modes; read
-                                            #      by the guard band's IsAutonomous
-                                            #      leaf.
-    # -- Task 3 (behavior_trees/task3_disruptive.xml) --
-    # The runner places every docking-bay sighting with these. They MUST equal
-    # target_tracker's (check_config): one camera placed twice is two worlds that
-    # disagree about where things are.
-    cam_x: 0.37                             # [RO] = target_tracker.cam_x
-    cam_y: 0.0                              # [RO] = target_tracker.cam_y
-    cam_yaw_deg: 0.0                        # [RO] = target_tracker.cam_yaw_deg
-    cam_pitch_deg: 0.0                      # [RO] = target_tracker.cam_pitch_deg,
-                                            #      + = aimed DOWN. Task 3 may need
-                                            #      it NEGATIVE: level, from inside
-                                            #      a slip the camera cannot see the
-                                            #      upper window
-                                            #      (docs/T3_coordinated_logistics.md)
-    dock_face_dz_m: 0.39                    # [RO] face centre above the camera
-                                            #      (pitched camera only): ~0.8 m
-                                            #      above water per the build
-                                            #      guide, camera at 0.41 m
-    dock_topic: "dock/observations"         # [RO] DockObservation, from the
-                                            #      dock detector (firefighting-cv
-                                            #      specs: observations_topic)
-    # -- obstacle avoidance (docs/nav2_avoidance_spec.md 5.8; crusader_bt README) --
-    # NavigateTo and CircleBuoy plan around every known hazard through Nav2's
-    # planner_server and hold when they cannot; ArduPilot still flies the boat
-    # (GUIDED setpoints). Avoidance is not a safety system: the RC e-stop is.
-    nav_mode: "off"                         # [RO] off = straight legs, no planner;
-                                            #      shadow = plans and shows the
-                                            #      path, drives straight legs;
-                                            #      on = drives the planned path.
-                                            #      The sim and lake rigs pass
-                                            #      -p nav_mode:=... A build without
-                                            #      nav2_msgs refuses anything but off.
-    nav_map_frame: "map"                    # [RO] = nav2 global_costmap
-                                            #      global_frame (check_config)
-    nav_datum_topic: "/crsd/datum"          # [RO] = nav_frames_node.datum_topic.
-                                            #      shadow/on: the BT frame waits
-                                            #      for this datum, not the first fix
-    nav_hazards_topic: "/crsd/nav/hazards"  # [RO] HazardArray out = nav2_params
-                                            #      hazard_layer.topic (check_config)
-    nav_leg_topic: "/crsd/nav/leg_status"   # [RO] leg status JSON out
-                                            #      = gcs_bridge.LEG_TOPIC (check_config)
-    nav_planner_action: "/compute_path_to_pose"
-                                            # [RO] planner_server's action
-    nav_valid_service: "/is_path_valid"     # [RO] ... and its path check
-    nav_clear_service: "/global_costmap/clear_entirely_global_costmap"
-                                            # [RO] ... and the costmap clear
-    nav_planner_id: "GridBased"             # [RO] a plugin in nav2_params
-                                            #      planner_plugins (SmacPlanner2D)
-    nav_hazard_rate_hz: 2.0                 # [RO] known-hazard publish rate. The
-                                            #      layer's max_age_s must cover two
-                                            #      periods (check_config)
-    nav_status_hz: 2.0                      # [RO] leg status rate, plus every
-                                            #      state change
-    nav_hard_m: 0.8                         # [RO] "0.8 m hard": never closer than
-                                            #      this to a hazard's surface. At
-                                            #      most robot_radius*cos(pi/16)
-                                            #      (check_config)
-    nav_soft_m: 2.0                         # [RO] "2 m soft" = inflation_radius
-                                            #      (check_config)
-    nav_buoy_radius_m: 0.30                 # [RO] a RoboBuoy, circumscribed: its
-                                            #      footprint is 0.432 m square
-    nav_track_radius_m: 0.30                # [RO] a LiDAR track no plan buoy claims
-    nav_exempt_radius_m: 1.0                # [RO] a track this close to an exempt
-                                            #      buoy is that buoy, not a third
-    nav_lookahead_m: 5.0                    # [RO] the carrot sits this far ahead
-    nav_lookahead_min_m: 3.0                # [RO] ... and at least this far
-    nav_max_chord_dev_m: 0.3                # [RO] the carrot's chord may cut the
-                                            #      path by this much, no more
-    nav_wp_radius_m: 2.0                    # [RO] = the autopilot's WP_RADIUS
-                                            #      (check_config): an intermediate
-                                            #      carrot this close is reached
-    nav_replan_period_s: 0.5                # [RO] plan at most this often
-    nav_min_request_gap_s: 0.2              # [RO] ... and never faster than this
-    nav_check_period_s: 0.1                 # [RO] is_path_valid at most this often
-    nav_plan_timeout_s: 1.0                 # [RO] no answer by then = cannot plan
-                                            #      (Humble's planner hangs on a
-                                            #      non-current costmap)
-    nav_first_plan_wait_s: 1.0              # [RO] no plan yet by then = hold
-    nav_invalid_confirm: 2                  # [RO] is_path_valid must say invalid
-                                            #      this many times in a row
-    nav_hysteresis_frac: 0.2                # [RO] a new path replaces a valid one
-                                            #      only if shorter by this fraction
-    nav_hysteresis_m: 3.0                   # [RO] ... AND by this many metres
-    nav_goal_replan_m: 1.0                  # [RO] a goal that moves this far
-                                            #      forces a replan
-    nav_clip_radius_m: 35.0                 # [RO] goals are clipped to this radius
-                                            #      round the boat: inside the
-                                            #      costmap window (check_config)
-    nav_clear_after_s: 5.0                  # [RO] blocked this long = clear the
-                                            #      costmap once and replan
-    nav_unblock_reset_s: 3.0                # [RO] continuous FOLLOWING this long
-                                            #      resets the blocked clock
-    nav_escape_margin_m: 0.5                # [RO] a start inside the hard zone
-                                            #      escapes to this much beyond it
-    nav_goal_margin_m: 0.3                  # [RO] a goal inside the hard zone is
-                                            #      pushed out to this beyond it
-    nav_local_check_tol_m: 0.1              # [RO] the BT's own checks use
-                                            #      hard - this, for quantisation
-    nav_orbit_max_push_m: 3.0               # [RO] an orbit point near a hazard is
-                                            #      pushed out by at most this
-    nav_orbit_clear_m: 1.4                  # [RO] ... until it is this clear. Also the
-                                            #      goal rule for every orbit hop as it
-                                            #      starts, ring[0] included (clearPoint)
-    nav_orbit_radius_m: 6.0                 # [RO] ENTRY/EXIT orbit radius (CircleBuoy;
-                                            #      an XML radius= still wins). Tight
-                                            #      fields: ~2 (buoy 0.3 + hard 0.8 +
-                                            #      the hull's half-length, with room)
-    nav_orbit_points: 8                     # [RO] ring points; more for a small radius
-                                            #      so a hop stays short and on the circle
-    nav_orbit_tolerance_m: 2.0              # [RO] a ring hop counts as arrived within
-                                            #      this; keep it under the chord
-                                            #      (2 r sin(180/points)) or hops are skipped
-    nav_gate_standoff_m: 6.0                # [RO] gate through point, metres past the
-                                            #      middle (the most; see nav_gate_min_*)
-    nav_gate_approach_m: 8.0                # [RO] gate approach point, metres short of it
-    nav_gate_clear_m: 1.5                   # [RO] THE GOAL RULE for gates: the straight
-                                            #      crossing and both gate points keep
-                                            #      this from every hazard's EDGE (a buoy
-                                            #      centre: + nav_buoy_radius_m)
-    nav_gate_min_standoff_m: 3.5            # [RO] a crowded gate's through point may
-                                            #      back off from the tree's standoff
-                                            #      (6) to this; keep it > the through
-                                            #      leg's tolerance (2.5) or the boat
-                                            #      "arrives" before the gate line
-    nav_gate_min_approach_m: 4.0            # [RO] ... and its approach point from 8 to
-                                            #      this, the room to line up
-    nav_gate_margin_m: 1.8                  # [RO] then the crossing may move off-centre
-                                            #      in the gap, never closer than this
-                                            #      to either gate buoy
-    nav_gate_step_m: 0.25                   # [RO] search pitch for both of the above
-                                            #      (the widest shift the margin allows
-                                            #      is always tried as well)
-    nav_gate_tight_clear_m: 1.0             # [RO] nothing fits? the same search again
-                                            #      with this clearance (hard_m + 0.2;
-                                            #      the guard needs hard - tol = 0.7) ...
-    nav_gate_tight_margin_m: 1.1            # [RO] ... and this from the gate buoys
-                                            #      (hard_m + buoy_radius_m). Tight is
-                                            #      better than sitting still
-    nav_goal_max_move_m: 3.0                # [RO] the goal rule moves a goal at most
-                                            #      this far to clear it; nothing clear
-                                            #      that close -> the goal stays and the
-                                            #      leg's guard holds the boat
-    nav_dock_finger_len_m: 2.0              # [RO] build guide: dock fingers
+    publish_setpoints: false               # FALSE = this node CANNOT move the boat; legs
+                                           # still poll for arrival, so a human can drive
+                                           # and the tree follows. True is a G1 gate.
+    fire_pump: false                       # FALSE = FireBurst runs DRY. Moving is G1,
+                                           # water is G7.
+    # The sticks for the MANUAL fire tree (StrafeKeep -> /crsd/rc_override), in the
+    # order [ahead, lateral, yaw]: dp_hold's map and its measured neutrals. G1 row O9
+    # checks each DIRECTION; flip one with stick_reverse.
+    stick_channels: [3, 4, 1]              # throttle, lateral, steer
+    stick_neutral_us: [1495, 1495, 1489]   # = RC3/RC4/RC1_TRIM
+    stick_reverse: [false, false, false]
+    # Task 3: the runner places every docking-bay sighting with this camera mounting.
+    # It MUST equal target_tracker's (check_config): one camera placed twice is two
+    # worlds that disagree about where things are.
+    cam_x: 0.37
+    cam_y: 0.0
+    cam_yaw_deg: 0.0
+    cam_pitch_deg: 0.0                     # + = aimed DOWN. Task 3 may need it negative:
+                                           # level, from inside a slip the camera cannot
+                                           # see the upper window
+    dock_face_dz_m: 0.39                   # face centre above the camera (pitched camera
+                                           # only): ~0.8 m above water, camera at 0.41 m
+    # Obstacle avoidance (docs/nav2_avoidance_spec.md 5.8): NavigateTo and CircleBuoy plan
+    # around every known hazard through Nav2's planner_server and hold when they cannot;
+    # ArduPilot still flies the boat. Avoidance is not a safety system: the RC e-stop is.
+    nav_mode: "off"                        # off = straight legs; shadow = plans and shows
+                                           # the path, drives straight legs; on = drives
+                                           # the planned path. The sim passes -p nav_mode:=
+    # The planner knobs below are the tuned baseline the GCS planner profiles compare
+    # against. They are live: a set applies at the next mission START.
+    nav_hard_m: 0.8                         # "0.8 m hard": never closer than
+                                            # this to a hazard's surface. At
+                                            # most robot_radius*cos(pi/16)
+                                            # (check_config)
+    nav_soft_m: 2.0                         # "2 m soft" = inflation_radius
+                                            # (check_config)
+    nav_buoy_radius_m: 0.30                 # a RoboBuoy, circumscribed: its
+                                            # footprint is 0.432 m square
+    nav_track_radius_m: 0.30                # a LiDAR track no plan buoy claims
+    nav_exempt_radius_m: 1.0                # a track this close to an exempt
+                                            # buoy is that buoy, not a third
+    nav_lookahead_m: 5.0                    # the carrot sits this far ahead
+    nav_lookahead_min_m: 3.0                # ... and at least this far
+    nav_max_chord_dev_m: 0.3                # the carrot's chord may cut the
+                                            # path by this much, no more
+    nav_wp_radius_m: 2.0                    # = the autopilot's WP_RADIUS
+                                            # (check_config): an intermediate
+                                            # carrot this close is reached
+    nav_replan_period_s: 0.5                # plan at most this often
+    nav_min_request_gap_s: 0.2              # ... and never faster than this
+    nav_check_period_s: 0.1                 # is_path_valid at most this often
+    nav_plan_timeout_s: 1.0                 # no answer by then = cannot plan
+                                            # (Humble's planner hangs on a
+                                            # non-current costmap)
+    nav_first_plan_wait_s: 1.0              # no plan yet by then = hold
+    nav_invalid_confirm: 2                  # is_path_valid must say invalid
+                                            # this many times in a row
+    nav_hysteresis_frac: 0.2                # a new path replaces a valid one
+                                            # only if shorter by this fraction
+    nav_hysteresis_m: 3.0                   # ... AND by this many metres
+    nav_goal_replan_m: 1.0                  # a goal that moves this far
+                                            # forces a replan
+    nav_clip_radius_m: 35.0                 # goals are clipped to this radius
+                                            # round the boat: inside the
+                                            # costmap window (check_config)
+    nav_clear_after_s: 5.0                  # blocked this long = clear the
+                                            # costmap once and replan
+    nav_unblock_reset_s: 3.0                # continuous FOLLOWING this long
+                                            # resets the blocked clock
+    nav_escape_margin_m: 0.5                # a start inside the hard zone
+                                            # escapes to this much beyond it
+    nav_goal_margin_m: 0.3                  # a goal inside the hard zone is
+                                            # pushed out to this beyond it
+    nav_local_check_tol_m: 0.1              # the BT's own checks use
+                                            # hard - this, for quantisation
+    nav_orbit_max_push_m: 3.0               # an orbit point near a hazard is
+                                            # pushed out by at most this
+    nav_orbit_clear_m: 1.4                  # ... until it is this clear. Also the
+                                            # goal rule for every orbit hop as it
+                                            # starts, ring[0] included (clearPoint)
+    nav_orbit_radius_m: 6.0                 # ENTRY/EXIT orbit radius (CircleBuoy;
+                                            # an XML radius= still wins). Tight
+                                            # fields: ~2 (buoy 0.3 + hard 0.8 +
+                                            # the hull's half-length, with room)
+    nav_orbit_points: 8                     # ring points; more for a small radius
+                                            # so a hop stays short and on the circle
+    nav_orbit_tolerance_m: 2.0              # a ring hop counts as arrived within
+                                            # this; keep it under the chord
+                                            # (2 r sin(180/points)) or hops are skipped
+    nav_gate_standoff_m: 6.0                # gate through point, metres past the
+                                            # middle (the most; see nav_gate_min_*)
+    nav_gate_approach_m: 8.0                # gate approach point, metres short of it
+    nav_gate_clear_m: 1.5                   # THE GOAL RULE for gates: the straight
+                                            # crossing and both gate points keep
+                                            # this from every hazard's EDGE (a buoy
+                                            # centre: + nav_buoy_radius_m)
+    nav_gate_min_standoff_m: 3.5            # a crowded gate's through point may
+                                            # back off from the tree's standoff
+                                            # (6) to this; keep it > the through
+                                            # leg's tolerance (2.5) or the boat
+                                            # "arrives" before the gate line
+    nav_gate_min_approach_m: 4.0            # ... and its approach point from 8 to
+                                            # this, the room to line up
+    nav_gate_margin_m: 1.8                  # then the crossing may move off-centre
+                                            # in the gap, never closer than this
+                                            # to either gate buoy
+    nav_gate_step_m: 0.25                   # search pitch for both of the above
+                                            # (the widest shift the margin allows
+                                            # is always tried as well)
+    nav_gate_tight_clear_m: 1.0             # nothing fits? the same search again
+                                            # with this clearance (hard_m + 0.2;
+                                            # the guard needs hard - tol = 0.7) ...
+    nav_gate_tight_margin_m: 1.1            # ... and this from the gate buoys
+                                            # (hard_m + buoy_radius_m). Tight is
+                                            # better than sitting still
+    nav_goal_max_move_m: 3.0                # the goal rule moves a goal at most
+                                            # this far to clear it; nothing clear
+                                            # that close -> the goal stays and the
+                                            # leg's guard holds the boat
+    nav_dock_finger_len_m: 2.0              # build guide: dock fingers
     nav_dock_finger_w_m: 0.5                # [RO]
     nav_dock_slip_w_m: 1.5                  # [RO]
     nav_dock_deck_depth_m: 1.0              # [RO]
-    nav_fence_len_m: 10.0                   # [RO] SIDE FENCES, nav_mode on only: each
-                                            #      red/green in the passage plan gets a
-                                            #      wall of hazard circles this long,
-                                            #      OUTWARD from the buoy (gate: away
-                                            #      from the partner; single: red right
-                                            #      / green left of the axis), so the
-                                            #      planner passes it only on the
-                                            #      handbook's side. 0 = no fences
-    nav_fence_spacing_m: 0.5                # [RO] circle pitch; < 2 x radius = a wall
-    nav_fence_radius_m: 0.3                 # [RO] circle radius
-    nav_fence_clear_m: 8.0                  # [RO] no circle this close to the ENTRY or
-                                            #      EXIT buoy: orbit radius 6 +
-                                            #      nav_orbit_clear_m 1.4 + radius 0.3
+    nav_fence_len_m: 10.0                   # SIDE FENCES, nav_mode on only: each
+                                            # red/green in the passage plan gets a
+                                            # wall of hazard circles this long,
+                                            # OUTWARD from the buoy (gate: away
+                                            # from the partner; single: red right
+                                            # / green left of the axis), so the
+                                            # planner passes it only on the
+                                            # handbook's side. 0 = no fences
+    nav_fence_spacing_m: 0.5                # circle pitch; < 2 x radius = a wall
+    nav_fence_radius_m: 0.3                 # circle radius
+    nav_fence_clear_m: 8.0                  # no circle this close to the ENTRY or
+                                            # EXIT buoy: orbit radius 6 +
+                                            # nav_orbit_clear_m 1.4 + radius 0.3
 
 # ---- rfd_link_node: the RFD900 mesh to Ekko (crusader_link) ----
 rfd_link_node:
   ros__parameters:
-    rfd_endpoint: "/dev/crsd-rfd"           # [RO] the radio (udev); the sim uses udpin:127.0.0.1:14555
-    rfd_baud: 115200                        # [RO] serial only; every mesh radio runs SERIAL=115
-    uav_sysid: 200                          # [RO] Ekko's companion, which sends the TUNNELs
-    source_system: 42                       # [RO] the boat on the mesh (not its autopilot)
-    pose_timeout_s: 1.0                     # [RO] older /crsd/pose: no BOAT packet
-    quiet_warn_s: 15.0                      # [DYN] say once when Ekko goes quiet
-    reconnect_s: 5.0                        # [RO] retry an absent radio this often
+    rfd_endpoint: "/dev/crsd-rfd"          # the radio (udev); the sim uses udpin:127.0.0.1:14555
+    uav_sysid: 200                         # Ekko's companion, which sends the TUNNELs
+    source_system: 42                      # the boat on the mesh (not its autopilot)

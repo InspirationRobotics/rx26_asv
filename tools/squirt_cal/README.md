@@ -71,7 +71,7 @@ tool sees the pump output go on and logs a shot the same way.
   peak-to-peak pitch and roll while the water was in the air, so rocking shows up
   in the data.
 - **It cannot hold the pump on.** It sends `/crsd/pump_cmd` bursts that
-  `telemetry_bridge` checks (`crusader_fcu/pump_core.py`), and the autopilot times
+  `telemetry_bridge` checks (`crusader_behavior/pump_core.py`), and the autopilot times
   each one (DO_REPEAT_SERVO, one cycle). It never opens MAVLink (README rule 1).
   It refuses to fire while a mission is running (`/crsd/current_task`).
 - **A bench tool, not a launch-file node.** It has no entry point and is not in
@@ -136,4 +136,3 @@ warning.
   in MANUAL, which is G1-gated.
 - **The Task 3 tree using the result.** `SprayUntilHit` still assumes a pan/tilt
   cannon.
-- **A nozzle model in `tools/task3_sim`.**

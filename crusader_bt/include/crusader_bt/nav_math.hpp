@@ -149,8 +149,8 @@ enum class Beacon
 
 /// A tracked target's label as a beacon state; anything unrecognised is Unknown (no side
 /// constraint), never guessed into a colour. ENTRY is FLASHING blue, EXIT STEADY blue:
-/// oak_detector names a lit shape with no prefix (blue_diamond) and a flashing one flash_*,
-/// while buoy_detector's blue_buoy cannot tell the two apart.
+/// camera_node's buoy model names a lit shape with no prefix (blue_diamond) and a flashing
+/// one flash_*, while a detector that says only blue_buoy cannot tell the two apart.
 inline Beacon beaconFromLabel(const std::string & raw)
 {
   std::string s;

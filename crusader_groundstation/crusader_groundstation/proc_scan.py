@@ -9,15 +9,15 @@ WHY ALONGSIDE THE ROS GRAPH, NOT INSTEAD OF IT. The two see different worlds:
   the ROS graph  sees nodes ACROSS the DDS domain, including other containers
                  (the livox driver is a node we can observe but not a process we
                  can find: different PID namespace).
-  /proc          sees processes that are not ROS nodes at all: tools/oak_view.py
-                 and tools/lidar_view.py are plain scripts, and one started from
-                 a terminal would show as STOPPED and offer a Start button that
-                 collides on its port.
+  /proc          sees a process before it joins the graph, and one whose DDS
+                 discovery failed: started from a terminal, it would otherwise
+                 show as STOPPED and offer a Start button that runs a second copy
+                 on the same device.
 
 So a thing is running if EITHER says so.
 
 MATCHING IS ON WHOLE PATH COMPONENTS: `led_node` must not match
-`pixhawk_led_status_node`, and a substring test over the command line passes
+`/lib/x/old_led_node`, and a substring test over the command line passes
 every casual test and then reports the wrong node on the one day it matters.
 """
 import os

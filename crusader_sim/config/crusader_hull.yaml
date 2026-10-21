@@ -18,7 +18,7 @@
 # What to send to replace the GUESSes: crusader_sim/MODEL_REQUEST.md.
 
 hull:
-  length_m: 1.0              # TEAM   tools/task3_sim/world.py:398 "rough, from the team"
+  length_m: 1.0              # TEAM   "rough, from the team" (the former tools/task3_sim)
   beam_m: 0.6                # TEAM   same
   depth_m: 0.45              # GUESS  hull bottom to deck
   draft_m: 0.24              # MEASURED 2026-09-05, Resources.md:71 (= lidar water_z)

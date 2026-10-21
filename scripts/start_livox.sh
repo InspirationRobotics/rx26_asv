@@ -4,7 +4,7 @@
 #
 # The MID360 is the one device this repo does NOT own. It lives in its own
 # container (see docs/OPERATIONS.md §13) and publishes /livox/lidar, which
-# crusader_perception's lidar_cluster_node consumes. This script is the single
+# crusader_perception's lidar_node consumes. This script is the single
 # blessed way to start it, so "how the LiDAR comes up" has one answer.
 #
 # ---------------------------------------------------------------------------

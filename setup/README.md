@@ -43,7 +43,7 @@ Nav2 one is for `docs/nav2_avoidance_spec.md`.
 
 **Done on the boat 2026-10-03 (Chase approved).** The boat's `asv` container now runs
 `asv:nav2-20261003`, built from `asv_add_nav2.Dockerfile` on `asv:bt-20260928`. The layer adds 20 ROS
-packages (Nav2, STVL and `map_msgs`, which the lake panel's `panel_feed` imports) and changes one:
+packages (Nav2, STVL and `map_msgs`) and changes one:
 `tf2-ros-py` 0.25.20 → 0.25.23. The old container is kept, stopped, as `asv_pre_nav2`. Three
 things learned doing it:
 
@@ -134,7 +134,7 @@ sudo systemctl start crsd-container && bash ~/robotx_ws/src/rx26_asv/tools/scrip
    comes up fine on the old image.
 3. Inside `asv`, clear the same three CMake directories as above, then run `rebuild.sh`.
 
-The lake rig needs that rebuild: its `bt_runner` links `nav2_msgs` until it is rebuilt in the old image.
+`bt_runner_node` needs that rebuild: it links `nav2_msgs` until it is rebuilt in the old image.
 
 Delete `asv_pre_nav2` only after a successful water day. `crsd-container.service` starts the
 container by name (`docker start -a asv`), so no unit file changes. If `apt-get update` fails in

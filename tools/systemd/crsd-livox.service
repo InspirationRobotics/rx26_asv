@@ -7,7 +7,7 @@
 # Starts the MID360 driver in the livox container. Independent of the Pixhawk
 # chain: the LiDAR shares no device with MAVProxy, so it is ordered only after
 # docker and the network, not after crsd-mavproxy. crusader_perception's
-# lidar_cluster_node retries until the topic appears, so nothing downstream
+# lidar_node retries until the topic appears, so nothing downstream
 # needs this to win a start-order race.
 [Unit]
 Description=Crusader MID360 LiDAR driver (livox container)
