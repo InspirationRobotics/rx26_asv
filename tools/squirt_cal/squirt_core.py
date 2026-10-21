@@ -44,7 +44,7 @@ from steady_core import SteadyMonitor
 DEFAULTS = dict(
     port=8094,
     log_dir="/root/robotx_ws/logs/squirt_cal",
-    snapshot_url="http://127.0.0.1:8080/stream/raw",
+    snapshot_topic="/crsd/camera/raw/compressed",
     wall_range_topic="/crsd/wall_range",   # = wall_range_node.wall_topic
     pump_rc_channel=10,          # = telemetry_bridge.pump_rc_channel (log-only fallback)
     pump_on_threshold_us=1700,

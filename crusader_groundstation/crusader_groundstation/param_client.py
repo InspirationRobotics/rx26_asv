@@ -1,14 +1,8 @@
-"""param_client — read and write another node's parameters, from the page.
+"""param_client — read and write another node's parameters, for the Params tab.
 
-The Tuning tab exists because the knobs that matter are discovered on the water;
-this is `ros2 param set` made from the boat's own dashboard, with the range and
-description in front of you.
-
-NOTHING HERE KNOWS WHAT ANY PARAMETER IS. It asks the node. Every Crusader node
-declares parameters through crusader_common.param_utils.declare, which puts the
-description, read_only posture and numeric range into the ParameterDescriptor,
-so a second table here would go stale. A parameter appears in the GUI because
-the node declares it, or not at all.
+`ros2 param set` from the ground station. NOTHING HERE KNOWS WHAT ANY PARAMETER IS: it
+asks the node, whose ParameterDescriptor carries the read_only posture and the range
+(crusader_common.node_main.declare_params), so a second table here could not go stale.
 
 READ-ONLY PARAMETERS ARE LISTED, NOT HIDDEN, greyed out with the posture said
 out loud: "cannot turn it from here" is a design decision with a reason (the
@@ -17,17 +11,14 @@ reads as the parameter not existing.
 
 WHAT IT CANNOT DO: persist anything. A set lands in the running node and dies
 with it, because crusader_params.yaml is the commented source of truth that a
-browser POST must not rewrite. The page shows the live value against the YAML
-default and marks the drift.
+browser must not rewrite. The page shows the live value against the YAML value.
 
-THREADING. Called from the HTTP thread while the node spins on the main one.
+THREADING. Called from a worker thread while the node spins on the main one.
 Every call is `call_async` plus a wait on the future's done-callback, never
 spin_until_future_complete (a second executor spinning the same node wedges a
 ROS web bridge).
 """
 import threading
-
-from crusader_common import param_utils
 
 # The four services every rclpy/rclcpp node exposes under its own name.
 _LIST = "list_parameters"
@@ -70,8 +61,7 @@ def range_of(descriptor):
     """(lo, hi) from a ParameterDescriptor, or (None, None).
 
     floating_point_range and integer_range are empty arrays when unset, so both
-    are checked: param_utils picks by the DEFAULT's Python type, and an int-valued
-    knob declared from a float default is real.
+    are checked.
     """
     for field in ("floating_point_range", "integer_range"):
         rng = getattr(descriptor, field, None)
@@ -248,9 +238,6 @@ class ParamBridge:
                 "reason": _not_editable_reason(desc),
                 "description": desc.description,
                 "lo": lo, "hi": hi,
-                # Straight off the descriptor, so a new mode shows in the
-                # dropdown the moment the node runs.
-                "choices": list(param_utils.choices_of(desc)),
             })
         return out
 
@@ -260,9 +247,8 @@ class ParamBridge:
         Types come from a fresh describe_parameters, not the page: a node
         restarted since the last poll may have a different posture.
 
-        The node's own on-set callback still validates the range and may refuse;
-        its reason comes back. The page's inputs are hints and neither is THIS
-        the authority.
+        The node itself validates the type and range and may refuse; its reason
+        comes back. The page's inputs are hints, and so is this.
         """
         from rcl_interfaces.msg import Parameter
         from rcl_interfaces.srv import DescribeParameters, SetParameters
@@ -305,8 +291,7 @@ def _not_editable_reason(desc):
     read as a dashboard bug.
     """
     if desc.read_only:
-        return ("[RO] structural — change it in crusader_params.yaml and "
-                "restart the node")
+        return "read-only: change it in crusader_params.yaml and restart the node"
     if desc.type not in SCALAR_TYPES:
         return (f"{TYPE_NAMES.get(desc.type, desc.type)} values are not "
                 "editable here — use ros2 param set")

@@ -3,7 +3,7 @@
     python3 -m pytest crusader_groundstation/test/test_planner_profiles.py
     python3 -m unittest discover -s crusader_groundstation/test        (no pytest needed)
 
-Needs PyYAML, nothing else: the module is the pure half of the Tuning tab's profile picker.
+Needs PyYAML, nothing else: the module is the pure half of the Params tab's profile picker.
 """
 import os
 import sys

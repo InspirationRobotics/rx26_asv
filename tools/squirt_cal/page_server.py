@@ -1,4 +1,4 @@
-"""gcs_server — HTTP front end for the ground station.
+"""page_server — squirt_cal's HTTP front end: the phone page, GET /state, POST actions.
 
 No ROS imports. It is handed a snapshot callable and an action callable and
 knows nothing else; that is what lets the whole page be exercised on a laptop

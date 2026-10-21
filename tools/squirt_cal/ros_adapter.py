@@ -14,14 +14,13 @@ This process never opens MAVLink (README rule 1) and cannot hold the pump on:
 a PumpCommand is a bounded burst the autopilot itself ends.
 """
 import math
-import os
-import tempfile
 import threading
 import time
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import String
 
 from crusader_msgs.msg import (Attitude, FcuStatus, LatLonHead, PumpCommand,
@@ -31,41 +30,7 @@ PUMP_STATE_TIMEOUT_S = 1.0
 RESULT_WORDS = {0: "none", 1: "sent", 2: "ACCEPTED", 3: "REJECTED by the autopilot",
                 4: "REFUSED by the bridge"}
 
-try:
-    from crusader_groundstation.recorder import MjpegPuller
-except ImportError:                     # no ground station on this path: no snapshots
-    MjpegPuller = None
-
-
-if MjpegPuller is not None:
-    class LatestFramePuller(MjpegPuller):
-        """Keeps the newest JPEG in memory instead of writing every frame.
-
-        Stays attached for the whole session: the camera producers only encode
-        while a viewer is attached, and the first frame a new viewer gets can
-        be stale (crusader_common/mjpeg_view.py), so attaching per shot would
-        photograph the moment BEFORE the water."""
-
-        def __init__(self, url):
-            super().__init__(url, tempfile.gettempdir(), rate_hz=15.0)
-            self._latest = None
-            self._lk = threading.Lock()
-
-        def _save(self, frame):
-            with self._lk:
-                self._latest = (time.monotonic(), frame)
-
-        def save_latest(self, path, max_age_s=1.0):
-            with self._lk:
-                latest = self._latest
-            if latest is None or time.monotonic() - latest[0] > max_age_s:
-                return False
-            try:
-                with open(path, "wb") as f:
-                    f.write(latest[1])
-                return True
-            except OSError:
-                return False
+SNAPSHOT_MAX_AGE_S = 1.0
 
 
 class RosAdapter:
@@ -90,13 +55,15 @@ class RosAdapter:
         self._pump_on = False            # last output state seen on /crsd/pump_state
         self._rc_on = False              # last pilot-switch state seen on RC
         self._wall_t = None
-        self.puller = None
-        if cfg["snapshot_url"] and MjpegPuller is not None:
-            self.puller = LatestFramePuller(cfg["snapshot_url"])
-            self.puller.start()
+        # Subscribed for the whole session: camera_node encodes only while something
+        # listens, so subscribing per shot would photograph the moment BEFORE the water.
+        self._frame = None               # (t, jpeg bytes)
+        self._frame_lk = threading.Lock()
+        if cfg["snapshot_topic"]:
+            n.create_subscription(CompressedImage, cfg["snapshot_topic"], self._on_frame, 2)
         n.get_logger().info(
             f"squirt_cal: wall range on {cfg['wall_range_topic']}, pump requests on "
-            f"/crsd/pump_cmd, snapshots {'from ' + cfg['snapshot_url'] if self.puller else 'off'}")
+            f"/crsd/pump_cmd, snapshots {'from ' + cfg['snapshot_topic'] if cfg['snapshot_topic'] else 'off'}")
 
     # ---- the App's side ----
 
@@ -108,8 +75,6 @@ class RosAdapter:
             rclpy.spin_once(self.node, timeout_sec=0.1)
 
     def stop(self):
-        if self.puller is not None:
-            self.puller.stop()
         try:
             self.node.destroy_node()
             rclpy.shutdown()
@@ -155,7 +120,16 @@ class RosAdapter:
         return True, f"burst {burst_s:.2f} s asked of the bridge (#{seq})"
 
     def snapshot(self, path):
-        return bool(self.puller and self.puller.save_latest(path))
+        with self._frame_lk:
+            frame = self._frame
+        if frame is None or time.monotonic() - frame[0] > SNAPSHOT_MAX_AGE_S:
+            return False
+        try:
+            with open(path, "wb") as f:
+                f.write(frame[1])
+            return True
+        except OSError:
+            return False
 
     def fake_state(self, target):
         return None
@@ -164,6 +138,10 @@ class RosAdapter:
         return dict(ok=False, message="not a fake boat")
 
     # ---- callbacks (the executor thread); App methods take its own lock ----
+
+    def _on_frame(self, msg):
+        with self._frame_lk:
+            self._frame = (time.monotonic(), bytes(msg.data))
 
     def _on_wall(self, msg):
         t = time.monotonic()

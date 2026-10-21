@@ -422,7 +422,7 @@ def parse_args():
                         "darker/shorter shutter (default: -3, 0 disables)")
     p.add_argument("--ae-region-top", type=float, default=0.35,
                    help="top of the AE metering band, fraction of frame height "
-                        "(matches ground_station/oak_detector's ae_region_top)")
+                        "(matches camera_node's ae_region_top)")
     p.add_argument("--ae-region-height", type=float, default=0.45,
                    help="height of the AE metering band, fraction of frame "
                         "height; 0 meters the whole frame, which lets a bright "

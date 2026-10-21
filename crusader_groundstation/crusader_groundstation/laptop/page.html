@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Crusader GCS</title>
+<style>
+:root {
+  --bg: #f4f5f7; --panel: #ffffff; --fg: #1d2330; --muted: #6b7280; --line: #d9dde3;
+  --accent: #1565c0; --ok: #2e7d32; --warn: #b26a00; --bad: #c62828;
+  --map-bg: #eef2f6; --grid: #d3dae3; --trail: #7e57c2;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12151b; --panel: #1b2029; --fg: #e3e7ee; --muted: #8b94a3; --line: #2c3340;
+    --accent: #64b5f6; --ok: #66bb6a; --warn: #ffb74d; --bad: #ef5350;
+    --map-bg: #0e1218; --grid: #222a36; --trail: #b39ddb;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+header { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 8px; background: var(--panel);
+         border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; }
+.tile { padding: 3px 8px; border-radius: 4px; border: 1px solid var(--line); white-space: nowrap; }
+.tile b { font-weight: 600; }
+.ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+.muted { color: var(--muted); }
+.tile.bad { border-color: var(--bad); } .tile.warn { border-color: var(--warn); }
+nav { display: flex; flex-wrap: wrap; gap: 2px; padding: 4px 8px 0; }
+nav button { border: 1px solid var(--line); border-bottom: none; background: var(--bg);
+             color: var(--fg); padding: 6px 12px; border-radius: 6px 6px 0 0; cursor: pointer; }
+nav button.on { background: var(--panel); font-weight: 600; }
+main { background: var(--panel); border-top: 1px solid var(--line); padding: 10px; min-height: 80vh; }
+section { display: none; } section.on { display: block; }
+.row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-start; }
+.col { flex: 1 1 320px; min-width: 0; }
+canvas.map { width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 4px; display: block; }
+canvas.small { height: 45vh; }
+table { border-collapse: collapse; width: 100%; }
+td, th { border-bottom: 1px solid var(--line); padding: 3px 6px; text-align: left; vertical-align: top; }
+th { color: var(--muted); font-weight: 500; }
+button { cursor: pointer; padding: 4px 10px; border-radius: 4px; border: 1px solid var(--line);
+         background: var(--bg); color: var(--fg); }
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+button.danger { background: var(--bad); color: #fff; border-color: var(--bad); }
+button:disabled { opacity: 0.45; cursor: default; }
+input, select { background: var(--bg); color: var(--fg); border: 1px solid var(--line);
+                border-radius: 4px; padding: 3px 5px; }
+input.num { width: 7em; }
+h3 { margin: 12px 0 6px; font-size: 15px; }
+.box { border: 1px solid var(--line); border-radius: 4px; padding: 8px; margin-bottom: 10px; }
+.scroll { max-height: 60vh; overflow: auto; }
+.mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; white-space: pre-wrap; }
+#toast { position: fixed; right: 12px; bottom: 12px; max-width: 50vw; padding: 8px 12px;
+         border-radius: 6px; background: var(--fg); color: var(--bg); display: none; z-index: 5; }
+img#cam { max-width: 100%; border: 1px solid var(--line); border-radius: 4px; background: #000; }
+.drift { color: var(--warn); }
+</style>
+</head>
+<body>
+<header id="strip"><span class="tile">connecting…</span></header>
+<nav id="tabs"></nav>
+<main>
+<section id="t-map">
+  <div class="row">
+    <div class="col" style="flex: 3 1 600px"><canvas id="map" class="map"></canvas></div>
+    <div class="col" style="flex: 1 1 260px">
+      <div class="box">
+        <h3>Passage plan</h3>
+        <div id="plan-info" class="muted">no plan</div>
+      </div>
+      <div class="box">
+        <h3>MANUAL field</h3>
+        <p class="muted">For when Ekko cannot fly: place the buoys yourself. The first flashing
+          blue is the ENTRY, the first steady blue the EXIT. Sent, it replaces Ekko's plan
+          on the boat and is resent every second until cleared.</p>
+        <label><input type="checkbox" id="edit-on"> edit on the map (click: place, click a
+          buoy: remove)</label><br>
+        <select id="edit-beacon"></select>
+        <div id="edit-count" class="muted"></div>
+        <button class="primary" id="field-send">Send field</button>
+        <button id="field-clear-boat">Clear on boat</button><br>
+        <button id="field-load">Copy current plan</button>
+        <button id="field-clear">Clear editor</button>
+      </div>
+      <button id="trail-clear">Clear trail</button>
+    </div>
+  </div>
+</section>
+
+<section id="t-mission">
+  <div class="row">
+    <div class="col">
+      <div class="box">
+        <h3>Run a built-in mission</h3>
+        <select id="m-name"></select>
+        <select id="m-tier"><option value="0">Core</option><option value="1">Advanced</option>
+          <option value="2">Disruptive</option></select>
+        timeout <input id="m-timeout" class="num" type="number" min="0" value="0"> s (0 = default)
+        <div style="margin-top: 6px">
+          <button class="primary" id="m-start">Start</button>
+          <button class="danger" id="m-stop">Stop</button>
+        </div>
+      </div>
+      <div class="box"><h3>Tree</h3><div id="m-state"></div>
+        <div class="scroll"><table id="m-nodes"></table></div></div>
+    </div>
+    <div class="col"><canvas id="map2" class="map small"></canvas></div>
+  </div>
+</section>
+
+<section id="t-sensors">
+  <div class="row">
+    <div class="col">
+      <h3>Camera</h3>
+      <div>model <select id="cam-model"><option>none</option><option>buoy</option>
+        <option>dock</option></select>
+        view <select id="cam-w"><option>320</option><option selected>640</option>
+          <option>960</option></select> px
+        <span id="cam-info" class="muted"></span></div>
+      <img id="cam" alt="camera">
+      <div id="cam-health" class="mono muted"></div>
+    </div>
+    <div class="col">
+      <h3>LiDAR (plan view, bow up)</h3>
+      <canvas id="lidar" class="map small"></canvas>
+      <div id="lidar-health" class="mono muted"></div>
+    </div>
+  </div>
+  <div class="box">
+    <h3>Camera settings</h3>
+    <div>profile <select id="cp-name"></select> <button id="cp-apply">Apply</button>
+      <button id="cp-delete">Delete</button>
+      &nbsp; save the live settings as <input id="cp-new" placeholder="name">
+      <button id="cp-save">Save</button></div>
+    <div id="cam-controls"></div>
+  </div>
+</section>
+
+<section id="t-nodes">
+  <div class="row">
+    <div class="col" style="flex: 2 1 500px"><div id="nodes"></div></div>
+    <div class="col">
+      <div class="box"><h3>Profiles</h3><div id="profiles"></div></div>
+      <div class="box"><h3>Jetson</h3><div id="sys"></div></div>
+      <div class="box"><h3>Power</h3><div id="power"></div>
+        <input id="pw-host" placeholder="type the hostname">
+        <button class="danger" data-verb="shutdown">Shut down</button>
+        <button class="danger" data-verb="reboot">Reboot</button></div>
+    </div>
+  </div>
+</section>
+
+<section id="t-reports">
+  <label><input type="checkbox" id="ocs-hb"> show heartbeats</label>
+  <div class="scroll"><table id="ocs"></table></div>
+</section>
+
+<section id="t-radio">
+  <button id="radio-test">Send test frame to Ekko</button>
+  <div class="row">
+    <div class="col"><h3>Systems</h3><table id="radio-sys"></table></div>
+    <div class="col"><h3>Streams</h3><table id="radio-streams"></table></div>
+  </div>
+  <h3>Frames</h3><div class="scroll"><table id="radio"></table></div>
+</section>
+
+<section id="t-logs">
+  level <select id="log-level"><option value="10">debug</option><option value="20" selected>info</option>
+    <option value="30">warn</option><option value="40">error</option></select>
+  node <select id="log-node"><option value="">all</option></select>
+  filter <input id="log-filter">
+  <label><input type="checkbox" id="log-follow" checked> follow</label>
+  <div id="logs" class="scroll mono" style="max-height: 75vh"></div>
+</section>
+
+<section id="t-params">
+  <div class="box">node <select id="p-node"></select> <button id="p-load">Load</button>
+    <button class="primary" id="p-set">Set changed</button>
+    <span class="muted">Live only: crusader_params.yaml stays the source of truth.</span></div>
+  <div class="box"><h3>Planner profiles (bt_runner_node)</h3>
+    <select id="pp-name"></select> <button id="pp-apply">Apply</button>
+    &nbsp; save the drifted planner values as <input id="pp-new" placeholder="name">
+    <button id="pp-save">Save</button> <span id="pp-info" class="muted"></span></div>
+  <table id="params"></table>
+</section>
+
+<section id="t-record">
+  <div class="box" id="rec-live"></div>
+  <div class="box">
+    <h3>New session</h3>
+    camera frames <input id="rec-hz" class="num" type="number" step="0.5" value="1"> fps
+    <button class="primary" id="rec-start">Start</button>
+    <button class="danger" id="rec-stop">Stop</button>
+    <button id="rec-bag-stop">Stop the bag only</button>
+    <div>also record these topics in a bag (<button id="rec-topics">load topics</button>):</div>
+    <div id="rec-topic-list" class="scroll" style="max-height: 30vh"></div>
+  </div>
+  <h3>Sessions</h3><table id="rec-sessions"></table>
+</section>
+</main>
+<div id="toast"></div>
+<script src="map.js"></script>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const TABS = [["map", "Map"], ["mission", "Mission"], ["sensors", "Sensors"], ["nodes", "Nodes"],
+              ["reports", "Reports"], ["radio", "Radio"], ["logs", "Logs"], ["params", "Params"],
+              ["record", "Record"]];
+const G = {link: null, state: null, nodes: null, tree: null, plan: null, logs: [], radio: [],
+           ocs: [], tab: "map", params: null, camControls: [], camProfiles: []};
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+}
+function fmt(v, d = 1, unit = "") { return v == null ? "—" : (+v).toFixed(d) + unit; }
+function ago(t) { return t == null ? "—" : new Date(t * 1000).toLocaleTimeString(); }
+let toastTimer;
+function toast(msg, ok = true) {
+  const t = $("toast"); t.textContent = msg; t.style.display = "block";
+  t.style.background = ok ? "" : "var(--bad)";
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.style.display = "none"), ok ? 3500 : 8000);
+}
+async function req(op, fields = {}, quiet = false) {
+  let r;
+  try {
+    r = await (await fetch("/req", {method: "POST", body: JSON.stringify(Object.assign({op}, fields))})).json();
+  } catch (e) { r = {ok: false, msg: String(e)}; }
+  if (!quiet || !r.ok) toast(`${op}: ${r.msg || (r.ok ? "ok" : "failed")}`, r.ok);
+  return r;
+}
+
+// ---- tabs -------------------------------------------------------------------
+for (const [id, label] of TABS) {
+  const b = document.createElement("button");
+  b.textContent = label; b.dataset.tab = id;
+  b.onclick = () => show(id);
+  $("tabs").appendChild(b);
+}
+function show(id) {
+  G.tab = id;
+  for (const b of $("tabs").children) b.classList.toggle("on", b.dataset.tab === id);
+  for (const [t] of TABS) $("t-" + t).classList.toggle("on", t === id);
+  CrsdMap.redraw();
+  if (id === "sensors") { camLoop(); lidarLoop(); loadCamera(); }
+  if (id === "mission" && !$("m-name").options.length) loadMissions();
+  if (id === "params") paramNodes();
+  if (id === "record") recordList();
+  if (id === "logs") logs();
+  if (id === "reports") ocs();
+  if (id === "radio") radio();
+}
+
+// ---- the event stream -------------------------------------------------------
+const handlers = {
+  link(f) { G.link = f; strip(); },
+  hello(f) { G.hello = f; },
+  state(f) { G.state = f; CrsdMap.update("state", f); strip(); system(); },
+  targets(f) { CrsdMap.update("targets", f); },
+  plan(f) { G.plan = f; CrsdMap.update("plan", f); planInfo(); },
+  path(f) { CrsdMap.update("path", f); },
+  hazards(f) { CrsdMap.update("hazards", f); },
+  nodes(f) { G.nodes = f; nodes(); },
+  tree(f) { G.tree = f; tree(); },
+  log(f) { if (f.replay) G.logs = []; G.logs.push(...f.items); G.logs = G.logs.slice(-2000); logs(); },
+  radio(f) { if (f.replay) G.radio = []; G.radio.push(...f.items); G.radio = G.radio.slice(-500);
+             G.radioSummary = f; radio(); },
+  ocs(f) { if (f.replay) G.ocs = []; G.ocs.push(...f.items); G.ocs = G.ocs.slice(-300); ocs(); },
+};
+const es = new EventSource("/events");
+es.onmessage = e => { const f = JSON.parse(e.data); (handlers[f.t] || (() => {}))(f); };
+es.onerror = () => { G.link = {up: false, error: "gcs_app is not running"}; strip(); };
+
+// ---- status strip -----------------------------------------------------------
+const TRI = ["?", "no", "yes"];
+function tile(text, cls = "") { return `<span class="tile ${cls}">${text}</span>`; }
+function strip() {
+  const L = G.link, s = G.state || {}, out = [];
+  if (!L || !L.up) out.push(tile(`<b>BOAT LINK DOWN</b> ${esc(L ? L.error : "")}`, "bad"));
+  else out.push(tile(`link <b class="ok">up</b> ${esc(L.boat)}`));
+  const age = s.stamp ? Date.now() / 1000 - s.stamp : null;
+  if (L && L.up && age != null && age > 3) out.push(tile(`state ${age.toFixed(0)} s old`, "warn"));
+  const fcu = s.fcu || {}, h = s.health;
+  out.push(tile(fcu.mode == null ? "mode —" : `<b>${esc(fcu.mode)}</b> ${fcu.armed ? '<b class="bad">ARMED</b>' : "disarmed"}`,
+                fcu.mode == null ? "warn" : ""));
+  if (h) {
+    out.push(tile(`E-stop <b>${["?", "off", "ENGAGED / RC lost"][h.estop]}</b>`, h.estop === 2 ? "bad" : h.estop ? "" : "warn"));
+    out.push(tile(`batt ${fmt(h.batt_v, 1, " V")} ${h.batt_pct == null ? "" : h.batt_pct + "%"}`));
+    out.push(tile(`GPS fix ${h.fix} · ${h.sats} sats · hdop ${fmt(h.hdop, 1)}`, h.fix >= 3 ? "" : "warn"));
+    out.push(tile(`EKF ${TRI[h.ekf]}`, h.ekf === 2 ? "" : "warn"));
+    out.push(tile(`pre-arm ${TRI[h.prearm]}`, h.prearm === 2 ? "" : "warn"));
+    if (h.text) out.push(tile(esc(h.text), h.sev <= 3 ? "bad" : h.sev <= 4 ? "warn" : ""));
+  } else out.push(tile("autopilot health: no data", "warn"));
+  const b = s.boat || {};
+  out.push(tile(b.lat == null ? "position —" : `hdg ${fmt(b.hdg, 0, "°")} · ${fmt(b.spd, 1, " m/s")}`,
+                b.lat == null ? "warn" : ""));
+  const m = s.mission;
+  if (m) out.push(tile(m.state === "RUNNING" ? `<b>${esc(m.name)}</b> ${esc(m.running_node || "")}`
+                                            : `mission idle${m.last ? ": " + esc(m.last.name) + " " + esc(m.last.outcome) : ""}`,
+                       m.warning ? "warn" : ""));
+  if (s.record) out.push(tile(`● REC ${esc(s.record.name)}`, "bad"));
+  if (s.sys) out.push(tile(`CPU ${fmt(s.sys.cpu, 0, "%")} · ${fmt(s.sys.temp, 0, "°C")}`));
+  if (s.link && s.link.dropped) out.push(tile(`${s.link.dropped} frames dropped`, "warn"));
+  $("strip").innerHTML = out.join("");
+}
+
+// ---- map + MANUAL field -----------------------------------------------------
+CrsdMap.attach($("map"), {editable: true});
+CrsdMap.attach($("map2"));
+for (const [code, [name]] of Object.entries(CrsdMap.BEACON))
+  $("edit-beacon").insertAdjacentHTML("beforeend", `<option value="${code}">${name}</option>`);
+$("edit-beacon").value = 2;
+$("edit-beacon").onchange = e => CrsdMap.setBeacon(+e.target.value);
+$("edit-on").onchange = e => CrsdMap.setEditing(e.target.checked);
+CrsdMap.onEdit(() => {
+  const p = CrsdMap.manualPlan();
+  $("edit-count").textContent = `${p.buoys.length} buoys · entry ${p.entry ? "set" : "none"} · exit ${p.exit ? "set" : "none"}`;
+});
+$("field-send").onclick = () => {
+  const p = CrsdMap.manualPlan();
+  if (!p.buoys.length) return toast("place at least one buoy first", false);
+  req("manual_field", {plan: p});
+};
+$("field-clear-boat").onclick = () => confirm("Clear the MANUAL field on the boat? bt_runner will have no plan.") && req("manual_field", {clear: true});
+$("field-load").onclick = () => CrsdMap.loadPlan();
+$("field-clear").onclick = () => CrsdMap.clearManual();
+$("trail-clear").onclick = () => CrsdMap.clearTrail();
+function planInfo() {
+  const p = G.plan;
+  $("plan-info").innerHTML = !p || !p.ok ? "no plan on the boat" :
+    `<b>${p.source === "manual" ? "MANUAL" : "Ekko"}</b> v${p.version}, ${p.buoys.length} buoys, ` +
+    `heard ${fmt(p.age, 0)} s ago<br>entry ${p.entry ? "yes" : "none"} · exit ${p.exit ? "yes" : "none"}` +
+    (p.ekko_too ? '<br><b class="warn">Ekko is publishing too: the boat sees both plans.</b>' : "");
+}
+
+// ---- mission ----------------------------------------------------------------
+async function loadMissions() {
+  const r = await req("missions_list", {}, true);
+  if (!r.ok) return;
+  $("m-name").innerHTML = r.data.names.map(n => `<option>${esc(n)}</option>`).join("");
+  $("m-name").value = r.data.names.includes("competition") ? "competition" : r.data.names[0];
+}
+$("m-start").onclick = () => req("run_mission", {name: $("m-name").value, tier: +$("m-tier").value,
+                                                 timeout_s: +$("m-timeout").value || 0});
+$("m-stop").onclick = () => req("cancel_mission");
+function tree() {
+  const t = G.tree || {};
+  const last = t.last ? `last: <b>${esc(t.last.name)}</b> ${esc(t.last.outcome)} — ${esc(t.last.detail)} (${fmt(t.last.elapsed_s, 0)} s)` : "";
+  $("m-state").innerHTML = !t.ok ? '<span class="warn">no /crsd/bt_status: is bt_runner_node up?</span>' :
+    t.state === "RUNNING"
+      ? `<b>RUNNING ${esc(t.name)}</b> ${fmt(t.elapsed_s, 0)} s · node <b>${esc(t.running_node)}</b> · task ${esc(t.current_task)}` +
+        (t.warning ? `<br><b class="warn">${esc(t.warning)}</b>` : "")
+      : `idle. ${last}`;
+  $("m-nodes").innerHTML = (t.nodes || []).map(n =>
+    `<tr><td>${esc(n.name)}</td><td class="muted">${esc(n.type)}</td><td class="${n.status === "RUNNING" ? "ok" : n.status === "FAILURE" ? "bad" : "muted"}">${esc(n.status)}</td></tr>`).join("");
+}
+
+// ---- sensors ----------------------------------------------------------------
+let camBusy = false;
+function camLoop() {
+  if (G.tab !== "sensors" || camBusy) return;
+  camBusy = true;
+  const img = $("cam"), w = $("cam-w").value, url = `/cam.jpg?w=${w}&q=50&t=${Date.now()}`;
+  fetch(url).then(async r => {
+    if (r.ok) {
+      const old = img.src; img.src = URL.createObjectURL(await r.blob());
+      if (old.startsWith("blob:")) URL.revokeObjectURL(old);
+      $("cam-info").textContent = `${r.headers.get("X-Size")} · ${r.headers.get("X-Age")} s old`;
+    } else $("cam-info").textContent = await r.text();
+  }).catch(e => ($("cam-info").textContent = String(e)))
+    .finally(() => { camBusy = false; setTimeout(camLoop, 500); });
+}
+let lidarBusy = false;
+function lidarLoop() {
+  if (G.tab !== "sensors" || lidarBusy) return;
+  lidarBusy = true;
+  fetch("/lidar.json?max=3000").then(r => r.json()).then(drawLidar)
+    .catch(() => drawLidar({ok: false, msg: "gcs_app did not answer"}))
+    .finally(() => { lidarBusy = false; setTimeout(lidarLoop, 500); });
+}
+function drawLidar(d) {
+  const cv = $("lidar"), c = cv.getContext("2d");
+  cv.width = cv.clientWidth; cv.height = cv.clientHeight;
+  const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  c.fillStyle = css("--map-bg"); c.fillRect(0, 0, cv.width, cv.height);
+  c.fillStyle = css("--muted"); c.font = "12px system-ui";
+  if (!d.ok) { c.fillText(d.msg || "no preview", 10, 20); return; }
+  const range = 20, s = Math.min(cv.width / 2, cv.height) / range, ox = cv.width / 2, oy = cv.height - 10;
+  c.strokeStyle = css("--grid");
+  for (let r = 5; r <= range; r += 5) { c.beginPath(); c.arc(ox, oy, r * s, Math.PI, 2 * Math.PI); c.stroke(); c.fillText(`${r} m`, ox + 3, oy - r * s - 2); }
+  c.fillStyle = css("--accent");
+  for (const [x, y] of d.points) c.fillRect(ox - y * s - 1, oy - x * s - 1, 2, 2);   // x fwd = up, y left = left
+  c.fillStyle = css("--fg"); c.fillText(`${d.points.length} points, ${fmt(d.age, 1)} s old`, 10, 16);
+}
+$("cam-model").onchange = async e => {
+  const node = camNode(); if (!node) return toast("camera_node is not running", false);
+  await req("params_set", {node, values: {model: e.target.value}});
+};
+function camNode() { return ((G.nodes || {}).graph || []).find(n => n.endsWith("/camera_node")); }
+async function loadCamera() {
+  const pr = await req("cam_profiles_list", {}, true);
+  if (pr.ok) {
+    G.camControls = pr.data.controls; G.camProfiles = pr.data.profiles;
+    $("cp-name").innerHTML = pr.data.profiles.map(p => `<option>${esc(p.name)}</option>`).join("");
+  }
+  const node = camNode();
+  if (!node) { $("cam-controls").innerHTML = '<p class="muted">camera_node is not running.</p>'; return; }
+  const r = await req("params_list", {node}, true);
+  if (!r.ok) return;
+  const rows = Object.fromEntries(r.data.params.map(p => [p.name, p]));
+  if (rows.model) $("cam-model").value = rows.model.value;
+  $("cam-controls").innerHTML = G.camControls.map(g =>
+    `<h3>${esc(g.group)}</h3><table>` + g.controls.filter(n => rows[n]).map(n => paramRow(rows[n], "cc")).join("") + "</table>").join("") +
+    '<button class="primary" id="cc-set">Set changed</button>';
+  $("cc-set").onclick = () => setChanged(node, "cc");
+}
+$("cp-apply").onclick = async () => { await req("cam_profile_apply", {name: $("cp-name").value}); loadCamera(); };
+$("cp-delete").onclick = async () => confirm(`Delete camera profile ${$("cp-name").value}?`) && (await req("cam_profile_delete", {name: $("cp-name").value}), loadCamera());
+$("cp-save").onclick = async () => { await req("cam_profile_save", {name: $("cp-new").value.trim()}); loadCamera(); };
+
+// ---- parameters (shared by Params and Sensors) --------------------------------
+function paramRow(p, prefix) {
+  const id = `${prefix}-${p.name}`, range = p.lo != null ? `${p.lo} … ${p.hi}` : "";
+  const yaml = p.in_yaml ? `<span class="${JSON.stringify(p.default) !== JSON.stringify(p.value) ? "drift" : "muted"}">yaml ${esc(JSON.stringify(p.default))}</span>` : '<span class="muted">not in yaml</span>';
+  let input;
+  if (!p.editable) input = `<span title="${esc(p.reason)}">${esc(JSON.stringify(p.value))}</span>`;
+  else if (p.choices && p.choices.length)
+    input = `<select id="${id}" data-name="${esc(p.name)}" data-type="${p.type}" data-orig="${esc(p.value)}">` +
+            p.choices.map(c => `<option ${c === p.value ? "selected" : ""}>${esc(c)}</option>`).join("") + "</select>";
+  else if (p.type === "bool")
+    input = `<input type="checkbox" id="${id}" data-name="${esc(p.name)}" data-type="bool" data-orig="${p.value}" ${p.value ? "checked" : ""}>`;
+  else input = `<input id="${id}" class="num" data-name="${esc(p.name)}" data-type="${p.type}" data-orig="${esc(p.value)}" value="${esc(p.value)}">`;
+  return `<tr><td>${esc(p.name)}</td><td>${input}</td><td>${yaml}</td><td class="muted">${range}</td></tr>`;
+}
+function setChanged(node, prefix) {
+  const values = {};
+  for (const e of document.querySelectorAll(`[id^="${prefix}-"][data-name]`)) {
+    const t = e.dataset.type;
+    const v = t === "bool" ? e.checked : t === "integer" ? parseInt(e.value, 10) : t === "double" ? parseFloat(e.value) : e.value;
+    if (String(v) !== e.dataset.orig) values[e.dataset.name] = v;
+  }
+  if (!Object.keys(values).length) return toast("nothing changed");
+  return req("params_set", {node, values}).then(() => (prefix === "cc" ? loadCamera() : loadParams()));
+}
+function paramNodes() {
+  const sel = $("p-node"), cur = sel.value, graph = (G.nodes || {}).graph || [];
+  sel.innerHTML = graph.map(n => `<option>${esc(n)}</option>`).join("");
+  if (graph.includes(cur)) sel.value = cur;
+  planners();
+}
+async function loadParams() {
+  const node = $("p-node").value; if (!node) return;
+  const r = await req("params_list", {node}, true);
+  if (!r.ok) return;
+  $("params").innerHTML = "<tr><th>name</th><th>live</th><th>yaml</th><th>range</th></tr>" +
+    r.data.params.map(p => paramRow(p, "pp")).join("");
+}
+$("p-load").onclick = loadParams;
+$("p-set").onclick = () => setChanged($("p-node").value, "pp");
+async function planners() {
+  const r = await req("planner_profiles_list", {}, true);
+  if (!r.ok) return;
+  $("pp-name").innerHTML = r.data.profiles.map(p => `<option value="${esc(p.name)}">${esc(p.title)} (${p.origin})</option>`).join("");
+  $("pp-info").textContent = r.data.sources.filter(s => !s.ok).map(s => `${s.origin}: ${s.reason}`).join("; ");
+}
+$("pp-apply").onclick = () => req("planner_profile_apply", {name: $("pp-name").value});
+$("pp-save").onclick = async () => { await req("planner_profile_save", {name: $("pp-new").value.trim()}); planners(); };
+
+// ---- nodes, system, power -----------------------------------------------------
+function nodes() {
+  const N = G.nodes; if (!N) return;
+  $("nodes").innerHTML = N.groups.map(g => {
+    const items = N.items.filter(i => i.group === g.id);
+    return `<h3>${esc(g.label)} <span class="muted">${esc(g.hint)}</span></h3><table>` + items.map(i =>
+      `<tr><td><b>${esc(i.name)}</b><br><span class="muted">${esc(i.note)}</span></td>
+       <td class="${i.running ? "ok" : "muted"}">${esc(i.state)}<br><span class="muted">${esc(i.detail)}</span></td>
+       <td>${i.running ? "" : `<button data-act="start" data-name="${i.name}">Start</button>`}
+           ${i.running && !i.protected ? `<button data-act="restart" data-name="${i.name}">Restart</button>
+             <button class="danger" data-act="stop" data-name="${i.name}" ${i.stoppable ? "" : "disabled"} title="${esc(i.stop_reason)}">Stop</button>` : ""}
+           ${i.protected ? '<span class="muted">protected</span>' : ""}</td>
+       <td class="mono muted">${esc((i.tail || []).slice(-3).join("\n"))}</td></tr>`).join("") + "</table>";
+  }).join("");
+  $("profiles").innerHTML = N.profiles.map(p => `<button data-profile="${p.id}">Start ${esc(p.label)}</button>`).join(" ");
+  if (G.tab === "params" && !$("p-node").options.length) paramNodes();
+}
+$("nodes").onclick = async e => {
+  const b = e.target.closest("button[data-act]"); if (!b) return;
+  const name = b.dataset.name, action = b.dataset.act;
+  if (action === "stop" && !confirm(`Stop ${name}?`)) return;
+  let r = await req("node", {action, name});
+  const item = (G.nodes.items || []).find(i => i.name === name);
+  if (!r.ok && action === "start" && item && item.conflicts.length &&
+      confirm(`${item.conflicts.join(", ")} holds the same device. Stop it and start ${name}?`))
+    await req("node", {action, name, stop_conflicts: true});
+};
+$("profiles").onclick = e => { const b = e.target.closest("button"); if (b) req("node", {action: "profile", name: b.dataset.profile}); };
+function system() {
+  const s = (G.state || {}).sys, p = (G.state || {}).power;
+  if (s) $("sys").innerHTML = `CPU ${fmt(s.cpu, 0, "%")} · ${fmt(s.temp, 0, " °C")}<br>memory ${fmt(s.mem_gb, 1)} / ${fmt(s.mem_total_gb, 1)} GB<br>disk free ${fmt(s.disk_gb, 1, " GB")}<br>up ${esc(s.uptime)}`;
+  if (p) $("power").innerHTML = !p.available ? `<span class="muted">${esc(p.reason)}</span>` :
+    p.locked ? `<b class="bad">locked: ${esc(p.lock_reason)}</b>` : `host <b>${esc(p.hostname)}</b>`;
+}
+for (const b of document.querySelectorAll("button[data-verb]"))
+  b.onclick = () => confirm(`${b.dataset.verb.toUpperCase()} the Jetson?`) && req("power", {verb: b.dataset.verb, hostname: $("pw-host").value.trim()});
+
+// ---- reports, radio, logs ---------------------------------------------------------
+function ocs() {
+  const hb = $("ocs-hb").checked;
+  $("ocs").innerHTML = "<tr><th>time</th><th>dir</th><th>kind</th><th>status</th><th>body</th></tr>" +
+    G.ocs.filter(o => hb || o.kind !== "heartbeat").slice(-200).reverse().map(o =>
+      `<tr><td>${ago(o.stamp)}</td><td>${esc(o.dir)}</td><td><b>${esc(o.kind)}</b></td>
+       <td class="${/^(sent|republished)$/.test(o.status) ? "ok" : "warn"}">${esc(o.status)}</td>
+       <td class="mono">${esc(JSON.stringify(o.body))}</td></tr>`).join("");
+}
+$("ocs-hb").onchange = ocs;
+function radio() {
+  const s = G.radioSummary || {};
+  $("radio-sys").innerHTML = "<tr><th>system</th><th>rx</th><th>tx</th><th>heard</th><th>last</th></tr>" +
+    (s.systems || []).map(x => `<tr><td>${x.sys} ${esc(x.name)}</td><td>${x.rx}</td><td>${x.tx}</td><td>${fmt(x.heard_s, 1, " s ago")}</td><td>${esc(x.last)}</td></tr>`).join("");
+  $("radio-streams").innerHTML = "<tr><th>stream</th><th>rate</th><th>of expected</th><th>longest gap</th></tr>" +
+    (s.streams || []).map(x => `<tr><td>${esc(x.name)}</td><td>${fmt(x.rate_hz, 2, " Hz")}</td><td>${fmt(x.pct, 0, "%")}</td><td>${fmt(x.longest_gap_s, 1, " s")}</td></tr>`).join("");
+  $("radio").innerHTML = G.radio.slice(-200).reverse().map(r =>
+    `<tr><td>${ago(r.t)}</td><td>${esc(r.dir)}</td><td>${esc(r.who)}</td><td><b>${esc(r.name)}</b></td><td class="mono">${esc(r.summary)}</td><td>${r.bytes} B</td></tr>`).join("");
+}
+$("radio-test").onclick = () => req("radio_test");
+function logs() {
+  const nodeSel = $("log-node"), known = new Set([...nodeSel.options].map(o => o.value));
+  for (const r of G.logs) if (!known.has(r.node)) { known.add(r.node); nodeSel.insertAdjacentHTML("beforeend", `<option>${esc(r.node)}</option>`); }
+  if (G.tab !== "logs") return;
+  const node = nodeSel.value, f = $("log-filter").value.toLowerCase(), cls = {30: "warn", 40: "bad", 50: "bad"};
+  const box = $("logs");
+  box.innerHTML = G.logs.filter(r => (!node || r.node === node) && (!f || r.msg.toLowerCase().includes(f))).slice(-800)
+    .map(r => `<div class="${cls[r.level] || ""}">${ago(r.t)} [${esc(r.level_name)}] ${esc(r.node)}: ${esc(r.msg)}</div>`).join("");
+  if ($("log-follow").checked) box.scrollTop = box.scrollHeight;
+}
+$("log-level").onchange = e => req("log_level", {level: +e.target.value}, true);
+$("log-node").onchange = logs; $("log-filter").oninput = logs;
+
+// ---- record -------------------------------------------------------------------------
+async function recordList() {
+  const r = await req("record_list", {}, true);
+  if (!r.ok) return;
+  const d = r.data, live = d.live, bag = d.bag || {};
+  $("rec-live").innerHTML = (live ? `<b class="bad">● recording ${esc(live.name)}</b> ${fmt(live.elapsed_s, 0)} s, ${fmt(live.size_mb, 1)} MB, frames ${esc(JSON.stringify(live.frames))}` +
+      (live.error ? ` <b class="warn">${esc(live.error)}</b>` : "") : "not recording") +
+    (bag.recording ? `<br>bag: ${bag.topics.length} topics, ${fmt(bag.size_mb, 1)} MB, ${fmt(bag.rate_mb_s, 2)} MB/s, ${fmt(bag.hours_left, 1)} h left` : "") +
+    `<br><span class="${d.persist.persists ? "muted" : "bad"}">${esc(d.dir)} ${d.persist.persists ? "persists (" + esc(d.persist.source) + ")" : "is NOT on a bind mount: lost with the container"}</span>`;
+  $("rec-sessions").innerHTML = "<tr><th>session</th><th>size</th><th>frames</th><th></th></tr>" + d.sessions.map(s =>
+    `<tr><td>${esc(s.name)}${s.recording ? ' <b class="bad">live</b>' : ""}</td><td>${fmt(s.size_mb, 1, " MB")}</td><td>${esc(JSON.stringify(s.frames))}</td>
+     <td>${s.recording ? "" : `<a href="/download?name=${encodeURIComponent(s.name)}">download</a> <button data-del="${esc(s.name)}">delete</button>`}</td></tr>`).join("");
+  if (G.tab === "record") setTimeout(recordList, 2000);
+}
+$("rec-sessions").onclick = async e => { const n = e.target.dataset.del; if (n && confirm(`Delete ${n}?`)) { await req("record_delete", {name: n}); } };
+$("rec-topics").onclick = async () => {
+  const r = await req("record_topics", {}, true);
+  if (r.ok) $("rec-topic-list").innerHTML = r.data.topics.map(t =>
+    `<label style="display:block"><input type="checkbox" value="${esc(t.name)}"> ${esc(t.name)} <span class="muted">${esc(t.type)}</span></label>`).join("");
+};
+$("rec-start").onclick = () => req("record", {kind: "session", action: "start", frame_hz: +$("rec-hz").value,
+  topics: [...document.querySelectorAll("#rec-topic-list input:checked")].map(i => i.value)});
+$("rec-stop").onclick = () => req("record", {kind: "session", action: "stop"});
+$("rec-bag-stop").onclick = () => req("record", {kind: "bag", action: "stop"});
+
+show("map");
+</script>
+</body>
+</html>

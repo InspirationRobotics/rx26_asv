@@ -14,8 +14,8 @@ competition day. It CAN fire the pump, but only through the bridge's
 /crsd/pump_cmd, which refuses anything its own checks do not allow.
 
 Layout: squirt_core (the session, no ROS, no HTTP) + an adapter (fake_boat or
-ros_adapter) + crusader_groundstation's GcsServer (the page, GET /state, POST
-actions re-checked on the server).
+ros_adapter) + page_server's GcsServer (the page, GET /state, POST actions
+re-checked on the server).
 """
 import argparse
 import os
@@ -23,14 +23,13 @@ import re
 import sys
 import tempfile
 import threading
-import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 sys.path.insert(0, str(HERE))
 
-from squirt_core import App, DEFAULTS, load_config   # noqa: E402
+from squirt_core import App, load_config   # noqa: E402
 
 
 def check_page_is_wired(page):
@@ -56,17 +55,6 @@ def load_section(path):
     except Exception as e:
         print(f"squirt_cal: could not read the squirt_cal section of {path}: {e}")
         return None
-
-
-def import_server():
-    try:
-        from crusader_groundstation.gcs_server import GcsServer
-    except ImportError:
-        # Not installed (a laptop): take it off the source tree. gcs_server
-        # imports nothing from ROS, by design.
-        sys.path.insert(0, str(REPO / "crusader_groundstation"))
-        from crusader_groundstation.gcs_server import GcsServer
-    return GcsServer
 
 
 def main(argv=None):
@@ -115,7 +103,7 @@ def main(argv=None):
     if app.log.error:
         print(f"squirt_cal: {app.log.error}")
 
-    GcsServer = import_server()
+    from page_server import GcsServer
     server = GcsServer(page.encode("utf-8"), app.snapshot, app.action)
     port = args.port or cfg["port"]
     server.start(port)

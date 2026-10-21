@@ -61,7 +61,7 @@ CONFIG_DRIVEN_NODES = set("""
     camera_node
     lidar_node
     target_tracker
-    ground_station
+    gcs_bridge
     bt_runner_node
     rfd_link_node
     nav_frames_node
@@ -77,15 +77,10 @@ SIM_ONLY_PACKAGES = {"crusader_sim"}
 # param). A mismatch does not fail: both start healthy, `ros2 topic list` shows
 # two plausible names, and the consumer never receives anything — the most
 # expensive kind of green.
-TOPIC_PAIRS = (
-    # A leg-topic mismatch is a blank map, not an error (docs/nav2_avoidance_spec.md).
-    (("bt_runner_node", "nav_leg_topic"), ("ground_station", "nav_leg_topic")),
-)
-
 # Ports that must stay distinct: the loser of a bind fails at startup with an
-# address-in-use that reads like a crash. The ground station EMBEDS the viewers
-# rather than proxying them, so it must avoid their ports.
-PORT_OWNERS = (("ground_station", "port"), ("squirt_cal", "port"))
+# address-in-use that reads like a crash.
+PORT_OWNERS = (("gcs_bridge", "port"), ("squirt_cal", "port"))
+GCS_BRIDGE = REPO / "crusader_groundstation" / "crusader_groundstation" / "gcs_bridge.py"
 
 OCS_LINK = (REPO / "crusader_groundstation" / "crusader_groundstation"
             / "ocs_link.py")
@@ -262,19 +257,17 @@ def check_params_yaml():
     except KeyError as e:
         fail("camera extrinsic consistent", f"missing key {e}")
 
-    # Producer/consumer topic names (see TOPIC_PAIRS).
-    for (pn, pk), (cn, ck) in TOPIC_PAIRS:
-        try:
-            a, b = cfg[pn]["ros__parameters"][pk], cfg[cn]["ros__parameters"][ck]
-        except KeyError as e:
-            fail(f"topic {pn}.{pk} -> {cn}.{ck}", f"missing key {e}")
-            continue
-        if a != b:
-            fail(f"topic {pn}.{pk} -> {cn}.{ck}",
-                 f"{a!r} != {b!r} — both nodes start, neither complains, and "
-                 "the consumer receives nothing")
+    # A leg-topic mismatch is a blank path on the map, not an error.
+    try:
+        leg = _module_literals(GCS_BRIDGE)["LEG_TOPIC"]
+        bt_leg = cfg["bt_runner_node"]["ros__parameters"]["nav_leg_topic"]
+        if leg != bt_leg:
+            fail("leg topic bt_runner -> gcs_bridge",
+                 f"bt_runner_node.nav_leg_topic {bt_leg!r} != gcs_bridge.LEG_TOPIC {leg!r}")
         else:
-            ok(f"topic {pn}.{pk} -> {cn}.{ck}", a)
+            ok("leg topic bt_runner -> gcs_bridge", leg)
+    except KeyError as e:
+        fail("leg topic bt_runner -> gcs_bridge", f"missing key {e}")
 
     # UDP port discipline on the MAVLink links. The boat owns 1455x so a --out
     # line names its vehicle. The flight stack's port is never taken by anything
@@ -327,7 +320,9 @@ def check_params_yaml():
     clash = False
     for node, key in PORT_OWNERS:
         try:
-            port = cfg[node]["ros__parameters"][key]
+            values = (_effective(cfg, node, GCS_BRIDGE) if node == "gcs_bridge"
+                      else cfg[node]["ros__parameters"])
+            port = values[key]
         except KeyError as e:
             fail("http ports distinct", f"missing key {e}")
             clash = True

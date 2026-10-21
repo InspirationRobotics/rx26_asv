@@ -119,7 +119,7 @@ class TrackerParams:
                                      # contain no colour word: bt_runner's
                                      # beaconFromLabel() matches substrings
     colour_family_shapes: tuple = ("diamond",)
-                                     # oak_detector's vocabulary is
+                                     # buoy_model's vocabulary is
                                      # [flash_|off_]<colour>_<shape> or a bare <shape>:
                                      # every label ending in _<shape>, and <shape> itself,
                                      # is one family per shape; bare and off_ labels are

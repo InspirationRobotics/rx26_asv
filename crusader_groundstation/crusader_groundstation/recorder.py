@@ -6,14 +6,9 @@ Three streams into one timestamped directory:
                     state, and every tracked target. Line-delimited so a run
                     that ends in a crash still parses up to the last complete
                     line, which a single JSON array would not.
-  camera/*.jpg      frames pulled from whichever MJPEG viewer is running
-  lidar/*.jpg       the same, from the LiDAR viewer
-
-FRAMES ARE PULLED FROM THE VIEWERS, not captured again: buoy_detector and
-lidar_view already encode JPEG for the browser, so attaching as one more MJPEG
-client costs the producer nothing, where a recorder encoding its own JPEGs would
-double the encode cost on a Jetson already running inference. Recording
-therefore only works while a viewer is up.
+  camera/*.jpg      camera_node's raw frames (/crsd/camera/raw/compressed), which
+                    it encodes only while something subscribes. The LiDAR goes in
+                    the bag.
 
 RECORDING HAPPENS ON THE BOAT; THE DOWNLOAD IS SEPARATE AND EXPLICIT. Writing
 frames across the WiFi link would put the camera's ~18 Mbps on the air for the
@@ -24,7 +19,6 @@ anyone expects, and a full root filesystem takes down the whole stack. Recording
 refuses to start below the floor and stops itself, loudly, if it crosses it
 mid-run.
 """
-import io
 import json
 import os
 import re
@@ -32,13 +26,10 @@ import shutil
 import tarfile
 import threading
 import time
-import urllib.request
 
 # A session name reaches the filesystem, so it is generated here and validated
 # on the way back in. Nothing but these characters, ever.
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-
-JPEG_BOUNDARY_HINT = b"\xff\xd8"        # SOI; used to resync a mangled stream
 
 
 def safe_session_dir(root, name):
@@ -206,87 +197,35 @@ def dir_size_mb(path):
     return round(dir_size_bytes(path) / 1048576.0, 1)
 
 
-class MjpegPuller(threading.Thread):
-    """Saves frames from one MJPEG endpoint at a bounded rate.
+class FrameWriter:
+    """Saves the JPEGs it is handed, at most rate_hz of them."""
 
-    Parses multipart/x-mixed-replace by finding JPEG start-of-image and
-    end-of-image markers rather than trusting the boundary string, which also lets
-    the reader resynchronise after a partial frame.
-    """
-
-    def __init__(self, url, out_dir, rate_hz, on_error=None, quality_note=""):
-        super().__init__(daemon=True)
-        self.url = url
+    def __init__(self, out_dir, rate_hz, on_error=None):
         self.out_dir = out_dir
         self.period = 1.0 / max(rate_hz, 0.01)
         self.on_error = on_error
-        self.quality_note = quality_note
-        self._stop = threading.Event()
         self.count = 0
-        self.last_error = ""
+        self._next = 0.0
+        self._failed = False
+        os.makedirs(out_dir, exist_ok=True)
 
-    def stop(self):
-        self._stop.set()
-
-    def run(self):
-        os.makedirs(self.out_dir, exist_ok=True)
-        while not self._stop.is_set():
-            try:
-                self._pull()
-            except Exception as e:
-                self.last_error = str(e)
-                if self.on_error:
-                    self.on_error(f"{self.url}: {e}")
-                # A viewer that is not up yet, or was restarted, is normal during a session:
-                # retry slowly rather than spinning on connection refused.
-                self._stop.wait(3.0)
-
-    def _pull(self):
-        req = urllib.request.Request(self.url)
-        with urllib.request.urlopen(req, timeout=10) as stream:
-            # read1(), NOT read(): HTTPResponse.read(n) blocks until it has all n bytes, so
-            # a stream of small JPEGs buffers for a second and every frame in it gets the
-            # same timestamp, and the rate gate keeps one frame of the ten asked for.
-            # read1() returns what has arrived.
-            read = getattr(stream, "read1", None) or stream.read
-            buf = b""
-            next_save = 0.0
-            while not self._stop.is_set():
-                chunk = read(8192)
-                if not chunk:
-                    return                      # producer closed; reconnect
-                buf += chunk
-                while True:
-                    start = buf.find(b"\xff\xd8")
-                    end = buf.find(b"\xff\xd9", start + 2) if start >= 0 else -1
-                    if start < 0 or end < 0:
-                        break
-                    frame = buf[start:end + 2]
-                    buf = buf[end + 2:]
-                    now = time.monotonic()
-                    if now >= next_save:
-                        next_save = now + self.period
-                        self._save(frame)
-                # A stream that never yields a complete frame must not grow
-                # the buffer without bound; 4 MB is far past any sane JPEG.
-                if len(buf) > 4_000_000:
-                    buf = buf[-1_000_000:]
-
-    def _save(self, frame):
+    def put(self, jpeg, now=None):
+        now = time.monotonic() if now is None else now
+        if self._failed or now < self._next:
+            return
+        self._next = now + self.period
         self.count += 1
-        path = os.path.join(self.out_dir, f"{self.count:06d}.jpg")
         try:
-            with open(path, "wb") as f:
-                f.write(frame)
+            with open(os.path.join(self.out_dir, f"{self.count:06d}.jpg"), "wb") as f:
+                f.write(jpeg)
         except OSError as e:
-            self.last_error = str(e)
+            self._failed = True         # a full or gone disk: stop trying, say so once
             if self.on_error:
-                self.on_error(f"write failed: {e}")
-            self._stop.set()
+                self.on_error(f"frame write failed: {e}")
 
 
 class Session:
-    """One recording: a directory, a telemetry file, and up to two pullers."""
+    """One recording: a directory, a telemetry file, and its frame writers."""
 
     def __init__(self, root, name, min_free_gb, logger=None):
         self.root = root
@@ -297,7 +236,7 @@ class Session:
         self.started = time.time()
         self.stopped = None
         self.samples = 0
-        self.pullers = {}
+        self.frames = {}
         self.error = ""
         os.makedirs(self.dir, exist_ok=True)
         self._tel = open(os.path.join(self.dir, "telemetry.jsonl"), "a",
@@ -316,13 +255,16 @@ class Session:
             self._tel.flush()
             self.samples += 1
 
-    def add_puller(self, key, url, rate_hz):
-        p = MjpegPuller(url, os.path.join(self.dir, key), rate_hz,
-                        on_error=self._on_puller_error)
-        self.pullers[key] = p
-        p.start()
+    def add_frames(self, key, rate_hz):
+        self.frames[key] = FrameWriter(os.path.join(self.dir, key), rate_hz,
+                                       on_error=self._on_frame_error)
 
-    def _on_puller_error(self, message):
+    def put_frame(self, key, jpeg):
+        writer = self.frames.get(key)
+        if writer is not None and self.stopped is None:
+            writer.put(jpeg)
+
+    def _on_frame_error(self, message):
         self.error = message
         if self.log:
             self.log(f"recorder: {message}")
@@ -347,25 +289,19 @@ class Session:
             if self.stopped:
                 return
             self.stopped = time.time()
-        for p in self.pullers.values():
-            p.stop()
         try:
             self._tel.close()
         except OSError:
             pass
         self.write_meta()
 
-    def puller_stats(self):
-        """(saved frame counts, capture rates) per viewer, in one walk.
-
-        Read back OFF the pullers, not echoed from the request, so the number on screen
-        and in meta.json is the rate frames are actually saved at.
-        """
-        return ({k: p.count for k, p in self.pullers.items()},
-                {k: round(1.0 / p.period, 2) for k, p in self.pullers.items()})
+    def frame_stats(self):
+        """(saved frame counts, capture rates) per source, read off the writers."""
+        return ({k: w.count for k, w in self.frames.items()},
+                {k: round(1.0 / w.period, 2) for k, w in self.frames.items()})
 
     def write_meta(self):
-        counts, rates = self.puller_stats()
+        counts, rates = self.frame_stats()
         meta = {
             "name": self.name,
             "started": self.started,
@@ -386,7 +322,7 @@ class Session:
         return meta
 
     def status(self):
-        counts, rates = self.puller_stats()
+        counts, rates = self.frame_stats()
         return {
             "name": self.name,
             "recording": self.stopped is None,
@@ -412,12 +348,10 @@ class Recorder:
         os.makedirs(root, exist_ok=True)
 
     def start(self, sources, frame_hz):
-        """Begin a session. `sources` is {key: url} for MJPEG endpoints.
+        """Begin a session. `sources` are the frame keys to record (put_frame feeds them).
 
         `frame_hz` is one rate for every source, or a {key: hz} mapping from
-        frame_rates(): per source because 30 fps of annotated camera is wanted while
-        30 fps of a plan view redrawn from a 10 Hz sensor is three copies of every
-        frame.
+        frame_rates().
 
         Returns (ok, message). Refuses when a session is already live: two recorders
         in one directory corrupt it in a way that looks fine until it is read.
@@ -429,14 +363,14 @@ class Recorder:
             return False, (f"refusing to start: {free:.1f} GB free, floor is "
                            f"{self.min_free_gb:.1f} GB")
         name = time.strftime("%Y%m%d-%H%M%S")
-        # Resolved once, for every source, so the puller and the log line
+        # Resolved once, for every source, so the writer and the log line
         # cannot be told two different numbers.
         rates = {k: (frame_hz.get(k, FALLBACK_FRAME_HZ)
                      if isinstance(frame_hz, dict) else frame_hz)
                  for k in sources}
         self.session = Session(self.root, name, self.min_free_gb, self.log)
-        for key, url in sources.items():
-            self.session.add_puller(key, url, rates[key])
+        for key in sources:
+            self.session.add_frames(key, rates[key])
         if self.log:
             # The RATE is logged, not just the source name.
             self.log(f"recording {name} (sources: "
@@ -457,6 +391,15 @@ class Recorder:
     def sample(self, payload):
         if self.session and self.session.stopped is None:
             self.session.write_sample(payload)
+
+    def put_frame(self, key, jpeg):
+        session = self.session
+        if session is not None:
+            session.put_frame(key, jpeg)
+
+    @property
+    def recording(self):
+        return self.session is not None and self.session.stopped is None
 
     def tick(self):
         """Periodic guard. Called from the node's timer."""

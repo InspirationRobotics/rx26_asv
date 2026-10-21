@@ -18,7 +18,7 @@ python  tools/squirt_cal/squirt_cal.py --fake     # anywhere: a simulated boat
 Then open **`http://<jetson>:8094`** on the phone, on the boat's WiFi.
 - With `--fake` it runs on a laptop with no ROS, and a *Fake boat* panel appears.
 - Every run is one **session**: `<log_dir>/<YYYYmmdd-HHMMSS>/shots.jsonl`, plus
-  one camera frame per shot when `snapshot_url` is up.
+  one camera frame per shot from `snapshot_topic` (camera_node's raw frame).
 
 ## One person, one phone
 
@@ -76,7 +76,7 @@ tool sees the pump output go on and logs a shot the same way.
   It refuses to fire while a mission is running (`/crsd/current_task`).
 - **A bench tool, not a launch-file node.** It has no entry point and is not in
   `core.launch.py`: nothing ships until it has run on the boat. It reuses
-  `crusader_groundstation`'s `GcsServer`, so every action is a POST re-checked
+  `page_server.py`'s `GcsServer`, so every action is a POST re-checked
   on the server.
 
 ## Before the first real session

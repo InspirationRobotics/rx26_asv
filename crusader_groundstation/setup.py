@@ -14,18 +14,12 @@ setup(
     zip_safe=False,
     maintainer="Team Inspiration",
     maintainer_email="brandont3927@gmail.com",
-    description="Crusader ground station: one web page for the whole boat",
+    description="Crusader ground station: gcs_bridge on the boat, ocs_client",
     url="https://github.com/InspirationRobotics/rx26_asv",
     license="MIT",
     entry_points={
         "console_scripts": [
-            # NOT PROVEN ON THE BOAT. Carries a NOTE header, and is not in
-            # core.launch.py. It is an entry point because a ground station
-            # that cannot be started is not a ground station.
-            "ground_station = crusader_groundstation.gcs_node:main",
-            # Same posture as ground_station above: NOT PROVEN ON THE
-            # BOAT, carries a NOTE header, and is deliberately absent
-            # from core.launch.py until it has carried a real run.
+            "gcs_bridge = crusader_groundstation.gcs_bridge:main",
             "ocs_client = crusader_groundstation.ocs_client_node:main",
         ],
     },

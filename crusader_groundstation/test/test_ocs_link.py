@@ -13,6 +13,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import json
 import socket
 import sys
 import threading
@@ -409,12 +410,8 @@ class AutoOverLoopback(unittest.TestCase):
 
 
 class ShippedConfig(unittest.TestCase):
-    """The node and the params file must agree, or the node dies at startup.
-
-    ocs_client_node cannot be imported without rclpy, so its PARAM_SPEC is read
-    from the source: a YAML key with no entry there is a ValueError from
-    declare_from_config, which is exactly what a pull without a rebuild produces.
-    """
+    """The params file names only parameters the node declares: ROS ignores the rest without a
+    word. ocs_client_node cannot be imported without rclpy, so PARAMS is read from the source."""
 
     @classmethod
     def setUpClass(cls):
@@ -427,14 +424,13 @@ class ShippedConfig(unittest.TestCase):
         cls.spec = None
         for node in tree.body:
             if (isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
-                    and node.targets[0].id == "PARAM_SPEC"):
+                    and node.targets[0].id == "PARAMS"):
                 cls.spec = {k.value for k in node.value.keys}
         with open(YAML, encoding="utf-8") as fh:
             cls.params = yaml.safe_load(fh)["ocs_client"]["ros__parameters"]
 
-    def test_every_yaml_key_has_a_declared_posture_and_the_reverse(self):
+    def test_every_yaml_key_is_declared(self):
         self.assertEqual(sorted(set(self.params) - self.spec), [])
-        self.assertEqual(sorted(self.spec - set(self.params)), [])
 
     def test_the_shipped_values_are_the_auto_discovery_setup(self):
         p = self.params
@@ -517,6 +513,34 @@ class CheckConfigRule(unittest.TestCase):
 
     def test_a_repeated_fallback_is_refused(self):
         self.assertTrue(self.run_check(ocs_fallback_hosts=["10.0.0.1", "10.0.0.1"]))
+
+
+class ReportQueue(unittest.TestCase):
+    """Task reports wait, in order, through a link that is not up; the heartbeat is
+    latest-wins and goes after them."""
+
+    def test_reports_queued_offline_go_first_and_in_order(self):
+        srv = Acceptor()
+        self.addCleanup(srv.close)
+        sent = []
+        link = ol.OcsLink("127.0.0.1", srv.port, log=lambda m: None, retry_s=0.05,
+                          on_sent=sent.append)
+        self.addCleanup(link.stop)
+        link.publish({"heartbeat": {"n": 1}})
+        link.publish({"heartbeat": {"n": 2}})          # replaces n=1
+        link.send_report({"docking": {"n": 1}})
+        link.send_report({"firefighting": {"n": 2}})   # never replaces anything
+        link.start()
+        self.assertTrue(wait_until(lambda: len(sent) == 3))
+        self.assertEqual([sorted(f)[0] for f in sent], ["docking", "firefighting", "heartbeat"])
+        self.assertEqual(sent[2]["heartbeat"]["n"], 2)
+        conn = srv.conns[0]
+        conn.settimeout(2.0)
+        reader, frames = ol.FrameReader(), []
+        while len(frames) < 3:
+            frames += reader.feed(conn.recv(4096))
+        self.assertEqual([sorted(json.loads(f))[0] for f in frames],
+                         ["docking", "firefighting", "heartbeat"])
 
 
 if __name__ == "__main__":

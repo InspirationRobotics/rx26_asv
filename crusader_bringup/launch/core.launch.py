@@ -4,7 +4,7 @@
   led_status_node   crusader_behavior: autopilot + RC state -> /crsd/led_state
   led_node          crusader_behavior: /crsd/led_state -> the LED Arduino
   rc_watchdog       crusader_behavior: force-disarm on RC link loss
-  ground_station    crusader_groundstation
+  gcs_bridge        crusader_groundstation: the laptop GCS connects here (tcp 14559)
   lidar_node        crusader_perception: clusters, the Nav2 cloud, OBSTACLE_DISTANCE
   rfd_link_node     crusader_link: the RFD900 mesh to Ekko. Respawns, so a radio plugged in
                     after boot is picked up; never also start it by hand (two readers on one
@@ -40,7 +40,7 @@ def generate_launch_description():
         node("crusader_behavior", "led_status_node"),
         node("crusader_behavior", "led_node"),
         node("crusader_behavior", "rc_watchdog"),
-        node("crusader_groundstation", "ground_station"),
+        node("crusader_groundstation", "gcs_bridge"),
         node("crusader_perception", "lidar_node"),
         node("crusader_link", "rfd_link_node", respawn=True, respawn_delay=5.0),
     ])

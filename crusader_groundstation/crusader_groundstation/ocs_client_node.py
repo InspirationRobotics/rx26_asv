@@ -1,194 +1,144 @@
-"""ocs_client — publishes Crusader's heartbeat to the Operator Control Station.
+"""ocs_client — Crusader's link to the Operator Control Station, which holds the team's one
+connection to RoboNation's RoboCommand. Not in core.launch.py: start it from the Nodes tab.
 
-NOT PROVEN ON THE BOAT; absent from core.launch.py like ground_station. Start
-it by hand:
+  out to the OCS: the handbook's 2 Hz heartbeat (latest-wins) and every task report from
+                  /crsd/robocommand/report (in order, none dropped), each as
+                  {team_id, vehicle_id, sent_at, <kind>: body}
+  in:             OCS commands -> /crsd/ocs_command. THIS NODE NEVER ACTS on one.
+  echo:           /crsd/ocs_traffic, JSON {dir, kind, body, status, stamp}, for the GCS
 
-    ros2 run crusader_groundstation ocs_client
+`current_task` comes from /crsd/current_task: handbook 3.4.11 makes the transition INTO a
+task the start of that attempt, and above Core the beacons activate on it. Unknown tokens
+are refused and a vanished publisher stands us down.
 
-The OCS holds the team's single connection to RoboNation's RoboCommand. This
-node keeps it supplied with the handbook's 2 Hz heartbeat over one TCP
-connection that also carries commands back.
+FINDING THE OCS. `ocs_host: "auto"` listens for the OCS's UDP beacon (which must carry
+`team_id`) and dials the sender, falling back to `ocs_fallback_hosts`; a fixed IP is dialled
+and nothing else (ocs_link.py).
 
-THIS NODE NEVER ACTS. Inbound commands are republished to /crsd/ocs_command and
-nothing else. The RC e-stop is the only safety path; WiFi never is.
-
-`current_task` comes from /crsd/current_task and is not cosmetic: handbook
-3.4.11 makes the transition INTO a task value the start of that attempt and
-TASK_NONE the stand-down, and above Core the beacons activate on it. Unknown
-tokens are refused and a vanished publisher stands us down (_on_task,
-_current_task).
-
-FINDING THE OCS. `ocs_host: "auto"` listens for the OCS's UDP beacon (which
-must carry this node's `team_id`) on `ocs_discovery_port` and dials the sender,
-falling back to `ocs_fallback_hosts`; a fixed IP is dialled and nothing else.
-Rules in ocs_link.py; the OCS's half in OCS/rx_bridge/beacon.py.
-
-TELEMETRY IT WILL NOT INVENT. If /crsd/pose or /crsd/fcu_status is stale, no
-heartbeat is sent: the gap shows on the OCS as rising silence, while a made-up
-fix scores as though the boat were somewhere it is not. STATE_UNKNOWN is banned
-for the same reason -- it is the proto zero value and the OCS validator refuses
-it.
+TELEMETRY IT WILL NOT INVENT. With /crsd/pose or /crsd/fcu_status stale no heartbeat is
+sent: the OCS shows rising silence, where a made-up fix would score as a real position.
 """
 import json
 import math
 import time
 from collections import deque
 
-from crusader_common import config as crsd_config
-from crusader_common.node_main import run_node
-from crusader_common.param_utils import declare_from_config
-from crusader_common.stream_cache import StreamCache
-from crusader_msgs.msg import Attitude, FcuStatus, LatLonHead
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, String
 
-from crusader_groundstation.ocs_link import (DEFAULT_DISCOVERY_PORT,
-                                             DEFAULT_FALLBACK_HOSTS, TASK_NONE,
-                                             OcsLink, coerce_task, fake_report,
-                                             rfc3339)
+from crusader_common.node_main import declare_params, run_node
+from crusader_common.stream_cache import StreamCache
+from crusader_msgs.msg import Attitude, FcuStatus, LatLonHead, RoboCommandReport
 
-PARAM_SPEC = {
-    "ocs_host": dict(read_only=True,
-                     description="'auto' = find the OCS from its UDP beacon, "
-                                 "falling back to ocs_fallback_hosts; or a "
-                                 "fixed IP of the OCS on the TEAM subnet, "
-                                 "dialled and nothing else. NOT 127.0.0.1, "
-                                 "which is this Jetson. Never a RoboCommand "
-                                 "course address (192.168.65-68.x)."),
-    "ocs_port": dict(read_only=True, lo=1024, hi=65535,
-                     description="clear of 8090 ground_station and 8080/8081 "
-                                 "the viewers. With 'auto' it is the port tried "
-                                 "on fallback hosts; a beacon names its own."),
-    "ocs_discovery_port": dict(read_only=True, lo=0, hi=65535,
-                               description="UDP port this node listens on for "
-                                           "the OCS beacon (ocs_host 'auto' "
-                                           "only); = [discovery] port in the "
-                                           "OCS bridge.toml. 0 = do not "
-                                           "listen, use the fallback hosts "
-                                           "alone."),
-    "ocs_fallback_hosts": dict(read_only=True,
-                               description="OCS addresses tried in turn when "
-                                           "no beacon is heard (ocs_host "
-                                           "'auto' only). IPv4 literals, "
-                                           "none on a RoboCommand course "
-                                           "network."),
-    "vehicle_id": dict(read_only=True,
-                       description="must match a [[vehicle]] id in the OCS "
-                                   "bridge.toml, or every frame is dropped"),
-    "team_id": dict(read_only=True, description="= bridge.toml team_id"),
-    "rate_hz": dict(read_only=True, lo=0.1, hi=10.0,
-                    description="2.0 is the handbook's mandated heartbeat rate"),
-    "fake_telemetry": dict(read_only=True,
-                           description="synthesize a circle instead of "
-                                       "subscribing; for bench use with no "
-                                       "Pixhawk. Logs a warning while on."),
-    "pose_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
-                           description="= shared.pose_timeout_s"),
-    "attitude_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
-                               description="stale -> roll/pitch omitted"),
-    "status_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
-                             description="stale -> no heartbeat at all, since "
-                                         "state cannot be known"),
+from crusader_groundstation.ocs_link import (DEFAULT_DISCOVERY_PORT, DEFAULT_FALLBACK_HOSTS,
+                                             TASK_NONE, OcsLink, coerce_task, fake_report,
+                                             json_safe, rfc3339)
+
+PARAMS = {
+    "ocs_host": "auto",                 # or a fixed OCS IP on the TEAM subnet, never a
+                                        # RoboCommand course address (192.168.65-68.x)
+    "ocs_port": 37564,
+    "ocs_discovery_port": DEFAULT_DISCOVERY_PORT,   # = [discovery] port in bridge.toml; 0 = none
+    "ocs_fallback_hosts": list(DEFAULT_FALLBACK_HOSTS),
+    "vehicle_id": "USV1",               # must match a [[vehicle]] id in bridge.toml
+    "team_id": "ASTA",                  # = bridge.toml team_id
+    "rate_hz": 2.0,                     # the handbook's mandated heartbeat rate
+    "fake_telemetry": False,            # a synthetic circle, for the bench with no Pixhawk
+    "autonomous_modes": ["GUIDED", "AUTO", "LOITER", "RTL"],   # = telemetry_bridge's
+    "pose_timeout_s": 1.0,
+    "attitude_timeout_s": 1.0,          # stale -> roll/pitch omitted
+    "status_timeout_s": 1.0,            # stale -> no heartbeat: the state is unknowable
 }
+HEARTBEAT_ECHO_S = 5.0                  # one heartbeat in the traffic echo per this, and
+                                        # every change of state or task
 
 
 class OcsClient(Node):
     def __init__(self):
         super().__init__("ocs_client")
-        p = declare_from_config(self, crsd_config.node_params("ocs_client"),
-                                PARAM_SPEC)
-        self.p = p
-
+        p = self.p = declare_params(self, PARAMS)
         self._pose = StreamCache(p["pose_timeout_s"])
         self._att = StreamCache(p["attitude_timeout_s"])
         self._status = StreamCache(p["status_timeout_s"])
-        # Recorded but unused: STATE_AUTO comes from the flight mode, see _build().
-        self._autonomy = False
         self._kill = False
-        # The task a mission node claims to be attempting.
         self._task = TASK_NONE
         self._warned_tasks = set()
-        self._auto_modes = {str(m).upper() for m in
-                            crsd_config.shared_params().get(
-                                "autonomous_modes", ("AUTO", "GUIDED"))}
-        self.get_logger().info(
-            f"STATE_AUTO reported for modes: {sorted(self._auto_modes)}")
+        self._auto_modes = {str(m).upper() for m in p["autonomous_modes"]}
         self._t0 = time.time()
-        self._skipped = 0
+        self._echoed = (None, 0.0)          # (state, task), when
 
-        # Commands arrive on the link thread and rclpy publishers are not
-        # promised thread-safe, so they are parked here for the timer. Bounded:
-        # dropping the oldest advisory beats growing without limit.
-        self._inbox = deque(maxlen=32)
+        # The link thread hands frames over through these, drained by the timer:
+        # rclpy publishers are not promised thread-safe.
+        self._inbox = deque(maxlen=32)      # commands from the OCS
+        self._outbox = deque(maxlen=500)    # frames that went out
         self._cmd_pub = self.create_publisher(String, "/crsd/ocs_command", 10)
+        self._traffic_pub = self.create_publisher(String, "/crsd/ocs_traffic", 50)
+        self.create_subscription(RoboCommandReport, "/crsd/robocommand/report",
+                                 self._on_report,
+                                 QoSProfile(depth=20, reliability=ReliabilityPolicy.RELIABLE))
 
         if p["fake_telemetry"]:
-            self.get_logger().warning(
-                "fake_telemetry is ON -- this node is publishing invented "
-                "positions to the OCS. Never leave this set for a scored run.")
+            self.get_logger().warning("fake_telemetry is ON: this node sends invented "
+                                      "positions to the OCS. Never for a scored run.")
         else:
-            self.create_subscription(LatLonHead, "/crsd/pose", self._on_pose, 10)
-            self.create_subscription(Attitude, "/crsd/attitude", self._on_att, 10)
+            self.create_subscription(LatLonHead, "/crsd/pose",
+                                     lambda m: self._pose.set(m, time.monotonic()), 10)
+            self.create_subscription(Attitude, "/crsd/attitude",
+                                     lambda m: self._att.set(m, time.monotonic()), 10)
             self.create_subscription(FcuStatus, "/crsd/fcu_status",
-                                     self._on_status, 10)
-            self.create_subscription(Bool, "/crsd/autonomy_active",
-                                     self._on_autonomy, 10)
+                                     lambda m: self._status.set(m, time.monotonic()), 10)
             self.create_subscription(Bool, "/crsd/kill_active", self._on_kill, 10)
-            # TRANSIENT_LOCAL to match bt_runner's latched publisher:
-            # current_task is published on transitions only, so a VOLATILE
-            # subscriber starting mid-mission would report TASK_NONE throughout.
+            # Latched like bt_runner's publisher: it publishes on transitions only.
             self.create_subscription(
                 String, "/crsd/current_task", self._on_task,
                 QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                            durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
-        # .get so a params file without the discovery keys still starts; they
-        # matter only when ocs_host is "auto".
         self.link = OcsLink(
-            str(p["ocs_host"]).strip(), int(p["ocs_port"]),
-            on_command=self._inbox.append,
-            log=lambda m: self.get_logger().info(str(m)),
-            team=str(p["team_id"]),
-            discovery_port=int(p.get("ocs_discovery_port", DEFAULT_DISCOVERY_PORT)),
-            fallback_hosts=list(p.get("ocs_fallback_hosts",
-                                      DEFAULT_FALLBACK_HOSTS)))
+            str(p["ocs_host"]).strip(), int(p["ocs_port"]), on_command=self._inbox.append,
+            on_sent=self._outbox.append, log=lambda m: self.get_logger().info(str(m)),
+            team=str(p["team_id"]), discovery_port=int(p["ocs_discovery_port"]),
+            fallback_hosts=list(p["ocs_fallback_hosts"]))
         self.link.start()
-        self.get_logger().info(
-            "ocs_client: %s -> %s at %.1f Hz"
-            % (p["vehicle_id"], self.link.describe(), p["rate_hz"]))
-
+        self.get_logger().info(f"ocs_client: {p['vehicle_id']} -> {self.link.describe()} at "
+                               f"{p['rate_hz']:.1f} Hz; STATE_AUTO in {sorted(self._auto_modes)}")
         self.create_timer(1.0 / float(p["rate_hz"]), self._tick)
 
     def destroy_node(self):
         self.link.stop()
         return super().destroy_node()
 
-    # ---- subscriptions ---------------------------------------------------
+    def _envelope(self, kind, body):
+        return {"team_id": self.p["team_id"], "vehicle_id": self.p["vehicle_id"],
+                "sent_at": rfc3339(), kind: body}
 
-    def _on_pose(self, msg):
-        self._pose.set(msg, time.monotonic())
+    def _echo(self, direction, kind, body, status):
+        self._traffic_pub.publish(String(data=json.dumps(json_safe(
+            {"dir": direction, "kind": kind, "body": body, "status": status,
+             "stamp": time.time()}), default=str)))
 
-    def _on_att(self, msg):
-        self._att.set(msg, time.monotonic())
-
-    def _on_status(self, msg):
-        self._status.set(msg, time.monotonic())
-
-    def _on_autonomy(self, msg):
-        self._autonomy = bool(msg.data)
+    # ---- inputs ----------------------------------------------------------
 
     def _on_kill(self, msg):
         self._kill = bool(msg.data)
 
-    def _on_task(self, msg):
-        """Accept a task token only if RoboCommand's RxTask enum has that name.
+    def _on_report(self, msg):
+        """One task report from a BT leaf, queued for the OCS in arrival order."""
+        try:
+            body = json.loads(msg.body_json)
+        except ValueError as e:
+            self.get_logger().error(f"report {msg.kind!r} is not JSON ({e}): not sent")
+            self._echo("tx", msg.kind, msg.body_json, f"refused: not JSON ({e})")
+            return
+        self.link.send_report(self._envelope(msg.kind, body))
+        self.get_logger().info(f"report {msg.kind} queued for the OCS")
+        self._echo("tx", msg.kind, body, "queued" if self.link.connected else
+                   "queued: no OCS link yet")
 
-        ParseDict rejects the whole frame on an unknown enum name, so a bad
-        token would cost EVERY heartbeat while set, not just the field.
-        TASK_NONE keeps position, speed and state flowing. Warned once per
-        distinct bad token.
-        """
+    def _on_task(self, msg):
+        """Accept a task token only if RoboCommand's RxTask enum has it: ParseDict rejects
+        the whole frame on an unknown name, so a bad token would cost every heartbeat."""
         token, error = coerce_task(msg.data)
         if error and str(msg.data) not in self._warned_tasks:
             self._warned_tasks.add(str(msg.data))
@@ -198,85 +148,72 @@ class OcsClient(Node):
         self._task = token
 
     def _current_task(self):
-        """The task to report, or TASK_NONE if nothing is claiming one.
-
-        current_task is latched and published only on transitions, so if the
-        publisher dies mid-attempt the last token would sit here, still telling
-        RoboCommand a task is under way. A publisher count of zero catches that
-        with no keepalive; the normal stand-down is the publisher's own
-        TASK_NONE on exit.
-        """
-        if self._task != TASK_NONE and not self.count_publishers(
-                "/crsd/current_task"):
-            self.get_logger().warning(
-                "task source vanished while claiming %s — standing down to %s"
-                % (self._task, TASK_NONE))
+        """TASK_NONE when the latched publisher has died mid-attempt: its last token would
+        otherwise keep telling RoboCommand that a task is under way."""
+        if self._task != TASK_NONE and not self.count_publishers("/crsd/current_task"):
+            self.get_logger().warning("task source vanished while claiming %s: standing "
+                                      "down to %s" % (self._task, TASK_NONE))
             self._task = TASK_NONE
         return self._task
 
-    # ---- the heartbeat ---------------------------------------------------
+    # ---- the timer ---------------------------------------------------------
 
     def _tick(self):
         while self._inbox:
-            self._republish(self._inbox.popleft())
+            cmd = self._inbox.popleft()
+            self._cmd_pub.publish(String(data=json.dumps(cmd)))
+            self.get_logger().info("OCS command -> /crsd/ocs_command: %s" % sorted(cmd))
+            self._echo("rx", next((k for k in cmd if k not in ("team_id", "vehicle_id",
+                                                              "sent_at")), "command"),
+                       cmd, "republished")
+        while self._outbox:
+            self._echo_sent(self._outbox.popleft())
+        report = self._heartbeat(time.monotonic())
+        if report is not None:
+            self.link.publish(report)
 
-        report = self._build(time.monotonic())
-        if report is None:
-            return
-        self.link.publish(report)
+    def _echo_sent(self, frame):
+        kind = next((k for k in frame if k not in ("team_id", "vehicle_id", "sent_at")), "?")
+        if kind == "heartbeat":
+            key, now = (frame[kind]["state"], frame[kind]["current_task"]), time.monotonic()
+            if key == self._echoed[0] and now - self._echoed[1] < HEARTBEAT_ECHO_S:
+                return
+            self._echoed = (key, now)
+        self._echo("tx", kind, frame[kind], "sent")
 
-    def _republish(self, cmd):
-        """Hand an OCS command to whoever wants it. This node does not act."""
-        self._cmd_pub.publish(String(data=json.dumps(cmd)))
-        self.get_logger().info("OCS command -> /crsd/ocs_command: %s"
-                               % sorted(cmd))
-
-    def _build(self, now):
+    def _heartbeat(self, now):
         p = self.p
         if p["fake_telemetry"]:
             return fake_report(p["vehicle_id"], p["team_id"], self._t0)
-
         pose = self._pose.get(now)
         status = self._status.get(now)
         if pose is None or status is None:
-            # Say so once per transition, not twice a second.
             if self._pose.went_stale(now) or self._status.went_stale(now):
-                self.get_logger().warning(
-                    "no heartbeat: pose or fcu_status is stale -- the OCS will "
-                    "show rising silence, which is the truth")
-            self._skipped += 1
+                self.get_logger().warning("no heartbeat: pose or fcu_status is stale; the "
+                                          "OCS will show rising silence, which is the truth")
+                self._echo("tx", "heartbeat", None, "withheld: pose or fcu_status stale")
             return None
-
-        # STATE_AUTO uses the same shared.autonomous_modes list telemetry_bridge
-        # gates commands on and pixhawk_led_status lights GREEN for, so the
-        # three cannot disagree. A disarmed boat is not driving itself whatever
-        # the mode.
+        # A disarmed boat is not driving itself whatever the mode.
         if self._kill:
             state = "STATE_KILLED"
         elif status.armed and str(status.mode).upper() in self._auto_modes:
             state = "STATE_AUTO"
         else:
             state = "STATE_MANUAL"
-
         hb = {
             "state": state,
             "position": {"latitude": pose.latitude, "longitude": pose.longitude},
             "spd_mps": pose.ground_speed,
-            # NaN passed through: telemetry_bridge sets it when GPS yaw is
-            # unresolved, and the OCS validator exists to catch exactly that.
+            # NaN passed through: unresolved GPS yaw, which the OCS validator catches.
             "heading_deg": pose.heading,
             "vehicle_type": "TYPE_USV",
             "current_task": self._current_task(),
         }
-
         att = self._att.get(now)
         if att is not None:
-            # Radians in the autopilot's NED axes; the report wants degrees.
             hb["roll_deg"] = math.degrees(att.roll)
             hb["pitch_deg"] = math.degrees(att.pitch)
-
-        return {"team_id": p["team_id"], "vehicle_id": p["vehicle_id"],
-                "sent_at": rfc3339(), "heartbeat": hb}
+        return self._envelope("heartbeat", hb)
 
 
 def main(args=None):

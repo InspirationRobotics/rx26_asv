@@ -16,8 +16,8 @@ crusader_params.yaml is symlinked into the install space but a new file is
 COPIED there by the build, so a profile written to the install copy vanishes at
 the next colcon build. `status()` reports the path it settled on.
 
-THIS MODULE DOES NOT VALIDATE CAMERA VALUES, deliberately. oak_detector owns
-every range and refuses in its own words through /params/set; a second copy of
+THIS MODULE DOES NOT VALIDATE CAMERA VALUES, deliberately. camera_node owns
+every range and refuses in its own words through params_set; a second copy of
 the bounds here would go stale. A profile is stored as given and found
 unacceptable by trying to apply it.
 """

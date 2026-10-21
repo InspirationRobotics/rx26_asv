@@ -22,10 +22,12 @@ TWO THINGS THE OBVIOUS TCP CLIENT GETS WRONG:
   * `recv()` returning b'' means the far end closed. Treated as "no data yet"
     (as `if data:` does), the client loops forever on a dead socket and the boat
     looks healthy while saying nothing.
-  * Telemetry is a SINGLE LATEST-WINS SLOT, not a queue. A queue filled during a
-    dropped link dumps stale heartbeats on reconnect: the OCS rate governor
+  * The HEARTBEAT is a single latest-wins slot, not a queue. A queue filled during
+    a dropped link dumps stale heartbeats on reconnect: the OCS rate governor
     discards most as a rate problem, and the survivors are re-stamped, so a
     ten-second-old position reaches RoboNation labelled as current.
+    TASK REPORTS are the opposite: each one scores once, so they wait in a FIFO
+    (send_report) and go out in order, before the heartbeat, on every pass.
 
 FINDING THE OCS. `OcsLink("192.168.8.107", 37564)` dials that address only.
 `OcsLink("auto", 37564, team=..., discovery_port=37565, fallback_hosts=[...])`
@@ -45,6 +47,7 @@ import socket
 import struct
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 
 _HEADER = struct.Struct(">I")
@@ -53,6 +56,7 @@ MAX_FRAME = 1 << 20
 
 #: How long a read blocks before we go round and check for something to send.
 _READ_TIMEOUT_S = 0.05
+REPORT_QUEUE = 200        # task reports held through a dropped link
 
 # ---- RxTask, transcribed from RoboCommand's own schema ----------------------
 #
@@ -401,20 +405,22 @@ class BeaconListener:
 class OcsLink:
     """Keeps one connection to the OCS alive, in the background.
 
-    on_command(dict) is called for every RxCommand that arrives. It runs on the
-    link thread, so it must not block -- hand the work to ROS and return.
+    on_command(dict) is called for every RxCommand that arrives, and on_sent(dict) for
+    every frame that went out. Both run on the link thread, so they must not block --
+    hand the work to ROS and return.
 
     `host` is an address to dial, or "auto": find the OCS from its beacon,
     falling back to `fallback_hosts` in turn. Only "auto" uses `team`,
     `discovery_port` and `fallback_hosts`; `discovery_port` 0 means no listener.
     """
 
-    def __init__(self, host: str, port: int, *, on_command=None, log=print,
+    def __init__(self, host: str, port: int, *, on_command=None, on_sent=None, log=print,
                  retry_s: float = 5.0, team: str = "",
                  discovery_port: int = 0, fallback_hosts=()) -> None:
         self.host = host
         self.port = port
         self.on_command = on_command
+        self.on_sent = on_sent
         self.log = log
         self.retry_s = retry_s
         self.team = team
@@ -437,7 +443,8 @@ class OcsLink:
 
         self._sock: socket.socket | None = None
         self._reader = FrameReader()
-        self._pending: dict | None = None      # the latest-wins slot
+        self._pending: dict | None = None      # the latest-wins heartbeat slot
+        self._reports: deque = deque(maxlen=REPORT_QUEUE)
         self._tx_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -447,10 +454,17 @@ class OcsLink:
     # ---- what the node calls -------------------------------------------
 
     def publish(self, report: dict) -> None:
-        """Offer the newest report. Replaces any not yet sent -- see the module
+        """Offer the newest heartbeat. Replaces any not yet sent -- see the module
         docstring on why this must not be a queue."""
         with self._tx_lock:
             self._pending = report
+
+    def send_report(self, report: dict) -> None:
+        """Queue one task report; reports go out in order, none replaced."""
+        with self._tx_lock:
+            if len(self._reports) == self._reports.maxlen:
+                self.log("OCS link: report queue full -- dropping the oldest report")
+            self._reports.append(report)
 
     @property
     def connected(self) -> bool:
@@ -567,21 +581,32 @@ class OcsLink:
                 self._deliver(payload)
 
         with self._tx_lock:
-            report, self._pending = self._pending, None
-        if report is None:
-            return True
-        try:
-            body = json.dumps(json_safe(report), allow_nan=False).encode("utf-8")
-        except (TypeError, ValueError) as exc:
-            # Ours to fix, not the link's. Drop the frame and keep the link up.
-            self.log("OCS link: unserialisable report dropped -- %s" % exc)
-            return True
-        try:
-            sock.sendall(encode(body))   # sendall: a short write truncates
-        except OSError as exc:
-            self.log("OCS link: send failed -- %s" % exc)
-            return False
-        self._sent += 1
+            frames = list(self._reports)
+            self._reports.clear()
+            heartbeat, self._pending = self._pending, None
+        if heartbeat is not None:
+            frames.append(heartbeat)
+        for i, report in enumerate(frames):
+            try:
+                body = json.dumps(json_safe(report), allow_nan=False).encode("utf-8")
+            except (TypeError, ValueError) as exc:
+                # Ours to fix, not the link's. Drop the frame and keep the link up.
+                self.log("OCS link: unserialisable report dropped -- %s" % exc)
+                continue
+            try:
+                sock.sendall(encode(body))   # sendall: a short write truncates
+            except OSError as exc:
+                self.log("OCS link: send failed -- %s" % exc)
+                with self._tx_lock:      # unsent task reports wait for the next link
+                    self._reports.extendleft(reversed(
+                        [r for r in frames[i:] if r is not heartbeat]))
+                return False
+            self._sent += 1
+            if self.on_sent is not None:
+                try:
+                    self.on_sent(report)
+                except Exception as exc:            # noqa: BLE001
+                    self.log("OCS link: on_sent raised -- %s" % exc)
         return True
 
     def _deliver(self, payload: bytes) -> None:

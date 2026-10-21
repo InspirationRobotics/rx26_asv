@@ -1,31 +1,30 @@
 """planner_profiles — named planner-tuning sets for bt_runner_node, as files.
 
 WHAT A PROFILE IS. A ROS 2 params file with ONLY the keys that differ from
-crusader_params.yaml / nav2_params.yaml, nested like those files. It is the format the
-sim's Task 1 panel writes (crusader_sim/config/tuning_profiles/*.yaml, `gz_sim_up.sh
---tuning`) and the lake rig reads (`LAKE_TUNING=`), so one file serves all three:
+crusader_params.yaml / nav2_params.yaml, nested like those files: the format of
+crusader_sim/config/tuning_profiles/*.yaml (`gz_sim_up.sh --tuning`), so one file serves
+the sim and the boat:
 
     # title: Tight field (3-5 m between buoys)
     # about: 3 m orbits ...
     bt_runner_node:
       ros__parameters:
         nav_orbit_radius_m: 3.0
-    planner_server:                 # Nav2: only at rig LAUNCH, never from here
+    planner_server:                 # Nav2: only at launch, never from here
       ros__parameters:
         GridBased: {tolerance: 0.3}
 
 WHAT THE GROUND STATION DOES WITH ONE. Loading applies ONLY the bt_runner_node
 nav_* keys (the planner knobs bt_runner re-reads at the next START) through the
-Tuning tab's ordinary /params/set path, so the node's own set-callback judges
-every value. Everything else is LISTED as skipped and why, never applied
-silently: Nav2's planner_server and global_costmap are configured at rig launch,
+Params tab's ordinary params_set, so the node itself judges every value. Everything
+else is LISTED as skipped and why, never applied silently: Nav2's planner_server
+and global_costmap are configured at launch,
 and a bt_runner_node key that is not a nav_* planner knob (publish_setpoints!)
 has no business arriving from a file picker.
 
-WHERE THEY LIVE. Two directories, listed together:
-  shipped  the repo's crusader_sim/config/tuning_profiles (a parameter; read-only here)
-  saved    ~/.cache/crusader_lake/tuning, where "Save as profile" writes -- the
-           lake rig's own log directory, so `LAKE_TUNING=<that file>` finds it.
+WHERE THEY LIVE. Two directories, listed together (gcs_bridge parameters):
+  shipped  the repo's crusader_sim/config/tuning_profiles (read-only here)
+  saved    where "Save" writes
 
 BLANKS OVER GUESSES. A missing directory is a listing with no profiles and the
 reason; a file that does not parse is listed with its error, not dropped.
@@ -42,8 +41,6 @@ NODE = "bt_runner_node"
 NODE_PATH = "/" + NODE
 PLANNER_PREFIX = "nav_"
 
-DEFAULT_SHIPPED_DIR = "/root/robotx_ws/src/rx26_asv/crusader_sim/config/tuning_profiles"
-DEFAULT_SAVE_DIR = "~/.cache/crusader_lake/tuning"
 
 # The sim panel's rule (crusader_sim.task1_panel.NAME_RE), so a name that works there works here.
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
@@ -176,7 +173,7 @@ def drifted_planner_values(rows):
     """({name: value}, note) -- the planner knobs whose live value differs from the YAML's.
 
     `rows` is ParamBridge.list's output for bt_runner_node. The comparison is
-    against crusader_params.yaml (the drift the Tuning tab marks). A knob with no
+    against crusader_params.yaml (the drift the Params tab marks). A knob with no
     YAML default has nothing to differ FROM and is not saved; if none has one,
     say so rather than returning an empty set that reads as "nothing changed".
     """
@@ -197,10 +194,10 @@ def _clean(v):
 
 def profile_text(name, values, about=None):
     """The file a save writes: the header, then only these keys, nested like crusader_params.yaml."""
-    about = about or ("Saved from the ground station's Tuning tab "
+    about = about or ("Saved from the ground station's Params tab "
                       + time.strftime("%Y-%m-%d %H:%M") + ": the nav_* planner keys that differed "
-                      "from crusader_params.yaml. Load profile in the Tuning tab applies them at the "
-                      "next START; LAKE_TUNING=<this file> applies them when the rig launches.")
+                      "from crusader_params.yaml. Applied from the Params tab, they take effect at "
+                      "the next START.")
     doc = {NODE: {"ros__parameters": {k: values[k] for k in sorted(values)}}}
     return (f"# title: {name}\n# about: {about}\n"
             + yaml.safe_dump(doc, default_flow_style=False, sort_keys=False))

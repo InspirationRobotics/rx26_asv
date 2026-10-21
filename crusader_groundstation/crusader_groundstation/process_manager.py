@@ -62,13 +62,12 @@ class ManagedProcess:
 class ProcessManager:
     """Owns every process this server started. Thread-safe.
 
-    Callers come from HTTP threads and the ROS executor, so every mutation of the
+    Callers come from worker threads and the ROS executor, so every mutation of the
     table takes one lock.
     """
 
-    def __init__(self, tools_dir="", ros_distro_setup="", logger=None):
-        self.tools_dir = tools_dir
-        self.ros_distro_setup = ros_distro_setup
+    def __init__(self, params_file="", logger=None):
+        self.params_file = params_file
         self.log = logger
         self._procs = {}
         self._lock = threading.Lock()
@@ -102,17 +101,18 @@ class ProcessManager:
     # ---- control ----
 
     def command_for(self, spec):
-        """The argv for one NodeSpec. Separated so it is checkable off-boat."""
-        if spec.kind == "script":
-            return ["python3", os.path.join(self.tools_dir, spec.executable)]
-        return ["ros2", "run", spec.package, spec.executable]
+        """The argv for one NodeSpec: the same params file core.launch.py passes, so a
+        node started here runs with the values it would have at boot."""
+        cmd = ["ros2", "run", spec.package, spec.executable]
+        if self.params_file:
+            cmd += ["--ros-args", "--params-file", self.params_file]
+        return cmd
 
     def start(self, spec):
         """Spawn a node. Returns (ok, message).
 
         start_new_session puts the child in its own process group, so Ctrl+C in
-        the ground station's terminal does not take the boat's stack down with
-        it: a dashboard must be safe to close.
+        gcs_bridge's terminal does not take the boat's stack down with it.
         """
         with self._lock:
             existing = self._procs.get(spec.name)
@@ -125,8 +125,8 @@ class ProcessManager:
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1, start_new_session=True)
         except FileNotFoundError:
-            return False, (f"could not run {cmd[0]!r} — is the workspace "
-                           "sourced in the shell that started this server?")
+            return False, (f"could not run {cmd[0]!r}: is the workspace sourced in "
+                           "the shell that started gcs_bridge?")
         except Exception as e:
             return False, f"could not start {spec.name}: {e}"
 
@@ -209,7 +209,7 @@ class ProcessManager:
                 return True, f"killed {name} (it ignored SIGTERM)"
             time.sleep(0.1)
         return False, (f"{name} survived SIGKILL — it is stuck in the kernel, "
-                       "almost certainly on USB. Nothing this dashboard can "
+                       "almost certainly on USB. Nothing gcs_bridge can "
                        "send will end it; replug the camera or reboot.")
 
     def stop_external(self, name, pids):

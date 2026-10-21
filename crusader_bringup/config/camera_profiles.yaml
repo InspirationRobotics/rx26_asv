@@ -1,8 +1,8 @@
 # camera_profiles.yaml — named OAK-D camera settings, one block per condition.
 #
 # WHY A SECOND FILE. crusader_params.yaml is the source of truth for how a node STARTS, and the
-# ground station deliberately cannot write it (see gcs_node's header). A camera profile changes
-# several times in an afternoon as the light moves, by an operator at a browser, and losing one
+# ground station deliberately cannot write it. A camera profile changes several times in an
+# afternoon as the light moves, by an operator at the laptop, and losing one
 # costs a re-tune rather than a rebuild. So profiles live here, the ground station owns this file,
 # and nothing in the launch path reads it.
 #
@@ -13,7 +13,7 @@
 # THESE NUMBERS ARE STARTING POINTS, NOT MEASUREMENTS. Only `as_shipped` is real (copied from
 # crusader_params.yaml, what the boat has run). The other four are reasoned from the ranges and from
 # what the classifier reads, and have never been shot on the water. Tune one, save over it from the
-# Camera tab, and it stops being a guess.
+# Sensors tab, and it stops being a guess.
 #
 # THE STANDING RULES, which every block below follows:
 #   ae_mode: manual        outdoors, because auto re-meters as the hull turns into the sun and the
@@ -26,7 +26,7 @@
 
 profiles:
 
-  # Copied verbatim from crusader_params.yaml's oak_detector section. The one
+  # camera_node's defaults (oak_controls) and its crusader_params.yaml section. The one
   # click back to what the boat boots with, after a tuning session went wrong.
   as_shipped:
     ae_mode: auto

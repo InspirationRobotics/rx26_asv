@@ -105,7 +105,7 @@ squirt_cal:
   ros__parameters:
     port: 8094                             # the phone opens http://<jetson>:8094
     log_dir: "/root/robotx_ws/logs/squirt_cal"   # bind-mounted: one dir per session
-    snapshot_url: "http://127.0.0.1:8080/stream/raw"   # "" = no camera frames
+    snapshot_topic: "/crsd/camera/raw/compressed"   # camera_node; "" = no camera frames
     wall_range_topic: "/crsd/wall_range"   # = wall_range_node.wall_topic
     pump_rc_channel: 10                    # = telemetry_bridge.pump_rc_channel
     pump_on_threshold_us: 1700             # pilot switch reads ON above this
@@ -238,96 +238,13 @@ target_tracker:
                                            #       with track_timeout_s 0 it never leaves.
                                            #       OPEN WATER: true, with lidar_node r_max 25-40
                                            #       (stereo range is ~6% off; LiDAR is cm)
-
-# ---- Ground station: the operator's window onto the whole boat ----
-# Read-only over ROS: no publishers. Its only outward effects are the node
-# processes it spawns and the two power verbs it hands to the HOST helper
-# (tools/scripts/crsd_power_helper.py), gated in the page AND re-checked
-# server-side: a rule enforced only in JavaScript is decoration.
-ground_station:
+# ---- Ground station: gcs_bridge, which the laptop's gcs_app connects to on tcp/14559 ----
+# Every parameter and its default is in the node's PARAMS.
+gcs_bridge:
   ros__parameters:
-    port: 8090                             # [RO] clear of the viewers it embeds:
-                                           #      8080 = buoy_detector/oak_view,
-                                           #      8081 = lidar_view
-    bind_host: "0.0.0.0"                   # [RO] must NOT be 127.0.0.1 or the
-                                           #      laptop cannot reach it
-    targets_topic: "crsd/world_targets"    # [RO] = target_tracker.targets_topic
-    clusters_topic: "crsd/lidar_clusters"  # [RO] = lidar_cluster_node.clusters_topic.
-                                           #      The RAW input beside the tracks;
-                                           #      sent only when the page asks.
-    obstacle_topic: "crsd/obstacle_distance"  # [RO] = proximity_bridge.output_topic:
-                                           #      the 72 sectors EXACTLY as sent
-                                           #      to the autopilot. Map vs QGC's
-                                           #      PRX1 view differ: the fault is
-                                           #      between here and the FCU. They
-                                           #      agree but the clusters differ:
-                                           #      proximity_bridge.
-    clusters_timeout_s: 2.0                # [RO] stale -> the layer greys out.
-                                           #      Longer than pose: the LiDAR
-                                           #      window is ~0.5 s and a 1 s
-                                           #      budget would flap.
-    obstacle_timeout_s: 2.0                # [RO] proximity_bridge sends at 5 Hz
-    nav_leg_topic: "/crsd/nav/leg_status"  # [RO] = bt_runner's leg status (JSON,
-                                           #      docs/nav2_avoidance_spec.md 4.3):
-                                           #      the path, carrot and goal drawn.
-    nav_leg_timeout_s: 2.0                 # [DYN] stale -> the path is BLANK, never
-                                           #       the last one. bt_runner sends up
-                                           #       to 2 Hz during a leg, once per
-                                           #       change when idle, so an idle
-                                           #       boat's path disappears.
-    tools_dir: "/root/robotx_ws/src/rx26_asv/tools"   # [RO] the viewer scripts,
-                                           #      INSIDE the asv container. Wrong
-                                           #      path = viewer tabs fail with a
-                                           #      file-not-found, nothing else.
-    power_socket: "/run/crsd-power.sock"   # [RO] host helper socket, bind-mounted
-                                           #      into this container: a container
-                                           #      CANNOT power off the Jetson on
-                                           #      its own (crsd_power_helper).
-    allow_power: true                      # [RO] master switch for the power tab.
-                                           #      false on any machine where a
-                                           #      browser must never halt the host.
-    disk_path: "/"                         # [RO] filesystem reported as free: the
-                                           #      CONTAINER's view, so the tab
-                                           #      prints the path it measured.
-    pose_timeout_s: 1.0                    # [RO] = shared.pose_timeout_s
-    attitude_timeout_s: 1.0                # [RO] stale -> attitude readout greys
-    status_timeout_s: 1.0                  # [RO] mode/armed readout. ALSO the
-                                           #      power interlock: unknown armed
-                                           #      state locks power — a missing
-                                           #      FcuStatus usually means the
-                                           #      bridge is down, which is not
-                                           #      evidence the boat is safe.
-    targets_timeout_s: 3.0                 # [RO] stale -> map says so
-    poll_period_s: 0.2                     # [RO] browser -> /state. 5 Hz is
-                                           #      ~0.5 Mbps with a full trail
-    graph_period_s: 1.0                    # [DYN] how often the ROS node graph is
-                                           #       scanned. Per browser poll would
-                                           #       scale discovery traffic with
-                                           #       the number of viewers.
-    trail_length: 600                      # [DYN] wake points kept
-    trail_min_move_m: 0.5                  # [DYN] distance-gated, not time-gated
-    log_capacity: 1500                     # [RO] /rosout lines kept in the ring.
-                                           #      Bounded: a node in a failure
-                                           #      loop emits thousands a minute,
-                                           #      and running the Jetson out of
-                                           #      memory then helps nobody.
-    record_dir: "/root/robotx_ws/logs/sessions"   # [RO] session root. Put it on
-                                           #      a BIND MOUNT for recordings to
-                                           #      survive the container being
-                                           #      recreated.
-    record_telemetry_hz: 2.0               # [DYN] telemetry.jsonl sample rate
-    record_frame_hz: 1.0                   # [DYN] DEFAULT frames/s saved PER
-                                           #       viewer, pulled from the MJPEG
-                                           #       servers. The Record tab
-                                           #       overrides it per session without
-                                           #       writing back, so a full-rate
-                                           #       afternoon does not become the
-                                           #       normal. 0.05-60; 30 is ~1 MB/s,
-                                           #       3.6 GB/hour.
-    record_min_free_gb: 2.0                # [DYN] refuse to start, and stop
-                                           #       mid-run, below this: a full root
-                                           #       filesystem takes down the whole
-                                           #       stack, not just the recording.
+    record_dir: "/root/robotx_ws/logs/sessions"   # a bind mount, or recordings die with the
+                                                  # container (it says so at startup)
+    allow_power: true                      # shutdown/reboot from the Nodes tab, locked while armed
 
 # ---- rc_heartbeat_watchdog: force-disarm on RC-transmitter link loss (safety) ----
 # Reads telemetry_bridge's /crsd/rc_channels and /crsd/fcu_status and routes a
@@ -373,9 +290,8 @@ ocs_client:
                                            #      (check_config fails it; the OCS
                                            #      never beacons there either).
     ocs_port: 37564                        # [RO] = [tcp] port in the OCS
-                                           #      bridge.toml. Clear of 8090
-                                           #      (ground_station) and 8080/8081
-                                           #      (its viewers). With "auto" this
+                                           #      bridge.toml. Clear of 14559
+                                           #      (gcs_bridge). With "auto" this
                                            #      is used for fallback hosts; a
                                            #      beacon carries its own.
     ocs_discovery_port: 37565              # [RO] UDP port LISTENED on for the
@@ -503,7 +419,7 @@ bt_runner_node:
     nav_hazards_topic: "/crsd/nav/hazards"  # [RO] HazardArray out = nav2_params
                                             #      hazard_layer.topic (check_config)
     nav_leg_topic: "/crsd/nav/leg_status"   # [RO] leg status JSON out
-                                            #      = ground_station.nav_leg_topic
+                                            #      = gcs_bridge.LEG_TOPIC (check_config)
     nav_planner_action: "/compute_path_to_pose"
                                             # [RO] planner_server's action
     nav_valid_service: "/is_path_valid"     # [RO] ... and its path check

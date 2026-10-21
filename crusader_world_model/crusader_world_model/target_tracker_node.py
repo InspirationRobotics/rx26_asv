@@ -1,6 +1,6 @@
 """target_tracker_node — camera (+ LiDAR) + pose in, earth-anchored targets out.
 
-Not in core.launch.py (crusader_sim/scripts/lake_rig_up.sh starts it) and it
+Not in core.launch.py (start it from the Nodes tab) and it
 commands nothing directly, but crusader_bt's
 bt_runner_node subscribes /crsd/world_targets and fills the behaviour tree's
 buoy field from CONFIRMED tracks only, so a confirmed phantom here is a mission

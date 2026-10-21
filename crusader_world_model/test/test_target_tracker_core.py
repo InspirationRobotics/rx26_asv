@@ -213,7 +213,7 @@ class VotingTest(unittest.TestCase):
 
 
 class OakVocabularyTest(unittest.TestCase):
-    """oak_detector names: [flash_|off_]<colour>_<shape>, or a bare <shape>."""
+    """buoy_model labels: [flash_|off_]<colour>_<shape>, or a bare <shape>."""
 
     def test_bare_and_flash_red_diamond_are_one_track_resolving_red(self):
         f = Feeder(make_tracker())
