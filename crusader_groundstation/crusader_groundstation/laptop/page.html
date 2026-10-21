@@ -25,6 +25,7 @@
   --ok: #0a6b2e; --warn: #8a4b00; --bad: #b0151c; --stale: #98a4b0; --trail: #14496e;
   --map-bg: #e4ebf2; --map-grid: #cdd6e0; --map-grid-major: #9eaebf; --map-text: #2b343d;
   --map-boat: #14496e; --map-path: #00796b; --map-hazard: #b35900;
+  --lvl0: #14496e; --lvl1: #00796b; --lvl2: #8a4b00; --lvl3: #6a3d9a;
 }
 html[data-theme="dark"] {
   color-scheme: dark;
@@ -35,6 +36,7 @@ html[data-theme="dark"] {
   --ok: #5fbf6a; --warn: #d8a13a; --bad: #e05252; --stale: #555555; --trail: #4f87b0;
   --map-bg: #0e1218; --map-grid: #222a36; --map-grid-major: #364254; --map-text: #aab3c0;
   --map-boat: #64b5f6; --map-path: #26c6da; --map-hazard: #ff9800;
+  --lvl0: #64b5f6; --lvl1: #26c6da; --lvl2: #d8a13a; --lvl3: #b39ddb;
 }
 :root { --grid: var(--map-grid); }
 * { box-sizing: border-box; }
@@ -64,6 +66,11 @@ header { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px 10px;
 .t-ok .v { color: var(--ok); } .t-warn .v { color: var(--warn); } .t-bad .v { color: var(--bad); }
 .t-stale .v { color: var(--muted); font-weight: 400; }
 .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+/* Mission tree: one guide per ancestor level, coloured by level, so a branch's children share a line */
+#m-nodes td:first-child { white-space: nowrap; }
+.bt-g { display: inline-block; width: 1em; height: 1.2em; vertical-align: -0.25em; border-left: 2px solid var(--lvl0); }
+.bt-g.l1 { border-color: var(--lvl1); } .bt-g.l2 { border-color: var(--lvl2); } .bt-g.l3 { border-color: var(--lvl3); }
+.bt-parent { font-weight: 600; }
 .muted { color: var(--muted); }
 nav { display: flex; flex-wrap: wrap; gap: 2px; padding: 4px 8px 0; }
 nav button { border: 1px solid var(--line); border-bottom: none; background: var(--bg);
@@ -611,8 +618,10 @@ function tree() {
       ? `<b>RUNNING ${esc(t.name)}</b> ${fmt(t.elapsed_s, 0)} s · node <b>${esc(t.running_node)}</b> · task ${esc(t.current_task)}` +
         (t.warning ? `<br><b class="warn">${esc(t.warning)}</b>` : "")
       : `idle. ${last}`;
+  // d and kind come from bt_runner's TreeView::nodesJson; an older runner without them draws flat
+  const guides = d => Array.from({length: d}, (_, k) => `<i class="bt-g l${k % 4}"></i>`).join("");
   $("m-nodes").innerHTML = (t.nodes || []).map(n =>
-    `<tr><td>${esc(n.name)}</td><td class="muted">${esc(n.type)}</td><td class="${n.status === "RUNNING" ? "ok" : n.status === "FAILURE" ? "bad" : "muted"}">${esc(n.status)}</td></tr>`).join("");
+    `<tr><td>${guides(n.d | 0)}<span class="${/^(control|decorator)$/.test(n.kind) ? "bt-parent" : ""}">${esc(n.name)}</span></td><td class="muted">${esc(n.type)}</td><td class="${n.status === "RUNNING" ? "ok" : n.status === "FAILURE" ? "bad" : "muted"}">${esc(n.status)}</td></tr>`).join("");
 }
 
 // ---- sensors ----------------------------------------------------------------
