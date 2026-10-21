@@ -37,31 +37,22 @@ from tf2_ros import TransformBroadcaster
 
 from crusader_msgs.msg import LatLonHead
 
-from crusader_common import config as crsd_config
-from crusader_common.node_main import run_node
-from crusader_common.param_utils import declare_from_config, make_set_callback
+from crusader_common.node_main import declare_params, run_node
 
 from crusader_nav import frames_core as fc
 
 DATUM_SOURCES = ("param", "first_fix")
 
-# [RO] = structural: change the YAML (or the launch argument) and restart.
-# [DYN] = `ros2 param set`, range-validated.
-PARAM_SPEC = {
-    "datum_source": dict(read_only=True, choices=DATUM_SOURCES,
-                         description="param: datum_lat/datum_lon; first_fix: first /crsd/pose"),
-    "datum_lat": dict(read_only=True, lo=-90.0, hi=90.0,
-                      description="datum latitude [deg], datum_source=param"),
-    "datum_lon": dict(read_only=True, lo=-180.0, hi=180.0,
-                      description="datum longitude [deg], datum_source=param"),
-    "pose_topic": dict(read_only=True, description="LatLonHead in"),
-    "datum_topic": dict(read_only=True, description="LatLonHead out, latched"),
-    "map_frame": dict(read_only=True, description="TF parent frame"),
-    "base_frame": dict(read_only=True, description="TF child frame: levelled base_link"),
-    "health_period_s": dict(read_only=False, lo=0.1, hi=60.0),
+DATUM_TOPIC = "/crsd/datum"             # = bt_runner_node.nav_datum_topic (check_config)
+
+PARAMS = {
+    "datum_source": "first_fix",        # param: datum_lat/datum_lon; first_fix: first /crsd/pose
+    "datum_lat": 0.0,
+    "datum_lon": 0.0,
+    "map_frame": "map",                 # TF parent
+    "base_frame": "base_footprint",     # TF child: base_link levelled
+    "health_period_s": 1.0,
 }
-DYNAMIC_RANGES = {k: (v["lo"], v["hi"]) for k, v in PARAM_SPEC.items()
-                  if not v["read_only"] and "lo" in v}
 
 
 def datum_config_error(source, lat, lon):
@@ -93,7 +84,7 @@ class NavFramesNode(Node):
 
     def __init__(self):
         super().__init__("nav_frames_node")
-        p = declare_from_config(self, crsd_config.node_params("nav_frames_node"), PARAM_SPEC)
+        p = declare_params(self, PARAMS)
         err = datum_config_error(p["datum_source"], p["datum_lat"], p["datum_lon"])
         if err:
             raise ValueError(f"nav_frames_node: {err}")
@@ -106,24 +97,17 @@ class NavFramesNode(Node):
 
         self._tf = TransformBroadcaster(self)
         self._datum_pub = self.create_publisher(
-            LatLonHead, p["datum_topic"],
+            LatLonHead, DATUM_TOPIC,
             QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                        durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self._health_pub = self.create_publisher(String, "/crsd/nav/frames_health", 10)
-        self.create_subscription(LatLonHead, p["pose_topic"], self._on_pose, 10)
-        self._health_timer = self.create_timer(p["health_period_s"], self._health)
-        self.add_on_set_parameters_callback(
-            make_set_callback(self, DYNAMIC_RANGES, self._apply))
+        self.create_subscription(LatLonHead, "/crsd/pose", self._on_pose, 10)
+        self.create_timer(p["health_period_s"], self._health)
 
         if self._source == "param":
             self._set_datum(p["datum_lat"], p["datum_lon"])
         else:
             self.get_logger().info("waiting for the first /crsd/pose fix to pin the datum")
-
-    def _apply(self, changes):
-        if "health_period_s" in changes:
-            self._health_timer.cancel()
-            self._health_timer = self.create_timer(changes["health_period_s"], self._health)
 
     def _set_datum(self, lat, lon):
         self._datum = (lat, lon)

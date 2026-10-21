@@ -33,20 +33,12 @@ import time
 from lifecycle_msgs.srv import ChangeState, GetState
 from rclpy.node import Node
 
-from crusader_common.node_main import run_node
-from crusader_common.param_utils import declare_from_config
+from crusader_common.node_main import declare_params, run_node
 
 from crusader_nav import lifecycle_core as lc
 
-PARAM_SPEC = {
-    "node_names": dict(read_only=True, description="lifecycle nodes to configure and activate"),
-    "check_period_s": dict(read_only=True, lo=0.1, hi=60.0,
-                           description="period of the get_state check [s]"),
-    "call_timeout_s": dict(read_only=True, lo=0.5, hi=60.0,
-                           description="a service call unanswered after this is dropped [s]"),
-    "recreate_after_timeouts": dict(read_only=True, lo=1, hi=100,
-                                    description="consecutive timeouts before new clients"),
-}
+RANGES = {"check_period_s": (0.1, 60.0), "call_timeout_s": (0.5, 60.0),
+          "recreate_after_timeouts": (1, 100)}
 
 GET_STATE = "get_state"
 
@@ -178,7 +170,7 @@ class NavLifecycle(Node):
 
     def __init__(self):
         super().__init__("nav_lifecycle")
-        p = declare_from_config(self, lc.DEFAULT_PARAMS, PARAM_SPEC)
+        p = declare_params(self, lc.DEFAULT_PARAMS, ranges=RANGES)
         err = lc.params_error(p)
         if err:
             raise ValueError(f"nav_lifecycle: {err}")

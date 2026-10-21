@@ -7,23 +7,22 @@ buoy field from CONFIRMED tracks only, so a confirmed phantom here is a mission
 problem, not just an untidy map.
 
 Subscribes:
-  oak/detections       crusader_msgs/Detection3DArray  — camera_link
-  crsd/lidar_clusters  crusader_msgs/Cluster3DArray    — base_link, and
-                       COUNTED BUT DISCARDED unless use_lidar (see below)
-  /crsd/pose           crusader_msgs/LatLonHead        — position + heading
-  /crsd/attitude       crusader_msgs/Attitude          — roll/pitch/yaw
+  /crsd/oak/detections  crusader_msgs/Detection3DArray  — camera_link (camera_node)
+  crsd/lidar_clusters   crusader_msgs/Cluster3DArray    — base_link (lidar_node), and
+                        COUNTED BUT DISCARDED unless use_lidar (see below)
+  /crsd/pose            crusader_msgs/LatLonHead        — position + heading
+  /crsd/attitude        crusader_msgs/Attitude          — roll/pitch/yaw
 Publishes:
-  crsd/world_targets       crusader_msgs/TrackedTargetArray  (EVERY tick)
-  crsd/world_model_health  std_msgs/String (JSON)            — where sightings went
+  /crsd/world_targets       crusader_msgs/TrackedTargetArray  (EVERY tick)
+  /crsd/world_model_health  std_msgs/String (JSON)            — where sightings went
 
 All the geometry and all the state live in target_tracker_core, which has no
-ROS imports and runs on a laptop. This file is I/O, parameters and freshness,
-mirroring lidar_cluster_node.py.
+ROS imports and runs on a laptop. This file is I/O, parameters and freshness.
 
 CAMERA-ONLY BY DEFAULT. `use_lidar` is False, so a cluster reaches the health
 counters and nothing else and every track came from a camera detection (see
 target_tracker_core: near walls the LiDAR makes permanent phantom tracks). The
-switch is [DYN] (Tuning tab, no restart); on, ranges go from stereo (a few per cent
+switch is live (ros2 param set, no restart); on, ranges go from stereo (a few per cent
 of the distance) back to time-of-flight (centimetres).
 
 WHY A TIMER AND NOT A CALLBACK PER DETECTION. The inputs run at different rates
@@ -62,112 +61,63 @@ from std_msgs.msg import String
 from crusader_msgs.msg import (Attitude, Cluster3DArray, Detection3DArray,
                                LatLonHead, TrackedTarget, TrackedTargetArray)
 
-from crusader_common import config as crsd_config
 from crusader_common import geo
-from crusader_common.node_main import run_node
-from crusader_common.param_utils import declare_from_config, make_set_callback
+from crusader_common.node_main import declare_params, on_param_set, run_node
 from crusader_common.stream_cache import StreamCache
 
 from crusader_world_model import target_tracker_core as core
 
-# [RO] = structural: topic names, the camera extrinsic and the freshness budgets.
-# The extrinsic is [RO] because live-tunable mounting geometry silently
-# invalidates every target already on the map. [DYN] = the fusion and tracking
-# gates, which a bench session needs to sweep.
-PARAM_SPEC = {
-    "detections_topic": dict(read_only=True, description="Detection3DArray in"),
-    "clusters_topic": dict(read_only=True, description="Cluster3DArray in"),
-    "targets_topic": dict(read_only=True, description="TrackedTargetArray out"),
-    "health_topic": dict(read_only=True, description="JSON stats out"),
-    "update_rate_hz": dict(read_only=True, lo=1.0, hi=30.0,
-                           description="fuse/track cycle rate"),
-    # --- freshness budgets [RO] ---
-    "pose_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
-                           description="= shared.pose_timeout_s; stale -> no "
-                                       "observations ingested"),
-    "attitude_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
-                               description="stale -> no observations ingested"),
-    "detection_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
-                                description="stale -> LiDAR-only cycles"),
-    "cluster_timeout_s": dict(read_only=True, lo=0.2, hi=10.0,
-                              description="stale -> camera-only cycles"),
-    # --- camera extrinsic [RO]: camera_link -> base_link ---
-    "cam_x": dict(read_only=True, lo=-5.0, hi=5.0, description="BODY fwd+ [m]"),
-    "cam_y": dict(read_only=True, lo=-5.0, hi=5.0, description="BODY left+ [m]"),
-    "cam_z": dict(read_only=True, lo=-5.0, hi=5.0, description="BODY up+ [m]"),
-    "cam_yaw_deg": dict(read_only=True, lo=-180.0, hi=180.0,
-                        description="mount yaw, + = aimed to PORT"),
-    "cam_pitch_deg": dict(read_only=True, lo=-90.0, hi=90.0,
-                          description="mount tilt, + = aimed DOWN"),
-    # --- fusion gates [DYN] ---
-    # use_lidar leads the group because the five below it are inert while it is
-    # False. [DYN], unlike the extrinsic: flipping it does not invalidate targets
-    # already on the map.
-    "use_lidar": dict(read_only=False,
-                      description="fuse LiDAR clusters. False (default) = "
-                                  "camera-only: clusters are counted and "
-                                  "discarded, and nothing anonymous can reach "
-                                  "the map. True for open water"),
-    "fuse_bearing_deg": dict(read_only=False, lo=0.5, hi=45.0,
-                             description="camera/LiDAR bearing agreement"),
-    "fuse_range_m": dict(read_only=False, lo=0.5, hi=20.0,
-                         description="absolute range-agreement floor [m]"),
-    "fuse_range_frac": dict(read_only=False, lo=0.0, hi=1.0,
-                            description="... or this fraction of camera range"),
-    "min_confidence": dict(read_only=False, lo=0.0, hi=1.0,
-                           description="re-threshold above buoy_detector's"),
-    "track_unlabeled": dict(read_only=True,
-                            description="keep LiDAR-only clusters as tracks"),
-    # --- tracking gates [DYN] ---
-    "assoc_radius_m": dict(read_only=False, lo=0.2, hi=20.0,
-                           description="world-frame association radius [m]"),
-    "pos_alpha": dict(read_only=False, lo=0.01, hi=1.0,
-                      description="floor on the position EMA gain"),
-    "vel_alpha": dict(read_only=False, lo=0.01, hi=1.0,
-                      description="velocity EMA gain"),
-    "confirm_hits": dict(read_only=False, lo=1, hi=100,
-                         description="sightings before CONFIRMED"),
-    "tentative_timeout_s": dict(read_only=False, lo=0.5, hi=60.0,
-                                description="unconfirmed tracks expire fast"),
-    "track_timeout_s": dict(read_only=False, lo=0.0, hi=3600.0,
-                            description="confirmed tracks are held this long; "
-                                        "0 = never expire (remember the whole "
-                                        "course for the run)"),
-    "max_tracks": dict(read_only=False, lo=1, hi=1000,
-                       description="hard cap; runaway guard, not a normal path"),
-    # --- colour voting [DYN] / label sets [RO] ---
-    # The three label settings are [RO]: they define what the tracker thinks a
-    # RoboBuoy IS, and rclpy cannot range-check a string list. The vote thresholds
-    # and master switch are safe to sweep live: votes are kept complete, so the
-    # history re-resolves.
-    "colour_vote_enable": dict(read_only=False,
-                               description="True: family labels associate "
-                                           "and the colour is voted. False: "
-                                           "the old same-label rule + plain "
-                                           "majority"),
-    "colour_family_labels": dict(read_only=True,
-                                 description="labels that are ONE buoy in "
-                                             "different beacon states"),
-    "colour_family_shapes": dict(read_only=True,
-                                 description="oak_detector shapes: every "
-                                             "[flash_|off_]<colour>_<shape> and "
-                                             "bare <shape> label is one family"),
-    "colour_unlit_labels": dict(read_only=True,
-                                description="family labels that carry no "
-                                            "colour (dark beacon); excluded "
-                                            "from the vote ratio"),
-    "colour_unknown_label": dict(read_only=True,
-                                 description="reported when no lit colour "
-                                             "wins; must hold no colour word"),
-    "colour_min_votes": dict(read_only=False, lo=1, hi=1000,
-                             description="votes a lit colour needs to be "
-                                         "reported"),
-    "colour_min_ratio": dict(read_only=False, lo=0.0, hi=1.0,
-                             description="share of the LIT votes a colour "
-                                         "needs to be reported"),
-    "health_period_s": dict(read_only=False, lo=1.0, hi=60.0,
-                            description="JSON stats publish period"),
+DETECTIONS_TOPIC = "/crsd/oak/detections"
+CLUSTERS_TOPIC = "crsd/lidar_clusters"
+
+PARAMS = {
+    "update_rate_hz": 10.0,             # fuse/track cycle
+    # freshness budgets
+    "pose_timeout_s": 1.0,              # stale -> no observations ingested
+    "attitude_timeout_s": 1.0,          # stale -> no observations ingested
+    "detection_timeout_s": 1.0,         # stale -> LiDAR-only cycles
+    "cluster_timeout_s": 2.0,           # stale -> camera-only cycles
+    # camera extrinsic, camera_link -> base_link: read-only, because a live mount
+    # change silently moves every target already on the map
+    "cam_x": 0.37,
+    "cam_y": 0.0,
+    "cam_z": 0.65,
+    "cam_yaw_deg": 0.0,                 # + = aimed to port
+    "cam_pitch_deg": 0.0,               # + = aimed down
+    # fusion gates: the five after use_lidar are inert while it is false
+    "use_lidar": False,                 # false = camera-only; true for open water
+    "fuse_bearing_deg": 6.0,
+    "fuse_range_m": 4.0,
+    "fuse_range_frac": 0.25,
+    "min_confidence": 0.5,
+    "track_unlabeled": True,            # keep LiDAR-only clusters as tracks
+    # tracking gates
+    "assoc_radius_m": 3.0,
+    "pos_alpha": 0.3,
+    "vel_alpha": 0.2,
+    "confirm_hits": 3,
+    "tentative_timeout_s": 3.0,
+    "track_timeout_s": 0.0,             # 0 = confirmed tracks never expire
+    "max_tracks": 64,                   # runaway guard, not a normal path
+    # colour voting. The label sets define what a RoboBuoy IS, so they are read-only
+    "colour_vote_enable": True,
+    "colour_family_labels": ["red_buoy", "green_buoy", "black_buoy", "flashing_blue_buoy",
+                             "steady_blue_buoy", "blue_buoy"],
+    "colour_family_shapes": ["diamond"],   # [flash_|off_]<colour>_<shape> is one family
+    "colour_unlit_labels": ["black_buoy"],
+    "colour_unknown_label": "unknown_buoy",
+    "colour_min_votes": 5,
+    "colour_min_ratio": 0.6,
+    "health_period_s": 5.0,
 }
+RANGES = {
+    "fuse_bearing_deg": (0.5, 45.0), "fuse_range_m": (0.5, 20.0), "fuse_range_frac": (0.0, 1.0),
+    "min_confidence": (0.0, 1.0), "assoc_radius_m": (0.2, 20.0), "pos_alpha": (0.01, 1.0),
+    "vel_alpha": (0.01, 1.0), "confirm_hits": (1, 100), "tentative_timeout_s": (0.5, 60.0),
+    "track_timeout_s": (0.0, 3600.0), "max_tracks": (1, 1000), "colour_min_votes": (1, 1000),
+    "colour_min_ratio": (0.0, 1.0),
+}
+DYNAMIC = tuple(RANGES) + ("use_lidar", "colour_vote_enable")
 
 # Params that map straight onto a TrackerParams field of the same name. Listed
 # rather than inferred so a node-level parameter that is not a core parameter
@@ -196,18 +146,10 @@ class TargetTrackerNode(Node):
 
     def __init__(self):
         super().__init__("target_tracker")
-        p = declare_from_config(self, crsd_config.node_params("target_tracker"),
-                                PARAM_SPEC)
-        self.p = p
-
-        self.params = core.TrackerParams(
-            **{name: p[name] for name in _CORE_PARAMS})
+        p = self.p = declare_params(self, PARAMS, dynamic=DYNAMIC, ranges=RANGES)
+        self.params = core.TrackerParams(**{name: p[name] for name in _CORE_PARAMS})
         self.tracker = core.TargetTracker(self.params)
-
-        ranges = {n: (s["lo"], s["hi"]) for n, s in PARAM_SPEC.items()
-                  if not s.get("read_only") and "lo" in s}
-        self.add_on_set_parameters_callback(
-            make_set_callback(self, ranges, self._apply))
+        on_param_set(self, self._apply)
 
         # Every input gets a freshness budget; nothing is read without one (the
         # module docstring says what each staleness does).
@@ -230,39 +172,31 @@ class TargetTrackerNode(Node):
         self._cycles = 0
         self._ingested = 0
 
-        self.create_subscription(Detection3DArray, p["detections_topic"],
+        self.create_subscription(Detection3DArray, DETECTIONS_TOPIC,
                                  self._on_detections, qos_profile_sensor_data)
-        self.create_subscription(Cluster3DArray, p["clusters_topic"],
-                                 self._on_clusters, 10)
+        self.create_subscription(Cluster3DArray, CLUSTERS_TOPIC, self._on_clusters, 10)
         self.create_subscription(LatLonHead, "/crsd/pose", self._on_pose, 10)
         self.create_subscription(Attitude, "/crsd/attitude", self._on_att, 10)
 
-        self.pub = self.create_publisher(TrackedTargetArray,
-                                         p["targets_topic"], 10)
-        self.health_pub = self.create_publisher(String, p["health_topic"], 10)
+        self.pub = self.create_publisher(TrackedTargetArray, "/crsd/world_targets", 10)
+        self.health_pub = self.create_publisher(String, "/crsd/world_model_health", 10)
 
         self.create_timer(1.0 / p["update_rate_hz"], self._tick)
         self.create_timer(p["health_period_s"], self._health)
         # Which sensors feed it, in the first line of the log: "subscribed and
         # discarded", not silence, so nobody has to find the parameter to learn the
         # LiDAR is received and thrown away.
-        sources = (f"'{p['detections_topic']}' + '{p['clusters_topic']}'"
-                   if p["use_lidar"] else
-                   f"'{p['detections_topic']}' ONLY — use_lidar is FALSE, so "
-                   f"'{p['clusters_topic']}' is subscribed and discarded")
+        sources = (f"{DETECTIONS_TOPIC} + {CLUSTERS_TOPIC}" if p["use_lidar"] else
+                   f"{DETECTIONS_TOPIC} ONLY: use_lidar is FALSE, so {CLUSTERS_TOPIC} "
+                   "is subscribed and discarded")
         self.get_logger().info(
-            f"tracking into '{p['targets_topic']}' from {sources}; camera "
+            f"tracking into /crsd/world_targets from {sources}; camera "
             f"mount ({p['cam_x']:.2f}, {p['cam_y']:.2f}, {p['cam_z']:.2f}) m "
             f"yaw={p['cam_yaw_deg']:.1f} pitch={p['cam_pitch_deg']:.1f} deg")
 
     def _apply(self, changes):
-        """Apply a validated `ros2 param set` to the live core.
-
-        TrackerParams is a plain dataclass the core reads every cycle, so
-        assigning the attribute IS applying the change. health_period_s is the
-        exception: rclpy timers cannot be repriced, so it takes effect at the next
-        restart rather than pretending.
-        """
+        """A `ros2 param set` that passed its checks. TrackerParams is a plain dataclass the
+        core reads every cycle, so assigning the attribute is applying the change."""
         for name, value in changes.items():
             if name in _CORE_PARAMS:
                 setattr(self.params, name, value)
@@ -478,8 +412,7 @@ class TargetTrackerNode(Node):
             self.get_logger().warn(
                 "no detections or clusters ingested yet — the world model is "
                 "publishing empty arrays because nothing is feeding it. Check "
-                f"'{self.p['detections_topic']}' and "
-                f"'{self.p['clusters_topic']}' are actually publishing.",
+                f"{DETECTIONS_TOPIC} and {CLUSTERS_TOPIC} are actually publishing.",
                 throttle_duration_sec=15.0)
         stats = self.tracker.stats
         if stats.get("lidar_ignored"):
@@ -492,8 +425,8 @@ class TargetTrackerNode(Node):
                 "received and discarded in the last cycle. Every track on the "
                 "map is "
                 "a camera detection, so every range is stereo — a few per cent "
-                "of the distance, not centimetres. Set use_lidar true (Tuning "
-                "tab, or ros2 param set) on open water.",
+                "of the distance, not centimetres. Set use_lidar true (ros2 "
+                "param set) on open water.",
                 throttle_duration_sec=60.0)
         if (self.params.use_lidar and stats.get("cam_in")
                 and stats.get("lidar_in") and not stats.get("fused")):

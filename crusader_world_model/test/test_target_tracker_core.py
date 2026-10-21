@@ -259,13 +259,11 @@ class DisableTest(unittest.TestCase):
 
 
 class WiringTest(unittest.TestCase):
-    """The node cannot be imported without rclpy, so its wiring is checked from
-    the source: a name in _CORE_PARAMS that TrackerParams lacks is a TypeError
-    at node start, and a YAML key with no PARAM_SPEC entry is a ValueError from
-    declare_from_config. Both would otherwise first show up on the boat."""
+    """The node cannot be imported without rclpy, so its wiring is checked from the source:
+    a name in _CORE_PARAMS that TrackerParams lacks is a TypeError at node start, and a YAML
+    key the node does not declare is ignored by ROS without a word."""
 
-    NODE = os.path.join(HERE, "..", "crusader_world_model",
-                        "target_tracker_node.py")
+    NODE = os.path.join(HERE, "..", "crusader_world_model", "target_tracker_node.py")
     YAML = os.path.join(HERE, "..", "..", "crusader_bringup", "config",
                         "crusader_params.yaml")
 
@@ -273,36 +271,38 @@ class WiringTest(unittest.TestCase):
     def setUpClass(cls):
         with open(cls.NODE, encoding="utf-8") as fh:
             tree = ast.parse(fh.read())
-        cls.core_params = cls.spec = None
+        lit = {}
         for node in tree.body:
             if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
-                if node.targets[0].id == "_CORE_PARAMS":
-                    cls.core_params = [e.value for e in node.value.elts]
-                if node.targets[0].id == "PARAM_SPEC":
-                    cls.spec = {k.value for k in node.value.keys}
+                try:
+                    lit[node.targets[0].id] = ast.literal_eval(node.value)
+                except ValueError:
+                    pass
+        cls.core_params, cls.params = lit["_CORE_PARAMS"], lit["PARAMS"]
 
     def test_every_core_param_is_a_trackerparams_field(self):
         fields = {f.name for f in dataclasses.fields(core.TrackerParams)}
         self.assertEqual(sorted(set(self.core_params) - fields), [])
 
-    def test_every_core_param_has_a_declared_posture(self):
-        self.assertEqual(sorted(set(self.core_params) - self.spec), [])
+    def test_every_core_param_is_declared(self):
+        self.assertEqual(sorted(set(self.core_params) - set(self.params)), [])
 
-    def test_yaml_matches_the_spec_and_the_defaults(self):
+    def test_yaml_keys_are_declared(self):
         try:
             import yaml
         except ImportError:
             self.skipTest("PyYAML not installed")
         with open(self.YAML, encoding="utf-8") as fh:
             tt = yaml.safe_load(fh)["target_tracker"]["ros__parameters"]
-        self.assertEqual(sorted(set(tt) - self.spec), [])
+        self.assertEqual(sorted(set(tt) - set(self.params)), [])
+
+    def test_colour_defaults_match_the_core(self):
         defaults = core.TrackerParams()
         for name in self.core_params:
             if name.startswith("colour_"):
-                self.assertIn(name, tt)
-                self.assertEqual(
-                    tuple(tt[name]) if isinstance(tt[name], list) else tt[name],
-                    getattr(defaults, name), name)
+                v = self.params[name]
+                self.assertEqual(tuple(v) if isinstance(v, list) else v,
+                                 getattr(defaults, name), name)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,8 @@
   <url type="repository">https://github.com/InspirationRobotics/rx26_asv</url>
 
   <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>rcl_interfaces</depend>
   <depend>crusader_msgs</depend>
   <depend>crusader_common</depend>
 

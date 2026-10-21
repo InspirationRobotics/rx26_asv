@@ -78,12 +78,8 @@ SIM_ONLY_PACKAGES = {"crusader_sim"}
 # two plausible names, and the consumer never receives anything — the most
 # expensive kind of green.
 TOPIC_PAIRS = (
-    (("target_tracker", "targets_topic"), ("ground_station", "targets_topic")),
-    # Nav2 avoidance (docs/nav2_avoidance_spec.md). A leg-topic mismatch is a
-    # blank map, not an error; a datum-topic mismatch leaves bt_runner waiting
-    # for a datum nobody sends, holding every planned leg.
+    # A leg-topic mismatch is a blank map, not an error (docs/nav2_avoidance_spec.md).
     (("bt_runner_node", "nav_leg_topic"), ("ground_station", "nav_leg_topic")),
-    (("nav_frames_node", "datum_topic"), ("bt_runner_node", "nav_datum_topic")),
 )
 
 # Ports that must stay distinct: the loser of a bind fails at startup with an
@@ -592,7 +588,9 @@ def check_nav():
         lifecycle = nav2["nav_lifecycle"]["ros__parameters"]
         hazard_topic = cm["hazard_layer"]["topic"]
         bt = cfg["bt_runner_node"]["ros__parameters"]
-        frames = cfg["nav_frames_node"]["ros__parameters"]
+        frames_src = REPO / "crusader_nav" / "crusader_nav" / "nav_frames_node.py"
+        frames = _effective(cfg, "nav_frames_node", frames_src)
+        datum_topic = _module_literals(frames_src)["DATUM_TOPIC"]
         lidar_src = REPO / "crusader_perception" / "crusader_perception" / "lidar_node.py"
         lidar = _effective(cfg, "lidar_node", lidar_src)
         lidar["nav_cloud_topic"] = _module_literals(lidar_src)["NAV_CLOUD_TOPIC"]
@@ -693,6 +691,13 @@ def check_nav():
               ("bt_runner_node.nav_wp_radius_m", float(bt["nav_wp_radius_m"])),
               ("baseline WP_RADIUS", float(wp_radius)),
               "the carrot arrival test disagrees with the autopilot")
+
+    # A datum-topic mismatch leaves bt_runner waiting for a datum nobody sends, holding
+    # every planned leg.
+    _same("datum topic nav_frames_node -> bt_runner",
+          ("nav_frames_node.DATUM_TOPIC", datum_topic),
+          ("bt_runner_node.nav_datum_topic", bt["nav_datum_topic"]),
+          "bt_runner never adopts a datum")
 
     # The datum: a 'param' datum of (0, 0) is the default, not a datum.
     source, dlat, dlon = frames["datum_source"], frames["datum_lat"], frames["datum_lon"]
