@@ -3,10 +3,13 @@ built workspace (crusader_msgs, crusader_bt for missions_list); skips itself wit
 
     ROS_DOMAIN_ID=57 python3 crusader_groundstation/test/test_gcs_bridge.py
 """
+import array
 import collections
+import contextlib
 import io
 import itertools
 import json
+import math
 import os
 import shutil
 import socket
@@ -25,8 +28,10 @@ sys.path.insert(0, os.path.join(HERE, ".."))
 try:
     import rclpy
     from rclpy.executors import MultiThreadedExecutor
+    from sensor_msgs.msg import CompressedImage
     from std_msgs.msg import String
-    from crusader_msgs.msg import LatLonHead, PassagePlan
+    from crusader_common import geo
+    from crusader_msgs.msg import Cluster3D, Cluster3DArray, LatLonHead, PassagePlan
     from crusader_groundstation import gcs_bridge, gcs_wire
     from crusader_groundstation.gcs_bridge import (MANUAL_VERSION_BASE, OPS_WORKERS, Connection,
                                                    GcsBridge)
@@ -73,6 +78,53 @@ class Peaked(collections.deque):
         self.peak = max(self.peak, len(self))
 
 
+def clusters_msg(*specs):
+    """specs: (x forward, y left, extent_x, extent_y, n_points), in base_link."""
+    msg = Cluster3DArray()
+    msg.header.frame_id = "base_link"
+    for x, y, ex, ey, n in specs:
+        c = Cluster3D(x=x, y=y, extent_x=ex, extent_y=ey, n_points=n, range=math.hypot(x, y))
+        msg.clusters.append(c)
+    return msg
+
+
+def jpeg_msg(data):
+    return CompressedImage(format="jpeg", data=array.array("B", data))
+
+
+@unittest.skipUnless(HAVE_ROS, "needs rclpy and a built workspace")
+class Placement(unittest.TestCase):
+    """The pure part of the obstacles op: no node, no topics."""
+
+    def test_heading_is_clockwise_from_north(self):
+        lat0, lon0 = 1.3, 103.8
+        # heading -> where 10 m ahead and 5 m to the left land, as (east, north) metres
+        cases = {0: ((0, 10), (-5, 0)), 90: ((10, 0), (0, 5)), 180: ((0, -10), (5, 0)),
+                 270: ((-10, 0), (0, -5)), 45: ((7.0711, 7.0711), (-3.5355, 3.5355))}
+        for heading, (ahead, left) in cases.items():
+            items = gcs_bridge.place_clusters([(10, 0, 0.3, 0.3, 40), (0, 5, 1.0, 2.0, 120)],
+                                              lat0, lon0, heading)
+            for item, want in zip(items, (ahead, left)):
+                with self.subTest(heading=heading, want=want):
+                    got = geo.latlon_to_xy(item["lat"], item["lon"], (lat0, lon0))
+                    self.assertAlmostEqual(got[0], want[0], places=3)
+                    self.assertAlmostEqual(got[1], want[1], places=3)
+
+    def test_radius_covers_the_box_and_n_is_kept(self):
+        a, b = gcs_bridge.place_clusters([(10, 0, 0.3, 0.3, 40), (0, 5, 1.0, 2.0, 120)],
+                                         1.3, 103.8, 0.0)
+        self.assertEqual((a["r"], a["n"]), (0.21, 40))
+        self.assertEqual((b["r"], b["n"]), (1.12, 120))
+
+    def test_a_cache_with_nothing_to_use_says_why(self):
+        cache = gcs_bridge.StreamCache(1.0)
+        self.assertEqual(gcs_bridge.stale_reason("LiDAR", cache, 10.0, ": is it up?"),
+                         "no LiDAR heard: is it up?")
+        cache.set([], 10.0)
+        self.assertEqual(gcs_bridge.stale_reason("LiDAR", cache, 10.5), "")
+        self.assertEqual(gcs_bridge.stale_reason("LiDAR", cache, 13.04), "LiDAR stale (3.0 s)")
+
+
 @unittest.skipUnless(HAVE_ROS, "needs rclpy and a built workspace")
 class Bridge(unittest.TestCase):
 
@@ -88,6 +140,9 @@ class Bridge(unittest.TestCase):
         cls.probe.create_subscription(PassagePlan, "/crsd/passage_plan", cls.plans.append, 10)
         cls.pose = cls.probe.create_publisher(LatLonHead, "/crsd/pose", 10)
         cls.bt = cls.probe.create_publisher(String, "/crsd/bt_status", 10)
+        cls.clusters = cls.probe.create_publisher(Cluster3DArray, gcs_bridge.CLUSTERS_TOPIC, 10)
+        cls.cam = {"image": cls.probe.create_publisher(CompressedImage, gcs_bridge.IMAGE_TOPIC, 2),
+                   "raw": cls.probe.create_publisher(CompressedImage, gcs_bridge.RAW_TOPIC, 2)}
         cls.ex = MultiThreadedExecutor()
         cls.ex.add_node(cls.node)
         cls.ex.add_node(cls.probe)
@@ -232,6 +287,201 @@ class Bridge(unittest.TestCase):
     def test_unknown_op(self):
         h, _ = self.req("fly")
         self.assertFalse(h["ok"])
+
+    # -- the on-demand topics: leased by a laptop that keeps asking, dropped soon after
+
+    LEASED = {"image", "raw", "preview", "clusters"}
+
+    @contextlib.contextmanager
+    def publishing(self, *pairs, hz=10.0):
+        """(publisher, msg) pairs sent at hz on a thread, as the sensor nodes would."""
+        stop = threading.Event()
+
+        def run():
+            while not stop.is_set():
+                for pub, msg in pairs:
+                    pub.publish(msg)
+                stop.wait(1.0 / hz)
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(2)
+            time.sleep(0.2)             # what was in flight reaches the bridge before we go on
+
+    def release_leases(self):
+        """Every lease expired now, and the bridge's subscriptions dropped with them."""
+        for key in list(self.node._leases):     # values only: the node iterates this dict
+            self.node._leases[key] = 0.0
+        self.until(lambda: not self.LEASED & set(self.node._subs), "the leases dropped")
+        # a real lease outlives the clusters' freshness; an early expiry must not let the last
+        # clusters heard before the drop pass for fresh after the next subscription
+        self.node._clusters.set([], time.monotonic() - 3600.0)
+
+    def fake_rescale(self):
+        """-> the (jpeg, w, q) each picture was handed to rescale_jpeg with; no cv2 needed."""
+        calls = []
+
+        def rescale(jpeg, width, quality):
+            calls.append((jpeg, width, quality))
+            return jpeg, width, 9
+
+        patcher = mock.patch.object(gcs_bridge, "rescale_jpeg", rescale)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return calls
+
+    def boat_pose(self, heading=90.0):
+        return LatLonHead(latitude=1.3, longitude=103.8, heading=heading, ground_speed=0.0)
+
+    def test_obstacles_are_placed_around_the_boat(self):
+        self.addCleanup(self.release_leases)
+        lat, lon = 1.3, 103.8
+        msg = clusters_msg((10.0, 0.0, 0.3, 0.3, 40), (0.0, 5.0, 1.0, 2.0, 120))
+        with self.publishing((self.pose, self.boat_pose(90.0)), (self.clusters, msg)):
+            h, _ = self.req("obstacles")
+        self.assertTrue(h["ok"], h["msg"])
+        d = h["data"]
+        self.assertEqual(d["reason"], "")
+        self.assertLess(max(d["clusters_age"], d["pose_age"]), 1.0)
+        ahead, left = sorted(d["items"], key=lambda i: i["n"])
+        # facing east: 10 m ahead is 10 m east, 5 m to the left is 5 m north
+        self.assertAlmostEqual(ahead["lat"], lat, places=7)
+        metres_per_deg_lon = geo.M_PER_DEG * math.cos(math.radians(lat))
+        self.assertAlmostEqual(ahead["lon"], lon + 10 / metres_per_deg_lon, places=7)
+        self.assertAlmostEqual(left["lat"], lat + 5 / geo.M_PER_DEG, places=7)
+        self.assertAlmostEqual(left["lon"], lon, places=7)
+        self.assertEqual((ahead["r"], left["r"]), (0.21, 1.12))
+
+    def test_no_clusters_is_an_answer_not_a_blank(self):
+        self.addCleanup(self.release_leases)
+        with self.publishing((self.pose, self.boat_pose()), (self.clusters, clusters_msg())):
+            h, _ = self.req("obstacles")
+        self.assertTrue(h["ok"], h["msg"])
+        self.assertEqual((h["data"]["items"], h["data"]["reason"]), ([], ""))
+
+    def test_obstacles_are_blank_when_the_pose_is_stale(self):
+        self.addCleanup(self.release_leases)
+        self.node._pose.set((1.3, 103.8, 90.0, 0.0), time.monotonic() - 5.0)
+        with self.publishing((self.clusters, clusters_msg((10.0, 0.0, 0.3, 0.3, 40)))):
+            h, _ = self.req("obstacles")
+        d = h["data"]
+        self.assertTrue(h["ok"], h["msg"])
+        self.assertEqual(d["items"], [])
+        self.assertIn("boat position stale", d["reason"])
+        self.assertNotIn("LiDAR", d["reason"])
+        self.assertGreaterEqual(d["pose_age"], 5.0)
+        self.assertLess(d["clusters_age"], 1.0)
+
+    def test_obstacles_are_blank_when_the_clusters_are_old(self):
+        self.addCleanup(self.release_leases)
+        self.node._clusters.set([(10.0, 0.0, 0.3, 0.3, 40)], time.monotonic() - 5.0)
+        with self.publishing((self.pose, self.boat_pose())):    # lidar_node has gone quiet
+            h, _ = self.req("obstacles")
+        d = h["data"]
+        self.assertTrue(h["ok"], h["msg"])
+        self.assertEqual(d["items"], [])
+        self.assertIn("LiDAR clusters stale", d["reason"])
+        self.assertNotIn("boat position", d["reason"])
+        self.assertGreaterEqual(d["clusters_age"], 5.0)
+        self.assertLess(d["pose_age"], 1.0)
+
+    def test_obstacles_are_blank_without_a_heading(self):
+        self.addCleanup(self.release_leases)
+        with self.publishing((self.pose, self.boat_pose(float("nan"))),
+                             (self.clusters, clusters_msg((10.0, 0.0, 0.3, 0.3, 40)))):
+            h, _ = self.req("obstacles")
+        self.assertEqual(h["data"]["items"], [])
+        self.assertEqual(h["data"]["reason"], "boat heading unknown")
+
+    def test_obstacles_are_subscribed_only_while_asked(self):
+        self.release_leases()
+        self.until(lambda: self.probe.count_subscribers(gcs_bridge.CLUSTERS_TOPIC) == 0,
+                   "nobody subscribed to the clusters before the first ask")
+        msg = clusters_msg((10.0, 0.0, 0.3, 0.3, 40))
+        with mock.patch.object(gcs_bridge, "LEASE_S", 0.6):
+            with self.publishing((self.pose, self.boat_pose()), (self.clusters, msg)):
+                h, _ = self.req("obstacles")
+                self.assertEqual(len(h["data"]["items"]), 1)
+                self.assertIn("clusters", self.node._subs)
+                self.until(lambda: self.probe.count_subscribers(gcs_bridge.CLUSTERS_TOPIC) == 1,
+                           "the bridge subscribed to the clusters")
+                self.until(lambda: "clusters" not in self.node._subs,
+                           "the subscription dropped after the last ask", 3.0)
+        self.until(lambda: self.probe.count_subscribers(gcs_bridge.CLUSTERS_TOPIC) == 0,
+                   "the clusters unsubscribed in the graph")
+
+    def test_cam_stream_is_annotated_unless_raw_is_asked_for(self):
+        self.release_leases()
+        self.addCleanup(self.release_leases)
+        calls = self.fake_rescale()
+        with self.publishing((self.cam["image"], jpeg_msg(b"annotated")),
+                             (self.cam["raw"], jpeg_msg(b"raw"))):
+            for fields in ({}, {"stream": "annotated"}):
+                with self.subTest(fields=fields):
+                    h, blob = self.req("cam", w=400, q=70, **fields)
+                    self.assertEqual((h["t"], h["stream"], blob),
+                                     ("cam", "annotated", b"annotated"))
+                    self.assertEqual(calls[-1], (b"annotated", 400, 70))
+            self.assertNotIn("raw", self.node._subs)    # annotated viewers leave raw alone
+            h, blob = self.req("cam", w=400, q=70, stream="raw")
+            self.assertEqual((h["t"], h["stream"], blob), ("cam", "raw", b"raw"))
+            self.assertEqual(calls[-1], (b"raw", 400, 70))     # scaled and encoded as the other is
+            self.assertIn("raw", self.node._subs)
+
+    def test_cam_refuses_a_stream_it_does_not_know(self):
+        self.release_leases()
+        for bad in ("sepia", "", None):
+            with self.subTest(stream=bad):
+                h, _ = self.req("cam", stream=bad)
+                self.assertEqual((h["t"], h["ok"]), ("result", False))
+                self.assertIn("annotated or raw", h["msg"])
+        self.assertFalse(self.LEASED & set(self.node._subs))     # refused before anything leased
+
+    def test_no_raw_picture_says_which_one(self):
+        self.release_leases()
+        self.addCleanup(self.release_leases)
+        h, _ = self.req("cam", stream="raw")
+        self.assertFalse(h["ok"])
+        self.assertIn("no raw picture", h["msg"])
+
+    def stop_recording(self):
+        name = self.node.recorder.session and self.node.recorder.session.name
+        self.req("record", kind="session", action="stop")
+        if name:
+            shutil.rmtree(os.path.join(self.tmp, name), True)
+
+    def test_raw_stays_subscribed_while_recording_or_viewing_needs_it(self):
+        self.release_leases()
+        self.addCleanup(self.release_leases)
+        self.addCleanup(self.stop_recording)
+        calls = self.fake_rescale()
+        with mock.patch.object(gcs_bridge, "LEASE_S", 1.0), \
+                self.publishing((self.cam["raw"], jpeg_msg(b"raw"))):
+            h, _ = self.req("record", kind="session", action="start")
+            self.assertTrue(h["ok"], h["msg"])
+            self.until(lambda: "raw" in self.node._subs, "the recorder's raw subscription")
+            frames = self.node.recorder.session.frame_stats
+            self.until(lambda: frames()[0].get("camera", 0) >= 1, "a recorded frame")
+            h, blob = self.req("cam", stream="raw")             # recording AND viewing
+            self.assertEqual(blob, b"raw")
+            time.sleep(1.3)                                     # the viewer's lease has run out
+            self.assertIn("raw", self.node._subs)
+            before = frames()[0]["camera"]
+            self.until(lambda: frames()[0]["camera"] > before, "recording on without a viewer")
+            self.req("cam", stream="raw")                       # viewing again; the recording ends
+            h, _ = self.req("record", kind="session", action="stop")
+            self.assertTrue(h["ok"], h["msg"])
+            self.assertIn("raw", self.node._subs)               # the viewer's lease still holds it
+            self.until(lambda: "raw" not in self.node._subs, "the raw subscription dropped", 4.0)
+            self.assertEqual(calls[-1][0], b"raw")
+            h, blob = self.req("cam", stream="raw")             # viewing alone
+            self.assertEqual(blob, b"raw")
+            self.assertIn("raw", self.node._subs)
+            self.until(lambda: "raw" not in self.node._subs, "a lone viewer's lease dropped", 4.0)
 
     # -- a download on a slow link: a second laptop whose link the test holds shut
 

@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from unittest import mock
@@ -55,6 +56,10 @@ class FakeBoat:
                       "msg": "unknown op 'ping'", "data": None})
             elif op == "cam":
                 send({"t": "cam", "id": rid, "w": h["w"], "h": 10, "age": 0.1}, b"\xff\xd8JPEG")
+            elif op == "obstacles":
+                send({"t": "result", "id": rid, "op": op, "ok": True, "msg": "", "data": {
+                    "items": [{"lat": 1.0, "lon": 2.0, "r": 0.5, "n": 3}], "reason": "",
+                    "clusters_age": 0.1, "pose_age": 0.2}})
             elif op == "lidar":
                 xy = (100).to_bytes(2, "little", signed=True) + (-50).to_bytes(2, "little", signed=True)
                 send({"t": "lidar", "id": rid, "n": 1, "scale": 0.01, "frame": "base_link"}, xy)
@@ -163,6 +168,33 @@ class GcsApp(unittest.TestCase):
         d = json.loads(urllib.request.urlopen(self.base + "/lidar.json").read())
         self.assertEqual(d["points"], [[1.0, -0.5]])
 
+    def cam_request(self, query):
+        """The cam request the boat saw after GET /cam.jpg?<query>."""
+        urllib.request.urlopen(f"{self.base}/cam.jpg?w=320&q=50{query}").read()
+        return [r for r in self.boat.reqs if r["op"] == "cam"][-1]
+
+    def test_cam_stream_goes_through_when_asked_for(self):
+        self.assertNotIn("stream", self.cam_request(""))     # the boat's default: annotated
+        self.assertEqual(self.cam_request("&stream=raw")["stream"], "raw")
+        self.assertEqual(self.cam_request("&stream=annotated")["stream"], "annotated")
+
+    def test_cam_refuses_a_stream_it_does_not_know(self):
+        for query in ("&stream=sepia", "&stream=Raw", "&stream=raw%20"):
+            with self.subTest(query=query):
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    urllib.request.urlopen(f"{self.base}/cam.jpg?w=320&q=50{query}")
+                self.assertEqual(caught.exception.code, 400)
+                self.assertIn(b"annotated or raw", caught.exception.read())
+        self.assertFalse([r for r in self.boat.reqs
+                          if r.get("stream") not in (None, "raw", "annotated")])
+
+    def test_obstacles_ride_the_request_path(self):
+        r = self.post({"op": "obstacles"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["data"]["items"], [{"lat": 1.0, "lon": 2.0, "r": 0.5, "n": 3}])
+        self.assertEqual(r["data"]["reason"], "")
+        self.assertEqual(self.boat.reqs[-1]["op"], "obstacles")
+
     def test_download_streams(self):
         r = urllib.request.urlopen(self.base + "/download?name=s1")
         self.assertEqual(r.read(), b"abcdef")
@@ -183,6 +215,15 @@ class GcsApp(unittest.TestCase):
         page = urllib.request.urlopen(self.base + "/").read().decode()
         self.assertIn("<title>Crusader GCS</title>", page)
         self.assertIn("CrsdMap", urllib.request.urlopen(self.base + "/map.js").read().decode())
+
+    def test_page_has_the_obstacle_layer_and_the_annotation_switch(self):
+        page = urllib.request.urlopen(self.base + "/").read().decode()
+        self.assertEqual(page.count("--map-obstacle:"), 2)      # the light and the dark theme
+        for needle in ('id="obs-on"', 'id="obs-info"', 'id="cam-annotate"', "crsd-cam-annotate",
+                       "stream=${stream}", 'req("obstacles"'):
+            self.assertIn(needle, page)
+        js = urllib.request.urlopen(self.base + "/map.js").read().decode()
+        self.assertIn('kind === "obstacles"', js)
 
 
 class LinkTiming(unittest.TestCase):

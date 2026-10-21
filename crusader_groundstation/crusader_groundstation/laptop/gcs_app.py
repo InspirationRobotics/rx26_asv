@@ -9,7 +9,8 @@ same against the sim (--boat 127.0.0.1).
 The page talks only to this process:
   GET  /events          server-sent events: every frame the boat sends, and the link's state
   POST /req             one op ({op, ...}), answered with the boat's result
-  GET  /cam.jpg         the camera, asked of the boat per request (so only while its tab shows)
+  GET  /cam.jpg         the camera, asked of the boat per request (so only while its tab shows);
+                        &stream=raw for the frame without the detector's boxes
   GET  /lidar.json      the LiDAR preview, likewise
   GET  /download?name=  a recording, streamed straight through
 A page reload gets the newest frame of every kind and the recent log, radio and OCS events
@@ -37,6 +38,7 @@ import gcs_wire  # noqa: E402
 DEFAULT_BOAT = "192.168.100.109"
 LATEST_KINDS = ("hello", "state", "targets", "plan", "path", "hazards", "nodes", "tree")
 RINGS = {"log": 1500, "radio": 500, "ocs": 300}
+CAM_STREAMS = ("annotated", "raw")  # /cam.jpg?stream=: the boat's _op_cam says the same
 STATIC = {"/": ("page.html", "text/html; charset=utf-8"),
           "/map.js": ("map.js", "text/javascript; charset=utf-8")}
 REQ_TIMEOUT_S = 15.0
@@ -373,8 +375,12 @@ def make_handler(link, hub, allowed_hosts):
             elif url.path == "/events":
                 self._events()
             elif url.path == "/cam.jpg":
-                header, blob = link.request("cam", {"w": int(args.get("w", 320)),
-                                                    "q": int(args.get("q", 50))}, timeout=5.0)
+                fields = {"w": int(args.get("w", 320)), "q": int(args.get("q", 50))}
+                if "stream" in args:        # absent = the boat's default, the annotated picture
+                    if args["stream"] not in CAM_STREAMS:
+                        return self._send(400, b"stream must be annotated or raw", "text/plain")
+                    fields["stream"] = args["stream"]
+                header, blob = link.request("cam", fields, timeout=5.0)
                 if header.get("t") == "cam" and blob:
                     self._send(200, blob, "image/jpeg",
                                (("X-Age", str(header.get("age"))),

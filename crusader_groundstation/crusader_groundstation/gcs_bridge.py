@@ -13,8 +13,8 @@ arrival whatever the laptop showed:
 Each laptop gets two bounded send lanes: a slow WiFi link loses control frames (oldest state
 first), never stalls the boat. A recording download rides the bulk lane and waits for room
 there, so it cannot crowd out the state frames and results the operator is watching.
-The pictures and the LiDAR preview are subscribed only while a laptop keeps asking for them,
-so a closed tab costs camera_node and lidar_node nothing.
+The pictures, the LiDAR preview and the LiDAR clusters are subscribed only while a laptop keeps
+asking for them, so a closed tab costs camera_node and lidar_node nothing.
 """
 import json
 import math
@@ -39,8 +39,9 @@ from crusader_common import geo
 from crusader_common.node_main import declare_params, run_node
 from crusader_common.stream_cache import StreamCache
 from crusader_msgs.action import RunMission
-from crusader_msgs.msg import (Attitude, FcuHealth, FcuStatus, HazardArray, LatLonHead,
-                               PassageBuoy, PassagePlan, RadioFrame, TrackedTargetArray)
+from crusader_msgs.msg import (Attitude, Cluster3DArray, FcuHealth, FcuStatus, HazardArray,
+                               LatLonHead, PassageBuoy, PassagePlan, RadioFrame,
+                               TrackedTargetArray)
 
 from crusader_groundstation import (bag_recorder, camera_profiles, gcs_wire, param_client,
                                     planner_profiles, power_client, proc_scan, system_info)
@@ -61,6 +62,7 @@ PARAMS = {
     "status_timeout_s": 1.0,
     "health_timeout_s": 3.0,            # /crsd/fcu_health is 1 Hz
     "targets_timeout_s": 3.0,
+    "clusters_timeout_s": 1.0,          # lidar_node clusters every sweep, 10 Hz
     "leg_timeout_s": 2.0,               # bt_runner's leg status is 2 Hz while a leg runs
     "bt_timeout_s": 3.0,
     "sensor_health_timeout_s": 12.0,    # camera_node and lidar_node say so every 5 s
@@ -78,6 +80,8 @@ LEG_TOPIC = "/crsd/nav/leg_status"      # = bt_runner_node.nav_leg_topic (check_
 IMAGE_TOPIC = "/crsd/camera/image/compressed"
 RAW_TOPIC = "/crsd/camera/raw/compressed"
 PREVIEW_TOPIC = "/crsd/lidar/preview"
+CLUSTERS_TOPIC = "/crsd/lidar_clusters"
+CAM_STREAMS = {"annotated": "image", "raw": "raw"}      # _op_cam's stream -> its lease key
 MISSION_ACTION = "/crsd/run_mission"
 STATE_PERIOD_S = 0.5
 EVENT_PERIOD_S = 0.25
@@ -315,6 +319,7 @@ class GcsBridge(Node):
         self._status = StreamCache(p["status_timeout_s"])
         self._health = StreamCache(p["health_timeout_s"])
         self._targets = StreamCache(p["targets_timeout_s"])
+        self._clusters = StreamCache(p["clusters_timeout_s"])
         self._leg = StreamCache(p["leg_timeout_s"])
         self._bt = StreamCache(p["bt_timeout_s"])
         self._camera = StreamCache(p["sensor_health_timeout_s"])
@@ -322,9 +327,9 @@ class GcsBridge(Node):
         self._plan = None                   # (PassagePlan, monotonic time)
         self._hazards = None
         self._datum = None
-        self._latest = {}                   # "image" | "preview" -> (stamp, payload, mono)
+        self._latest = {}                   # "image" | "raw" | "preview" -> (stamp, payload, mono)
         self._latest_cv = threading.Condition()
-        self._leases = {}                   # "image" | "preview" -> expiry (monotonic)
+        self._leases = {}                   # "image" | "raw" | "preview" | "clusters" -> expiry
         self._subs = {}
         self._graph, self._graph_full, self._pids = set(), [], {}
         self._last = {}                     # frame kind -> the newest frame of it
@@ -489,17 +494,29 @@ class GcsBridge(Node):
         item["seq"] = self._ocs_seq
         self._ocs.append(item)
 
+    def _store_latest(self, key, msg, payload):
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        with self._latest_cv:
+            self._latest[key] = (stamp, payload, time.monotonic())
+            self._latest_cv.notify_all()
+
     def _on_image(self, key):
         def callback(msg):
-            stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-            payload = bytes(msg.data) if key != "preview" else msg
-            with self._latest_cv:
-                self._latest[key] = (stamp, payload, time.monotonic())
-                self._latest_cv.notify_all()
+            self._store_latest(key, msg, bytes(msg.data) if key != "preview" else msg)
         return callback
 
     def _on_raw(self, msg):
-        self.recorder.put_frame("camera", bytes(msg.data))
+        """The recorder's frame, and the one a laptop that asked for the raw picture is sent."""
+        jpeg = bytes(msg.data)
+        self.recorder.put_frame("camera", jpeg)
+        self._store_latest("raw", msg, jpeg)
+
+    def _on_clusters(self, msg):
+        """Kept as base_link tuples: _op_obstacles places them, with the pose it is asked with."""
+        self._clusters.set([(c.x, c.y, c.extent_x, c.extent_y, int(c.n_points))
+                            for c in msg.clusters], time.monotonic())
+        with self._latest_cv:
+            self._latest_cv.notify_all()
 
     # ------------------------------------------------------------------ on-demand topics
 
@@ -515,7 +532,8 @@ class GcsBridge(Node):
         topics = {"image": (CompressedImage, IMAGE_TOPIC, self._on_image("image"), 2),
                   "preview": (PointCloud2, PREVIEW_TOPIC, self._on_image("preview"),
                               qos_profile_sensor_data),
-                  "raw": (CompressedImage, RAW_TOPIC, self._on_raw, 5)}
+                  "raw": (CompressedImage, RAW_TOPIC, self._on_raw, 5),
+                  "clusters": (Cluster3DArray, CLUSTERS_TOPIC, self._on_clusters, 5)}
         for key, (kind, topic, cb, qos) in topics.items():
             if key in wanted and key not in self._subs:
                 self._subs[key] = self.create_subscription(kind, topic, cb, qos)
@@ -524,11 +542,17 @@ class GcsBridge(Node):
                 with self._latest_cv:
                     self._latest.pop(key, None)
 
-    def _wait_latest(self, key, timeout_s=1.5):
+    def _wait_until(self, ready, timeout_s=1.5):
+        """Wait for ready(), woken by every arrival: after a lease starts a subscription the
+        first message is up to one reconcile tick away, then the publisher's period."""
         deadline = time.monotonic() + timeout_s
         with self._latest_cv:
-            while key not in self._latest and time.monotonic() < deadline:
+            while not ready() and time.monotonic() < deadline:
                 self._latest_cv.wait(0.1)
+
+    def _wait_latest(self, key, timeout_s=1.5):
+        self._wait_until(lambda: key in self._latest, timeout_s)
+        with self._latest_cv:
             return self._latest.get(key)
 
     # ------------------------------------------------------------------ the 2 Hz frames
@@ -879,16 +903,22 @@ class GcsBridge(Node):
     # ------------------------------------------------------------------ pictures
 
     def _op_cam(self, conn, req):
+        """The annotated picture (the default), or with stream "raw" the frame the model saw."""
+        stream = req.get("stream", "annotated")
+        key = CAM_STREAMS.get(stream)
+        if key is None:
+            return False, f"stream must be annotated or raw, not {stream!r}", None
         w = max(80, min(1920, int(req.get("w") or 320)))
         q = max(10, min(95, int(req.get("q") or 50)))
-        self._lease("image")
-        latest = self._wait_latest("image")
+        self._lease(key)
+        latest = self._wait_latest(key)
         if latest is None or time.monotonic() - latest[2] > FRAME_MAX_AGE_S:
-            return False, "no picture: is camera_node running?", None
+            what = "picture" if stream == "annotated" else "raw picture"
+            return False, f"no {what}: is camera_node running?", None
         stamp, jpeg, mono = latest
         jpeg, width, height = rescale_jpeg(jpeg, w, q)
         conn.send({"t": "cam", "id": req.get("id"), "w": width, "h": height, "stamp": stamp,
-                   "age": round(time.monotonic() - mono, 2)}, jpeg)
+                   "stream": stream, "age": round(time.monotonic() - mono, 2)}, jpeg)
         return None
 
     def _op_lidar(self, conn, req):
@@ -903,6 +933,23 @@ class GcsBridge(Node):
                    "frame": msg.header.frame_id, "stamp": stamp,
                    "age": round(time.monotonic() - mono, 2)}, blob)
         return None
+
+    def _op_obstacles(self, conn, req):
+        """The LiDAR clusters as circles on the map. They are placed with the pose of this
+        moment, so BOTH must be fresh: otherwise no items, and why (blanks over guesses)."""
+        self._lease("clusters")
+        self._wait_until(lambda: self._clusters.fresh(time.monotonic()))
+        now = time.monotonic()
+        clusters, pose = self._clusters.get(now), self._pose.get(now)
+        reasons = [r for r in (
+            stale_reason("LiDAR clusters", self._clusters, now, ": is lidar_node running?"),
+            stale_reason("boat position", self._pose, now)) if r]
+        if pose is not None and not math.isfinite(pose[2]):
+            reasons.append("boat heading unknown")
+        items = [] if reasons else place_clusters(clusters, *pose[:3])
+        return True, "", {"items": items, "reason": "; ".join(reasons),
+                          "clusters_age": _round(self._clusters.age(now), 2),
+                          "pose_age": _round(self._pose.age(now), 2)}
 
     # ------------------------------------------------------------------ parameters
 
@@ -1190,6 +1237,27 @@ def pack_xy(msg, n_max):
         pts = pts[np.linspace(0, len(pts) - 1, n_max).astype(int)]
     xy = np.clip(np.round(pts / LIDAR_SCALE), -32767, 32767).astype("<i2")
     return xy.tobytes(), len(xy)
+
+
+def place_clusters(clusters, lat, lon, heading_deg):
+    """[(x forward, y left, extent_x, extent_y, n_points)] in base_link -> [{lat, lon, r, n}] for
+    a boat at (lat, lon) heading `heading_deg` (clockwise from north). r [m] is the circle that
+    covers the cluster's box. Yaw only: roll and pitch move a cluster by centimetres."""
+    yaw = math.radians(heading_deg)
+    items = []
+    for x, y, ex, ey, n in clusters:
+        east, north, _up = geo.body_to_world_ypr(x, y, 0.0, 0.0, 0.0, yaw)
+        c_lat, c_lon = geo.xy_to_latlon(east, north, (lat, lon))
+        items.append({"lat": c_lat, "lon": c_lon, "r": _round(math.hypot(ex, ey) / 2), "n": n})
+    return items
+
+
+def stale_reason(label, cache, now, hint=""):
+    """Why a StreamCache holds nothing to use at `now`, or "" when it is fresh."""
+    if cache.fresh(now):
+        return ""
+    age = cache.age(now)
+    return f"no {label} heard{hint}" if age is None else f"{label} stale ({age:.1f} s)"
 
 
 def _oak_controls():

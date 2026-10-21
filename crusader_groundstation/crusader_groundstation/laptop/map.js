@@ -21,10 +21,12 @@ const CrsdMap = (() => {
     boat: [["--map-boat", "--accent"], "#1565c0"],
     path: [["--map-path"], "#00bcd4"],
     hazard: [["--map-hazard"], "#ff9800"],
+    obstacle: [["--map-obstacle"], "#7b1fa2"],
   };
+  const OBSTACLE_MIN_PX = 3;                      // radius floor: a small cluster survives zooming out
   const S = {
     origin: null, boat: null, trail: [], targets: [], plan: null, path: null, hazards: [],
-    manual: [], editing: false, beacon: 2,
+    obstacles: [], manual: [], editing: false, beacon: 2,
   };
   const views = [], listeners = [];
   let T = null;                                   // the colours of the draw in progress
@@ -69,6 +71,7 @@ const CrsdMap = (() => {
     else if (kind === "plan") S.plan = f.ok ? f : null;
     else if (kind === "path") S.path = f.ok ? f : null;
     else if (kind === "hazards") S.hazards = f.items || [];
+    else if (kind === "obstacles") S.obstacles = f.items || [];   // the LiDAR clusters; [] clears
     redraw();
   }
 
@@ -164,6 +167,15 @@ const CrsdMap = (() => {
       }
       c.stroke();
     }
+    // LiDAR clusters: translucent, under the trail and the targets they may turn out to be
+    c.fillStyle = c.strokeStyle = T.obstacle; c.lineWidth = 1;
+    for (const o of S.obstacles) {
+      const p = at(v, o.lat, o.lon), r = Math.max(OBSTACLE_MIN_PX, (o.r || 0) * v.scale);
+      c.beginPath(); c.arc(p[0], p[1], r, 0, 2 * Math.PI);
+      c.globalAlpha = 0.35; c.fill();
+      c.globalAlpha = 0.9; c.stroke();
+    }
+    c.globalAlpha = 1;
     // trail
     c.strokeStyle = T.boat; c.lineWidth = 1.5; c.globalAlpha = 0.6; c.beginPath();
     trace(v, S.trail);

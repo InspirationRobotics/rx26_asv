@@ -24,7 +24,7 @@
   --danger-bg: #b0151c; --danger-fg: #ffffff;
   --ok: #0a6b2e; --warn: #8a4b00; --bad: #b0151c; --stale: #98a4b0; --trail: #14496e;
   --map-bg: #e4ebf2; --map-grid: #cdd6e0; --map-grid-major: #9eaebf; --map-text: #2b343d;
-  --map-boat: #14496e; --map-path: #00796b; --map-hazard: #b35900;
+  --map-boat: #14496e; --map-path: #00796b; --map-hazard: #b35900; --map-obstacle: #7b1fa2;
   --lvl0: #14496e; --lvl1: #00796b; --lvl2: #8a4b00; --lvl3: #6a3d9a;
 }
 html[data-theme="dark"] {
@@ -35,7 +35,7 @@ html[data-theme="dark"] {
   --danger-bg: #7a3030; --danger-fg: #f3c4c4;
   --ok: #5fbf6a; --warn: #d8a13a; --bad: #e05252; --stale: #555555; --trail: #4f87b0;
   --map-bg: #0e1218; --map-grid: #222a36; --map-grid-major: #364254; --map-text: #aab3c0;
-  --map-boat: #64b5f6; --map-path: #26c6da; --map-hazard: #ff9800;
+  --map-boat: #64b5f6; --map-path: #26c6da; --map-hazard: #ff9800; --map-obstacle: #ce93d8;
   --lvl0: #64b5f6; --lvl1: #26c6da; --lvl2: #d8a13a; --lvl3: #b39ddb;
 }
 :root { --grid: var(--map-grid); }
@@ -134,6 +134,11 @@ img#cam { max-width: 100%; border: 1px solid var(--line); border-radius: 4px; ba
     <div class="col" style="flex: 3 1 600px"><canvas id="map" class="map"></canvas></div>
     <div class="col" style="flex: 1 1 260px">
       <div class="box">
+        <h3>Layers</h3>
+        <label><input type="checkbox" id="obs-on"> <span class="dot" style="background: var(--map-obstacle)"></span>Obstacles (LiDAR)</label>
+        <div id="obs-info" class="muted small"></div>
+      </div>
+      <div class="box">
         <h3>Passage plan</h3>
         <div id="plan-info" class="muted">no plan</div>
       </div>
@@ -202,6 +207,7 @@ img#cam { max-width: 100%; border: 1px solid var(--line); border-radius: 4px; ba
         <option>dock</option></select>
         view <select id="cam-w"><option>320</option><option selected>640</option>
           <option>960</option></select> px
+        <label title="off: the frame as the camera sent it, without the detector's boxes"><input type="checkbox" id="cam-annotate" checked> Annotations</label>
         <span id="cam-info" class="muted"></span></div>
       <img id="cam" alt="camera">
       <div id="cam-health" class="mono muted"></div>
@@ -329,6 +335,7 @@ function show(id) {
   for (const b of $("tabs").children) b.classList.toggle("on", b.dataset.tab === id);
   for (const [t] of TABS) $("t-" + t).classList.toggle("on", t === id);
   CrsdMap.redraw();
+  obstaclesLoop();
   if (id === "sensors") { camLoop(); lidarLoop(); loadCamera(); }
   if (id === "mission" && !$("m-name").options.length) loadMissions();
   if (id === "params") paramNodes();
@@ -358,6 +365,32 @@ const handlers = {
 const es = new EventSource("/events");
 es.onmessage = e => { const f = JSON.parse(e.data); (handlers[f.t] || (() => {}))(f); };
 es.onerror = () => setLink({up: false, error: "gcs_app is not running"});
+
+// ---- obstacles (LiDAR) ------------------------------------------------------
+// Asked of the boat only while the box is ticked and the Map tab shows: the boat subscribes to
+// the clusters while we keep asking, and drops them seconds after we stop.
+let obsBusy = false, obsTimer = 0;
+const obstaclesShown = () => G.tab === "map" && $("obs-on").checked;
+function obstaclesLoop() {
+  clearTimeout(obsTimer);
+  if (!obstaclesShown()) {
+    $("obs-info").textContent = "";
+    CrsdMap.update("obstacles", {items: []});
+    return;
+  }
+  if (obsBusy) return;                              // the answer in flight re-arms the loop
+  obsBusy = true;
+  req("obstacles", {}, true).then(showObstacles)
+    .finally(() => { obsBusy = false; obsTimer = setTimeout(obstaclesLoop, 500); });
+}
+function showObstacles(r) {
+  if (!obstaclesShown()) return;                    // unticked or left the tab while it was asked
+  const d = r.data || {}, items = r.ok ? d.items || [] : [];
+  CrsdMap.update("obstacles", {items});
+  $("obs-info").textContent = !r.ok ? r.msg : d.reason ? `no obstacles drawn: ${d.reason}`
+                                                       : `obstacles: ${items.length}, age ${fmt(d.clusters_age, 1)} s`;
+}
+$("obs-on").onchange = obstaclesLoop;
 
 // ---- theme ------------------------------------------------------------------
 let themeChosen = false;      // a saved or toggled choice beats the OS setting
@@ -629,7 +662,8 @@ let camBusy = false;
 function camLoop() {
   if (G.tab !== "sensors" || camBusy) return;
   camBusy = true;
-  const img = $("cam"), w = $("cam-w").value, url = `/cam.jpg?w=${w}&q=50&t=${Date.now()}`;
+  const img = $("cam"), w = $("cam-w").value, stream = $("cam-annotate").checked ? "annotated" : "raw";
+  const url = `/cam.jpg?w=${w}&q=50&stream=${stream}&t=${Date.now()}`;
   fetch(url).then(async r => {
     if (r.ok) {
       const old = img.src; img.src = URL.createObjectURL(await r.blob());
@@ -639,6 +673,10 @@ function camLoop() {
   }).catch(e => ($("cam-info").textContent = String(e)))
     .finally(() => { camBusy = false; setTimeout(camLoop, 500); });
 }
+try { $("cam-annotate").checked = localStorage.getItem("crsd-cam-annotate") !== "off"; } catch (e) {}
+$("cam-annotate").onchange = e => {
+  try { localStorage.setItem("crsd-cam-annotate", e.target.checked ? "on" : "off"); } catch (err) {}
+};
 let lidarBusy = false;
 function lidarLoop() {
   if (G.tab !== "sensors" || lidarBusy) return;
