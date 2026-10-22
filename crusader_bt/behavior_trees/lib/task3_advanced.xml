@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Task3Advanced: Task 3 Coordinated Logistics, Advanced tier, the USV's half (handbook 3.3.4).
+
+  Dock and spray (lib/common/task3_dock_fire.xml), then read the resource request off the same
+  window (DecodeResourceRequest) and report it (ReportResourceDelivery). Task3Advanced and
+  Task3Disruptive behave identically: the file name fixes the tier, and a tin pattern is
+  never filtered here.
+
+  DockCameraAlive is in the guard band: a blind boat must not keep driving at a dock. The
+  TaskAttempt is inside, so the heartbeat reports TASK_COORDINATED_LOGISTICS wherever this tree
+  is dropped.
+
+  Needs lib/common/task3_dock_fire.xml: whatever file includes this one includes that too,
+  ONCE. This file does not, so Task3DockFire is never registered twice.
+-->
+<root BTCPP_format="4">
+
+  <BehaviorTree ID="Task3Advanced">
+    <TaskAttempt token="TASK_COORDINATED_LOGISTICS">
+      <ReactiveSequence name="guard_band">
+        <DockCameraAlive max_age_s="{camera_max_age_s}"/>
+        <UpdateDockBook/>
+        <Sequence name="task3">
+          <SubTree ID="Task3DockFire" _autoremap="true"/>
+
+          <!-- The same window carries the resource request: read the c1/c2 code off it and
+               report ResourceDeliveryRequest. Any pattern is accepted. -->
+          <DecodeResourceRequest request="{request}" timeout_s="{decode_timeout_s}" hold_s="5.0" min_frames="20"/>
+          <ReportResourceDelivery request="{request}"/>
+        </Sequence>
+      </ReactiveSequence>
+    </TaskAttempt>
+  </BehaviorTree>
+
+  <TreeNodesModel>
+    <SubTree ID="Task3Advanced">
+      <input_port name="vantage_standoff_m" default="5.0">how far out from the dock to look at the bays from, metres</input_port>
+      <input_port name="predock_m" default="3.0">line-up point, metres out from the bay face</input_port>
+      <input_port name="berth_m" default="1.25">berth, metres from the face to the body origin</input_port>
+      <input_port name="lead_m" default="2.0">lead-in point, metres beyond the line-up point</input_port>
+      <input_port name="berth_tolerance_m" default="0.25">arrival radius at the berth, metres</input_port>
+      <input_port name="spray_timeout_s" default="60.0">give up spraying the window after this long, seconds</input_port>
+      <input_port name="decode_timeout_s" default="80.0">give up reading the resource request after this long, seconds</input_port>
+      <input_port name="camera_max_age_s" default="3.0">stop when the dock camera is silent this long, seconds</input_port>
+    </SubTree>
+  </TreeNodesModel>
+
+</root>

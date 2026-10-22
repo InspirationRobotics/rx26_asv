@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Task1Disruptive: Task 1 Safe Passage, Disruptive tier. Task1Advanced's path (wait for the
+  field, plan the whole passage, drive it: lib/common/task1_plan_drive.xml) under one more
+  guard: PassagePlanFresh.
+
+  The passage may change mid-run and only the aircraft can see it, so the boat needs Ekko's
+  field to keep arriving. PassagePlanFresh is first in a ReactiveSequence, so it is re-checked
+  on every tick: a field older than plan_max_age_s FAILS the attempt wherever the boat is,
+  mid-transit included, and so does a run started before Ekko has reported at all (the
+  handbook's "the UAV reports before the USV transits"). Ekko re-sends its map every second,
+  so the default tolerates ~15 lost frames. The TaskAttempt is inside, so the heartbeat reports
+  TASK_SAFE_PASSAGE wherever this tree is dropped.
+
+  Needs lib/common/task1_plan_drive.xml: whatever file includes this one includes that too,
+  ONCE. This file does not, so Task1PlanDrive is never registered twice.
+-->
+<root BTCPP_format="4">
+
+  <BehaviorTree ID="Task1Disruptive">
+    <TaskAttempt token="TASK_SAFE_PASSAGE">
+      <ReactiveSequence name="guard_band">
+        <PassagePlanFresh max_age_s="{plan_max_age_s}"/>
+        <ResolveBuoyStates/>
+        <ReportSafePassage min_period_s="1.0"/>
+        <SubTree ID="Task1PlanDrive" _autoremap="true"/>
+      </ReactiveSequence>
+    </TaskAttempt>
+  </BehaviorTree>
+
+  <TreeNodesModel>
+    <SubTree ID="Task1Disruptive">
+      <input_port name="orbit_radius_m" default="">preferred orbit radius, metres (a real: write it with a decimal point); shrunk to fit; empty = the nav_orbit_radius_m parameter</input_port>
+      <input_port name="orbit_min_m" default="1.5">smallest orbit normally accepted, metres</input_port>
+      <input_port name="overshoot_deg" default="45.0">degrees each orbit runs past one full turn</input_port>
+      <input_port name="lookahead_m" default="2.5">pure-pursuit lookahead along the path, metres</input_port>
+      <input_port name="blocked_timeout_s" default="15.0">fail a phase after being blocked this long, then re-plan, seconds</input_port>
+      <input_port name="plan_attempts" default="4">re-plan attempts per phase (a whole number)</input_port>
+      <input_port name="plan_max_age_s" default="15.0">stop when the aircraft's field is older than this, seconds</input_port>
+    </SubTree>
+  </TreeNodesModel>
+
+</root>

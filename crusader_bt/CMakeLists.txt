@@ -43,13 +43,14 @@ else()
     "(image without Nav2): bt_runner_node must run with nav_mode off")
 endif()
 
-# The leaves and the planner port, shared by bt_runner_node and bt_tree_check as a static
+# The leaves, the planner port and the mission loader (mission_loader.cpp: how a mission name
+# becomes a tree, built-in or uploaded), shared by bt_runner_node and bt_tree_check as a static
 # library so each file compiles once. task3_leaves.cpp is NOT optional: leaves.cpp's
 # registerCrusaderNodes() calls registerTask3Nodes(), so leaving it out is a link error, not a
 # missing tree. fire_leaves.cpp likewise (registerFireNodes). ros_planner_port.cpp is always
 # compiled: with Nav2 it is the planner port, without it a stub.
 add_library(crusader_bt_leaves STATIC src/leaves.cpp src/task3_leaves.cpp src/fire_leaves.cpp
-  src/global_leaves.cpp src/ros_planner_port.cpp)
+  src/global_leaves.cpp src/ros_planner_port.cpp src/mission_loader.cpp)
 target_include_directories(crusader_bt_leaves PUBLIC include)
 add_executable(bt_runner_node src/bt_runner_node.cpp)
 target_include_directories(bt_runner_node PRIVATE include)
@@ -110,12 +111,25 @@ if(BUILD_TESTING)
   add_executable(test_run_start test/test_run_start.cpp)
   target_include_directories(test_run_start PRIVATE include)
   add_test(NAME run_start COMMAND test_run_start)
-  # mission_nodes: WaitForRunStart, TaskAttempt and TierAtLeast ticked against a Context.
+  # mission_nodes: WaitForRunStart, TaskAttempt and PassagePlanFresh ticked against a Context.
   add_executable(test_mission_nodes test/test_mission_nodes.cpp)
   target_include_directories(test_mission_nodes PRIVATE include)
   ament_target_dependencies(test_mission_nodes ${DEPS})
   target_link_libraries(test_mission_nodes crusader_bt_leaves)
   add_test(NAME mission_nodes COMMAND test_mission_nodes)
+  # mission_loader: an uploaded mission resolves the task library by ID, and a name that is no
+  # file is refused. gtest is optional here: an image without it still builds the rest.
+  find_package(ament_cmake_gtest QUIET)
+  if(ament_cmake_gtest_FOUND)
+    ament_add_gtest(test_mission_loader test/test_mission_loader.cpp)
+    target_include_directories(test_mission_loader PRIVATE include)
+    ament_target_dependencies(test_mission_loader ${DEPS})
+    target_link_libraries(test_mission_loader crusader_bt_leaves)
+    target_compile_definitions(test_mission_loader PRIVATE
+      CRSD_TREES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/behavior_trees")
+  else()
+    message(STATUS "crusader_bt: ament_cmake_gtest not found, test_mission_loader is not built")
+  endif()
   # Every built-in tree must load: an unknown node or a bad port fails the build's tests,
   # not a mission at the dock.
   file(GLOB CRSD_TREES ${CMAKE_CURRENT_SOURCE_DIR}/behavior_trees/*.xml)

@@ -201,26 +201,6 @@ public:
   }
 };
 
-/// The goal's tier is at least `tier` (0 Core, 1 Advanced, 2 Disruptive), so
-/// one tree serves all three and Core simply stops after the fire is out.
-class TierAtLeast : public CrusaderCondition
-{
-public:
-  TierAtLeast(const std::string & n, const BT::NodeConfig & c)
-  : CrusaderCondition(n, c) {}
-  static BT::PortsList providedPorts()
-  {
-    return {BT::InputPort<int>("tier", 1, "0 Core, 1 Advanced, 2 Disruptive")};
-  }
-
-  BT::NodeStatus tick() override
-  {
-    const int want = getInput<int>("tier").value_or(1);
-    std::lock_guard<std::mutex> lk(ctx_->mu);
-    return ctx_->tier >= want ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
-  }
-};
-
 // ------------------------------------------------------ world-model update
 
 /// Says what the boat believes about the bays, when that belief changes. The
@@ -738,7 +718,6 @@ void registerTask3Nodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<ChosenBaySafe>("ChosenBaySafe");
   factory.registerNodeType<DockedInBay>("DockedInBay");
   factory.registerNodeType<LinedUp>("LinedUp");
-  factory.registerNodeType<TierAtLeast>("TierAtLeast");
   factory.registerNodeType<UpdateDockBook>("UpdateDockBook");
   factory.registerNodeType<PickVantage>("PickVantage");
   factory.registerNodeType<CommitSafeBay>("CommitSafeBay");

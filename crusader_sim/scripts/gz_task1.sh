@@ -4,7 +4,7 @@
 #
 #     bash crusader_sim/scripts/gz_task1.sh [course] [task1_goal flags...]
 #
-# task1_goal arms, confirms GUIDED, sends the RunMission goal (TREE, default task1_global)
+# task1_goal arms, confirms GUIDED, sends the RunMission goal (TREE, default task1_advanced)
 # and prints the tree's running node, then task1_judge's verdict. The run is also written to
 # ~/.cache/crusader_sim/task1_last.log, so the verdict survives the window being
 # closed (not /tmp: WSL wipes /tmp every time the distro starts).
@@ -16,5 +16,5 @@ LOG="$HOME/.cache/crusader_sim/task1_last.log"
 mkdir -p "$(dirname "$LOG")"
 docker exec -it "$CONTAINER" bash -c \
   "source /opt/ros/humble/setup.bash && source /root/robotx_ws/install/setup.bash &&
-   python3 -u -m crusader_sim.task1_goal --course $COURSE --tree ${TREE:-task1_global} $*" 2>&1 \
+   python3 -u -m crusader_sim.task1_goal --course $COURSE --tree ${TREE:-task1_advanced} $*" 2>&1 \
   | tee "$LOG"

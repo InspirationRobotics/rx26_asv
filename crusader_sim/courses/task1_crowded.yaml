@@ -2,8 +2,8 @@
 #
 # 4-5 m between buoys, and the passage zig-zags: through b1/b2 heading north, then WEST
 # between b4 (green) and b8 (red), then back east past b3 (red) with b7 (black) on the other
-# hand, to the EXIT. The per-gate tree (task1_disruptive.xml) could not find a path here; the
-# whole-field tree (task1_global.xml) is the one this course is for.
+# hand, to the EXIT. The old per-gate tree could not find a path here; the whole-field trees
+# (task1_advanced.xml, task1_disruptive.xml) are what this course is for.
 #
 # ENU metres; the boat starts at the origin heading east. Top beacons lit, side beacons dark:
 # only the UAV sees colour (Advanced / Disruptive).

@@ -76,7 +76,7 @@ for i in $(seq 1 "$RUNS"); do
   SECONDS=0
   timeout $(( ${TMO%.*} + 90 )) docker exec "$CONTAINER" bash -c \
     "source /opt/ros/humble/setup.bash && source /root/robotx_ws/install/setup.bash &&
-     python3 -u -m crusader_sim.task1_goal --course $COURSE --tree ${TREE_ARG:-task1_global} --timeout-s $TMO $GOAL_ARGS" 2>&1 \
+     python3 -u -m crusader_sim.task1_goal --course $COURSE --tree ${TREE_ARG:-task1_advanced} --timeout-s $TMO $GOAL_ARGS" 2>&1 \
     | while IFS= read -r line; do printf '%4d %s\n' "$SECONDS" "$line"; done > "$L.task1.log"
   docker cp "$CONTAINER:/tmp/bt.log" "$L.bt.log" >/dev/null 2>&1 || : > "$L.bt.log"
   docker cp "$CONTAINER:/tmp/nav.log" "$L.nav.log" >/dev/null 2>&1 || : > "$L.nav.log"

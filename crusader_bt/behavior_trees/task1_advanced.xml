@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- MISSION: Task 1 Safe Passage, Advanced: wait for Ekko's field, plan the whole field, drive it. -->
+<!--
+  The tree is Task1Advanced, in lib/task1_advanced.xml. Its shared body, lib/common/task1_plan_drive.xml,
+  is included once, here. This adds the autonomy guard; the task heartbeat is inside the tree.
+  Every tunable is written out with its default.
+-->
+<root BTCPP_format="4" main_tree_to_execute="Main">
+  <include path="lib/common/task1_plan_drive.xml"/>
+  <include path="lib/task1_advanced.xml"/>
+
+  <BehaviorTree ID="Main">
+    <ReactiveSequence>
+      <IsAutonomous/>
+      <SubTree ID="Task1Advanced" _autoremap="true"
+               orbit_radius_m=""
+               orbit_min_m="1.5"
+               overshoot_deg="45.0"
+               lookahead_m="2.5"
+               blocked_timeout_s="15.0"
+               plan_attempts="4"/>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

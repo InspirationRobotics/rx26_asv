@@ -23,8 +23,8 @@ RoboCommand: RunStart -> OCS verifies -> relays {"run_start": {...}} -> ocs_clie
                   ->  tree: WaitForRunStart SUCCESS -> waypoints / TaskAttempt(Task 1) / TaskAttempt(Task 3) ...
 ```
 
-Bench testing with no RoboCommand: delete the `WaitForRunStart` block from the mission (or load
-the `bench_*` mission). Nothing else changes.
+Bench testing with no RoboCommand: delete the `WaitForRunStart` block from the mission. Nothing
+else changes.
 
 ## Tree layout
 
@@ -37,7 +37,7 @@ the `bench_*` mission). Nothing else changes.
         <WaitForRunStart/>                             remove for bench tests
         <NavigateTo target="fix" lat=".." lon=".."/>   "GPS waypoint" block, anywhere in any tree
         <TaskAttempt token="TASK_SAFE_PASSAGE">        heartbeat current_task, main tree
-          <SubTree ID="Task1Global" _autoremap="true" orbit_points="8" .../>
+          <SubTree ID="Task1Advanced" _autoremap="true" orbit_points="8" .../>
         </TaskAttempt>
         <TaskAttempt token="TASK_COORDINATED_LOGISTICS">
           <SubTree ID="Task3Disruptive" _autoremap="true" .../>
@@ -45,7 +45,7 @@ the `bench_*` mission). Nothing else changes.
       </Sequence>
     </ReactiveSequence>
   </BehaviorTree>
-  <BehaviorTree ID="Task1Global"> ... task-specific guards and reports live here ... </BehaviorTree>
+  <BehaviorTree ID="Task1Advanced"> ... task-specific guards and reports live here ... </BehaviorTree>
 </root>
 ```
 
@@ -59,10 +59,11 @@ the `bench_*` mission). Nothing else changes.
 * **Tunables are SubTree attributes.** Inside the subtree a leaf reads `{orbit_points}`; the
   caller writes `orbit_points="8"`. Writers (wrappers, the GUI) always write every declared port
   explicitly, so nothing depends on BT.CPP applying model defaults.
-* The existing standalone files (`task1_disruptive.xml`, `task1_global.xml`,
-  `task1_safe_passage.xml`, `task3_disruptive.xml`) keep their names and behaviour: each becomes a
-  thin `Main` that `<include>`s its lib subtree, so `TREE=...` in the sim and lake rigs is
-  unchanged.
+* **A tier belongs to the tree, never to the goal.** There is one tree per task per tier
+  (`task1_advanced`, `task1_disruptive`, `task3_core`, `task3_advanced`, `task3_disruptive`); no
+  tree file can do more than one tier, and `RunMission` carries no tier. Each standalone file is
+  a thin `Main` that `<include>`s the body its tiers share (`lib/common/`, once) and then its own
+  lib subtree. There is no Task 1 Core tree.
 * **A mission saved by the GUI is self-contained**: every subtree it uses is inlined, no
   `<include>`. The file that ran is the whole record of what ran.
 
@@ -72,7 +73,6 @@ the `bench_*` mission). Nothing else changes.
 |---|---|---|---|
 | `WaitForRunStart` | action | `max_age_s` (30), `timeout_s` (0 = forever), `hold` (true), out `run_id` | RUNNING, holding station like `HoldStation`, until a `run_start` received no earlier than `max_age_s` before this node started (30 s: a RunStart that just beat the START button counts, one from an earlier run does not). FAILURE only after `timeout_s` > 0. |
 | `TaskAttempt` | decorator | `token` (RxTask name) | Sets `current_task` = token on its first tick, `TASK_NONE` when the child finishes or is halted. Returns the child's status. |
-| `SetTier` | action | `tier` core/advanced/disruptive | Sets the tier `TierIs`/`TierAtLeast` read, for a mission that runs tasks at different tiers. |
 
 The runner latches the newest `run_start` (`run_id`, receive time) from `/crsd/ocs_command` and
 **does not reset it per goal**. `tree_file` becomes a live parameter, read when a goal is
@@ -84,7 +84,7 @@ A "Mission" tab beside the existing ones (the Task 1 tab stays for testing). Scr
 
 * **Palette** (left): blocks grouped by colour-coded category: Flow (Sequence, ReactiveSequence,
   Fallback, Parallel...), Decorators (ForceSuccess, Inverter, Retry, Timeout, Repeat...),
-  RoboCommand (WaitForRunStart, TaskAttempt, SetTier), Navigation (GPS waypoint, Return home,
+  RoboCommand (WaitForRunStart, TaskAttempt), Navigation (GPS waypoint, Return home,
   Orbit a GPS point, Hold position), Tasks (every lib subtree), Conditions, and an "advanced"
   toggle for the rest of the registered leaves. Every block shows a one-line description.
 * **Workspace** (centre): the selected tree as nested blocks; controls and decorators are
@@ -97,7 +97,7 @@ A "Mission" tab beside the existing ones (the Task 1 tab stays for testing). Scr
   field, and the mission's GPS waypoints. A click sets the selected waypoint's lat/lon, or adds a
   new GPS waypoint after the selected block.
 * **Toolbar**: mission picker (pre-built + saved), New, Save, Save as, Validate, XML view,
-  Download / Upload, Start (tier, timeout), Stop.
+  Download / Upload, Start (timeout), Stop.
 
 The editor's storage format **is** BT.CPP XML: load = parse XML into blocks, save = serialise.
 
@@ -109,7 +109,7 @@ catalogue, list, load (flattening `<include>`), validate, save. Both servers cal
 | Endpoint (POST, JSON) | Laptop `gcs_laptop.py` | Jetson / sim `gcs_node.py` |
 |---|---|---|
 | `/mission/catalogue`, `/mission/list`, `/mission/load`, `/mission/validate`, `/mission/save` | served locally from the laptop's checkout (`crusader_bt/behavior_trees`, `crusader_bt/missions`) | served from its own workspace |
-| `/mission/start` `{xml, name, tier, timeout_s}`, `/mission/stop` | forwarded to the Jetson | validates, writes the XML to `~/.ros/crusader_missions/`, sets `bt_runner_node.tree_file`, sends the `SafePassage` goal / cancels it |
+| `/mission/start` `{xml, name, timeout_s}`, `/mission/stop` | forwarded to the Jetson | validates, writes the XML to `~/.ros/crusader_missions/`, sets `bt_runner_node.tree_file`, sends the `SafePassage` goal / cancels it |
 
 ## Not changed
 

@@ -2,13 +2,12 @@
 # The goal names a tree; it never carries XML. No backslash line continuations in this
 # file: rosidl's template fails to decode them.
 #
-#   ros2 action send_goal /crsd/run_mission crusader_msgs/action/RunMission "{name: competition, tier: 1}" --feedback
+#   ros2 action send_goal /crsd/run_mission crusader_msgs/action/RunMission "{name: task1_advanced}" --feedback
+#
+# A tier is a property of the tree, never of the goal: task1_advanced, task1_disruptive,
+# task3_core ... are separate trees.
 
-uint8 TIER_CORE=0
-uint8 TIER_ADVANCED=1
-uint8 TIER_DISRUPTIVE=2
-string name                    # tree file stem, e.g. competition, task1_global
-uint8 tier
+string name                    # tree file stem, e.g. task1_advanced, task3_core
 float32 timeout_s              # 0 = the node's default_timeout_s; every goal terminates
 float64 approach_latitude      # team-provided approach point; both 0 = none
 float64 approach_longitude

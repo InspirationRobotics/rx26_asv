@@ -36,7 +36,7 @@
 # bt_runner — is the boat's code, unmodified, same params file with the sim's values layered on
 # top from /tmp/sim_params.yaml. The laptop's ground station
 # connects to it: BOAT_GUI.cmd --boat 127.0.0.1. TREE (a built-in tree name, default
-# task1_global) is the mission gz_task1.sh sends.
+# task1_advanced) is the mission gz_task1.sh sends.
 # ROS's setup.bash reads unset variables, so strict mode goes on AFTER it
 source /opt/ros/humble/setup.bash
 source /root/robotx_ws/install/setup.bash
@@ -75,7 +75,7 @@ if [ -n "${SIM_TUNING:-}" ]; then
   BT_TUNE=(--params-file "$SIM_TUNING"); NAV_TUNE=("nav2_overlay:=$SIM_TUNING")
 fi
 SIMSHARE=$WS/install/crusader_sim/share/crusader_sim
-TREE="${TREE:-task1_global}"       # sent by gz_task1.sh as the RunMission name
+TREE="${TREE:-task1_advanced}"       # sent by gz_task1.sh as the RunMission name
 export GZ_PARTITION=crusader_sim
 export RX26_SRC=$SRC
 

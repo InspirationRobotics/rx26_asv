@@ -251,6 +251,12 @@ def check_params_yaml():
           ("gcs_bridge.LEG_TOPIC", _module_literals(GCS_BRIDGE)["LEG_TOPIC"]),
           "the map shows no planned path")
 
+    # gcs_bridge writes an uploaded mission where bt_runner_node looks for it.
+    _same("user_trees_dir gcs_bridge -> bt_runner",
+          ("gcs_bridge.user_trees_dir", _effective(cfg, "gcs_bridge")["user_trees_dir"]),
+          ("bt_runner_node.user_trees_dir", bt["user_trees_dir"]),
+          "an uploaded mission is stored where the runner never looks")
+
     # UDP port discipline on the MAVLink links. The boat owns 1455x so a --out
     # line names its vehicle. The flight stack's port is never taken by anything
     # else: a udpin bind STEALS datagrams, and the displaced consumer sees

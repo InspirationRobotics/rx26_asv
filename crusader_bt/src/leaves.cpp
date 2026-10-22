@@ -241,6 +241,47 @@ public:
   }
 };
 
+/// Is Ekko's passage plan still arriving? FAILURE when none has, or the newest is older than
+/// `max_age_s`; first in a ReactiveSequence guard band, that ends the attempt at once, mid-transit
+/// too. It is the dead-radio stop: rfd_link_node publishes nothing when Ekko goes quiet, the
+/// runner keeps the last plan, and only its age (Context::plan_age_s) shows the link is gone,
+/// so the boat stops instead of driving a passage nobody can still update.
+class PassagePlanFresh : public CrusaderCondition
+{
+public:
+  PassagePlanFresh(const std::string & n, const BT::NodeConfig & c)
+  : CrusaderCondition(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {BT::InputPort<double>("max_age_s", 15.0,
+      "seconds; Ekko re-sends the whole map every second, so this rides out ~15 lost frames")};
+  }
+
+  BT::NodeStatus tick() override
+  {
+    const double max_age = getInput<double>("max_age_s").value_or(15.0);
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    if (ctx_->plan_age_s <= max_age) {
+      warned_ = false;
+      return BT::NodeStatus::SUCCESS;
+    }
+    if (!warned_) {                // the guard band re-ticks at 10 Hz: one line, not ten a second
+      warned_ = true;
+      if (ctx_->plan_age_s >= Context::kNoPlanAgeS) {
+        RCLCPP_WARN(log(), "no passage plan (Ekko has not reported, or the field was cleared) "
+          "- not transiting");
+      } else {
+        RCLCPP_WARN(log(), "passage plan is stale (%.1f s old, limit %.1f s) - not transiting",
+          ctx_->plan_age_s, max_age);
+      }
+    }
+    return BT::NodeStatus::FAILURE;
+  }
+
+private:
+  bool warned_ = false;
+};
+
 // -------------------------------------------------------- world-model update
 
 /// Refreshes nothing: the runner's subscriptions fill the context. It exists so the
@@ -834,6 +875,7 @@ void registerCrusaderNodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<EntryResolved>("EntryResolved");
   factory.registerNodeType<ExitResolved>("ExitResolved");
   factory.registerNodeType<NearExit>("NearExit");
+  factory.registerNodeType<PassagePlanFresh>("PassagePlanFresh");
   factory.registerNodeType<ResolveBuoyStates>("ResolveBuoyStates");
   factory.registerNodeType<ReportSafePassage>("ReportSafePassage");
   factory.registerNodeType<TaskAttempt>("TaskAttempt");

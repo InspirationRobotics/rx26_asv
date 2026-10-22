@@ -1,10 +1,13 @@
-// bt_runner_node — runs one of crusader_bt's built-in trees per RunMission goal.
+// bt_runner_node — runs one of crusader_bt's trees per RunMission goal.
 //
-//     ros2 action send_goal /crsd/run_mission crusader_msgs/action/RunMission "{name: competition, tier: 1}"
+//     ros2 action send_goal /crsd/run_mission crusader_msgs/action/RunMission "{name: task1_advanced}"
 //
-// The goal NAMES a tree in this package's behavior_trees/; it never carries XML. One mission at
-// a time. The action owns what the XML cannot be trusted with: the mission timeout, cancel
-// (halts the tree, so every RUNNING leaf's onHalted() fires) and the terminal state.
+// The goal NAMES a tree: a built-in in this package's behavior_trees/, else a mission file in
+// user_trees_dir that the ground station uploaded (mission_loader.hpp); it never carries XML. A
+// name that is neither is REJECTED when the goal arrives, and the file is read again for every
+// goal. One mission at a time. The action owns what the XML cannot be trusted with: the mission
+// timeout, cancel (halts the tree, so every RUNNING leaf's onHalted() fires) and the terminal
+// state.
 //
 //   in:  /crsd/fcu_status, /crsd/pose, /crsd/attitude, /crsd/world_targets, /crsd/passage_plan,
 //        dock/observations, /crsd/ocs_command, /crsd/wall_range, /crsd/pump_state,
@@ -40,7 +43,6 @@
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/string.hpp"
-#include "ament_index_cpp/get_package_share_directory.hpp"
 
 #include "crusader_msgs/action/run_mission.hpp"
 #include "crusader_msgs/msg/attitude.hpp"
@@ -62,6 +64,7 @@
 #include "crusader_bt/context.hpp"
 #include "crusader_bt/dock_math.hpp"
 #include "crusader_bt/nav_math.hpp"
+#include "crusader_bt/mission_loader.hpp"
 #include "crusader_bt/nav_params.hpp"
 #include "crusader_bt/ros_planner_port.hpp"
 
@@ -74,12 +77,6 @@ using namespace std::chrono_literals;
 
 /// The idle task token. TASK_UNKNOWN is never sent: RoboCommand reads it as "unparsed".
 static constexpr const char * kTaskNone = "TASK_NONE";
-
-/// The goal cannot run: the message is the whole result detail.
-struct GoalError : std::runtime_error
-{
-  using std::runtime_error::runtime_error;
-};
 
 static const char * outcomeName(uint8_t o)
 {
@@ -103,7 +100,6 @@ public:
   : rclcpp::Node("bt_runner_node")
   {
     action_name_ = declare_parameter<std::string>("action_name", "/crsd/run_mission");
-    trees_dir_ = ament_index_cpp::get_package_share_directory("crusader_bt") + "/behavior_trees";
     tick_hz_ = declare_parameter<double>("tick_hz", 10.0);
     default_timeout_s_ = declare_parameter<double>("default_timeout_s", 600.0);
     mode_grace_s_ = declare_parameter<double>("mode_grace_s", 3.0);
@@ -123,6 +119,11 @@ public:
     posture.read_only = true;
     posture.description = "fixed at startup: change it in crusader_params.yaml and restart bt_runner_node";
     ctx_->publish_setpoints = declare_parameter<bool>("publish_setpoints", false, posture);
+    // Where uploaded missions live (mission_loader.hpp): inside the workspace bind mount, like
+    // gcs_bridge's record_dir. gcs_bridge's user_trees_dir MUST equal it (check_config).
+    const std::string user_trees_dir =
+      declare_parameter<std::string>("user_trees_dir", "/root/robotx_ws/missions", posture);
+    dirs_ = missionDirs(user_trees_dir);
     // The fixed-nozzle shot may squirt: Gate G7, separate from moving (G1).
     ctx_->fire_pump = declare_parameter<bool>("fire_pump", false);
     // The sticks for the MANUAL fire tree (StrafeKeep): which RC channel is
@@ -227,7 +228,15 @@ public:
     group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
     server_ = rclcpp_action::create_server<RunMission>(
       this, action_name_,
-      [this](const rclcpp_action::GoalUUID &, std::shared_ptr<const RunMission::Goal>) {
+      [this](const rclcpp_action::GoalUUID &, std::shared_ptr<const RunMission::Goal> goal) {
+        // A name that is no file is refused here, not accepted and then FAULTed in 0 s.
+        try {
+          const std::string warning = resolveMission(dirs_, goal->name).warning;
+          if (!warning.empty()) {RCLCPP_WARN(get_logger(), "%s", warning.c_str());}
+        } catch (const MissionError & e) {
+          RCLCPP_WARN(get_logger(), "REJECTING goal: %s", e.what());
+          return rclcpp_action::GoalResponse::REJECT;
+        }
         if (busy_.exchange(true)) {
           RCLCPP_WARN(
             get_logger(),
@@ -252,8 +261,10 @@ public:
     idle_timer_ = create_wall_timer(1s, [this] {if (!busy_) {publishIdle();}});
 
     RCLCPP_INFO(
-      get_logger(), "bt_runner ready on %s: trees %s, %.0f Hz, setpoints %s",
-      action_name_.c_str(), builtinTrees().c_str(), tick_hz_,
+      get_logger(),
+      "bt_runner ready on %s: built-in trees %s; your missions in %s: %s; %.0f Hz, setpoints %s",
+      action_name_.c_str(), joinNames(missionNames(dirs_.builtin)).c_str(), dirs_.user.c_str(),
+      joinNames(missionNames(dirs_.user)).c_str(), tick_hz_,
       ctx_->publish_setpoints ? "ENABLED" : "DISABLED (read-only)");
     if (!ctx_->publish_setpoints) {
       RCLCPP_WARN(
@@ -404,11 +415,13 @@ private:
 
   /// The UAV's passage. Stored raw and folded in by refuseLocked(): a plan can
   /// arrive before there is an origin to express it in, and dropping it would
-  /// lose the plan the whole mission is gated on.
+  /// lose the plan the whole mission is gated on. The receipt time is kept too:
+  /// the stored plan is latched, so its age is what tells a live link from a dead one.
   void onPlan(const crusader_msgs::msg::PassagePlan::SharedPtr m)
   {
     std::lock_guard<std::mutex> lk(ctx_->mu);
     plan_raw_ = m;
+    plan_t_ = now();
     refuseLocked();
   }
 
@@ -810,34 +823,6 @@ private:
     return r;
   }
 
-  /// The built-in tree `name` names, or GoalError. A bare stem only: never a path.
-  std::string treePath(const std::string & name) const
-  {
-    const bool bare = !name.empty() && std::all_of(name.begin(), name.end(), [](char c) {
-        return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
-      });
-    const std::string path = trees_dir_ + "/" + name + ".xml";
-    std::error_code ec;
-    if (!bare || !std::filesystem::is_regular_file(path, ec)) {
-      throw GoalError("no built-in tree '" + name + "' (built-in: " + builtinTrees() + ")");
-    }
-    return path;
-  }
-
-  /// The built-in tree names, comma separated.
-  std::string builtinTrees() const
-  {
-    std::vector<std::string> names;
-    std::error_code ec;
-    for (const auto & e : std::filesystem::directory_iterator(trees_dir_, ec)) {
-      if (e.path().extension() == ".xml") {names.push_back(e.path().stem().string());}
-    }
-    std::sort(names.begin(), names.end());
-    std::string out;
-    for (const auto & n : names) {out += (out.empty() ? "" : ", ") + n;}
-    return out.empty() ? "none" : out;
-  }
-
   /// Re-reads every planner knob into ctx_->nav and logs the ones that changed since the
   /// previous goal. Called when a goal is ACCEPTED (execute(), before the tree is built) and
   /// never while a mission runs: a `ros2 param set` or a Tuning-tab set changes the PARAMETER at
@@ -943,6 +928,12 @@ private:
     ctx_->pose_fresh = ctx_->origin_set &&
       (t - pose_t_).seconds() < stream_timeout_s_;
 
+    // THE PLAN AGES LIKE THE POSE. plan_raw_ is latched, so a dead radio leaves it standing:
+    // the age is what PassagePlanFresh reads. An empty plan (the ground station's Clear) is
+    // no plan, never a fresh one.
+    ctx_->plan_age_s = (plan_raw_ && !plan_raw_->buoys.empty()) ?
+      (t - plan_t_).seconds() : Context::kNoPlanAgeS;
+
     // And so do the buoys: a dead tracker must not leave ctx_->buoys frozen and
     // perfectly convincing. Blanks over guesses.
     if (!tracked_.empty() && (t - targets_t_).seconds() >= stream_timeout_s_) {
@@ -988,7 +979,6 @@ private:
       // Per-mission state starts empty: a second attempt must not inherit the first's.
       ctx_->cleared_gates.clear();
       ctx_->global_passage = Context::GlobalPassage{};
-      ctx_->tier = goal->tier;
       resetTask3(*ctx_);
       resetFire(*ctx_);
       goal_mode_ = ctx_->mode;
@@ -1002,17 +992,18 @@ private:
     uint8_t outcome = RunMission::Result::OUTCOME_FAULT;
     std::string detail;
     try {
-      const std::string path = treePath(goal->name);
+      // Read again for every goal: an upload since the last one is this one's mission.
+      const MissionFile file = resolveMission(dirs_, goal->name);
       BT::BehaviorTreeFactory factory;
       registerCrusaderNodes(factory);
       auto bb = BT::Blackboard::create();
       bb->set("ctx", ctx_);
-      BT::Tree tree = factory.createTreeFromFile(path, bb);
+      BT::Tree tree = loadMission(factory, dirs_, file, bb);
       TreeView view(tree);
 
       RCLCPP_INFO(
-        get_logger(), "GOAL %s tier=%u timeout=%.0fs approach=(%.7f, %.7f)", goal->name.c_str(),
-        goal->tier, timeout_s, goal->approach_latitude, goal->approach_longitude);
+        get_logger(), "GOAL %s timeout=%.0fs approach=(%.7f, %.7f)", goal->name.c_str(),
+        timeout_s, goal->approach_latitude, goal->approach_longitude);
 
       rclcpp::Rate rate(tick_hz_);
       auto fb = std::make_shared<RunMission::Feedback>();
@@ -1080,7 +1071,7 @@ private:
         }
         rate.sleep();
       }
-    } catch (const GoalError & e) {
+    } catch (const MissionError & e) {
       detail = e.what();
       RCLCPP_ERROR(get_logger(), "%s", detail.c_str());
     } catch (const std::exception & e) {
@@ -1189,7 +1180,8 @@ private:
   ContextPtr ctx_;
   std::thread worker_;
   std::atomic<bool> stop_{false};
-  std::string action_name_, trees_dir_;
+  std::string action_name_;
+  MissionDirs dirs_;
   double tick_hz_ = 10.0, default_timeout_s_ = 600.0, mode_grace_s_ = 3.0;
   double stream_timeout_s_ = 1.0;
   double assoc_radius_m_ = 5.0;
@@ -1201,6 +1193,7 @@ private:
   rclcpp::Time pose_t_{0, 0, RCL_ROS_TIME};
   rclcpp::Time status_t_{0, 0, RCL_ROS_TIME};
   rclcpp::Time targets_t_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time plan_t_{0, 0, RCL_ROS_TIME};      ///< when plan_raw_ was received
   /// RAW inputs. ctx_->buoys is the FUSION of these two; see refuseLocked().
   std::vector<nav::Buoy> tracked_;
   crusader_msgs::msg::PassagePlan::SharedPtr plan_raw_;

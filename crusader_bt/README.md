@@ -1,8 +1,10 @@
 # crusader_bt
 
 Cognition: `bt_runner_node` serves `/crsd/run_mission` (RunMission) and ticks the built-in
-tree the goal names, `behavior_trees/<name>.xml` (`competition`, `task1_global`,
-`task1_safe_passage`, `task3_disruptive`, ...). Goals never carry XML.
+tree the goal names, `behavior_trees/<name>.xml` (`task1_advanced`, `task1_disruptive`,
+`task3_core`, `task3_advanced`, `task3_disruptive`, ...). Goals never carry XML. A tier belongs
+to the tree, not the goal: one tree per task per tier. Each top-level file includes the body its
+tiers share (`lib/common/`) once, then its own `lib/<name>.xml`.
 
 Topics: in `/crsd/pose`, `/crsd/fcu_status`, `/crsd/world_targets`, `/crsd/passage_plan`,
 `dock/observations`, `/crsd/ocs_command`, `/crsd/datum`; out `/crsd/bt_status` (JSON),

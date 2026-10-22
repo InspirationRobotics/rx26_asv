@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Task1PlanDrive: the plan-and-drive body shared by every Task 1 tree (Task1Advanced,
+  Task1Disruptive). Not a tree to run on its own: it has no guard band and no task token.
+
+  The aircraft hands over every buoy, its colour, the ENTRY and the EXIT before the boat moves
+  (handbook 3.3.2). One search (global_passage.hpp) plans the whole task from the boat: round
+  the ENTRY clockwise, every RED to starboard and every GREEN to port, round the EXIT
+  counter-clockwise. Plan once and drive the four phases; a phase blocked for blocked_timeout_s
+  fails and the Retry re-plans from the boat, and phases already done return SUCCESS at once.
+
+  INCLUDE IT ONCE per mission file, however many Task 1 trees the file uses: the per-tier lib
+  files do not include it, so no tree ID is ever registered twice.
+
+  The ports below are read from the calling tree's blackboard through _autoremap (the caller
+  declares and documents them); this subtree declares none, so no model default can shadow
+  the value the caller wrote.
+-->
+<root BTCPP_format="4">
+
+  <BehaviorTree ID="Task1PlanDrive">
+    <Sequence name="passage">
+      <WaitForField/>
+      <RetryUntilSuccessful num_attempts="{plan_attempts}">
+        <Sequence>
+          <PlanGlobalPassage orbit_radius_m="{orbit_radius_m}" orbit_min_m="{orbit_min_m}"
+                             overshoot_deg="{overshoot_deg}"/>
+          <DrivePlanPhase lookahead_m="{lookahead_m}" blocked_timeout_s="{blocked_timeout_s}"
+                          phase="approach"/>
+          <DrivePlanPhase lookahead_m="{lookahead_m}" blocked_timeout_s="{blocked_timeout_s}"
+                          phase="entry_orbit"/>
+          <DrivePlanPhase lookahead_m="{lookahead_m}" blocked_timeout_s="{blocked_timeout_s}"
+                          phase="transit"/>
+          <DrivePlanPhase lookahead_m="{lookahead_m}" blocked_timeout_s="{blocked_timeout_s}"
+                          phase="exit_orbit"/>
+        </Sequence>
+      </RetryUntilSuccessful>
+    </Sequence>
+  </BehaviorTree>
+
+</root>

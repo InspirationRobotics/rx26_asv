@@ -1,6 +1,6 @@
 """task1_goal — the operator's "Send goal" for a Gazebo run: arm, GUIDED, go.
 
-    python3 -m crusader_sim.task1_goal --course task1_core [--tree task1_global] [--tier disruptive]
+    python3 -m crusader_sim.task1_goal --course task1_core [--tree task1_disruptive]
 
 Runs in the crsd-sim container, after gz_rig_up.sh.
 
@@ -9,9 +9,9 @@ Does what an operator does before a Task 1 attempt, in order, then watches:
      the water the pilot arms with SB). Retries while pre-arm refuses, as ArduPilot does for
      ~10-20 s after boot.
   2. GUIDED, through /crsd/set_mode — the bridge's own mode path.
-  3. The RunMission goal to bt_runner (/crsd/run_mission): the built-in tree --tree, tier
-     from the course, approach point = the course's `approach` if it has one, else 6 m short
-     of the ENTRY buoy on the line from the start.
+  3. The RunMission goal to bt_runner (/crsd/run_mission): the built-in tree --tree (the tier
+     is the tree's: task1_advanced or task1_disruptive), approach point = the course's
+     `approach` if it has one, else 6 m short of the ENTRY buoy on the line from the start.
 Then prints the tree's running node until the result, and task1_judge's verdict.
 
 Ctrl-C / SIGTERM CANCELS the goal (goal_client.run_goal) and waits for the tree to finish it:
@@ -31,7 +31,7 @@ from nav_msgs.msg import Odometry
 
 from crusader_msgs.action import RunMission
 from crusader_sim import course as C
-from crusader_sim.goal_client import TIERS, install_stop, outcome_names, run_goal, tree_name
+from crusader_sim.goal_client import install_stop, outcome_names, run_goal, tree_name
 from crusader_sim.operator_tools import arm, set_mode
 from crusader_sim.task1_judge import Task1Judge, format_verdict
 
@@ -83,10 +83,8 @@ def _feed_judge(judge, m):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--course", default="task1_core")
-    ap.add_argument("--tree", default=os.environ.get("TREE") or "task1_global",
-                    help="a built-in tree of bt_runner_node (default: $TREE, else task1_global)")
-    ap.add_argument("--tier", choices=sorted(TIERS), default=None,
-                    help="default: the course's `tier`")
+    ap.add_argument("--tree", default=os.environ.get("TREE") or "task1_advanced",
+                    help="a built-in tree of bt_runner_node (default: $TREE, else task1_advanced)")
     ap.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S,
                     help="mission timeout, WALL-CLOCK seconds (bt_runner counts its own now(); the "
                          "sim runs on wall clock, no use_sim_time). default: %(default).0f")
@@ -94,7 +92,6 @@ def main():
     a = ap.parse_args()
 
     course = C.load(a.course)
-    tier = TIERS[a.tier or course.get("tier", "core")]
     lat, lon = approach_point(course)
 
     ok, why = arm()
@@ -113,9 +110,9 @@ def main():
     if not op.client.wait_for_server(timeout_sec=20.0):
         print("[operator] no /crsd/run_mission server (is bt_runner up?)")
         return 2
-    goal = RunMission.Goal(name=tree_name(a.tree), tier=tier, approach_latitude=lat, approach_longitude=lon,
+    goal = RunMission.Goal(name=tree_name(a.tree), approach_latitude=lat, approach_longitude=lon,
                            timeout_s=float(a.timeout_s))
-    print(f"[operator] goal: {goal.name}, tier {tier}, approach {lat:.7f} {lon:.7f}", flush=True)
+    print(f"[operator] goal: {goal.name}, approach {lat:.7f} {lon:.7f}", flush=True)
 
     stop = install_stop()                   # after rclpy.init(): see goal_client.install_stop
     run = run_goal(op.client, goal, lambda t: rclpy.spin_once(op, timeout_sec=t), stop,

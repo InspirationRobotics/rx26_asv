@@ -1,4 +1,4 @@
-// test_mission_nodes — WaitForRunStart, TaskAttempt and TierAtLeast, ticked against a Context.
+// test_mission_nodes — WaitForRunStart, TaskAttempt and PassagePlanFresh, ticked against a Context.
 //
 // Links the leaves, so it needs ROS: build with colcon, run from the build directory
 //
@@ -71,6 +71,13 @@ struct Rig
   }
 
   BT::NodeStatus tick() {return tree.tickOnce();}
+
+  /// One tick with Ekko's field `age_s` old (Context::kNoPlanAgeS = none, or cleared).
+  BT::NodeStatus tickWithPlanAge(double age_s)
+  {
+    ctx->plan_age_s = age_s;
+    return tick();
+  }
 
   /// The boat has a pose, so a hold can be sent.
   void withPose()
@@ -219,16 +226,38 @@ static void dwellTests()
   }
 }
 
-static void tierTests()
+static void planFreshTests()
 {
-  std::printf("\n2. TierAtLeast (the goal's tier)\n");
-  Rig r;
-  r.ctx->tier = 0;
-  r.load("<TierAtLeast tier=\"1\"/>");
-  chk("core is not at least advanced", r.tick() == BAD);
-  r.ctx->tier = 2;
-  r.load("<TierAtLeast tier=\"1\"/>");
-  chk("disruptive is at least advanced", r.tick() == OK);
+  std::printf("\n2. PassagePlanFresh (Ekko's field keeps arriving)\n");
+  {
+    Rig r;
+    r.load("<PassagePlanFresh max_age_s=\"15.0\"/>");
+    chk("no plan yet (age blank) is not fresh", r.tick() == BAD);
+    chk("a plan 0.4 s old is fresh", r.tickWithPlanAge(0.4) == OK);
+    chk("... still, exactly at max_age_s", r.tickWithPlanAge(15.0) == OK);
+    chk("older than max_age_s is stale", r.tickWithPlanAge(15.5) == BAD);
+    chk("a cleared plan (age blank again) is not fresh",
+      r.tickWithPlanAge(Context::kNoPlanAgeS) == BAD);
+  }
+  {
+    Rig r;
+    r.load("<PassagePlanFresh/>");
+    chk("max_age_s defaults to 15 s: 14 s is fresh", r.tickWithPlanAge(14.0) == OK);
+    chk("... and 16 s is not", r.tickWithPlanAge(16.0) == BAD);
+  }
+  {
+    Rig r;
+    r.load("<PassagePlanFresh max_age_s=\"3.0\"/>");
+    chk("the port moves the limit", r.tickWithPlanAge(4.0) == BAD);
+  }
+  {
+    // First in a ReactiveSequence guard band, it fails the attempt mid-run, not just at the start.
+    Rig r;
+    r.load("<ReactiveSequence><PassagePlanFresh max_age_s=\"15.0\"/><Scripted/></ReactiveSequence>");
+    g_child = RUN;
+    chk("the guarded child runs while the plan is fresh", r.tickWithPlanAge(1.0) == RUN);
+    chk("the plan going stale fails the attempt on the next tick", r.tickWithPlanAge(20.0) == BAD);
+  }
 }
 
 static void waitForRunStartTests()
@@ -307,8 +336,10 @@ static void waitForRunStartTests()
 }
 
 /// The first orbit hop's distance from the anchor and the ring size, after one tick of `main`
-/// (a Main tree that calls the subtree `Orbit`, which holds one CircleBuoy).
-static void orbitOf(Rig & r, const std::string & call_attrs, double * radius, int * hops)
+/// (a Main tree that calls the subtree `Orbit`, which holds one CircleBuoy; nested: Orbit holds
+/// a call to `OrbitBody` instead, with _autoremap alone, like the lib trees' common bodies).
+static void orbitOf(Rig & r, const std::string & call_attrs, double * radius, int * hops,
+  bool nested = false)
 {
   r.ctx->nav.orbit_radius_m = 9.0;
   r.ctx->nav.orbit_points = 12;
@@ -319,7 +350,11 @@ static void orbitOf(Rig & r, const std::string & call_attrs, double * radius, in
   r.tree = r.factory.createTreeFromText(
     "<root BTCPP_format=\"4\" main_tree_to_execute=\"Main\">"
     "<BehaviorTree ID=\"Main\"><SubTree ID=\"Orbit\" _autoremap=\"true\" " + call_attrs + "/></BehaviorTree>"
-    "<BehaviorTree ID=\"Orbit\"><CircleBuoy anchor=\"fix\" lat=\"0.0\" lon=\"0.0\" "
+    + std::string(nested ?
+      "<BehaviorTree ID=\"Orbit\"><SubTree ID=\"OrbitBody\" _autoremap=\"true\"/></BehaviorTree>"
+      "<BehaviorTree ID=\"OrbitBody\">" :
+      "<BehaviorTree ID=\"Orbit\">") +
+    "<CircleBuoy anchor=\"fix\" lat=\"0.0\" lon=\"0.0\" "
     "radius=\"{orbit_radius_m}\" points=\"{orbit_points}\"/></BehaviorTree></root>", r.bb);
   r.tick();
   *radius = crusader_bt::nav::norm(r.ctx->leg.goal);
@@ -342,6 +377,14 @@ static void tunableTests()
   Rig r3;
   orbitOf(r3, "", &rad, &hops);
   chk("absent values fall back the same way", std::abs(rad - 9.0) < 0.05 && hops > hops5);
+  // The per-tier lib trees hand their common body only _autoremap: a value written on the
+  // outer call must reach a leaf two SubTrees down, empty ones included.
+  Rig r4;
+  orbitOf(r4, "orbit_radius_m=\"7.5\" orbit_points=\"5\"", &rad, &hops, true);
+  chk("two SubTrees down: written values still drive the leaf", std::abs(rad - 7.5) < 0.05 && hops == hops5);
+  Rig r5;
+  orbitOf(r5, "orbit_radius_m=\"\" orbit_points=\"\"", &rad, &hops, true);
+  chk("... and empty ones still fall back", std::abs(rad - 9.0) < 0.05 && hops > hops5);
 }
 
 int main()
@@ -349,7 +392,7 @@ int main()
   rclcpp::init(0, nullptr);
   taskAttemptTests();
   dwellTests();
-  tierTests();
+  planFreshTests();
   waitForRunStartTests();
   tunableTests();
   rclcpp::shutdown();

@@ -81,6 +81,10 @@ struct Context
   // the plan too; bt_runner_node's refuseLocked says why.
   std::vector<nav::PlanBuoy> plan;
   std::vector<nav::Buoy> obstacles;           ///< tracked, but not in the plan
+  /// Seconds since the last non-empty plan arrived (PassagePlanFresh). kNoPlanAgeS = none yet,
+  /// or the newest one was empty: a blank, never a back-filled age.
+  static constexpr double kNoPlanAgeS = 1e9;
+  double plan_age_s = kNoPlanAgeS;
 
   /// Gates already driven, as (red_id, green_id): by buoy ids, so a replan that reorders the
   /// field cannot skip one.
@@ -90,7 +94,6 @@ struct Context
   //
   // `dock` is written by the runner through ingestDockObservation() below;
   // everything after it by the Task 3 leaves.
-  int tier = 0;                               ///< goal tier: 0 Core, 1 Adv, 2 Disr
   /// RoboCommand's newest RunStart, on `now_s`'s clock. NOT reset per goal: a RunStart that
   /// arrives before the operator presses START must still count (WaitForRunStart).
   runstart::Latch run_start;
@@ -189,8 +192,9 @@ struct Context
 
   // ---- the whole-field Task 1 plan (global_passage.hpp; src/global_leaves.cpp) ----
   //
-  // task1_global.xml plans the WHOLE passage at once (approach, entry orbit, transit, exit
-  // orbit) and drives it phase by phase. Per mission: reset with the goal, like the gates.
+  // The Task 1 trees (lib/common/task1_plan_drive.xml) plan the WHOLE passage at once (approach,
+  // entry orbit, transit, exit orbit) and drive it phase by phase. Per mission: reset with the
+  // goal, like the gates.
   struct GlobalPassage
   {
     gp::Phase phase = gp::Phase::Approach;   ///< the phase being driven, or the next one
@@ -397,8 +401,6 @@ inline const char * navModeName(path::Mode m)
   }
   return "off";
 }
-
-// ---------------------------------------------------------------------- tier
 
 // ----------------------------------------------------------------- leg status
 //
@@ -831,7 +833,7 @@ void registerCrusaderNodes(BT::BehaviorTreeFactory & factory);
 void registerTask3Nodes(BT::BehaviorTreeFactory & factory);
 /// The fixed-nozzle shot's leaves (src/fire_leaves.cpp).
 void registerFireNodes(BT::BehaviorTreeFactory & factory);
-/// The whole-field Task 1 leaves (src/global_leaves.cpp, task1_global.xml).
+/// The whole-field Task 1 leaves (src/global_leaves.cpp, lib/common/task1_plan_drive.xml).
 void registerGlobalPassageNodes(BT::BehaviorTreeFactory & factory);
 
 }  // namespace crusader_bt

@@ -1,4 +1,4 @@
-// global_leaves.cpp — the leaves of the whole-field Task 1 trees (behavior_trees/task1_global.xml).
+// global_leaves.cpp — the leaves of the whole-field Task 1 trees (behavior_trees/lib/common/task1_plan_drive.xml).
 //
 // Nothing here is geometry: the plan is global_passage.hpp and the driving path_follower.hpp,
 // both pinned off the boat by test/test_global_passage.cpp (closed loop included).

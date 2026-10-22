@@ -40,7 +40,7 @@ never the workspace: the root is not a package, so colcon finds every package be
 | The ground station | `tools/scripts/BOAT_GUI.cmd` on the laptop, then http://localhost:8090 |
 | Anything else (camera_node, target_tracker, bt_runner_node, ocs_client) | the Nodes tab |
 | Nav2 avoidance | `ros2 launch crusader_nav nav.launch.py datum_source:=param ...` |
-| A mission | the Mission tab, or `ros2 action send_goal /crsd/run_mission crusader_msgs/action/RunMission "{name: competition, tier: 1}"` |
+| A mission | the Mission tab, or `ros2 action send_goal /crsd/run_mission crusader_msgs/action/RunMission "{name: task1_advanced}"` |
 | Rebuild after any edit | `tools/scripts/rebuild.sh` on the Jetson host |
 | Before every session | `tools/scripts/preflight.py` |
 

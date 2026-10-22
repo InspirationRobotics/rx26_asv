@@ -32,7 +32,7 @@ try:
     from std_msgs.msg import String
     from crusader_common import geo
     from crusader_msgs.msg import Cluster3D, Cluster3DArray, LatLonHead, PassagePlan
-    from crusader_groundstation import gcs_bridge, gcs_wire
+    from crusader_groundstation import gcs_bridge, gcs_wire, mission_xml
     from crusader_groundstation.gcs_bridge import (MANUAL_VERSION_BASE, OPS_WORKERS, Connection,
                                                    GcsBridge)
     HAVE_ROS = True
@@ -131,9 +131,10 @@ class Bridge(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp()
+        cls.missions = tempfile.mkdtemp()
         yaml_path = os.path.join(REPO, "crusader_bringup", "config", "crusader_params.yaml")
         rclpy.init(args=["--ros-args", "-p", "port:=0", "-p", f"record_dir:={cls.tmp}",
-                         "-p", f"params_file:={yaml_path}"])
+                         "-p", f"user_trees_dir:={cls.missions}", "-p", f"params_file:={yaml_path}"])
         cls.node = GcsBridge()
         cls.probe = rclpy.create_node("gcs_bridge_probe")
         cls.plans = []
@@ -167,6 +168,7 @@ class Bridge(unittest.TestCase):
         cls.node.destroy_node()
         cls.probe.destroy_node()
         rclpy.try_shutdown()
+        shutil.rmtree(cls.missions, True)
 
     def wait_frame(self, pred, timeout=5.0):
         deadline = time.monotonic() + timeout
@@ -248,15 +250,216 @@ class Bridge(unittest.TestCase):
         self.assertFalse(h["ok"])
 
     def test_mission_without_a_runner(self):
-        h, _ = self.req("run_mission", name="competition", tier=1)
+        h, _ = self.req("run_mission", name="task1_advanced")
         self.assertFalse(h["ok"])
         self.assertIn("bt_runner_node", h["msg"])
         h, _ = self.req("missions_list")
         self.assertTrue(h["ok"], h["msg"])
-        self.assertIn("competition", h["data"]["names"])
+        self.assertIn("task1_advanced", h["data"]["names"])
+
+    # ---------------------------------------------------------------- the mission files
+
+    def mission_files(self):
+        """What is in the user's directory, archive included, as relative paths."""
+        return sorted(os.path.relpath(os.path.join(d, f), self.missions)
+                      for d, _dirs, files in os.walk(self.missions) for f in files)
+
+    def bt_says(self, state, name=None):
+        """bt_runner_node's word, delivered: the bridge now thinks `name` is (not) running."""
+        want = name if state == "RUNNING" else None
+        deadline = time.monotonic() + 5
+        while self.node._running_mission() != want and time.monotonic() < deadline:
+            self.bt.publish(String(data=json.dumps({"state": state, "name": name})))
+            time.sleep(0.05)
+        self.assertEqual(self.node._running_mission(), want)
+
+    def need_bt(self):
+        if self.node._bt_install()[0] is None:
+            self.skipTest("crusader_bt is not installed")
+        shutil.rmtree(self.missions, True)
+        self.bt_says("IDLE")
+
+    def catalogue(self):
+        h, _ = self.req("mission_catalogue")
+        self.assertTrue(h["ok"], h["msg"])
+        return h["data"]
+
+    def mission(self, *blocks):
+        """Mission XML for blocks, built the way the laptop builds it, from the boat's catalogue."""
+        return mission_xml.build_xml(list(blocks) or [{"id": "AlwaysSuccess"}], self.catalogue())
+
+    def upload(self, name, xml):
+        h, _ = self.req("mission_upload", name=name, xml=xml)
+        return h
+
+    def test_mission_catalogue(self):
+        self.need_bt()
+        cat = self.catalogue()
+        self.assertEqual(sorted(cat), ["builtins", "nodes", "subtrees", "user"])
+        nodes = {n["id"]: n for n in cat["nodes"]}
+        self.assertTrue({"Sequence", "AlwaysSuccess", "IsAutonomous", "NavigateTo"} <= set(nodes))
+        goal = next(p for p in nodes["NavigateTo"]["ports"] if p["name"] == "goal")
+        self.assertFalse(goal["required"])                  # read only for target="port"
+        self.assertTrue(all("required" in p for n in cat["nodes"] for p in n["ports"]))
+        tiers = {s["id"]: s for s in cat["subtrees"] if s.get("tier")}
+        self.assertEqual((tiers["Task1Advanced"]["task"], tiers["Task1Advanced"]["tier"]), (1, "advanced"))
+        lookahead = next(p for p in tiers["Task1Advanced"]["ports"] if p["name"] == "lookahead_m")
+        self.assertEqual((lookahead["type"], lookahead["default"]), ("double", "2.5"))
+        shared = [s for s in cat["subtrees"] if not s.get("tier")]
+        self.assertIn({"id": "Task1PlanDrive", "ports": []}, shared)    # known, not a block to offer
+        self.assertIn("task1_advanced", cat["builtins"])
+        self.assertEqual(cat["user"], [])
+        task1 = {"id": "Task1Advanced", "subtree": True}
+        self.assertEqual(mission_xml.validate(self.mission(task1), cat, "mine"), [])
+
+    def test_missions_list_keeps_names_and_says_whose(self):
+        self.need_bt()
+        self.assertTrue(self.upload("wp_mine", self.mission())["ok"])
+        h, _ = self.req("missions_list")
+        names, builtin, user = h["data"]["names"], h["data"]["builtin"], h["data"]["user"]
+        self.assertEqual((user, names), (["wp_mine"], builtin + user))
+        self.assertIn("task1_advanced", builtin)
+
+    def test_mission_upload_get_replace_delete(self):
+        self.need_bt()
+        first, second = self.mission(), self.mission({"id": "AlwaysFailure"})
+        h = self.upload("wp_mine", first)
+        self.assertTrue(h["ok"], h["msg"])
+        self.assertEqual((h["msg"], h["data"]), ("wp_mine saved", {"name": "wp_mine", "archived": None}))
+        self.assertEqual(self.mission_files(), ["wp_mine.xml"])      # no temp file is left behind
+        h, _ = self.req("mission_get", name="wp_mine")
+        self.assertEqual(h["data"], {"name": "wp_mine", "xml": first, "builtin": False})
+        h, _ = self.req("mission_get", name="task1_advanced")
+        self.assertTrue(h["data"]["builtin"])
+        self.assertIn("Task1Advanced", h["data"]["xml"])
+        h, _ = self.req("mission_get", name="nope")
+        self.assertFalse(h["ok"])
+        self.assertIsNone(h["data"])
+
+        h = self.upload("wp_mine", second)                           # replaced: the old is archived
+        self.assertTrue(h["ok"], h["msg"])
+        old = h["data"]["archived"]
+        self.assertRegex(old, r"^wp_mine\.\d{8}-\d{6}\.xml$")
+        self.assertEqual(self.mission_files(), [f".archive/{old}", "wp_mine.xml"])
+        with open(os.path.join(self.missions, ".archive", old), encoding="utf-8") as f:
+            self.assertEqual(f.read(), first)
+        h, _ = self.req("mission_get", name="wp_mine")
+        self.assertEqual(h["data"]["xml"], second)
+        h, _ = self.req("missions_list")
+        self.assertEqual(h["data"]["user"], ["wp_mine"])             # the archive is not a mission
+
+        h, _ = self.req("mission_delete", name="wp_mine")            # moved, never removed
+        self.assertTrue(h["ok"], h["msg"])
+        self.assertEqual(h["msg"], "wp_mine deleted")
+        gone = h["data"]["archived"]
+        self.assertEqual(self.mission_files(), sorted([f".archive/{old}", f".archive/{gone}"]))
+        with open(os.path.join(self.missions, ".archive", gone), encoding="utf-8") as f:
+            self.assertEqual(f.read(), second)
+        h, _ = self.req("missions_list")
+        self.assertEqual(h["data"]["user"], [])
+
+    def test_mission_upload_refusals_store_nothing(self):
+        self.need_bt()
+        cat = self.catalogue()
+        kept = self.mission({"id": "AlwaysSuccess", "name": "keeper"})
+        self.assertTrue(self.upload("wp_keep", kept)["ok"])
+        wp = {"id": "NavigateTo", "ports": {"target": "fix", "lat": "1.30", "lon": "103.80"}}
+        task1, task3 = ({"id": "Task1Advanced", "subtree": True}, {"id": "Task3Core", "subtree": True})
+        cases = {                                   # what is wrong -> (name, xml, part of the reason)
+            "a built-in name": ("task1_advanced", self.mission(), "built-in"),
+            "a name that is a path": ("../escape", self.mission(), "mission name"),
+            "an upper case name": ("Mine", self.mission(), "mission name"),
+            "a 0/0 waypoint": ("wp_zero", self.mission(
+                dict(wp, ports={"target": "fix", "lat": "0.0", "lon": "0.0"})), "both 0"),
+            "a waypoint with no lat": ("wp_nolat", self.mission(
+                dict(wp, ports={"target": "fix", "lon": "103.8"})), "needs a lat"),
+            "two tiers of one task": ("wp_tiers", self.mission(
+                task1, {"id": "Task1Disruptive", "subtree": True}), "one tier"),
+            "an unknown block": ("wp_unknown", self.mission({"id": "NoSuchBlock"}), "unknown block"),
+            "an <include>": ("wp_include", self.mission().replace(
+                "<BehaviorTree", '<include path="lib/task1_advanced.xml"/><BehaviorTree', 1), "<include>"),
+            "not XML": ("wp_junk", "this is not xml", "not well-formed"),
+            "not text": ("wp_binary", 12345, "not text"),
+        }
+        for what, (name, xml, reason) in cases.items():
+            h = self.upload(name, xml)
+            self.assertFalse(h["ok"], what)
+            self.assertTrue(h["msg"].startswith("not stored: "), (what, h["msg"]))
+            self.assertIn(reason, h["msg"], what)
+            self.assertTrue(h["data"]["problems"], what)
+            self.assertTrue(all(set(p) == {"path", "msg"} for p in h["data"]["problems"]), what)
+        self.assertEqual(self.mission_files(), ["wp_keep.xml"])      # nothing new, nothing archived
+        self.assertEqual(mission_xml.validate(kept, cat, "wp_keep"), [])
+        h = self.upload("wp_many", self.mission(task1, task3, {"id": "NoSuchBlock"},
+                                                {"id": "NoSuchBlockEither"}, {"id": "AndAThird"},
+                                                {"id": "AndAFourth"}))
+        self.assertRegex(h["msg"], r"\(and \d+ more\)$")           # the status line carries three
+
+    def test_mission_upload_refusal_is_one_shape(self):
+        self.assertEqual(gcs_bridge._refusal("not stored", ["a", "b", "c"]), "not stored: a; b; c")
+        self.assertEqual(gcs_bridge._refusal("not stored", list("abcde")),
+                         "not stored: a; b; c (and 2 more)")
+
+    def test_mission_upload_refused_when_bt_cpp_will_not_load_it(self):
+        self.need_bt()
+        old = self.mission()
+        self.assertTrue(self.upload("wp_keep", old)["ok"])
+        bad = '<root BTCPP_format="4"><BehaviorTree ID="Main"><NoSuchLeaf/></BehaviorTree></root>'
+        with mock.patch.object(gcs_bridge.mission_xml, "problems", return_value=[]):
+            h = self.upload("wp_keep", bad)             # the laptop's rules let it through
+        self.assertFalse(h["ok"])
+        self.assertIn("BehaviorTree.CPP will not load it", h["msg"])
+        self.assertIn("NoSuchLeaf", h["msg"])
+        self.assertEqual(self.mission_files(), ["wp_keep.xml"])      # staged file gone, old untouched
+        h, _ = self.req("mission_get", name="wp_keep")
+        self.assertEqual(h["data"]["xml"], old)
+
+    def test_mission_changes_are_refused_while_a_mission_runs(self):
+        self.need_bt()
+        self.assertTrue(self.upload("wp_run", self.mission())["ok"])
+        self.bt_says("RUNNING", "wp_run")
+        h = self.upload("wp_other", self.mission())                 # any running mission, not just that one
+        self.assertFalse(h["ok"])
+        self.assertIn("wp_run is running", h["msg"])
+        h, _ = self.req("mission_delete", name="wp_run")
+        self.assertFalse(h["ok"])
+        self.assertIn("is running", h["msg"])
+        self.assertEqual(self.mission_files(), ["wp_run.xml"])
+        self.bt_says("IDLE")
+        self.assertTrue(self.upload("wp_other", self.mission())["ok"])
+        self.assertTrue(self.req("mission_delete", name="wp_run")[0]["ok"])
+
+    def test_mission_delete_refusals(self):
+        self.need_bt()
+        for name, reason in (("task1_advanced", "built in"), ("nope", "no mission of yours"),
+                             ("../x", "no mission of yours"), ("", "no mission of yours")):
+            h, _ = self.req("mission_delete", name=name)
+            self.assertFalse(h["ok"], name)
+            self.assertIn(reason, h["msg"], name)
+        self.assertEqual(self.mission_files(), [])
+
+    def test_mission_ops_need_the_installed_crusader_bt(self):
+        with mock.patch.object(GcsBridge, "_bt_install", return_value=(None, None)):
+            for op, fields in (("missions_list", {}), ("mission_catalogue", {}),
+                               ("mission_get", {"name": "x"}),
+                               ("mission_upload", {"name": "x", "xml": "<root/>"}),
+                               ("mission_delete", {"name": "x"})):
+                h, _ = self.req(op, **fields)
+                self.assertEqual((h["ok"], h["msg"]), (False, "crusader_bt is not installed"), op)
+
+    def test_mission_nodes_are_asked_again_only_for_another_build(self):
+        self.need_bt()
+        self.node._nodes_cache = None
+        with mock.patch.object(self.node, "_bt_check", wraps=self.node._bt_check) as check:
+            first = self.node._nodes()
+            self.assertIs(self.node._nodes(), first)
+            self.assertEqual([c.args for c in check.call_args_list], [("--models",)])
+            self.node._nodes_cache = ((0, 0), first)                # a rebuilt bt_tree_check
+            self.assertEqual(self.node._nodes(), first)
+            self.assertEqual(check.call_count, 2)
 
     def test_tree_follows_bt_status(self):
-        status = {"state": "RUNNING", "name": "competition", "running_node": "CircleBuoy",
+        status = {"state": "RUNNING", "name": "task1_advanced", "running_node": "CircleBuoy",
                   "elapsed_s": 3.0, "nodes": []}
         self.bt.publish(String(data=json.dumps(status)))
         f, _ = self.wait_frame(lambda h: h["t"] == "tree" and h.get("running_node") == "CircleBuoy")

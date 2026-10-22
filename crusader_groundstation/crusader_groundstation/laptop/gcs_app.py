@@ -13,6 +13,11 @@ The page talks only to this process:
                         &stream=raw for the frame without the detector's boxes
   GET  /lidar.json      the LiDAR preview, likewise
   GET  /download?name=  a recording, streamed straight through
+A few mission ops are answered here, not by the boat: mission_build and mission_open turn the
+Mission tab's blocks into the mission XML and back with mission_xml, and mission_upload checks the
+XML with it before the boat sees it (the boat checks again with the same file). Their catalogue of
+blocks is the boat's own, fetched with mission_catalogue; a boat without it gets one plain refusal,
+UNSUPPORTED, and the page goes on working.
 A page reload gets the newest frame of every kind and the recent log, radio and OCS events
 from this process, so nothing waits for the boat to say it again. A page that cannot keep up
 is cut off rather than waited for; its EventSource reconnects and gets that same cache.
@@ -34,13 +39,18 @@ from urllib.parse import parse_qs, urlparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))       # gcs_wire sits beside this directory
 import gcs_wire  # noqa: E402
+import mission_xml  # noqa: E402
 
 DEFAULT_BOAT = "192.168.100.109"
 LATEST_KINDS = ("hello", "state", "targets", "plan", "path", "hazards", "nodes", "tree")
 RINGS = {"log": 1500, "radio": 500, "ocs": 300}
 CAM_STREAMS = ("annotated", "raw")  # /cam.jpg?stream=: the boat's _op_cam says the same
 STATIC = {"/": ("page.html", "text/html; charset=utf-8"),
-          "/map.js": ("map.js", "text/javascript; charset=utf-8")}
+          "/map.js": ("map.js", "text/javascript; charset=utf-8"),
+          "/editor.js": ("editor.js", "text/javascript; charset=utf-8")}
+UNSUPPORTED = "the boat does not support mission upload yet"
+MISSION_BOAT_OPS = ("mission_get", "mission_delete")        # the boat answers these as they are
+ANSWER = ("ok", "msg", "data")                              # what the page is told of any op
 REQ_TIMEOUT_S = 15.0
 LINK_EVENT_S = 2.0
 LINK_PUSH_S = 1.0           # the link's state goes to the pages at least this often
@@ -52,6 +62,11 @@ OUTBOX_SLOTS = 64
 WRITE_TIMEOUT_S = 10.0      # a write to a browser that has stopped reading gives up after this
 SUPERSEDED = ("state", "link")      # a newer one makes an older one worthless
 DONE = (b"", None)                  # the end of a download's chunks, however it ended
+
+
+def answer_of(header):
+    """(ok, msg, data) of a result header from the boat."""
+    return tuple(header.get(k) for k in ANSWER)
 
 
 def every(period, fn):
@@ -230,7 +245,7 @@ class BoatLink:
                 return {"t": "result", "ok": False, "msg": self.error or "no link to the boat"}, b""
             try:
                 self._send(sock, rid, op, fields)
-            except OSError as e:
+            except (OSError, ValueError) as e:      # ValueError: gcs_wire's frame size cap
                 return {"t": "result", "ok": False, "msg": f"send failed: {e}"}, b""
             if not pend["done"].wait(timeout):
                 return {"t": "result", "ok": False,
@@ -239,6 +254,91 @@ class BoatLink:
         finally:
             with self._pending_lock:
                 self._pending.pop(rid, None)
+
+
+class MissionOps:
+    """The mission ops this process answers itself, over the boat's catalogue of blocks: the page
+    sends blocks, gets the mission XML and what is wrong with it, and sends XML the boat is only
+    asked to store once mission_xml has accepted it."""
+
+    def __init__(self, link):
+        self.link = link
+        self._lock = threading.Lock()
+        self._cat = None            # (the link it came over, its Catalogue): good while that link is up
+        self._local = {"mission_catalogue": self._catalogue, "mission_build": self._build,
+                       "mission_open": self._open, "mission_upload": self._upload}
+
+    def handle(self, op, req):
+        """(ok, msg, data) for a mission op; None for any other op, which the boat is asked as it is."""
+        if op in self._local:
+            return self._local[op](req)
+        return self._boat(op, req) if op in MISSION_BOAT_OPS else None
+
+    def _boat(self, op, fields=None):
+        header, _blob = self.link.request(op, fields)
+        ok, msg, data = answer_of(header)
+        if not ok and str(msg).startswith("unknown op"):        # gcs_bridge's answer to an op it lacks
+            return False, UNSUPPORTED, {"unsupported": True}
+        return ok, msg, data
+
+    def _fetch(self):
+        """(Catalogue or None, the mission_catalogue result): always asks the boat."""
+        key = (self.link.up, self.link.since)
+        result = self._boat("mission_catalogue")
+        if not result[0]:
+            return None, result
+        try:
+            cat = mission_xml.Catalogue(result[2])
+        except ValueError as e:
+            return None, (False, f"the boat's mission catalogue is unusable: {e}", None)
+        with self._lock:
+            self._cat = (key, cat)
+        return cat, result
+
+    def _known(self):
+        """(Catalogue or None, why not): the one fetched over this link, else fetched now."""
+        with self._lock:
+            have = self._cat
+        if have and have[0] == (self.link.up, self.link.since):
+            return have[1], None
+        return self._fetch()
+
+    def _catalogue(self, req):
+        cat, (ok, msg, data) = self._fetch()
+        return (ok, msg, mission_xml.annotate(cat)) if cat else (ok, msg, data)
+
+    def _build(self, req):
+        cat, failed = self._known()
+        if cat is None:
+            return failed
+        try:
+            xml, problems = mission_xml.build(req.get("blocks"), cat, req.get("name"))
+        except mission_xml.BlockError as e:
+            return False, f"the blocks cannot be built: {e}", None
+        return True, "", {"xml": xml, "problems": problems}
+
+    def _open(self, req):
+        """A stored mission as blocks; with `group`, as one group of that name to insert elsewhere."""
+        ok, msg, data = self._boat("mission_get", {"name": req.get("name")})
+        if not ok:
+            return ok, msg, data
+        try:
+            blocks, notes = mission_xml.read_blocks(data["xml"], req.get("group"))
+        except (ValueError, KeyError, TypeError) as e:
+            return False, f"{req.get('name')} cannot be opened as blocks: {e}", None
+        return True, "", {"name": data.get("name"), "builtin": bool(data.get("builtin")),
+                          "blocks": blocks, "notes": notes}
+
+    def _upload(self, req):
+        cat, failed = self._known()
+        if cat is None:
+            return failed
+        problems = mission_xml.problems(req.get("xml"), cat, req.get("name"))
+        if problems:
+            shown = "; ".join(p["msg"] for p in problems[:3])
+            more = f" (and {len(problems) - 3} more)" if len(problems) > 3 else ""
+            return False, f"not uploaded: {shown}{more}", {"problems": problems}
+        return self._boat("mission_upload", {"name": req["name"], "xml": req["xml"]})
 
 
 class Outbox:
@@ -333,7 +433,8 @@ class Hub:
                 self.clients.remove(q)
 
 
-def make_handler(link, hub, allowed_hosts):
+def make_handler(link, hub, allowed_hosts, missions=None):
+    missions = missions or MissionOps(link)
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -414,8 +515,11 @@ def make_handler(link, hub, allowed_hosts):
                 op = str(body.pop("op"))
             except (ValueError, KeyError, TypeError):
                 return self._json({"ok": False, "msg": "bad request"}, 400)
-            header, _blob = link.request(op, body)
-            self._json({k: header.get(k) for k in ("ok", "msg", "data")})
+            answer = missions.handle(op, body)
+            if answer is None:
+                header, _blob = link.request(op, body)
+                answer = answer_of(header)
+            self._json(dict(zip(ANSWER, answer)))
 
         def _events(self):
             self.close_connection = True

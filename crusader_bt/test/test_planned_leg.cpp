@@ -1053,7 +1053,7 @@ int main()
   std::printf("17. A planned leg re-targets a goal that moved while FOLLOWING\n");
   {
     LegConfig c;
-    c.tolerance = 1.0;                       // the Task 3 lead-in (task3_disruptive.xml)
+    c.tolerance = 1.0;                       // the Task 3 lead-in (lib/common/task3_dock_fire.xml)
 
     // The boat is 3 m short of the end of a path to (30, 0) when the goal moves 5 m
     // sideways. The old path scores 3 + 5 = 8 m against a fresh plan's 5.8 m: 27 %

@@ -1595,7 +1595,7 @@ commit with `NAV_MODE=off`.
 | # | Course / setup | Pass criteria |
 |---|---|---|
 | S1 | `task1_core`, Disruptive tree (default) | referee **PASS** (gates 3/3, ENTRY cw and EXIT ccw ≥ 330°, no contact); `non_gate_centre_m` ≥ 0.70; median run time over 3 runs ≤ **1.2 ×** the baseline median; no BLOCKED in the log |
-| S2 | `task1_core` with `TREE=task1_safe_passage.xml` and `--no-uav` (Core) | PASS; clearance ≥ 0.70; time ≤ 1.2 × baseline |
+| S2 | `task1_core` with `TREE=task1_safe_passage.xml` and `--no-uav` (Core) | PASS; clearance ≥ 0.70; time ≤ 1.2 × baseline. No longer runnable: the Core tree was removed 2026-10-21 |
 | S3 | `task1_blocked_exit` | PASS; `black3` centre ≥ 0.80 - 0.07; the GCS shows a detour; exit orbit ≥ 330° ccw |
 | S4 | `task1_entry_black` | PASS; `black_entry` ≥ 0.73 m; entry orbit complete |
 | S5 | Task 1 panel (`TASK1_PANEL.cmd`): move the EXIT behind an unpaired buoy mid-run (the 2026-09-30 finding) | no contact; exit orbit ≥ 330° ccw; the panel's referee is clean |

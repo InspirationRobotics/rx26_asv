@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- MISSION: Task 3 Coordinated Logistics, Core: find the bay, dock, spray. -->
+<!--
+  The tree is Task3Core, in lib/task3_core.xml. Its shared body, lib/common/task3_dock_fire.xml,
+  is included once, here. This adds the autonomy guard; the task heartbeat is inside the tree.
+  Every tunable is written out with its default.
+-->
+<root BTCPP_format="4" main_tree_to_execute="Main">
+  <include path="lib/common/task3_dock_fire.xml"/>
+  <include path="lib/task3_core.xml"/>
+
+  <BehaviorTree ID="Main">
+    <ReactiveSequence>
+      <IsAutonomous/>
+      <SubTree ID="Task3Core" _autoremap="true"
+               vantage_standoff_m="5.0"
+               predock_m="3.0"
+               berth_m="1.25"
+               lead_m="2.0"
+               berth_tolerance_m="0.25"
+               spray_timeout_s="60.0"
+               camera_max_age_s="3.0"/>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

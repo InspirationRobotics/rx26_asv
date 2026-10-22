@@ -16,10 +16,12 @@ there, so it cannot crowd out the state frames and results the operator is watch
 The pictures, the LiDAR preview and the LiDAR clusters are subscribed only while a laptop keeps
 asking for them, so a closed tab costs camera_node and lidar_node nothing.
 """
+import functools
 import json
 import math
 import os
 import socket
+import subprocess
 import threading
 import time
 from collections import deque
@@ -43,8 +45,9 @@ from crusader_msgs.msg import (Attitude, Cluster3DArray, FcuHealth, FcuStatus, H
                                LatLonHead, PassageBuoy, PassagePlan, RadioFrame,
                                TrackedTargetArray)
 
-from crusader_groundstation import (bag_recorder, camera_profiles, gcs_wire, param_client,
-                                    planner_profiles, power_client, proc_scan, system_info)
+from crusader_groundstation import (bag_recorder, camera_profiles, gcs_wire, mission_store,
+                                    mission_xml, param_client, planner_profiles, power_client,
+                                    proc_scan, system_info)
 from crusader_groundstation import node_registry as reg
 from crusader_groundstation.log_buffer import LogBuffer
 from crusader_groundstation.process_manager import ProcessManager
@@ -69,6 +72,7 @@ PARAMS = {
     "graph_period_s": 1.0,
     "log_capacity": 1500,
     "record_dir": "/root/robotx_ws/logs/sessions",
+    "user_trees_dir": "/root/robotx_ws/missions",   # uploaded missions; = bt_runner_node's (check_config)
     "record_telemetry_hz": 2.0,
     "record_frame_hz": 1.0,             # default per session; the Record tab overrides it
     "record_min_free_gb": 2.0,
@@ -83,6 +87,7 @@ PREVIEW_TOPIC = "/crsd/lidar/preview"
 CLUSTERS_TOPIC = "/crsd/lidar_clusters"
 CAM_STREAMS = {"annotated": "image", "raw": "raw"}      # _op_cam's stream -> its lease key
 MISSION_ACTION = "/crsd/run_mission"
+CHECK_TIMEOUT_S = 30.0                  # bt_tree_check loads the whole library: ~1 s, more on a busy Jetson
 STATE_PERIOD_S = 0.5
 EVENT_PERIOD_S = 0.25
 LEASE_S = 3.0                           # a picture nobody asked for in this long is dropped
@@ -291,6 +296,24 @@ class _ChunkWriter:
         self.sent += len(chunk)
 
 
+def _refusal(prefix, reasons, shown=3):
+    """"not stored: a; b; c (and 2 more)": a refusal the status line can carry."""
+    more = f" (and {len(reasons) - shown} more)" if len(reasons) > shown else ""
+    return f"{prefix}: {'; '.join(reasons[:shown])}{more}"
+
+
+def mission_op(op):
+    """A mission op that needs the installed crusader_bt: it is given the MissionStore as `store`."""
+    @functools.wraps(op)
+    def run(self, conn, req):
+        trees, _checker = self._bt_install()
+        if trees is None:
+            return False, "crusader_bt is not installed", None
+        return op(self, conn, req, mission_store.MissionStore(
+            trees, os.path.expanduser(self.p["user_trees_dir"])))
+    return run
+
+
 class GcsBridge(Node):
 
     def __init__(self):
@@ -371,6 +394,8 @@ class GcsBridge(Node):
         self._cancel = self.create_client(CancelGoal, MISSION_ACTION + "/_action/cancel_goal")
         self._radio_test = self.create_client(Trigger, "/crsd/radio/send_test")
         self._goal = None
+        self._missions_lock = threading.Lock()      # one change to the mission files at a time
+        self._nodes_cache = None                    # (bt_tree_check's stamp, its parsed --models)
 
         self.create_timer(STATE_PERIOD_S, self._tick)
         self.create_timer(EVENT_PERIOD_S, self._flush_events)
@@ -799,21 +824,117 @@ class GcsBridge(Node):
 
     # ------------------------------------------------------------------ mission
 
-    def _op_missions_list(self, conn, req):
-        from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
+    @mission_op
+    def _op_missions_list(self, conn, req, store):
+        builtin, user = store.builtins(), store.user()
+        return True, "", {"names": builtin + user, "builtin": builtin, "user": user}
+
+    @mission_op
+    def _op_mission_catalogue(self, conn, req, store):
+        """What the Mission tab builds blocks from and the laptop's mission_xml checks against."""
+        return True, "", mission_store.catalogue(store.builtin_dir, self._nodes(), store)
+
+    @mission_op
+    def _op_mission_get(self, conn, req, store):
+        name = str(req.get("name") or "")
         try:
-            d = os.path.join(get_package_share_directory("crusader_bt"), "behavior_trees")
+            xml, builtin = store.read(name)
+        except KeyError:
+            return False, f"no mission {name!r}", None
+        return True, "", {"name": name, "xml": xml, "builtin": builtin}
+
+    @mission_op
+    def _op_mission_upload(self, conn, req, store):
+        """Stores a mission the laptop built. Checked again here whatever the laptop checked: the
+        same mission_xml against the same catalogue, then BT.CPP's own load of the staged file."""
+        name, xml = req.get("name"), req.get("xml")
+        running = self._running_mission()
+        if running:
+            return False, f"not stored: {running} is running; upload when it has ended", None
+        catalogue = mission_xml.Catalogue(
+            mission_store.catalogue(store.builtin_dir, self._nodes(), store))
+        problems = mission_xml.problems(xml, catalogue, name)
+        archived = None
+        if not problems:
+            with self._missions_lock:
+                staged = store.stage(name, xml)
+                try:
+                    ok, output = self._bt_check("--user", staged)
+                    if ok:
+                        archived = store.commit(name, staged)
+                    else:
+                        problems = [{"path": None, "msg": "BehaviorTree.CPP will not load it: "
+                                     + output.split(f"FAIL {staged}: ", 1)[-1].strip()}]
+                finally:
+                    store.discard(staged)       # nothing is left beside the missions when refused
+        if problems:
+            return False, _refusal("not stored", [p["msg"] for p in problems]), {"problems": problems}
+        archived = archived and os.path.basename(archived)
+        self.get_logger().info(f"mission {name} stored from the GCS"
+                               + (f"; the old one is archived as {archived}" if archived else ""))
+        return True, f"{name} saved", {"name": name, "archived": archived}
+
+    @mission_op
+    def _op_mission_delete(self, conn, req, store):
+        """Moves one of the user's missions into .archive: nothing is ever removed."""
+        name = str(req.get("name") or "")
+        if name in store.builtins():
+            return False, f"{name!r} is built in: it cannot be deleted", None
+        if name not in store.user():
+            return False, f"no mission of yours called {name!r}", None
+        if name == self._running_mission():
+            return False, f"{name!r} is running: delete it when it has ended", None
+        with self._missions_lock:
+            archived = os.path.basename(store.delete(name))
+        self.get_logger().info(f"mission {name} deleted from the GCS; archived as {archived}")
+        return True, f"{name} deleted", {"archived": archived}
+
+    def _running_mission(self):
+        """The name bt_runner_node says it is running; None when idle or not heard from."""
+        bt = self._bt.get(time.monotonic())
+        return (bt.get("name") or "a mission") if bt and bt.get("state") == "RUNNING" else None
+
+    def _bt_install(self):
+        """(behavior_trees directory, bt_tree_check) of the installed crusader_bt, else (None, None)."""
+        from ament_index_python.packages import (PackageNotFoundError, get_package_prefix,
+                                                 get_package_share_directory)
+        try:
+            return (os.path.join(get_package_share_directory("crusader_bt"), "behavior_trees"),
+                    os.path.join(get_package_prefix("crusader_bt"), "lib", "crusader_bt",
+                                 "bt_tree_check"))
         except PackageNotFoundError:
-            return False, "crusader_bt is not installed", None
-        names = sorted(f[:-4] for f in os.listdir(d) if f.endswith(".xml"))
-        return True, "", {"names": names}
+            return None, None
+
+    def _bt_check(self, *args):
+        """(ok, stdout) of bt_tree_check with `args`."""
+        _trees, checker = self._bt_install()
+        try:
+            done = subprocess.run([checker, *args], capture_output=True, text=True,
+                                  timeout=CHECK_TIMEOUT_S)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return False, f"FAIL {checker}: could not run: {e}"
+        return done.returncode == 0, done.stdout
+
+    def _nodes(self):
+        """The catalogue's nodes: every leaf `bt_tree_check --models` lists. Asked again only when
+        the installed bt_tree_check is another build (mtime, size), so a rebuilt crusader_bt shows
+        up without restarting this node."""
+        _trees, checker = self._bt_install()
+        st = os.stat(checker)
+        stamp = (st.st_mtime_ns, st.st_size)
+        with self._missions_lock:
+            if self._nodes_cache is None or self._nodes_cache[0] != stamp:
+                ok, output = self._bt_check("--models")
+                if not ok:
+                    raise RuntimeError(f"bt_tree_check --models failed: {output.strip()[:300]}")
+                self._nodes_cache = (stamp, mission_store.parse_models(output))
+            return self._nodes_cache[1]
 
     def _op_run_mission(self, conn, req):
         if not self.mission.wait_for_server(timeout_sec=1.0):
             return False, f"nothing serves {MISSION_ACTION}: is bt_runner_node up?", None
         goal = RunMission.Goal()
         goal.name = str(req.get("name") or "")
-        goal.tier = int(req.get("tier") or 0)
         goal.timeout_s = float(req.get("timeout_s") or 0.0)
         approach = req.get("approach")
         if approach:
@@ -825,11 +946,11 @@ class GcsBridge(Node):
             return False, f"{MISSION_ACTION} did not answer within 3 s", None
         handle = future.result()
         if not handle.accepted:
-            return False, (f"bt_runner_node refused {goal.name!r} (one mission at a time; see "
-                           "the Logs tab for why)"), None
+            return False, (f"bt_runner_node refused {goal.name!r}: no such mission, or one is "
+                           "already running (see the Logs tab for which)"), None
         self._goal = handle
         handle.get_result_async().add_done_callback(self._on_result)
-        self.get_logger().info(f"mission {goal.name} tier {goal.tier} started from the GCS")
+        self.get_logger().info(f"mission {goal.name} started from the GCS")
         return True, f"{goal.name} accepted", None
 
     def _on_result(self, future):
@@ -851,7 +972,7 @@ class GcsBridge(Node):
 
     def _op_manual_field(self, conn, req):
         """The operator's field, published as Ekko's would be. Clear = an empty plan, which
-        bt_runner reads as no plan (core tier)."""
+        bt_runner reads as no plan."""
         if req.get("clear"):
             self._manual = None
             self.plan_pub.publish(self._plan_msg({}))

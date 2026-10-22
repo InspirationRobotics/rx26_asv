@@ -6,7 +6,7 @@
 Runs in: the crsd-sim container, after gz_rig_up.sh — the same place as task1_goal, and
 it does what task1_goal does before a mission (operator_tools.arm over MAVLink 14550,
 operator_tools.set_mode GUIDED through /crsd/set_mode, then the RunMission goal to
-bt_runner), with two differences: the goal is tier 0 at an approach point you give as
+bt_runner), with two differences: the goal is an approach point you give as
 metres EAST/NORTH of the course origin (course.enu_to_latlon, the SITL scale), and the
 referee is task1_judge's clearance arithmetic only, on GROUND TRUTH
 (/sim/crusader/odometry, never anything the boat's stack computes).
@@ -153,10 +153,10 @@ def main(argv=None):
     if not op.client.wait_for_server(timeout_sec=20.0):
         print("[operator] no /crsd/run_mission server (is bt_runner up?)")
         return 2
-    goal = RunMission.Goal(name=tree_name(a.tree), tier=RunMission.Goal.TIER_CORE,
+    goal = RunMission.Goal(name=tree_name(a.tree),
                            approach_latitude=lat, approach_longitude=lon,
                            timeout_s=float(a.timeout_s))
-    print(f"[operator] goal: {goal.name}, tier 0, approach {lat:.7f} {lon:.7f} "
+    print(f"[operator] goal: {goal.name}, approach {lat:.7f} {lon:.7f} "
           f"({a.east_m:g} m east, {a.north_m:g} m north of the origin)", flush=True)
 
     stop = install_stop()                   # after rclpy.init(): see goal_client.install_stop

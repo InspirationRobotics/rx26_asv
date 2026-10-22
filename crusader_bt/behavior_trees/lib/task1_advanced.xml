@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Task1Advanced: Task 1 Safe Passage, Advanced tier. Waits for the aircraft's field, plans the
+  whole passage from the boat and drives it (lib/common/task1_plan_drive.xml).
+
+  Advanced has no freshness guard on the field: losing the radio after the report is allowed
+  (Task1Disruptive is the tier that stops when the field goes stale). The TaskAttempt is
+  inside, so the heartbeat reports TASK_SAFE_PASSAGE wherever this tree is dropped.
+
+  Needs lib/common/task1_plan_drive.xml: whatever file includes this one includes that too,
+  ONCE. This file does not, so Task1PlanDrive is never registered twice.
+-->
+<root BTCPP_format="4">
+
+  <BehaviorTree ID="Task1Advanced">
+    <TaskAttempt token="TASK_SAFE_PASSAGE">
+      <ReactiveSequence name="guard_band">
+        <ResolveBuoyStates/>
+        <ReportSafePassage min_period_s="1.0"/>
+        <SubTree ID="Task1PlanDrive" _autoremap="true"/>
+      </ReactiveSequence>
+    </TaskAttempt>
+  </BehaviorTree>
+
+  <TreeNodesModel>
+    <SubTree ID="Task1Advanced">
+      <input_port name="orbit_radius_m" default="">preferred orbit radius, metres (a real: write it with a decimal point); shrunk to fit; empty = the nav_orbit_radius_m parameter</input_port>
+      <input_port name="orbit_min_m" default="1.5">smallest orbit normally accepted, metres</input_port>
+      <input_port name="overshoot_deg" default="45.0">degrees each orbit runs past one full turn</input_port>
+      <input_port name="lookahead_m" default="2.5">pure-pursuit lookahead along the path, metres</input_port>
+      <input_port name="blocked_timeout_s" default="15.0">fail a phase after being blocked this long, then re-plan, seconds</input_port>
+      <input_port name="plan_attempts" default="4">re-plan attempts per phase (a whole number)</input_port>
+    </SubTree>
+  </TreeNodesModel>
+
+</root>

@@ -14,8 +14,6 @@ import signal
 import threading
 import time
 
-TIERS = {"core": 0, "advanced": 1, "disruptive": 2}
-
 
 def tree_name(tree):
     """A built-in tree's name from a name, a file name or a path: bt_runner takes only the

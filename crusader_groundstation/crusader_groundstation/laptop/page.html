@@ -25,6 +25,9 @@
   --ok: #0a6b2e; --warn: #8a4b00; --bad: #b0151c; --stale: #98a4b0; --trail: #14496e;
   --map-bg: #e4ebf2; --map-grid: #cdd6e0; --map-grid-major: #9eaebf; --map-text: #2b343d;
   --map-boat: #14496e; --map-path: #00796b; --map-hazard: #b35900; --map-obstacle: #7b1fa2;
+  --map-draft: #c2185b;
+  --blk-control: #14496e; --blk-decorator: #6a3d9a; --blk-action: #00796b; --blk-condition: #8a4b00;
+  --blk-task: #0a6b2e; --blk-gps: #c2185b; --blk-unknown: #5a6672;
   --lvl0: #14496e; --lvl1: #00796b; --lvl2: #8a4b00; --lvl3: #6a3d9a;
 }
 html[data-theme="dark"] {
@@ -36,6 +39,9 @@ html[data-theme="dark"] {
   --ok: #5fbf6a; --warn: #d8a13a; --bad: #e05252; --stale: #555555; --trail: #4f87b0;
   --map-bg: #0e1218; --map-grid: #222a36; --map-grid-major: #364254; --map-text: #aab3c0;
   --map-boat: #64b5f6; --map-path: #26c6da; --map-hazard: #ff9800; --map-obstacle: #ce93d8;
+  --map-draft: #f48fb1;
+  --blk-control: #64b5f6; --blk-decorator: #b39ddb; --blk-action: #26c6da; --blk-condition: #d8a13a;
+  --blk-task: #5fbf6a; --blk-gps: #f48fb1; --blk-unknown: #8e8e8e;
   --lvl0: #64b5f6; --lvl1: #26c6da; --lvl2: #d8a13a; --lvl3: #b39ddb;
 }
 :root { --grid: var(--map-grid); }
@@ -119,6 +125,48 @@ img#cam { max-width: 100%; border: 1px solid var(--line); border-radius: 4px; ba
 .ll-item .grow { flex: 1 1 auto; }
 .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px;
        border: 1px solid var(--line); }
+/* Mission editor: a block's left edge says what it is (--blk-*), in both themes */
+.ed-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
+.ed-bar input { width: 13em; }
+.ed-sep { flex: 0 0 1em; }
+.ed-grid { display: grid; grid-template-columns: minmax(150px, 210px) minmax(0, 1fr); gap: 10px; }
+@media (max-width: 700px) { .ed-grid { grid-template-columns: 1fr; } }
+#ed-pal { max-height: 64vh; overflow: auto; padding: 6px; background: var(--card);
+          border: 1px solid var(--line); border-radius: 4px; }
+#ed-find { width: 100%; margin-bottom: 4px; }
+#ed-pal summary { cursor: pointer; font-weight: 600; margin: 6px 0 2px; }
+.k-control { --bc: var(--blk-control); } .k-decorator { --bc: var(--blk-decorator); }
+.k-action { --bc: var(--blk-action); } .k-condition { --bc: var(--blk-condition); }
+.k-task { --bc: var(--blk-task); } .k-gps { --bc: var(--blk-gps); } .k-unknown { --bc: var(--blk-unknown); }
+.pal { margin: 2px 0; padding: 3px 8px; background: var(--panel); cursor: grab;
+       border: 1px solid var(--line); border-left: 4px solid var(--bc); border-radius: 4px;
+       white-space: nowrap; overflow: hidden; text-overflow: ellipsis; user-select: none; touch-action: none; }
+.pal.off { opacity: .4; cursor: not-allowed; }
+#ed-work { min-height: 9em; max-height: 64vh; overflow: auto; padding: 6px; background: var(--card);
+           border: 1px solid var(--line); border-radius: 4px; }
+#ed-root:empty::before { content: "Drag blocks here, or click them in the palette."; color: var(--muted); }
+#ed-problems > div { margin-bottom: 3px; }
+.blk { margin: 4px 0; background: var(--panel); border: 1px solid var(--line);
+       border-left: 5px solid var(--bc); border-radius: 4px; }
+.blk.sel { outline: 2px solid var(--accent); }
+.blk.bad { border-color: var(--bad); border-left-color: var(--bad); }
+.bh { display: flex; align-items: center; gap: 8px; padding: 4px 6px; cursor: grab; user-select: none;
+      touch-action: none; }
+.bh .bt { font-weight: 600; white-space: nowrap; }
+.bh .bsum { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.bh button { padding: 0 6px; }
+.bf { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 8px; align-items: center;
+      padding: 6px 8px; border-top: 1px solid var(--rowline); }
+.bf label { color: var(--muted); }
+.bf input, .bf select { width: 100%; }
+.bp { padding: 0 8px; color: var(--bad); font-size: 12px; }
+.bp:not(:empty) { padding: 2px 8px 4px; }
+.blk .blist { min-height: 26px; margin: 4px 0 4px 14px; padding: 2px 0 2px 8px; border-left: 2px dashed var(--bc); }
+.blk .blist:empty::before { content: "drop blocks here"; color: var(--muted); font-size: 12px; }
+.ed-ghost { position: fixed; left: 0; top: 0; z-index: 9; pointer-events: none; padding: 3px 8px; opacity: .9;
+            border-radius: 4px; background: var(--primary-bg); color: var(--primary-fg); }
+.ed-line { position: fixed; z-index: 8; height: 3px; border-radius: 2px; background: var(--accent); pointer-events: none; }
+body.ed-dragging { cursor: grabbing; user-select: none; }
 </style>
 </head>
 <body>
@@ -180,22 +228,57 @@ img#cam { max-width: 100%; border: 1px solid var(--line); border-radius: 4px; ba
 
 <section id="t-mission">
   <div class="row">
-    <div class="col">
+    <div class="col" style="flex: 3 1 560px">
       <div class="box">
-        <h3>Run a built-in mission</h3>
+        <h3 style="margin-top: 0">Build a mission</h3>
+        <div id="ed-note"><b id="ed-note-text">asking the boat for its blocks...</b>
+          <button id="ed-retry">Check again</button></div>
+        <div id="ed-body" hidden>
+          <div class="ed-bar">
+            <input id="ed-name" placeholder="mission_name" aria-label="mission name" spellcheck="false"
+              autocomplete="off" autocapitalize="none">
+            <button class="primary" id="ed-save">Save to boat</button>
+            <span class="ed-sep"></span>
+            <select id="ed-open" aria-label="stored missions"></select>
+            <button id="ed-open-go">Open</button>
+            <button id="ed-insert" title="inline it as a group of blocks, where the next block would go">Insert</button>
+            <button class="danger" id="ed-delete">Delete</button>
+          </div>
+          <div class="ed-bar">
+            <button id="ed-wp">Add waypoints on map</button>
+            <button id="ed-undo">Undo</button><button id="ed-redo">Redo</button>
+            <button id="ed-clear">Clear</button>
+            <span id="ed-status" class="small"></span>
+          </div>
+          <div class="ed-grid">
+            <div id="ed-pal"><input id="ed-find" placeholder="find a block" aria-label="find a block"
+              spellcheck="false"><div id="ed-pal-list"></div></div>
+            <div>
+              <div id="ed-problems"></div>
+              <div id="ed-hint" class="small muted" hidden>A competition run usually begins with WaitForRunStart,
+                which holds the mission until the operators send GO. <button id="ed-hint-add">Start with it</button></div>
+              <div id="ed-work"><div id="ed-root" class="blist"></div></div>
+              <details><summary class="muted small">the XML the boat would get</summary>
+                <pre id="ed-xml" class="mono"></pre></details>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="col" style="flex: 2 1 340px">
+      <div class="box">
+        <h3 style="margin-top: 0">Run a mission</h3>
         <select id="m-name"></select>
-        <select id="m-tier"><option value="0">Core</option><option value="1">Advanced</option>
-          <option value="2">Disruptive</option></select>
         timeout <input id="m-timeout" class="num" type="number" min="0" value="0"> s (0 = default)
         <div style="margin-top: 6px">
           <button class="primary" id="m-start">Start</button>
           <button class="danger" id="m-stop">Stop</button>
         </div>
       </div>
-      <div class="box"><h3>Tree</h3><div id="m-state"></div>
+      <canvas id="map2" class="map small"></canvas>
+      <div class="box" style="margin-top: 10px"><h3 style="margin-top: 0">Tree</h3><div id="m-state"></div>
         <div class="scroll"><table id="m-nodes"></table></div></div>
     </div>
-    <div class="col"><canvas id="map2" class="map small"></canvas></div>
   </div>
 </section>
 
@@ -293,6 +376,7 @@ img#cam { max-width: 100%; border: 1px solid var(--line); border-radius: 4px; ba
 </main>
 <div id="toast"></div>
 <script src="map.js"></script>
+<script src="editor.js"></script>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
@@ -314,11 +398,13 @@ function toast(msg, ok = true) {
   t.style.background = ok ? "" : "var(--bad)";
   clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.style.display = "none"), ok ? 3500 : 8000);
 }
-async function req(op, fields = {}, quiet = false) {
-  let r;
+async function ask(op, fields = {}) {
   try {
-    r = await (await fetch("/req", {method: "POST", body: JSON.stringify(Object.assign({op}, fields))})).json();
-  } catch (e) { r = {ok: false, msg: String(e)}; }
+    return await (await fetch("/req", {method: "POST", body: JSON.stringify(Object.assign({op}, fields))})).json();
+  } catch (e) { return {ok: false, msg: String(e)}; }
+}
+async function req(op, fields = {}, quiet = false) {
+  const r = await ask(op, fields);
   if (!quiet || !r.ok) toast(`${op}: ${r.msg || (r.ok ? "ok" : "failed")}`, r.ok);
   return r;
 }
@@ -336,6 +422,7 @@ function show(id) {
   for (const [t] of TABS) $("t-" + t).classList.toggle("on", t === id);
   CrsdMap.redraw();
   obstaclesLoop();
+  if (id === "mission") CrsdEditor.enter(); else CrsdEditor.leave();
   if (id === "sensors") { camLoop(); lidarLoop(); loadCamera(); }
   if (id === "mission" && !$("m-name").options.length) loadMissions();
   if (id === "params") paramNodes();
@@ -533,7 +620,8 @@ strip();
 function callMap(name, ...args) { return typeof CrsdMap[name] === "function" ? CrsdMap[name](...args) : undefined; }
 const manualList = () => callMap("manual") || [];
 CrsdMap.attach($("map"), {editable: true});
-CrsdMap.attach($("map2"));
+CrsdMap.attach($("map2"), {pickable: true});
+CrsdMap.onModeChange(mode => { $("edit-on").checked = mode === "manual"; });     // one click mode at a time
 for (const id of ["edit-beacon", "ll-beacon"]) {
   $(id).innerHTML = Object.entries(CrsdMap.BEACON).map(([code, [name]]) => `<option value="${code}">${esc(name)}</option>`).join("");
   $(id).value = 2;
@@ -634,14 +722,19 @@ function planInfo() {
 }
 
 // ---- mission ----------------------------------------------------------------
-async function loadMissions() {
+async function loadMissions(pick) {             // pick: the name to select; else the one selected stays
   const r = await req("missions_list", {}, true);
   if (!r.ok) return;
-  $("m-name").innerHTML = r.data.names.map(n => `<option>${esc(n)}</option>`).join("");
-  $("m-name").value = r.data.names.includes("competition") ? "competition" : r.data.names[0];
+  const keep = pick || $("m-name").value;
+  $("m-name").innerHTML = '<option value="">choose a mission</option>' + r.data.names.map(n => `<option>${esc(n)}</option>`).join("");
+  $("m-name").value = r.data.names.includes(keep) ? keep : "";
 }
-$("m-start").onclick = () => req("run_mission", {name: $("m-name").value, tier: +$("m-tier").value,
-                                                 timeout_s: +$("m-timeout").value || 0});
+CrsdEditor.init({ask, toast, esc, stored: name => loadMissions(name)});
+$("m-start").onclick = () => {
+  const name = $("m-name").value;
+  if (!name) return toast("choose a mission to run first", false);
+  req("run_mission", {name, timeout_s: +$("m-timeout").value || 0});
+};
 $("m-stop").onclick = () => req("cancel_mission");
 function tree() {
   const t = G.tree || {};

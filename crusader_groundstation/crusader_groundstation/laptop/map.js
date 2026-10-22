@@ -2,6 +2,9 @@
 // (the Map tab and the Mission tab), in metres east/north of the first position heard.
 // The MANUAL field editor works on the same state: what you place is what the boat is sent.
 // Clicking the map and addManual/removeManual/setManual edit one list; onManualChange hears them all.
+// The Mission tab's DRAFT (its GPS waypoints, numbered) is a layer of its own: setDraft draws it.
+// What a click on the map means is one MODE at a time (off, manual, pick, waypoints): turning one
+// on turns the other off, so the two editors never fight over a click. See setClickMode.
 "use strict";
 const CrsdMap = (() => {
   const M_PER_DEG = 111320;
@@ -22,14 +25,20 @@ const CrsdMap = (() => {
     path: [["--map-path"], "#00bcd4"],
     hazard: [["--map-hazard"], "#ff9800"],
     obstacle: [["--map-obstacle"], "#7b1fa2"],
+    draft: [["--map-draft"], "#c2185b"],
   };
   const OBSTACLE_MIN_PX = 3;                      // radius floor: a small cluster survives zooming out
+  const HIT_PX = 10;                              // a click this close to a marker is on it
+  const MODES = ["off", "manual", "pick", "waypoints"];
+  const MODE_HINT = {pick: "click the map to set the point   (Esc: cancel)",
+                     waypoints: "click the map to add waypoints   (Esc: done)"};
   const S = {
     origin: null, boat: null, trail: [], targets: [], plan: null, path: null, hazards: [],
-    obstacles: [], manual: [], editing: false, beacon: 2,
+    obstacles: [], manual: [], draft: [], draftSel: -1, beacon: 2,
   };
-  const views = [], listeners = [];
+  const views = [], listeners = [], modeListeners = [], draftListeners = [], pointListeners = [];
   let T = null;                                   // the colours of the draw in progress
+  let mode = "off", picking = null;               // picking: the callback waiting for one point
 
   function xy(lat, lon) {
     if (!S.origin) S.origin = [lat, lon];
@@ -79,8 +88,10 @@ const CrsdMap = (() => {
   // Pointer maths is in CSS pixels (v.w by v.h); the backing store is scaled by devicePixelRatio.
   function attach(cv, opts) {
     const v = {cv, ctx: cv.getContext("2d"), w: 0, h: 0, scale: 4, centre: [0, 0], follow: true,
-               drag: null, mouse: null, queued: false, editable: !!(opts && opts.editable)};
+               drag: null, mouse: null, queued: false, editable: !!(opts && opts.editable),
+               pickable: !!(opts && opts.pickable)};
     views.push(v);
+    cursor(v);
     cv.addEventListener("wheel", e => {
       e.preventDefault();
       const before = toWorld(v, e.offsetX, e.offsetY);
@@ -106,7 +117,7 @@ const CrsdMap = (() => {
     cv.addEventListener("mouseup", e => {
       const click = v.drag && !v.drag.moved;
       v.drag = null;
-      if (click && v.editable && S.editing && S.origin) edit(v, e.offsetX, e.offsetY);
+      if (click && S.origin) clicked(v, e.offsetX, e.offsetY);
     });
     cv.addEventListener("mouseleave", () => { v.drag = null; v.mouse = null; invalidate(v); });
     cv.addEventListener("dblclick", () => { v.follow = true; draw(v); });
@@ -196,6 +207,7 @@ const CrsdMap = (() => {
     }
     // the field being edited, each buoy numbered by its list index
     S.manual.forEach((b, i) => buoy(v, b, 1.0, i));
+    drawDraft(v);
     // tracked targets
     for (const t of S.targets) {
       const p = at(v, t.lat, t.lon), col = labelColour(t.label);
@@ -206,6 +218,7 @@ const CrsdMap = (() => {
     north(v);
     scaleBar(v);
     readout(v);
+    if (v.pickable && MODE_HINT[mode]) label(c, MODE_HINT[mode], 8, 8, "left", "top", T.draft);
   }
   // 1-2-5 x 10^n nearest to m: [step, subdivisions of it into nice minor steps]
   function nice(m) {
@@ -259,6 +272,20 @@ const CrsdMap = (() => {
     const p = at(v, q[0], q[1]);
     v.ctx.font = FONT_BOLD; label(v.ctx, text, p[0] + 9, p[1] + 4, "left", "alphabetic", col); v.ctx.font = FONT;
   }
+  function drawDraft(v) {                         // the Mission tab's waypoints, in the order they run
+    if (!S.draft.length) return;
+    const c = v.ctx, pts = S.draft.map(q => at(v, q.lat, q.lon));
+    c.strokeStyle = T.draft; c.lineWidth = 1.5; c.globalAlpha = 0.8; c.setLineDash([6, 4]); c.beginPath();
+    pts.forEach((p, i) => i ? c.lineTo(p[0], p[1]) : c.moveTo(p[0], p[1]));
+    c.stroke(); c.setLineDash([]); c.globalAlpha = 1;
+    c.font = FONT_BOLD;
+    pts.forEach((p, i) => {
+      const chosen = i === S.draftSel;
+      disc(c, p[0], p[1], chosen ? 9 : 6, T.draft, T.text, chosen ? 3 : 1.5);
+      label(c, String(i + 1), p[0] + 11, p[1] - 8);
+    });
+    c.font = FONT;
+  }
   function boat(v) {
     if (!S.boat) return;
     const c = v.ctx, p = at(v, S.boat.lat, S.boat.lon);
@@ -305,13 +332,15 @@ const CrsdMap = (() => {
   }
   function plain(b) { return {lat: b.lat, lon: b.lon, beacon: b.beacon}; }
   function manual() { return S.manual.map(plain); }
+  function fire(list, ...args) {                  // a listener that throws must not stop the others
+    for (const fn of list) {
+      try { fn(...args); } catch (e) { console.error("CrsdMap listener:", e); }
+    }
+  }
   function changed() {                            // after every add, remove or replace, clicks included
     if (!S.origin && S.manual.length) S.origin = [S.manual[0].lat, S.manual[0].lon];
     redraw();
-    const list = manual();
-    for (const fn of listeners) {
-      try { fn(list); } catch (e) { console.error("CrsdMap listener:", e); }
-    }
+    fire(listeners, manual());
   }
   function addManual(lat, lon, beacon) {
     if (!validBuoy(lat, lon, beacon)) return -1;
@@ -339,12 +368,13 @@ const CrsdMap = (() => {
     redraw();
     return true;
   }
+  function near(v, q, px, py) {                   // is the click at (px, py) on the marker for q?
+    const p = at(v, q.lat, q.lon);
+    return Math.hypot(p[0] - px, p[1] - py) < HIT_PX;
+  }
   function edit(v, px, py) {
-    const near = S.manual.findIndex(b => {
-      const p = at(v, b.lat, b.lon);
-      return Math.hypot(p[0] - px, p[1] - py) < 10;
-    });
-    if (near >= 0) removeManual(near);
+    const hit = S.manual.findIndex(b => near(v, b, px, py));
+    if (hit >= 0) removeManual(hit);
     else {
       const q = latlon(...toWorld(v, px, py));
       addManual(q[0], q[1], S.beacon);
@@ -357,12 +387,71 @@ const CrsdMap = (() => {
   }
   function loadPlan() { setManual(S.plan ? S.plan.buoys : []); }
 
+  // ---- what a click means ---------------------------------------------------
+  // off: nothing (a click on a draft marker only selects it). manual: the Map tab's field editor.
+  // pick: the next click on a pickable map answers beginPick. waypoints: every click on a pickable
+  // map is an onWaypoint. One mode at a time; onModeChange hears every change, so a checkbox or a
+  // button can follow it. Escape ends pick and waypoints.
+  function active(v) {                            // does a click on this view mean something now?
+    return mode === "manual" ? v.editable : v.pickable && (mode === "pick" || mode === "waypoints");
+  }
+  function cursor(v) { v.cv.style.cursor = active(v) ? "crosshair" : ""; }
+  function setClickMode(next) {
+    if (!MODES.includes(next) || next === mode) return false;
+    mode = next;
+    if (picking && mode !== "pick") finishPick(null);
+    views.forEach(cursor);
+    redraw();
+    fire(modeListeners, mode);
+    return true;
+  }
+  function finishPick(point) {                    // point: [lat, lon], or null when it was cancelled
+    const answer = picking;
+    picking = null;
+    if (mode === "pick") setClickMode("off");
+    if (answer) fire([answer], point);
+  }
+  function beginPick(answer) {
+    if (typeof answer !== "function") return false;
+    if (picking) finishPick(null);                // a second pick supersedes the first
+    picking = answer;
+    return setClickMode("pick");
+  }
+  function clicked(v, px, py) {
+    if (mode === "manual" && v.editable) return edit(v, px, py);
+    if (!v.pickable) return;
+    if (mode === "off") {
+      const i = S.draft.findIndex(q => near(v, q, px, py));
+      if (i >= 0) fire(draftListeners, i);
+      return;
+    }
+    const q = latlon(...toWorld(v, px, py));
+    if (mode === "pick") finishPick(q);
+    else if (mode === "waypoints") fire(pointListeners, q[0], q[1]);
+  }
+  function setDraft(list, chosen) {               // [{lat, lon}] in run order; chosen: the index to ring
+    S.draft = (Array.isArray(list) ? list : []).filter(q => q && validPos(q.lat, q.lon))
+      .map(q => ({lat: q.lat, lon: q.lon}));
+    S.draftSel = Number.isInteger(chosen) ? chosen : -1;
+    if (!S.origin && S.draft.length) S.origin = [S.draft[0].lat, S.draft[0].lon];
+    redraw();
+    return S.draft.length;                        // how many were kept: a bad entry is dropped
+  }
+  function listen(list) { return fn => { if (typeof fn === "function") list.push(fn); }; }
+
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape" && (mode === "pick" || mode === "waypoints")) setClickMode("off");
+  });
+
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", redraw);
 
   return {
     BEACON, update, attach, redraw, centreOn,
-    setEditing(on) { S.editing = on; redraw(); },
+    setEditing(on) { if (on) setClickMode("manual"); else if (mode === "manual") setClickMode("off"); },
     setBeacon(code) { S.beacon = code; },
+    setClickMode, clickMode: () => mode, beginPick, hasOrigin: () => !!S.origin,
+    onModeChange: listen(modeListeners), onWaypoint: listen(pointListeners),
+    onDraftPick: listen(draftListeners), setDraft,
     manual, addManual, removeManual, setManual, onManualChange, onEdit: onManualChange,
     manualPlan, loadPlan,
     clearManual() { setManual([]); },
