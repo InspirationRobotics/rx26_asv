@@ -784,9 +784,11 @@ def check_nav():
     if wp_radius is None:
         fail("nav_wp_radius_m", "WP_RADIUS missing from the baseline")
     else:
+        # WP_RADIUS is a REAL32 on the board (0.3 dumps as 0.30000001192...);
+        # round off the float32 noise, as the WP_SPEED check does with 1e-6.
         _same("nav_wp_radius_m is the autopilot WP_RADIUS",
               ("bt_runner_node.nav_wp_radius_m", float(bt["nav_wp_radius_m"])),
-              ("baseline WP_RADIUS", float(wp_radius)),
+              ("baseline WP_RADIUS", round(float(wp_radius), 6)),
               "the carrot arrival test disagrees with the autopilot")
 
     # A datum-topic mismatch leaves bt_runner waiting for a datum nobody sends, holding

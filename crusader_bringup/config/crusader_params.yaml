@@ -54,7 +54,7 @@ telemetry_bridge:
     pump_rc_channel: 10                    # the pilot's pump switch; = squirt_cal's
     pump_on_pwm: 2000                      # us; MEASURE on the bench (G7)
     pump_off_pwm: 1000                     # us; MUST equal SERVOn_TRIM
-    hs_wp_speed_mps: 1.0                   # = WP_SPEED: heading+speed thrust 1.0 means this
+    hs_wp_speed_mps: 1.2                   # = WP_SPEED: heading+speed thrust 1.0 means this
     # /crsd/rc_override (the fixed-nozzle shot strafes; only MANUAL strafes on this
     # OmniX hull). SB ch7, SC ch8, the pump and the drop switch stay the pilot's.
     override_channels: [1, 3, 4]           # steer, throttle, lateral
@@ -278,7 +278,7 @@ bt_runner_node:
     nav_lookahead_min_m: 3.0                # ... and at least this far
     nav_max_chord_dev_m: 0.3                # the carrot's chord may cut the
                                             # path by this much, no more
-    nav_wp_radius_m: 2.0                    # = the autopilot's WP_RADIUS
+    nav_wp_radius_m: 0.3                    # = the autopilot's WP_RADIUS
                                             # (check_config): an intermediate
                                             # carrot this close is reached
     nav_replan_period_s: 0.5                # plan at most this often
