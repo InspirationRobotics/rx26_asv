@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """gcs_app — the ground station on the laptop: one TCP link to the boat's gcs_bridge, one page
-on http://localhost:8090. Standard library only: plain Python 3.10 on Windows, no ROS. Works the
+on http://localhost:8150. Standard library only: plain Python 3.10 on Windows, no ROS. Works the
 same against the sim (--boat 127.0.0.1).
 
     python crusader_groundstation/crusader_groundstation/laptop/gcs_app.py [--boat HOST]
@@ -591,7 +591,7 @@ def main(argv=None):
     ap.add_argument("--boat", default=os.environ.get("CRSD_BOAT", DEFAULT_BOAT),
                     help=f"gcs_bridge's host (default {DEFAULT_BOAT}; 127.0.0.1 for the sim)")
     ap.add_argument("--boat-port", type=int, default=gcs_wire.PORT)
-    ap.add_argument("--port", type=int, default=8090, help="the page, on localhost only")
+    ap.add_argument("--port", type=int, default=8150, help="the page, on localhost only")
     ap.add_argument("--no-browser", action="store_true")
     a = ap.parse_args(argv)
 

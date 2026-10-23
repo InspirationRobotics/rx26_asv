@@ -14,7 +14,7 @@ way to do the same operation is how two machines end up configured differently.
 
 The camera and LiDAR pictures are the ground station's Sensors tab: `gcs_bridge` sends them
 over its one TCP link (14559) only while the tab is open, and the laptop's `gcs_app` serves
-the page on http://localhost:8090. The only other web page on the boat is squirt_cal's
+the page on http://localhost:8150. The only other web page on the boat is squirt_cal's
 (8094, for a phone).
 
 ## The param baseline

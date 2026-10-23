@@ -321,7 +321,7 @@ cat <<EOF
 
 === ready ===
   Gazebo GUI      on the desktop (or: gz sim -g, with GZ_PARTITION=crusader_sim)
-  ground station  BOAT_GUI.cmd --boat 127.0.0.1 (Windows), then http://localhost:8090
+  ground station  BOAT_GUI.cmd --boat 127.0.0.1 (Windows), then http://localhost:8150
   QGroundControl  auto-connects on udp 14550 (Windows)
   start Task 1:   bash $SIM/scripts/gz_task1.sh $COURSE   (TREE=<built-in tree> to choose)
   drive MANUAL:   ros2 topic pub /crsd/rc_override ... (in $CONTAINER), mode MANUAL
