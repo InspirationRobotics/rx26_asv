@@ -36,9 +36,9 @@ never the workspace: the root is not a package, so colcon finds every package be
 
 | What | How |
 |---|---|
-| The always-on stack | `ros2 launch crusader_bringup core.launch.py` (systemd `crsd-ros` on the boat) |
+| The always-on stack, camera_node included | `ros2 launch crusader_bringup core.launch.py` (systemd `crsd-ros` on the boat) |
 | The ground station | `tools/scripts/BOAT_GUI.cmd` on the laptop, then http://localhost:8090 |
-| Anything else (camera_node, target_tracker, bt_runner_node, ocs_client) | the Nodes tab |
+| Anything else (target_tracker, bt_runner_node, ocs_client) | the Nodes tab |
 | Nav2 avoidance | `ros2 launch crusader_nav nav.launch.py datum_source:=param ...` |
 | A mission | the Mission tab, or `ros2 action send_goal /crsd/run_mission crusader_msgs/action/RunMission "{name: task1_advanced}"` |
 | Rebuild after any edit | `tools/scripts/rebuild.sh` on the Jetson host |

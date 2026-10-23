@@ -16,7 +16,8 @@ The 17 camera controls (oak_controls) are dynamic parameters, sent to the runnin
 depthai, ultralytics and cv2 are imported inside functions, so this module imports on a
 machine with none of them.
 
-NOT in core.launch.py: start it from the ground station's Nodes tab.
+Started by core.launch.py, without respawn, so the Nodes tab can Stop it and Start it again.
+With no OAK-D at boot it exits until started from there.
 """
 import json
 import math

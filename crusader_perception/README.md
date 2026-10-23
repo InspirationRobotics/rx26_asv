@@ -11,4 +11,5 @@ something subscribes.
 
 Positions are REP-103 (x forward, y left, z up): detections in `camera_link`, LiDAR in
 `base_link`. The maths is in the `*_core.py` modules, which need no ROS and have the tests.
-camera_node needs depthai and ultralytics (the `asv` image); it is not in `core.launch.py`.
+camera_node needs depthai and ultralytics (the `asv` image); `core.launch.py` starts it, without
+respawn, so the Nodes tab can stop it to free the OAK-D.

@@ -286,7 +286,8 @@ body.ed-dragging { cursor: grabbing; user-select: none; }
   <div class="row">
     <div class="col">
       <h3>Camera</h3>
-      <div>model <select id="cam-model"><option>none</option><option>buoy</option>
+      <div><button id="cam-view" title="closed: no pictures are asked of the boat, so none cross the WiFi"></button>
+        model <select id="cam-model"><option>none</option><option>buoy</option>
         <option>dock</option></select>
         view <select id="cam-w"><option>320</option><option selected>640</option>
           <option>960</option></select> px
@@ -297,6 +298,7 @@ body.ed-dragging { cursor: grabbing; user-select: none; }
     </div>
     <div class="col">
       <h3>LiDAR (plan view, bow up)</h3>
+      <div><button id="lidar-view" title="closed: no points are asked of the boat, so none cross the WiFi"></button></div>
       <canvas id="lidar" class="map small"></canvas>
       <div id="lidar-health" class="mono muted"></div>
     </div>
@@ -751,33 +753,69 @@ function tree() {
 }
 
 // ---- sensors ----------------------------------------------------------------
-let camBusy = false;
+// A closed stream is never asked for: the boat's lease on it lapses and gcs_bridge drops the
+// subscription, so none of it crosses the WiFi. Closed until opened, remembered per laptop and
+// followed by every GCS page open on it; a hidden page asks for nothing either.
+const VIEW = {cam: false, lidar: false};
+function streamToggle(key, label, loop) {
+  const b = $(`${key}-view`), stored = `crsd-${key}-view`;
+  const set = on => { VIEW[key] = on; b.textContent = on ? `Close ${label}` : `View ${label}`; loop(); };
+  b.onclick = () => {
+    try { localStorage.setItem(stored, VIEW[key] ? "off" : "on"); } catch (e) {}
+    set(!VIEW[key]);
+  };
+  addEventListener("storage", e => { if (e.key === stored) set(e.newValue === "on"); });
+  let on = false;
+  try { on = localStorage.getItem(stored) === "on"; } catch (e) {}
+  set(on);
+}
+let camBusy = false, camTimer = 0;
 function camLoop() {
-  if (G.tab !== "sensors" || camBusy) return;
+  clearTimeout(camTimer);
+  if (G.tab !== "sensors" || document.hidden) return;
+  const img = $("cam");
+  if (!VIEW.cam) {
+    if (img.src.startsWith("blob:")) URL.revokeObjectURL(img.src);
+    img.removeAttribute("src");
+    $("cam-info").textContent = "closed: no pictures asked of the boat";
+    return;
+  }
+  if (camBusy) return;                              // the answer in flight re-arms the loop
   camBusy = true;
-  const img = $("cam"), w = $("cam-w").value, stream = $("cam-annotate").checked ? "annotated" : "raw";
+  const w = $("cam-w").value, stream = $("cam-annotate").checked ? "annotated" : "raw";
   const url = `/cam.jpg?w=${w}&q=50&stream=${stream}&t=${Date.now()}`;
   fetch(url).then(async r => {
+    if (!VIEW.cam) return;              // closed while this one was in flight
     if (r.ok) {
       const old = img.src; img.src = URL.createObjectURL(await r.blob());
       if (old.startsWith("blob:")) URL.revokeObjectURL(old);
       $("cam-info").textContent = `${r.headers.get("X-Size")} · ${r.headers.get("X-Age")} s old`;
     } else $("cam-info").textContent = await r.text();
-  }).catch(e => ($("cam-info").textContent = String(e)))
-    .finally(() => { camBusy = false; setTimeout(camLoop, 500); });
+  }).catch(e => VIEW.cam && ($("cam-info").textContent = String(e)))
+    .finally(() => { camBusy = false; camTimer = setTimeout(camLoop, 500); });
 }
 try { $("cam-annotate").checked = localStorage.getItem("crsd-cam-annotate") !== "off"; } catch (e) {}
 $("cam-annotate").onchange = e => {
   try { localStorage.setItem("crsd-cam-annotate", e.target.checked ? "on" : "off"); } catch (err) {}
 };
-let lidarBusy = false;
+let lidarBusy = false, lidarTimer = 0;
 function lidarLoop() {
-  if (G.tab !== "sensors" || lidarBusy) return;
+  clearTimeout(lidarTimer);
+  if (G.tab !== "sensors" || document.hidden) return;
+  if (!VIEW.lidar) return drawLidar({ok: false, msg: "closed: no points asked of the boat"});
+  if (lidarBusy) return;                            // the answer in flight re-arms the loop
   lidarBusy = true;
-  fetch("/lidar.json?max=3000").then(r => r.json()).then(drawLidar)
-    .catch(() => drawLidar({ok: false, msg: "gcs_app did not answer"}))
-    .finally(() => { lidarBusy = false; setTimeout(lidarLoop, 500); });
+  fetch("/lidar.json?max=3000").then(r => r.json()).then(d => VIEW.lidar && drawLidar(d))
+    .catch(() => VIEW.lidar && drawLidar({ok: false, msg: "gcs_app did not answer"}))
+    .finally(() => { lidarBusy = false; lidarTimer = setTimeout(lidarLoop, 500); });
 }
+streamToggle("cam", "camera", camLoop);
+streamToggle("lidar", "LiDAR", lidarLoop);
+document.addEventListener("visibilitychange", () => { camLoop(); lidarLoop(); });
+// The closed LiDAR box is drawn once, so it is redrawn when the theme or the window changes.
+const lidarRedraw = () => VIEW.lidar || lidarLoop();
+new MutationObserver(lidarRedraw).observe(document.documentElement, {attributeFilter: ["data-theme"]});
+addEventListener("resize", lidarRedraw);
 function drawLidar(d) {
   const cv = $("lidar"), c = cv.getContext("2d");
   cv.width = cv.clientWidth; cv.height = cv.clientHeight;

@@ -9,7 +9,8 @@ same against the sim (--boat 127.0.0.1).
 The page talks only to this process:
   GET  /events          server-sent events: every frame the boat sends, and the link's state
   POST /req             one op ({op, ...}), answered with the boat's result
-  GET  /cam.jpg         the camera, asked of the boat per request (so only while its tab shows);
+  GET  /cam.jpg         the camera, asked of the boat per request (so only while its tab shows
+                        and its View button is on);
                         &stream=raw for the frame without the detector's boxes
   GET  /lidar.json      the LiDAR preview, likewise
   GET  /download?name=  a recording, streamed straight through

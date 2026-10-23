@@ -255,6 +255,12 @@ class GcsApp(unittest.TestCase):
         js = urllib.request.urlopen(self.base + "/map.js").read().decode()
         self.assertIn('kind === "obstacles"', js)
 
+    def test_page_has_the_stream_view_buttons(self):
+        page = urllib.request.urlopen(self.base + "/").read().decode()
+        for needle in ('id="cam-view"', 'id="lidar-view"', 'streamToggle("cam", "camera", camLoop)',
+                       'streamToggle("lidar", "LiDAR", lidarLoop)', "if (!VIEW.cam)", "if (!VIEW.lidar)"):
+            self.assertIn(needle, page)
+
 
 def gps(lat="1.3", lon="103.8"):
     return {"id": "NavigateTo", "ports": {"target": "fix", "lat": lat, "lon": lon}, "children": []}

@@ -277,45 +277,34 @@ That starts:
 
 | Node | Package | Role |
 |---|---|---|
-| `telemetry_bridge` | `crusader_fcu` | THE single consumer of MAVProxy's rebroadcast, and THE single MAVLink sender |
-| `pixhawk_led_status_node` | `crusader_behavior` | Pixhawk state → LED state |
+| `telemetry_bridge` | `crusader_behavior` | THE single consumer of MAVProxy's rebroadcast, and THE single MAVLink sender |
+| `led_status_node` | `crusader_behavior` | autopilot + RC state → `/crsd/led_state` |
 | `led_node` | `crusader_behavior` | `/crsd/led_state` → LED serial |
 | `rc_watchdog` | `crusader_behavior` | force-disarm on RC-link loss |
-| `ground_station` | `crusader_groundstation` | the web UI on :8090 |
-| `lidar_cluster_node` | `crusader_perception` | MID360 cloud → `crsd/lidar_clusters` |
-| `proximity_bridge` | `crusader_perception` | clusters → `OBSTACLE_DISTANCE` for the autopilot's avoidance |
-| `lidar_view` | `tools/lidar_view.py` (a script) | LiDAR view on :8081 |
-| `rxl_link_node` | `crusader_link` | the RFD900 UAV link; respawns |
+| `gcs_bridge` | `crusader_groundstation` | the laptop GCS (`BOAT_GUI.cmd`) connects here, tcp 14559 |
+| `lidar_node` | `crusader_perception` | clusters, the Nav2 cloud, `OBSTACLE_DISTANCE` for the autopilot |
+| `camera_node` | `crusader_perception` | the OAK-D's one owner; does not respawn |
+| `rfd_link_node` | `crusader_link` | the RFD900 mesh to Ekko; respawns |
 
 **Verify:** flip the RC arm switch — the LED strip and the launch logs should
 change together.
 
 ### Camera
 
-`crusader_perception` owns the OAK-D from inside `asv` (§13). Three nodes, and only
-one may run — the device admits a single client:
+`camera_node` (`crusader_perception`) owns the OAK-D from inside `asv` (§13); the
+device admits a single client. Its `model` (`none | buoy | dock`, from
+`crusader_params.yaml`) is dynamic: the Sensors tab's model menu changes it live.
+The Sensors tab shows its picture and the LiDAR preview behind **View camera** and
+**View LiDAR**. Both start closed, and a closed one is never asked of the boat, so it
+costs no WiFi.
 
-```bash
-ros2 run crusader_perception buoy_detector    # detections; what the stack wants
-ros2 run crusader_perception oak_detector     # shape + LED colour; needs its TensorRT engines
-ros2 run crusader_perception oakd_publisher   # raw frames; for a human, ~38 MB/s
-```
-
-`buoy_detector` serves its own annotated view at `http://<JETSON_IP>:8080` — boxes,
-ranges, and where depth was sampled. That is the one to use when checking the
-camera. `tools/oak_view.py` is the alternative for a *raw* topic:
-
-```bash
-python3 /root/robotx_ws/src/rx26_asv/tools/oak_view.py --topic /oak/rgb
-```
-
-It subscribes rather than opening the device, so it cannot take the camera away
-from anything and any number can run at once. It cannot share port 8080 with
-`buoy_detector`'s view, and they are never both useful at once.
-
-> No camera node is in `core.launch.py` — they contend for the one camera, so
-> which runs is an operator choice per session. `target_tracker` is
-> not there either.
+> `core.launch.py` starts `camera_node`, so it holds the one camera from boot. To
+> run anything else that opens the OAK-D (`tools/oak_record.py`), stop `camera_node`
+> from the Nodes tab first (it does not respawn), then Start it again afterwards;
+> use Stop and Start, since Restart does not start it again. With no OAK-D at boot it
+> exits: the Nodes tab then shows it as `unknown`, and the reason is in
+> `journalctl -u crsd-ros` on the Jetson host. Start it from the Nodes tab once the
+> camera is plugged in. `target_tracker` is not in core.
 
 ### Obstacle avoidance (Nav2)
 

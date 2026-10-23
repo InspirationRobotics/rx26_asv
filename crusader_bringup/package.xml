@@ -15,8 +15,9 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <exec_depend>crusader_behavior</exec_depend>
-  <!-- Not launched by core.launch.py (its two nodes contend for the one OAK-D,
-       so which one runs is an operator choice) but exec_depended on anyway: a
+  <!-- core.launch.py runs crusader_perception's lidar_node and camera_node, but not
+       crusader_world_model's target_tracker (the Nodes tab starts it). Both are
+       exec_depended on anyway: a
        "packages-up-to crusader_bringup" build must cover every package we ship,
        or one silently stops being built and its compile errors surface on the
        boat instead of at build time. -->
