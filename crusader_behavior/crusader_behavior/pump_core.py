@@ -7,7 +7,7 @@ motors, not this output, so these checks are all that stands between a request a
 from dataclasses import dataclass
 
 MAV_CMD_DO_SET_SERVO = 183
-MAV_CMD_DO_REPEAT_SERVO = 211
+MAV_CMD_DO_REPEAT_SERVO = 184   # NOT 211: that is DO_GRIPPER, which ArduRover answers FAILED
 
 # PumpState.RESULT_* (kept equal by test_pump_core)
 RESULT_NONE, RESULT_SENT, RESULT_ACCEPTED, RESULT_REJECTED, RESULT_REFUSED = range(5)
@@ -93,13 +93,14 @@ class PumpGate:
             return False, "disarmed"
         if inp.output_pwm is None:
             return False, "pump output not reported (SERVO_OUTPUT_RAW stale)"
+        # A burst asked while ours runs EXTENDS it: the cannon keeps the water on until GREEN,
+        # and it still ends on the autopilot's timer within one burst of the last ask.
+        if self.burst_until is not None and inp.now < self.burst_until:
+            return True, "extends the running burst"
         if p.is_on(inp.output_pwm):
             return False, f"pump output already ON ({inp.output_pwm})"
-        if self.burst_until is not None:
-            if inp.now < self.burst_until:
-                return False, "a burst is still running"
-            if inp.now - self.burst_until < p.min_gap_s:
-                return False, f"too soon ({p.min_gap_s:.1f} s between bursts)"
+        if self.burst_until is not None and inp.now - self.burst_until < p.min_gap_s:
+            return False, f"too soon ({p.min_gap_s:.1f} s between bursts)"
         return True, "ok"
 
     def start_burst(self, duration, now):

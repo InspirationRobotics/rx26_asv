@@ -1,0 +1,73 @@
+<?xml version="1.0"?>
+<!-- MISSION: Test - pan/tilt cannon in MANUAL: hold 1.2 m off the dock, spray each RED window until GREEN. -->
+<!--
+  task3_cannon_fire.xml - Task 3 with the pan/tilt water cannon, from task3-gazebo, on main's
+  leaves only.
+
+  HOW TO RUN IT. Drive the boat in MANUAL to a few metres off the dock, bow on it, with the
+  LiDAR seeing the wall (lidar_node wall_enable). Start task3_cannon_fire from the GCS.
+
+  WHAT IT DOES
+    hold          StrafeKeep, every tick: range on the LiDAR wall (fire_range_m), sideways and
+                  square on the camera's upper-left window
+    docked        on station, then held tight for 2 s
+    the bay       the one GREEN bay (CommitSafeBay, retried until it reads): the windows the
+                  cannon aims at are that bay's
+    report        the docking report
+    then forever  wait for a steady RED window -> spray it until GREEN (90 s at most; the
+                  bridge aims the cannon and keeps the water on) -> read the code (a miss is
+                  not a failure) -> wait for the next
+
+  SWITCHES. bt_runner_node publish_setpoints (the sticks, G1); telemetry_bridge cannon_pump
+  (water, G7; false = the cannon aims and the bursts are logged DRY).
+  TAKING IT BACK. SC out of MANUAL ends it at once; SB is the e-stop. It also ends if the
+  LiDAR loses the wall for 1 s, attitude goes stale or the dock camera goes quiet.
+-->
+<root BTCPP_format="4" main_tree_to_execute="CannonFire">
+  <BehaviorTree ID="CannonFire">
+    <ReactiveSequence name="guard_band">
+      <ModeIs mode="MANUAL"/>
+      <NotDropped/>
+      <WallRangeAlive max_age_s="1.0"/>
+      <AttitudeAlive max_age_s="0.5"/>
+      <DockCameraAlive max_age_s="3.0"/>
+      <UpdateDockBook/>
+      <StrafeKeep fire_range_m="1.2" window_index="0" lateral_bias_m="0.0" nozzle_y_m="0.0"
+                  cam_timeout_s="0.5" face_timeout_s="3.0"
+                  range_check_m="0" face_setback_m="0.0"
+                  deadband_range_m="0.05" deadband_lat_m="0.04" deadband_yaw_deg="3.0"
+                  kp_fwd="90" kd_fwd="60" kp_lat="100" kd_lat="200" kp_yaw="5" kd_yaw="0.5"
+                  ki_fwd="40" ki_lat="10" i_max_us="100"
+                  min_us="30" max_us="120" slew_us_s="200"
+                  min_range_m="0.6" square_first_deg="10"/>
+      <Sequence name="mission">
+        <!-- on station, then docked: held tight for 2 s -->
+        <AwaitStrafeSolution fire_range_m="1.2" range_tol_m="0.40" lat_tol_m="0.30"
+                             yaw_tol_deg="10.0" hold_s="0.5" gap_s="0.0" timeout_s="1000000"/>
+        <AwaitStrafeSolution fire_range_m="1.2" range_tol_m="0.10" lat_tol_m="0.15"
+                             yaw_tol_deg="8.0" hold_s="2.0" gap_s="0.0" timeout_s="1000000"/>
+        <!-- the GREEN bay, once a second until one reads -->
+        <RetryUntilSuccessful num_attempts="-1">
+          <Fallback>
+            <CommitSafeBay bay="{bay}"/>
+            <ForceFailure>
+              <Sleep msec="1000"/>
+            </ForceFailure>
+          </Fallback>
+        </RetryUntilSuccessful>
+        <ReportDocking bay="{bay}"/>
+        <KeepRunningUntilFailure>
+          <ForceSuccess>
+            <Sequence name="one_fire">
+              <AwaitFireTarget bay="{bay}" timeout_s="1000000" resend_s="10.0"/>
+              <SprayUntilHit timeout_s="90.0" min_green_s="0.4" max_aim_age_s="3.0"/>
+              <ForceSuccess>
+                <DecodeResourceRequest timeout_s="80.0" hold_s="5.0" min_frames="20"/>
+              </ForceSuccess>
+            </Sequence>
+          </ForceSuccess>
+        </KeepRunningUntilFailure>
+      </Sequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

@@ -5,8 +5,10 @@ RX: /crsd/pose, /crsd/attitude, /crsd/fcu_status, /crsd/rc_channels, /crsd/auton
     stamped at receipt.
 TX: /crsd/force_disarm (never gated), /crsd/guided_setpoint and /crsd/guided_heading_speed
     (autonomous modes only; heading+speed also needs the drop latch), /crsd/rc_override
-    (override_core), /crsd/pump_cmd (pump_core), /crsd/set_mode, crsd/obstacle_distance.
+    (override_core), /crsd/pump_cmd (pump_core), /crsd/set_mode, crsd/obstacle_distance,
+    /crsd/water_cannon (cannon_core: the pan/tilt servos, and water through pump_core).
 """
+import json
 import os
 import threading
 import time
@@ -24,7 +26,7 @@ from crusader_common import geo
 from crusader_common.node_main import declare_params, run_node
 from crusader_common.stream_cache import StreamCache
 
-from crusader_behavior import fcu_health, guided_hs_core, override_core, pump_core
+from crusader_behavior import cannon_core, fcu_health, guided_hs_core, override_core, pump_core
 from crusader_behavior.drop_latch import DropLatch
 
 # MAVLink 2 before pymavlink is first imported: the v1 dialect has no OBSTACLE_DISTANCE.
@@ -56,6 +58,34 @@ PARAMS = {
     "override_modes": ["MANUAL"],       # an override in an autopilot mode fights the autopilot
     "estop_channel": 7,
     "estop_threshold": 1200,
+    # The pan/tilt cannon (cannon_core): DO_SET_SERVO on two outputs, 0 = no cannon.
+    "cannon_pan_channel": 0,
+    "cannon_tilt_channel": 0,
+    "cannon_pwm_min": 1100,
+    "cannon_pwm_max": 1900,
+    "cannon_pump": False,               # G7 for the cannon: false = aims, water DRY (logged)
+    "cannon_nozzle_xyz": [0.37, 0.279, 0.75],
+    "cannon_cam_xyz": [0.37, 0.0, 0.65],
+    "cannon_cam_yaw_deg": 0.0,
+    "cannon_cam_pitch_deg": 0.0,
+    "cannon_exit_speed_mps": 0.0,       # 0 = from the measured throw
+    "cannon_throw_range_m": 2.74,
+    "cannon_throw_elev_deg": 30.0,
+    "cannon_throw_drop_m": 0.51,
+    "cannon_pan_center_us": 1500.0,
+    "cannon_pan_us_per_deg": 5.556,
+    "cannon_pan_sign": 1.0,
+    "cannon_tilt_center_us": 1680.0,
+    "cannon_tilt_us_per_deg": 5.556,
+    "cannon_tilt_sign": -1.0,
+    "cannon_pan_limits_deg": [-60.0, 60.0],
+    "cannon_tilt_limits_deg": [-10.0, 60.0],
+    "cannon_settle_s": 0.4,
+    "cannon_servo_tol_us": 12.0,
+    "cannon_aim_max_age_s": 3.0,
+    "cannon_burst_s": 1.0,
+    "cannon_resend_s": 0.3,
+    "cannon_timeout_s": 0.6,            # no /crsd/water_cannon this long: stop
 }
 
 REQUIRED_SENDERS = ("rc_channels_override_send", "set_position_target_global_int_send",
@@ -116,6 +146,8 @@ class TelemetryBridge(Node):
         # A topic, not a service: waiting on COMMAND_ACK would block force-disarm.
         self.create_subscription(PumpCommand, "/crsd/pump_cmd", self._pump_cb, 10)
         self.create_subscription(GuidedHeadingSpeed, "/crsd/guided_heading_speed", self._hs_cb, 10)
+        self.create_subscription(String, "/crsd/water_cannon", self._cannon_cb, 10)
+        self.cannon_status_pub = self.create_publisher(String, "/crsd/cannon_status", 10)
 
         t_out = p["stream_timeout_s"]
         self._lock = threading.Lock()      # the caches, written by the RX thread
@@ -125,6 +157,7 @@ class TelemetryBridge(Node):
         self._status = StreamCache(p["mode_timeout_s"])
         self._rc = StreamCache(t_out)
         self._servo = StreamCache(t_out)
+        self._cannon_out = StreamCache(t_out)  # (pan, tilt) PWM the autopilot reports
         self._sys = StreamCache(t_out * 3)     # 1-2 Hz streams: three of their periods
         self._batt = StreamCache(t_out * 3)
         self._gps = StreamCache(t_out * 3)
@@ -140,6 +173,19 @@ class TelemetryBridge(Node):
         self._pump_result = pump_core.RESULT_NONE
         self._pump_reason = ""
         self._pump_ack_until = 0.0
+
+        self.cannon_ch = (p["cannon_pan_channel"], p["cannon_tilt_channel"])
+        self.cannon_pump = bool(p["cannon_pump"])
+        self.cannon_timeout_s = p["cannon_timeout_s"]
+        self.cannon = cannon_core.CannonParams.from_dict(p)
+        self.fire = cannon_core.FireGate(p["cannon_settle_s"], p["cannon_servo_tol_us"],
+                                         p["cannon_aim_max_age_s"], p["cannon_burst_s"],
+                                         p["cannon_resend_s"])
+        self._aim = None              # (x, y, z) camera_link, receipt time
+        self._aim_t = self._cannon_cmd_t = self._cannon_status_t = -1e18
+        self._cannon_want = False
+        self._cannon_sent = {}        # channel -> (pwm, time) last DO_SET_SERVO
+        self._cannon_aim = cannon_core.Aim()
 
         from pymavlink import mavutil
         self._mavutil = mavutil
@@ -218,10 +264,14 @@ class TelemetryBridge(Node):
                 self._rc.set(rc, t, stamp)
                 if self.latch.rc_sample(rc, t):
                     self._handle_trip()
-            elif mtype == "SERVO_OUTPUT_RAW" and self.pump.p.servo_channel:
+            elif mtype == "SERVO_OUTPUT_RAW":
                 pwm = pump_core.servo_raw(msg, self.pump.p.servo_channel)
-                if pwm is not None:
+                if pwm is not None and self.pump.p.servo_channel:
                     self._servo.set(pwm, t, stamp)
+                if all(self.cannon_ch):
+                    out = tuple(pump_core.servo_raw(msg, ch) for ch in self.cannon_ch)
+                    if None not in out:
+                        self._cannon_out.set(out, t, stamp)
             elif mtype == "SYS_STATUS":
                 self._sys.set({"voltage_mv": msg.voltage_battery, "remaining_pct": msg.battery_remaining,
                                "present": msg.onboard_control_sensors_present,
@@ -286,6 +336,7 @@ class TelemetryBridge(Node):
             self._publish_health(t, rc)
         try:
             self._pump_tick(t)
+            self._cannon_tick(t)
             with self._hs_lock:
                 stop = self.hs.tick(t)
             if stop is not None:
@@ -379,6 +430,67 @@ class TelemetryBridge(Node):
         m.last_result = self._pump_result
         m.last_reason = self.pump.latched or self._pump_reason
         self.pump_pub.publish(m)
+
+    # ---------- the pan/tilt cannon (cannon_core) ----------
+
+    @guarded
+    def _cannon_cb(self, msg: String):
+        """SprayUntilHit, every tick: {"fire": true, "x", "y", "z"} in camera_link, or fire false."""
+        j = json.loads(msg.data)
+        t = time.monotonic()
+        self._cannon_cmd_t = t
+        want = bool(j.get("fire")) and j.get("frame_id", "camera_link") == "camera_link"
+        if want:
+            self._aim, self._aim_t = (float(j["x"]), float(j["y"]), float(j["z"])), t
+        elif self._cannon_want:
+            self._cannon_stop("the tree stopped asking")
+        self._cannon_want = want
+
+    def _cannon_stop(self, why):
+        if self.fire.firing and self.cannon_pump:
+            self._pump_off()
+        if self.fire.firing:
+            self.get_logger().info(f"cannon: stop ({why})")
+        self.fire.reset()
+
+    def _cannon_servo(self, ch, pwm, t):
+        """DO_SET_SERVO on a change of 2 us or more, at most 20 Hz per output."""
+        last = self._cannon_sent.get(ch)
+        if last and (abs(pwm - last[0]) < 2 or t - last[1] < 0.05):
+            return
+        self._cannon_sent[ch] = (pwm, t)
+        self._command_long(pump_core.MAV_CMD_DO_SET_SERVO, pump_core.set_servo_params(ch, pwm))
+
+    def _cannon_tick(self, t):
+        if not all(self.cannon_ch):
+            return
+        if self._cannon_want and t - self._cannon_cmd_t > self.cannon_timeout_s:
+            self._cannon_want = False
+            self._cannon_stop(f"no /crsd/water_cannon for {self.cannon_timeout_s:.1f} s")
+        with self._lock:
+            att, out = self._att.get(t), self._cannon_out.get(t)
+        if self._cannon_want and self._aim is not None:
+            roll, pitch = (att[0], att[1]) if att is not None else (0.0, 0.0)
+            aim = self._cannon_aim = cannon_core.solve(self._aim, self.cannon, roll, pitch)
+            self._cannon_servo(self.cannon_ch[0], aim.pan_pwm, t)
+            self._cannon_servo(self.cannon_ch[1], aim.tilt_pwm, t)
+            err = None if out is None else max(abs(out[0] - aim.pan_pwm), abs(out[1] - aim.tilt_pwm))
+            was = self.fire.firing
+            burst = self.fire.update(t, t - self._aim_t, aim, err)
+            if burst > 0.0 and self.cannon_pump:
+                self._pump_cb(PumpCommand(duration_s=float(burst), source="cannon"))
+            if burst > 0.0 and not was:
+                self.get_logger().info(
+                    f"cannon: water ON{'' if self.cannon_pump else ' (DRY: cannon_pump is off)'} | "
+                    f"pan {aim.pan_deg:+.1f} tilt {aim.tilt_deg:+.1f} deg, {aim.dist_m:.2f} m out")
+        if t - self._cannon_status_t >= 0.2:
+            self._cannon_status_t = t
+            a = self._cannon_aim
+            self.cannon_status_pub.publish(String(data=json.dumps(dict(
+                want=self._cannon_want, firing=self.fire.firing, why=self.fire.why,
+                pump=self.cannon_pump, aim_cam=self._aim, pan_deg=round(a.pan_deg, 1),
+                tilt_deg=round(a.tilt_deg, 1), cmd_pwm=[a.pan_pwm, a.tilt_pwm],
+                servo_out=out, reachable=a.reachable, clipped=a.clipped))))
 
     # ---------- motion TX ----------
 

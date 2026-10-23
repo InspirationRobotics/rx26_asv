@@ -270,6 +270,10 @@ body.ed-dragging { cursor: grabbing; user-select: none; }
         <h3 style="margin-top: 0">Run a mission</h3>
         <select id="m-name"></select>
         timeout <input id="m-timeout" class="num" type="number" min="0" value="0"> s (0 = default)
+        <div style="margin-top: 6px" title="Task 3: where to look for the dock when no bay has been seen yet; empty = none">
+          approach <input id="m-alat" class="ll" placeholder="lat" aria-label="approach latitude" inputmode="decimal">
+          <input id="m-alon" class="ll" placeholder="lon" aria-label="approach longitude" inputmode="decimal">
+          <button id="m-here">Boat here</button></div>
         <div style="margin-top: 6px">
           <button class="primary" id="m-start">Start</button>
           <button class="danger" id="m-stop">Stop</button>
@@ -735,7 +739,19 @@ CrsdEditor.init({ask, toast, esc, stored: name => loadMissions(name)});
 $("m-start").onclick = () => {
   const name = $("m-name").value;
   if (!name) return toast("choose a mission to run first", false);
-  req("run_mission", {name, timeout_s: +$("m-timeout").value || 0});
+  const args = {name, timeout_s: +$("m-timeout").value || 0};
+  const la = $("m-alat").value.trim(), lo = $("m-alon").value.trim();
+  if (la || lo) {
+    const e = llError(+la, +lo);
+    if (e) return toast("approach: " + e, false);
+    args.approach = [+la, +lo];
+  }
+  req("run_mission", args);
+};
+$("m-here").onclick = () => {
+  const b = (G.state || {}).boat || {};
+  if (!num(b.lat) || !num(b.lon)) return toast("no boat position yet", false);
+  $("m-alat").value = b.lat.toFixed(7); $("m-alon").value = b.lon.toFixed(7);
 };
 $("m-stop").onclick = () => req("cancel_mission");
 function tree() {

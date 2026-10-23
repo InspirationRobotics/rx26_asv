@@ -50,7 +50,7 @@ telemetry_bridge:
     # docs/G7_pump_bench.md is done; then the Pixhawk output with SERVOn_FUNCTION =
     # 50 + pump_rc_channel and SERVOn_TRIM = pump_off_pwm: the autopilot ends each
     # burst at TRIM (check_config checks both against the baseline).
-    pump_servo_channel: 0                  # Pixhawk output 1..16; 0 = none
+    pump_servo_channel: 9                  # Pixhawk output 1..16 (AUX1 = 9, 2026-10-11); 0 = none
     pump_rc_channel: 10                    # the pilot's pump switch; = squirt_cal's
     pump_on_pwm: 2000                      # us; MEASURE on the bench (G7)
     pump_off_pwm: 1000                     # us; MUST equal SERVOn_TRIM
@@ -62,6 +62,20 @@ telemetry_bridge:
     estop_threshold: 1200                  # e-stop or RC lost: the e-stop stops MOTORS, not
                                            # pass-through outputs, so the bridge sends the
                                            # pump OFF
+    # The pan/tilt cannon (cannon_core): /crsd/water_cannon -> DO_SET_SERVO on AUX3 pan /
+    # AUX4 tilt (SERVO11/12_FUNCTION 0, MIN/MAX 1100/1900), water through the pump above.
+    # Numbers from task3-gazebo (2026-10-11/12, on the water).
+    cannon_pan_channel: 11
+    cannon_tilt_channel: 12
+    cannon_pump: false                     # G7 for the cannon: false = aims, water DRY
+    cannon_nozzle_xyz: [0.37, 0.279, 0.75] # pivot: level with the camera, 11 in to port
+    cannon_cam_xyz: [0.37, 0.0, 0.65]      # = target_tracker cam_x/y/z
+    cannon_exit_speed_mps: 0.0             # 0 = from the throw: 9 ft at 30 deg onto the water
+    cannon_throw_range_m: 2.74
+    cannon_throw_elev_deg: 30.0
+    cannon_throw_drop_m: 0.51
+    cannon_tilt_center_us: 1680.0          # level with the hull, by eye (2026-10-09)
+    cannon_tilt_sign: -1.0                 # the tilt servo is mounted reversed
 
 # ---- Task 3 fixed nozzle: the calibration tool (tools/squirt_cal) ----
 # A bench tool, not a node in the launch file: python3 tools/squirt_cal/squirt_cal.py
@@ -173,7 +187,7 @@ lidar_node:
                                            #       Open water: ros2 param set /lidar_node r_max 40.0
     nav_cloud_enable: true                 # [DYN] THE POOL SWITCH: false publishes empty clouds
                                            #       (walls would be lethal, goals unreachable)
-    wall_enable: false                     # /crsd/wall_range: not yet run on the boat
+    wall_enable: true                      # /crsd/wall_range: the cannon tree holds range on it
 # ---- Nav2 avoidance: nav_frames_node — the datum, and TF map -> base_footprint ----
 # docs/nav2_avoidance_spec.md section 2. TF `map`, bt_runner's east/north frame and every
 # HazardArray coordinate are ONE equirectangular ENU plane on one datum, chosen here alone
