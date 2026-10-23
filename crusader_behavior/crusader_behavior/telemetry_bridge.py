@@ -262,8 +262,11 @@ class TelemetryBridge(Node):
             elif mtype == "RC_CHANNELS":
                 rc = [getattr(msg, f"chan{i}_raw", 0) or 0 for i in range(1, 19)]
                 self._rc.set(rc, t, stamp)
+                was = self.latch.allowed
                 if self.latch.rc_sample(rc, t):
                     self._handle_trip()
+                elif self.latch.allowed != was:     # STARTUP -> ACTIVE: say so (the topic is latched)
+                    self._publish_drop_state()
             elif mtype == "SERVO_OUTPUT_RAW":
                 pwm = pump_core.servo_raw(msg, self.pump.p.servo_channel)
                 if pwm is not None and self.pump.p.servo_channel:
