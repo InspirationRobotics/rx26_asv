@@ -122,20 +122,26 @@ public:
 };
 
 /// The LiDAR has seen a wall recently. Blind, the boat must not keep driving
-/// at a dock: the keep's only range is this one.
+/// at a dock: the keep's only range is this one. With or_camera_s, a dock window
+/// the camera saw that recently also counts (StrafeKeep range_fallback="camera").
 class WallRangeAlive : public CrusaderCondition
 {
 public:
   WallRangeAlive(const std::string & n, const BT::NodeConfig & c) : CrusaderCondition(n, c) {}
   static BT::PortsList providedPorts()
   {
-    return {BT::InputPort<double>("max_age_s", 1.0, "seconds without a VALID wall range")};
+    return {BT::InputPort<double>("max_age_s", 1.0, "seconds without a VALID wall range"),
+      BT::InputPort<double>("or_camera_s", 0.0, "or a dock window seen this recently; 0 = off")};
   }
   BT::NodeStatus tick() override
   {
     const double max_age = getInput<double>("max_age_s").value_or(1.0);
+    const double cam = getInput<double>("or_camera_s").value_or(0.0);
     std::lock_guard<std::mutex> lk(ctx_->mu);
-    return ctx_->wall.valid_age(ctx_->now_s) <= max_age ? BT::NodeStatus::SUCCESS :
+    const double now = ctx_->now_s;
+    const bool seen = cam > 0.0 &&
+      std::min(ctx_->fire_win_x[0].age(now), ctx_->fire_win_x[1].age(now)) <= cam;
+    return ctx_->wall.valid_age(now) <= max_age || seen ? BT::NodeStatus::SUCCESS :
            BT::NodeStatus::FAILURE;
   }
 };
@@ -537,6 +543,8 @@ public:
       BT::InputPort<double>("ki_fwd", 20.0, "us per m.s (holds against a current)"),
       BT::InputPort<double>("ki_lat", 30.0, "us per m.s"),
       BT::InputPort<double>("i_max_us", 80.0, "integral cap"),
+      BT::InputPort<std::string>("range_fallback", "",
+        "camera = with no LiDAR wall, the range is the camera's to the window"),
     };
   }
 
@@ -580,6 +588,13 @@ public:
         si.lat_err_m = wy - noz_y - bias;
         si.lat_rate = ctx_->fire_win_y[widx].slope(now, 0.8);
       }
+      // out of the LiDAR's wall (too far, not square): close in on the camera's range
+      const bool cam_range = !std::isfinite(si.range_m) && std::isfinite(wx) &&
+        getInput<std::string>("range_fallback").value_or("") == "camera";
+      if (cam_range) {
+        si.range_m = wx - setback;
+        si.range_rate = ctx_->fire_win_x[widx].slope(now, 0.8);
+      }
       if (ctx_->face_heading.age(now) <= face_to) {
         ctx_->face_target = ctx_->face_heading.median(now, 2.0);
       }
@@ -605,6 +620,7 @@ public:
         cmd.why = block;                        // hold still: every stick at zero
       } else {
         cmd = fire::strafeKeep(sp, si, ctx_->strafe_state, dt);
+        if (cam_range) {cmd.why += " (camera range)";}
         if (ctx_->wall.blanked(now)) {          // water in the air: hold still
           cmd.sticks = fire::Sticks{};
           cmd.why = "shot in the air";

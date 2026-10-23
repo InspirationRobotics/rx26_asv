@@ -5,10 +5,11 @@
   leaves only.
 
   HOW TO RUN IT. Drive the boat in MANUAL to a few metres off the dock, bow on it, with the
-  LiDAR seeing the wall (lidar_node wall_enable). Start task3_cannon_fire from the GCS.
+  dock in the camera's view. Start task3_cannon_fire from the GCS.
 
   WHAT IT DOES
-    hold          StrafeKeep, every tick: range on the LiDAR wall (fire_range_m), sideways and
+    hold          StrafeKeep, every tick: range on the LiDAR wall (fire_range_m), or on the
+                  camera's range to the window until the LiDAR has the wall; sideways and
                   square on the camera's upper-left window
     docked        on station, then held tight for 2 s
     the bay       the one GREEN bay (CommitSafeBay, retried until it reads): the windows the
@@ -20,15 +21,16 @@
 
   SWITCHES. bt_runner_node publish_setpoints (the sticks, G1); telemetry_bridge cannon_pump
   (water, G7; false = the cannon aims and the bursts are logged DRY).
-  TAKING IT BACK. SC out of MANUAL ends it at once; SB is the e-stop. It also ends if the
-  LiDAR loses the wall for 1 s, attitude goes stale or the dock camera goes quiet.
+  TAKING IT BACK. SC out of MANUAL ends it at once; SB is the e-stop. It also ends if neither
+  the LiDAR wall nor the window has been seen for 1 s, attitude goes stale or the dock camera
+  goes quiet.
 -->
 <root BTCPP_format="4" main_tree_to_execute="CannonFire">
   <BehaviorTree ID="CannonFire">
     <ReactiveSequence name="guard_band">
       <ModeIs mode="MANUAL"/>
       <NotDropped/>
-      <WallRangeAlive max_age_s="1.0"/>
+      <WallRangeAlive max_age_s="1.0" or_camera_s="1.0"/>
       <AttitudeAlive max_age_s="0.5"/>
       <DockCameraAlive max_age_s="3.0"/>
       <UpdateDockBook/>
@@ -39,7 +41,7 @@
                   kp_fwd="90" kd_fwd="60" kp_lat="100" kd_lat="200" kp_yaw="5" kd_yaw="0.5"
                   ki_fwd="40" ki_lat="10" i_max_us="100"
                   min_us="30" max_us="120" slew_us_s="200"
-                  min_range_m="0.6" square_first_deg="10"/>
+                  min_range_m="0.6" square_first_deg="10" range_fallback="camera"/>
       <Sequence name="mission">
         <!-- on station, then docked: held tight for 2 s -->
         <AwaitStrafeSolution fire_range_m="1.2" range_tol_m="0.40" lat_tol_m="0.30"
