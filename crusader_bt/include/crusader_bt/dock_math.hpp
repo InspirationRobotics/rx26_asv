@@ -315,6 +315,10 @@ struct BayTrack
   double first_seen = 0.0;
   double last_seen = 0.0;
   std::vector<WindowSighting> windows;   ///< from the latest sighting
+  /// The latest sighting as the camera saw it, in the body frame (ahead, left of the
+  /// body origin, m): no heading in it, so no heading error either.
+  double live_ahead_m = std::numeric_limits<double>::quiet_NaN();
+  double live_left_m = std::numeric_limits<double>::quiet_NaN();
   int lit_window_index = -1;
   double windows_t = -1.0;
 
@@ -378,7 +382,7 @@ struct DockBook
     if (!std::isfinite(heading_deg)) {return out;}   // cannot place anything
 
     const Vec2 cam = bodyToWorld(boat, heading_deg, m.x, m.y);
-    struct Placed {std::size_t i; Vec2 q; double r;};
+    struct Placed {std::size_t i; Vec2 q; double r; Vec2 fb;};
     std::vector<Placed> placed;
     for (std::size_t i = 0; i < f.bays.size(); ++i) {
       const auto & s = f.bays[i];
@@ -396,7 +400,7 @@ struct DockBook
       }
       const double hr = nav::norm(fb);
       const Vec2 dir = camDirToWorld(heading_deg, m.yaw_deg, fb.x, fb.y);
-      placed.push_back({i, cam + dir * hr, hr});
+      placed.push_back({i, cam + dir * hr, hr, fb});
     }
 
     struct Pair {double d; std::size_t pi; std::size_t ti;};
@@ -414,6 +418,8 @@ struct DockBook
       pused[pr.pi] = tused[pr.ti] = true;
       const Placed & pl = placed[pr.pi];
       fold(tracks[pr.ti], f.bays[pl.i], pl.q, pl.r, cam, heading_deg, m, f.t);
+      tracks[pr.ti].live_ahead_m = m.x + pl.fb.x;
+      tracks[pr.ti].live_left_m = m.y + pl.fb.y;
       out[pl.i] = tracks[pr.ti].id;
     }
     // Unmatched: a new bay, unless the face is cut off (its centre is biased
@@ -428,6 +434,8 @@ struct DockBook
       t.first_seen = f.t;
       tracks.push_back(t);
       fold(tracks.back(), f.bays[pl.i], pl.q, pl.r, cam, heading_deg, m, f.t);
+      tracks.back().live_ahead_m = m.x + pl.fb.x;
+      tracks.back().live_left_m = m.y + pl.fb.y;
       out[pl.i] = tracks.back().id;
     }
     mergeClose();
@@ -471,6 +479,10 @@ private:
     k.green += d.green;
     k.other += d.other;
     k.first_seen = std::min(k.first_seen, d.first_seen);
+    if (d.last_seen > k.last_seen) {          // the newer camera view wins
+      k.live_ahead_m = d.live_ahead_m;
+      k.live_left_m = d.live_left_m;
+    }
     k.last_seen = std::max(k.last_seen, d.last_seen);
     if (d.windows_t > k.windows_t) {
       k.windows = d.windows;

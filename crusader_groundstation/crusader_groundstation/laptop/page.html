@@ -274,6 +274,9 @@ body.ed-dragging { cursor: grabbing; user-select: none; }
           approach <input id="m-alat" class="ll" placeholder="lat" aria-label="approach latitude" inputmode="decimal">
           <input id="m-alon" class="ll" placeholder="lon" aria-label="approach longitude" inputmode="decimal">
           <button id="m-here">Boat here</button></div>
+        <div id="m-dockh" style="margin-top: 6px; display: none" title="Task 3: the bow's heading facing the dock, deg true (bt_runner_node dock_heading_deg, read at Start)">
+          dock heading <input id="m-dockh-v" class="num" type="number" min="0" max="359.9" step="1"> deg
+          <button id="m-dockh-set">Set</button> <span id="m-dockh-now" class="muted"></span></div>
         <div style="margin-top: 6px">
           <button class="primary" id="m-start">Start</button>
           <button class="danger" id="m-stop">Stop</button>
@@ -747,6 +750,25 @@ $("m-start").onclick = () => {
     args.approach = [+la, +lo];
   }
   req("run_mission", args);
+};
+// Task 3: the dock heading, on bt_runner_node (dock_heading_deg; < 0 = not set)
+function btNode() { return ((G.nodes || {}).graph || []).find(n => n.endsWith("/bt_runner_node")); }
+async function loadDockHeading() {
+  const show = /^task3_(scan|cannon)_fire$/.test($("m-name").value);
+  $("m-dockh").style.display = show ? "" : "none";
+  const node = btNode();
+  if (!show || !node) return;
+  const r = await req("params_list", {node}, true);
+  const row = r.ok ? r.data.params.find(p => p.name === "dock_heading_deg") : null;
+  $("m-dockh-now").textContent = !row ? "" : row.value < 0 ? "not set" : `now ${row.value} deg`;
+}
+$("m-name").addEventListener("change", loadDockHeading);
+$("m-dockh-set").onclick = async () => {
+  const v = parseFloat($("m-dockh-v").value), node = btNode();
+  if (!(v >= 0 && v < 360)) return toast("dock heading: 0 to 359.9 deg", false);
+  if (!node) return toast("bt_runner_node is not running", false);
+  await req("params_set", {node, values: {dock_heading_deg: v}});
+  loadDockHeading();
 };
 $("m-here").onclick = () => {
   const b = (G.state || {}).boat || {};

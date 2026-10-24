@@ -6,8 +6,8 @@
 
     0. GUIDED to the approach point. Started in MANUAL, this step is skipped.
     1. the tree switches GUIDED -> MANUAL itself (only from GUIDED; SC still takes it back).
-    2. SEARCH: turn to dock_heading, slide left and right along the dock until a bay reads
-       GREEN with confidence (CommitFirstGreen: the first one, not every bay; numbered
+    2. SEARCH: turn to the dock heading, slide one way (left) along the dock until a bay
+       the camera sees reads GREEN with confidence (CommitFirstGreen: the first one, not every bay; numbered
        left to right for the docking report).
     3. APPROACH: square to the bay, strafe onto its centreline, then a steady, gently
        ramped push straight in (ApproachBay), to 1.8 m.
@@ -21,7 +21,8 @@
   ends only when the pilot takes the boat (SC out of MANUAL, or SD). SB is the e-stop.
 
   use_lidar: false = GPS and camera only; true = the LiDAR wall holds the range once it
-  has the dock. dock_heading: the bow's heading facing the dock, deg true. EDIT PER SITE.
+  has the dock. The bow's heading facing the dock (deg true) is bt_runner_node's
+  dock_heading_deg: set it in the GCS Mission tab before Start.
   publish_setpoints (bt_runner, G1) moves the boat; cannon_pump (telemetry_bridge, G7)
   sprays.
 -->
@@ -29,16 +30,17 @@
   <BehaviorTree ID="ScanFire">
     <Sequence name="scan_fire">
       <Script code="use_lidar := false"/>
-      <Script code="dock_heading := 290.0"/>
 
       <!-- 0-1. GUIDED to the waypoint, then MANUAL -->
       <Fallback name="to_the_waypoint">
         <ModeIs mode="MANUAL"/>
         <Sequence>
+          <!-- no dock sightings here: placing them needs the heading, and it is poor
+               while the autopilot pivots onto the waypoint -->
           <ReactiveSequence name="guided_leg">
             <IsAutonomous/>
-            <UpdateDockBook/>
-            <NavigateTo target="approach" tolerance="1.0"/>
+            <NotDropped/>
+            <NavigateTo target="approach" tolerance="2.0"/>
           </ReactiveSequence>
           <RequestMode mode="MANUAL" from="GUIDED" timeout_s="1000000"/>
         </Sequence>
@@ -58,15 +60,15 @@
                    end). leg_m is longer than the dock, so it never turns back; past it,
                    it would sweep back the other way -->
               <StrafeSearch first="left" leg_m="20.0" lat_us="70" min_out_m="3.5"
-                            heading_deg="{dock_heading}" forever="true"/>
+                            forever="true"/>
             </ReactiveFallback>
           </Fallback>
 
           <ApproachBay fwd_us="60" slew_us_s="40" centre_tol_m="0.25" handover_m="1.8"
-                       heading_deg="{dock_heading}" use_lidar="{use_lidar}"/>
+                       use_lidar="{use_lidar}"/>
 
           <ReactiveSequence name="docked">
-            <StrafeKeep fire_range_m="1.2" heading_deg="{dock_heading}" use_lidar="{use_lidar}"
+            <StrafeKeep fire_range_m="1.2" use_lidar="{use_lidar}"
                         deadband_range_m="0.05" deadband_lat_m="0.04" deadband_yaw_deg="3.0"
                         kp_fwd="90" kd_fwd="60" kp_lat="100" kd_lat="200" kp_yaw="5" kd_yaw="0.5"
                         ki_fwd="40" ki_lat="10" i_max_us="100"

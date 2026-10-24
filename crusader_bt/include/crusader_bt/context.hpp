@@ -119,6 +119,9 @@ struct Context
   /// must apply the SAME rule: a condition looser than its commit stalls the tree.
   dock::VoteParams dock_votes;
   int dock_min_obs = 5;
+  /// The bow's heading facing the dock, deg true: bt_runner_node dock_heading_deg (the
+  /// GCS sets it), read at goal start. < 0 = not set.
+  double dock_heading = -1.0;
 
   std::string task3_phase;                    ///< for feedback and the viewers
   int survey_attempt = 0;                     ///< PickVantage calls, all of them
@@ -647,6 +650,20 @@ inline void ingestAttitude(
   constexpr double d = 180.0 / fire::kPi;
   c.steady.feed_att(t, roll * d, pitch * d, roll_rate * d, pitch_rate * d);
   c.yaw_rate_dps = yaw_rate * d;     // NED yaw rate: + = clockwise = turning right
+}
+
+/// The camera saw this bay within the last second: it is in the picture now.
+inline bool inView(const Context & c, const dock::BayTrack & t)
+{
+  constexpr double kInViewS = 1.0;
+  return c.dock_t - t.last_seen <= kInViewS;
+}
+
+/// A leaf's heading_deg port, else the GCS's dock heading, else NaN.
+inline double dockHeading(const Context & c, double port)
+{
+  if (std::isfinite(port)) {return port;}
+  return c.dock_heading >= 0.0 ? c.dock_heading : std::numeric_limits<double>::quiet_NaN();
 }
 
 /// Forget the last attempt's shots. Called at goal start with resetTask3.

@@ -589,8 +589,14 @@ class TelemetryBridge(Node):
         self.get_logger().warn("force-disarm forwarded (rc_watchdog)", throttle_duration_sec=1.0)
 
     def _handle_trip(self):
-        """The drop latch tripped (called with _lock held): release the sticks, stop our motion."""
+        """The drop latch tripped (called with _lock held): release the sticks, stop our motion,
+        and out of an autonomous mode into MANUAL, so SD alone hands the boat back."""
         self.get_logger().error(f"AUTONOMY DROP: {self.latch.trip_reason}: releasing RC overrides")
+        status = self._status.get(time.monotonic())
+        if status is not None and str(status[0]).upper() in self.autonomous_modes:
+            self.get_logger().warn(f"AUTONOMY DROP in {status[0]}: set_mode -> MANUAL")
+            with self._tx:
+                self.conn.set_mode("MANUAL")
         for _ in range(RELEASE_FRAMES):
             self._send_override([0] * 8)
         with self._hs_lock:

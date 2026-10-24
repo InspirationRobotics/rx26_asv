@@ -44,9 +44,6 @@ struct BayView
   double off_centre_m = fire::kNaN;     ///< its centreline, + LEFT, square to its face
 };
 
-/// The camera saw the committed bay this recently (s): it is in the picture.
-constexpr double kInViewS = 1.0;
-
 /// CALL UNDER mu. Not ok with no committed bay or no fresh pose.
 BayView bayView(const Context & c)
 {
@@ -190,7 +187,6 @@ public:
     sp.slew_us_s = in("slew_us_s", sp.slew_us_s);
     sp.min_range_m = in("min_range_m", 0.6);
     sp.square_first_deg = in("square_first_deg", sp.square_first_deg);
-    const double set_h = in("heading_deg", fire::kNaN);
     const bool lidar = getInput<bool>("use_lidar").value_or(true);
 
     fire::StrafeCmd cmd;
@@ -222,7 +218,7 @@ public:
         if (src == "bay") {si.range_rate = rate(si.range_m, prev_.range_m, prev_.range_rate);}
         si.lat_rate = rate(si.lat_err_m, prev_.lat_err_m, prev_.lat_rate);
       }
-      const double square = b.ok ? b.square_deg : set_h;
+      const double square = b.ok ? b.square_deg : dockHeading(*ctx_, in("heading_deg", fire::kNaN));
       if (std::isfinite(square) && std::isfinite(ctx_->heading_deg)) {
         si.yaw_err_deg = fire::wrap180(square - ctx_->heading_deg);
       }
@@ -395,15 +391,18 @@ public:
       if (!b.ok) {
         why = "no bay or no pose: waiting";
       } else {
-        const double square = std::isfinite(b.square_deg) ? b.square_deg : in("heading_deg", 0.0);
+        const double square = std::isfinite(b.square_deg) ? b.square_deg :
+          dockHeading(*ctx_, in("heading_deg", fire::kNaN));
         const double off = fire::wrap180(square - ctx_->heading_deg);   // + = turn right
         const double rate = ctx_->yaw_rate_dps;
         yaw_us = fire::axisLaw(off, std::isfinite(rate) ? -rate : fire::kNaN, in("kp_yaw", 4.0),
           in("kd_yaw", 3.0), 3.0, min_us, in("max_yaw_us", 80.0));
-        off_c = b.off_centre_m;                                // + = the centreline is LEFT
-        lat_us = -fire::axisLaw(off_c, fire::kNaN, in("kp_lat", 100.0), 0.0, 0.05, min_us, fwd_us);
+        // in view: what the camera sees now (no heading in it); else the remembered place
         const dock::BayTrack * t = ctx_->dock.find(ctx_->chosen_track);
-        const bool in_view = ctx_->dock_t - t->last_seen <= kInViewS;
+        const bool in_view = inView(*ctx_, *t) && std::isfinite(t->live_left_m);
+        off_c = in_view ? t->live_left_m : b.off_centre_m;     // + = the centreline is LEFT
+        if (in_view && !getInput<bool>("use_lidar").value_or(true)) {range = t->live_ahead_m;}
+        lat_us = -fire::axisLaw(off_c, fire::kNaN, in("kp_lat", 100.0), 0.0, 0.05, min_us, fwd_us);
         if (std::isfinite(range) && range <= in("handover_m", 1.8)) {
           done = true;
         } else if (std::fabs(off_c) > in("centre_tol_m", 0.25)) {
@@ -568,8 +567,9 @@ public:
 
   BT::NodeStatus onStart() override
   {
-    const double set_h = getInput<double>("heading_deg").value_or(fire::kNaN);
+    const double port_h = getInput<double>("heading_deg").value_or(fire::kNaN);
     std::lock_guard<std::mutex> lk(ctx_->mu);
+    const double set_h = dockHeading(*ctx_, port_h);
     if (!ctx_->pose_fresh || !ctx_->origin_set || !std::isfinite(ctx_->heading_deg)) {
       RCLCPP_WARN(log(), "StrafeSearch: no pose or heading to slide by");
       return BT::NodeStatus::FAILURE;

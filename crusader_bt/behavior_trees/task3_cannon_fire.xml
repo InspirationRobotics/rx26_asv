@@ -11,13 +11,12 @@
                  the 2-colour code -> resource delivery report
 
   No timeouts: only the pilot's switches end it (SC out of MANUAL, or SD); SB is the
-  e-stop. use_lidar / dock_heading as in task3_scan_fire.xml.
+  e-stop. use_lidar and the dock heading as in task3_scan_fire.xml.
 -->
 <root BTCPP_format="4" main_tree_to_execute="CannonFire">
   <BehaviorTree ID="CannonFire">
     <Sequence>
       <Script code="use_lidar := false"/>
-      <Script code="dock_heading := 290.0"/>
       <ReactiveSequence name="manual">
         <ModeIs mode="MANUAL"/>
         <NotDropped/>
@@ -32,7 +31,7 @@
             </Fallback>
           </RetryUntilSuccessful>
           <ReactiveSequence name="docked">
-            <StrafeKeep fire_range_m="1.2" heading_deg="{dock_heading}" use_lidar="{use_lidar}"
+            <StrafeKeep fire_range_m="1.2" use_lidar="{use_lidar}"
                         deadband_range_m="0.05" deadband_lat_m="0.04" deadband_yaw_deg="3.0"
                         kp_fwd="90" kd_fwd="60" kp_lat="100" kd_lat="200" kp_yaw="5" kd_yaw="0.5"
                         ki_fwd="40" ki_lat="10" i_max_us="100"

@@ -102,6 +102,7 @@ public:
     action_name_ = declare_parameter<std::string>("action_name", "/crsd/run_mission");
     tick_hz_ = declare_parameter<double>("tick_hz", 10.0);
     default_timeout_s_ = declare_parameter<double>("default_timeout_s", 600.0);
+    declare_parameter<double>("dock_heading_deg", -1.0);   // live: the GCS sets it, read per goal
     mode_grace_s_ = declare_parameter<double>("mode_grace_s", 3.0);
     stream_timeout_s_ = declare_parameter<double>("stream_timeout_s", 1.0);
     assoc_radius_m_ = declare_parameter<double>("assoc_radius_m", 5.0);
@@ -988,6 +989,7 @@ private:
       resetFire(*ctx_);
       goal_mode_ = ctx_->mode;
       ctx_->handed_mode.clear();
+      ctx_->dock_heading = get_parameter("dock_heading_deg").as_double();
       // "Home" is where THIS attempt started, not the autopilot's HOME.
       ctx_->home = ctx_->boat;
       ctx_->have_home = ctx_->pose_fresh;

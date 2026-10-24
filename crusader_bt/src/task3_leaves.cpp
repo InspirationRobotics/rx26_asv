@@ -345,7 +345,11 @@ public:
       v.min_share = getInput<double>("min_share").value_or(v.min_share);
       const dock::BayTrack * best = nullptr;
       for (const auto & t : ctx_->dock.tracks) {
-        if (t.n < ctx_->dock_min_obs || dock::verdict(t, v) != dock::Verdict::Green) {continue;}
+        if (t.n < ctx_->dock_min_obs || dock::verdict(t, v) != dock::Verdict::Green ||
+          !inView(*ctx_, t))
+        {
+          continue;                 // only a GREEN bay the camera sees NOW
+        }
         if (best == nullptr || t.n > best->n) {best = &t;}
       }
       if (best == nullptr) {return BT::NodeStatus::FAILURE;}
