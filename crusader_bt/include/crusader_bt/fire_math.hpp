@@ -1,44 +1,26 @@
-// fire_math.hpp — the fixed-nozzle shot: hold a range and a heading, wait until
-// the boat is still, fire. Every number in it, and nothing else.
+// fire_math.hpp — Task 3 on the sticks (MANUAL): the docked hold and its gate. Every
+// number in it, and nothing else.
 //
 // Header-only, stdlib only, no ROS, no BehaviorTree.CPP (same contract as
 // nav_math.hpp), so it runs on a laptop in a second:
 //
 //     g++ -std=c++17 -O2 -I include -o t test/test_fire_math.cpp && ./t
 //
-// WHY A NOZZLE NEEDS ITS OWN MATHS. The Task 3 nozzle is fixed (~45 deg, no pan,
-// no tilt), so the boat IS the aim: its distance from the dock sets how high the
-// water lands and its heading sets how far left or right. tools/squirt_cal found
-// the range that hits a window; this file turns it into "drive this far, point
-// this way, and fire when you are still".
+//   the wall      /crsd/wall_range, median-filtered.
+//   steady        the hull's roll and pitch, and no thrust recently.
+//   the hold      the sticks toward: the bay's face at the firing range (surge), the
+//                 bay on the bow (sway), the bow square to the face (yaw). This OmniX
+//                 hull strafes in MANUAL, so the bow stays square and the boat slides.
+//   the gate      all of the above held for hold_s.
 //
-//   the wall      /crsd/wall_range, median-filtered and BLANKED while water is in
-//                 the air (spray returns LiDAR points short of the wall).
-//   the aim       heading so the stream's line passes through the window.
-//   the keep      signed speed toward the firing range. A BANDED law: ArduRover's
-//                 speed loop is untuned below ~0.2 m/s, so a small command does
-//                 nothing or overshoots; zero inside the band, at least v_min outside.
-//   steady        the hull's roll and pitch, and no thrust recently (a degree of
-//                 pitch moves the hit ~2-3 cm).
-//   the gate      all of the above held for hold_s, then one burst.
-//
-// TWO WAYS TO HOLD THE SPOT. solveAim / stationKeep is for GUIDED heading + speed,
-// which cannot strafe: left/right aim is by TURNING. The strafe keep (below) is for
-// MANUAL on this OmniX hull: the bow stays square to the face and the boat SLIDES
-// until the window is on the nozzle's line, with left/right and square-up from the
-// CAMERA (it sees the window itself, the LiDAR only a wall that may not be flat)
-// and range from the LiDAR.
+// The pan/tilt cannon aims itself (telemetry_bridge, cannon_core): the boat only has to
+// face and centre the bay.
 //
 // CONVENTIONS (the same as dock_math):
 //
 //   Heading is compass degrees, clockwise from north. Body frame is REP-103:
 //   x FORWARD, y LEFT, so "turn left" makes the compass heading SMALLER.
-//   WallRange.angle_deg is the body bearing of the wall's nearest point, + LEFT:
-//   turning left by angle_deg squares the bow to the wall, so the wall's inward
-//   normal is at compass (heading - angle_deg).
-//   WallRange.lat_m is the boat's offset from the slip centre, + LEFT. A window's
-//   lateral position is from the face centre, + LEFT (the upper-left window is
-//   +0.22 m), the same sign as squirt_cal's target_lat_m.
+//   WallRange.angle_deg is the body bearing of the wall's nearest point, + LEFT.
 #ifndef CRUSADER_BT__FIRE_MATH_HPP_
 #define CRUSADER_BT__FIRE_MATH_HPP_
 
@@ -183,90 +165,6 @@ private:
   double last_valid_t_ = -1.0;
 };
 
-// ------------------------------------------------------------------ the aim
-
-enum class Lateral {Fingers, Camera, Centreline};
-
-inline Lateral lateralFromName(const std::string & s)
-{
-  if (s == "fingers") {return Lateral::Fingers;}
-  if (s == "cv" || s == "camera") {return Lateral::Camera;}
-  return Lateral::Centreline;
-}
-
-struct AimParams
-{
-  double fire_range_m = 3.22;   // the calibrated wall range for this window (squirt_cal)
-  double window_lat_m = 0.22;   // the window from the face centre, + LEFT (UL = +0.22)
-  double yaw_bias_deg = 0.0;    // calibrated: + aims further LEFT (the stream's own skew)
-  double cam_x_m = 0.37;        // camera ahead of the body origin (for the CV bearing)
-  double max_aim_deg = 20.0;    // refuse an aim wider than this: something is wrong
-};
-
-struct Aim
-{
-  bool ok = false;
-  double range_target_m = kNaN;   // corrected for the yaw
-  double heading_deg = kNaN;      // compass heading that puts the stream on the window
-  double aim_left_deg = kNaN;     // how far left of the wall normal that is
-  std::string source;
-  std::string why;
-};
-
-// Where to point and how far to stand off.
-//
-// The nozzle is on the boat's centreline, so the stream follows it. Turned LEFT of
-// the wall normal by psi, that line meets the wall r*tan(psi) left of the body
-// origin's foot; to put it on a window `ahead_left` metres left of the foot,
-// psi = atan(ahead_left / r). The calibration was shot roughly square on (horizontal
-// run ~r_cal); turned by psi the run is r/cos(psi), so keep it by standing at
-// r_cal*cos(psi).
-//
-//   fingers      ahead_left = window_lat - lat_now   (the LiDAR's offset in
-//                the slip: the same number the calibration logged)
-//   camera       the window's bearing b in the camera frame (+ left). It sits
-//                (r - cam_x)*tan(b) left of the CURRENT centreline, so the
-//                turn is relative to the current heading, not the normal
-//   centreline   assume the boat is on the slip centreline: ahead_left = window_lat
-inline Aim solveAim(
-  const AimParams & p, Lateral mode, double range_m, double inward_deg,
-  double heading_now_deg, double lat_now_m, double window_bearing_deg)
-{
-  Aim a;
-  if (!std::isfinite(range_m) || range_m <= 0.3) {a.why = "no wall range"; return a;}
-  if (!std::isfinite(inward_deg)) {a.why = "no wall bearing"; return a;}
-  double psi = kNaN;                      // left of the wall normal, degrees
-  if (mode == Lateral::Camera) {
-    if (!std::isfinite(window_bearing_deg)) {a.why = "window not in view"; return a;}
-    if (!std::isfinite(heading_now_deg)) {a.why = "no heading"; return a;}
-    const double y = (range_m - p.cam_x_m) * std::tan(window_bearing_deg * kDeg);
-    const double turn_left = std::atan2(y, range_m) / kDeg + p.yaw_bias_deg;
-    const double target = wrap360(heading_now_deg - turn_left);
-    psi = wrap180(inward_deg - target);
-    a.source = "camera";
-  } else {
-    double ahead_left = p.window_lat_m;
-    if (mode == Lateral::Fingers) {
-      if (!std::isfinite(lat_now_m)) {a.why = "no slip fingers in view"; return a;}
-      ahead_left -= lat_now_m;
-      a.source = "fingers";
-    } else {
-      a.source = "centreline";
-    }
-    psi = std::atan2(ahead_left, range_m) / kDeg + p.yaw_bias_deg;
-  }
-  if (std::fabs(psi) > p.max_aim_deg) {
-    a.why = "aim of " + std::to_string(static_cast<int>(std::lround(psi))) +
-      " deg is too wide";
-    return a;
-  }
-  a.aim_left_deg = psi;
-  a.heading_deg = wrap360(inward_deg - psi);
-  a.range_target_m = p.fire_range_m * std::cos(psi * kDeg);
-  a.ok = true;
-  return a;
-}
-
 // ------------------------------------------------------------------ the cross-check
 
 // The perpendicular distance from a point (the boat) to a face plane, given a
@@ -274,90 +172,6 @@ inline Aim solveAim(
 inline double planeDistance(double be, double bn, double pe, double pn, double oe, double on)
 {
   return (be - pe) * oe + (bn - pn) * on;
-}
-
-// Do the LiDAR and the camera agree on how far the dock is? The wall fit's likeliest
-// mistake is to lock onto the slip FINGER TIPS (nearer and denser than the deck edge)
-// and read ~finger_len (2 m) short, or onto something behind the dock; the camera's
-// dock book places the faces independently. No camera range = no check (NaN agrees).
-// tol <= 0 turns it off.
-inline bool rangesAgree(double lidar_m, double camera_m, double tol_m)
-{
-  if (!(tol_m > 0.0) || !std::isfinite(camera_m)) {return true;}
-  return std::isfinite(lidar_m) && std::fabs(lidar_m - camera_m) <= tol_m;
-}
-
-// ------------------------------------------------------------------ the keep
-
-struct KeepParams
-{
-  double deadband_m = 0.05;     // inside this of the target: no thrust at all
-  double kp = 0.6;              // m/s per m of error, above v_min
-  double v_min = 0.12;          // the least speed ArduRover acts on reliably
-  double v_max_fwd = 0.25;
-  double v_max_rev = 0.25;
-  double accel = 0.25;          // m/s^2: gentle, because thrust rocks the hull
-  double min_range_m = 1.5;     // never drive FORWARD closer than this
-  double turn_first_deg = 10.0; // heading error above this: turn, don't drive
-};
-
-struct KeepCmd
-{
-  double heading_deg = kNaN;
-  double speed_mps = 0.0;       // + forward (closer), - astern
-  std::string why;
-};
-
-// Which heading the keep holds: SQUARE to the wall (its inward normal) while more
-// than square_m from the firing range, the aim heading inside that. Driving the whole
-// approach on the aim heading walks the boat sideways (4 m at 2-4 degrees is 15-25 cm,
-// over half a window) and, from far out, the fingers are not in view to aim with.
-inline double keepHeading(
-  const Aim & a, double inward_deg, double range_m, double fire_range_m, double square_m)
-{
-  if (std::isfinite(inward_deg) && std::isfinite(range_m) &&
-    std::fabs(range_m - fire_range_m) > square_m)
-  {
-    return inward_deg;
-  }
-  return a.ok ? a.heading_deg : kNaN;
-}
-
-// Signed speed toward the range target. `prev_speed` and `dt` bound the change
-// (the slew), so no tick ever asks for a jump in thrust.
-inline KeepCmd stationKeep(
-  const KeepParams & p, double range_m, double target_m, double heading_now_deg,
-  double heading_target_deg, double prev_speed, double dt)
-{
-  KeepCmd c;
-  c.heading_deg = heading_target_deg;
-  double want = 0.0;
-  const double err = range_m - target_m;              // + = too far out
-  const double herr = std::isfinite(heading_now_deg) && std::isfinite(heading_target_deg) ?
-    std::fabs(wrap180(heading_target_deg - heading_now_deg)) : 999.0;
-  if (!std::isfinite(err)) {
-    c.why = "no range";
-  } else if (herr > p.turn_first_deg) {
-    c.why = "turning first";
-  } else if (std::fabs(err) <= p.deadband_m) {
-    c.why = "in the band";
-  } else {
-    const double mag = std::max(p.v_min, p.kp * std::fabs(err));
-    want = err > 0 ? std::min(mag, p.v_max_fwd) : -std::min(mag, p.v_max_rev);
-    c.why = err > 0 ? "closing in" : "backing off";
-    if (want > 0 && range_m <= p.min_range_m) {
-      want = 0.0;
-      c.why = "at the minimum range";
-    }
-  }
-  // Slew-limit only a GROWING speed; less is allowed at once (the autopilot
-  // brakes at its own ATC_ACCEL_MAX), so the floor is never ramped through.
-  const double step = std::max(0.0, p.accel * dt);
-  if (want * prev_speed < 0.0) {c.speed_mps = std::clamp(want, -step, step);}
-  else if (std::fabs(want) <= std::fabs(prev_speed)) {c.speed_mps = want;}
-  else {c.speed_mps = std::clamp(want, prev_speed - step, prev_speed + step);}
-  if (std::fabs(c.speed_mps) < 1e-6) {c.speed_mps = 0.0;}
-  return c;
 }
 
 // ------------------------------------------------------------------ steady
@@ -449,103 +263,6 @@ private:
   std::deque<A> att_;
   double last_thrust_t_ = -1.0;
 };
-
-// ------------------------------------------------------------------ the camera, for the strafe keep
-
-// A number over time: medians, a least-squares slope, an age. Compass
-// headings go in `circular` series so 359 and 1 are 2 degrees apart.
-class Series
-{
-public:
-  explicit Series(bool circular = false) : circular_(circular) {}
-
-  void add(double t, double v)
-  {
-    if (!std::isfinite(v)) {return;}
-    buf_.push_back({t, v});
-    while (!buf_.empty() && buf_.front().first < t - 10.0) {buf_.pop_front();}
-  }
-
-  double age(double now) const
-  {
-    return buf_.empty() ? std::numeric_limits<double>::infinity() : now - buf_.back().first;
-  }
-
-  double median(double now, double window) const
-  {
-    std::vector<double> v;
-    const double ref = buf_.empty() ? 0.0 : buf_.back().second;
-    for (const auto & s : buf_) {
-      if (s.first >= now - window && s.first <= now + 1e-9) {
-        v.push_back(circular_ ? wrap180(s.second - ref) : s.second);
-      }
-    }
-    if (v.empty()) {return kNaN;}
-    const double m = fire::median(v);
-    return circular_ ? wrap360(ref + m) : m;
-  }
-
-  double slope(double now, double window) const   // per second; not for circular
-  {
-    double st = 0, sv = 0, stt = 0, stv = 0; int n = 0;
-    for (const auto & s : buf_) {
-      if (s.first < now - window || s.first > now + 1e-9) {continue;}
-      const double t = s.first - now;
-      st += t; sv += s.second; stt += t * t; stv += t * s.second; ++n;
-    }
-    if (n < 4) {return kNaN;}
-    const double den = n * stt - st * st;
-    return std::fabs(den) < 1e-12 ? kNaN : (n * stv - st * sv) / den;
-  }
-
-  void reset() {buf_.clear();}
-
-private:
-  bool circular_;
-  std::deque<std::pair<double, double>> buf_;
-};
-
-struct P3 {double x = kNaN, y = kNaN, z = kNaN;};
-
-// camera_link -> base_link. The camera frame is REP-103 (x along the optical
-// axis, y left, z up), pitched by `pitch_deg` (+ = aimed DOWN, as dock::Mount)
-// and yawed by `yaw_deg` (+ = aimed LEFT), with its origin at (mx, my) in the
-// body. `point` false rotates a DIRECTION (a plane normal) without moving it.
-inline P3 camToBody(
-  const P3 & c, double mx, double my, double yaw_deg, double pitch_deg, bool point = true)
-{
-  const double p = pitch_deg * kDeg, y = yaw_deg * kDeg;
-  const double xl = c.x * std::cos(p) + c.z * std::sin(p);     // undo the pitch
-  const double zl = -c.x * std::sin(p) + c.z * std::cos(p);
-  P3 b;
-  b.x = xl * std::cos(y) - c.y * std::sin(y);                  // undo the yaw
-  b.y = xl * std::sin(y) + c.y * std::cos(y);
-  b.z = zl;
-  if (point) {b.x += mx; b.y += my;}
-  return b;
-}
-
-// How far to turn LEFT (deg) to square the bow to the face, from the two
-// windows of ONE bay in ONE frame, in the body frame: square on, the upper-
-// left window is straight LEFT of the lower-right one. NaN if their spacing
-// is not the face's (expect_m +- tol_m): then one of them is not what the
-// detector says it is.
-inline double squareFromWindows(
-  double ulx, double uly, double lrx, double lry, double expect_m, double tol_m)
-{
-  const double dx = ulx - lrx, dy = uly - lry;
-  const double sep = std::hypot(dx, dy);
-  if (!std::isfinite(sep) || std::fabs(sep - expect_m) > tol_m || dy <= 0.0) {return kNaN;}
-  return std::atan2(-dx, dy) / kDeg;
-}
-
-// The same, from the face's plane normal in the body frame (pointing AT the
-// camera, as DockBay has it): square on it is (-1, 0).
-inline double squareFromNormal(double nx, double ny)
-{
-  if (!std::isfinite(nx) || !std::isfinite(ny) || -nx < 0.5) {return kNaN;}
-  return std::atan2(-ny, -nx) / kDeg;
-}
 
 // ------------------------------------------------------------------ the strafe keep (MANUAL)
 
@@ -726,31 +443,6 @@ inline bool inBand(double range_m, double target_m, double tol_m)
 {
   return std::isfinite(range_m) && std::isfinite(target_m) && std::fabs(range_m - target_m) <= tol_m;
 }
-
-inline bool aimed(double heading_deg, double target_deg, double tol_deg)
-{
-  return std::isfinite(heading_deg) && std::isfinite(target_deg) &&
-         std::fabs(wrap180(target_deg - heading_deg)) <= tol_deg;
-}
-
-// Shots fired, and when the next may go. `blank_until` is when the wall filter
-// may trust the LiDAR again: the burst plus the water's flight.
-struct BurstBook
-{
-  int fired = 0;
-  double last_end_t = -1e18;
-
-  bool ready(double t, double gap_s) const {return t - last_end_t >= gap_s;}
-
-  // returns blank_until
-  double record(double t_start, double duration_s, double flight_s)
-  {
-    ++fired;
-    last_end_t = t_start + duration_s;
-    return t_start + duration_s + flight_s;
-  }
-  void reset() {fired = 0; last_end_t = -1e18;}
-};
 
 }  // namespace fire
 }  // namespace crusader_bt

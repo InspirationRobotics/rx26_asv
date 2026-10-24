@@ -165,29 +165,17 @@ struct Context
   bool fire_pump = false;
   std::uint32_t pump_seq = 100000;            ///< the tree's burst numbering
   // written by the fire leaves
-  fire::Aim aim;                              ///< StationKeep's latest solution
-  fire::BurstBook bursts;
   double cmd_speed = 0.0;                     ///< the last speed StationKeep asked for
   double last_keep_t = -1.0;
   /// Set by StationKeep on every tick it commands; the runner sends STOP when it
   /// stops being set (stopIfSilent).
   bool hs_commanded = false;
 
-  // ---- the strafe keep (MANUAL; fire_math's second half) ----
-  // The camera's windows of the bay ahead, in the BODY frame, per
-  // DockWindow.index (0 = upper-left, 1 = lower-right), stamped on now_s's
-  // clock at receipt (ingestFireWindows). And the compass heading that squares
-  // the bow to that face, from the two windows (or the face plane).
-  fire::Series fire_win_x[2];
-  fire::Series fire_win_y[2];
-  fire::Series face_heading{true};
-  std::string face_src;                       ///< "windows" / "plane": the last source
-  double face_target = fire::kNaN;            ///< the last good square heading, held
+  // ---- the docked hold (MANUAL, StrafeKeep): the committed bay, on the sticks ----
   double yaw_rate_dps = fire::kNaN;           ///< ATTITUDE.yawspeed, + = turning right
   fire::StrafeState strafe_state;             ///< the keep's slew and integrators
   fire::StrafeInputs strafe_in;               ///< what the keep saw last tick, for the gate
   fire::StrafeCmd strafe;                     ///< ... and what it made of it
-  std::string strafe_block;                   ///< non-empty: the keep refuses (why)
   double last_strafe_t = -1.0;
   /// Set by StrafeKeep on every tick it commands the sticks; the runner RELEASES
   /// them when it stops being set.
@@ -661,62 +649,16 @@ inline void ingestAttitude(
   c.yaw_rate_dps = yaw_rate * d;     // NED yaw rate: + = clockwise = turning right
 }
 
-/// The strafe keep's view of one DockObservation. CALL UNDER ctx.mu, after
-/// ingestDockObservation, with `t` on now_s's clock (the frame's own stamp is
-/// another clock). Takes the bay nearest the bow with a positioned window, puts
-/// its windows into the body frame, and derives the heading that squares the bow
-/// to it: from both windows at the face's spacing, else the face plane's normal.
-inline void ingestFireWindows(Context & c, double t, const dock::Frame & f)
-{
-  constexpr double kFaceSepM = 0.45, kFaceSepTolM = 0.15;   // UL-LR, build guide
-  const dock::BaySighting * best = nullptr;
-  for (const auto & b : f.bays) {
-    bool any = false;
-    for (const auto & w : b.windows) {any = any || (w.has_position && w.index >= 0 && w.index <= 1);}
-    if (!any) {continue;}
-    if (best == nullptr || std::fabs(b.bearing_deg) < std::fabs(best->bearing_deg)) {best = &b;}
-  }
-  if (best == nullptr) {return;}
-  const auto & m = c.cam_mount;
-  fire::P3 body[2];
-  bool have[2] = {false, false};
-  for (const auto & w : best->windows) {
-    if (!w.has_position || w.index < 0 || w.index > 1) {continue;}
-    body[w.index] = fire::camToBody(fire::P3{w.x, w.y, w.z}, m.x, m.y, m.yaw_deg, m.pitch_deg);
-    have[w.index] = true;
-    c.fire_win_x[w.index].add(t, body[w.index].x);
-    c.fire_win_y[w.index].add(t, body[w.index].y);
-  }
-  if (!std::isfinite(c.heading_deg)) {return;}
-  double left = fire::kNaN;
-  if (have[0] && have[1]) {
-    left = fire::squareFromWindows(body[0].x, body[0].y, body[1].x, body[1].y,
-        kFaceSepM, kFaceSepTolM);
-    if (std::isfinite(left)) {c.face_src = "windows";}
-  }
-  if (!std::isfinite(left) && best->has_normal) {
-    const fire::P3 n = fire::camToBody(fire::P3{best->nx, best->ny, best->nz}, 0, 0,
-        m.yaw_deg, m.pitch_deg, false);
-    left = fire::squareFromNormal(n.x, n.y);
-    if (std::isfinite(left)) {c.face_src = "plane";}
-  }
-  if (std::isfinite(left)) {c.face_heading.add(t, fire::wrap360(c.heading_deg - left));}
-}
-
 /// Forget the last attempt's shots. Called at goal start with resetTask3.
 inline void resetFire(Context & c)
 {
-  c.aim = fire::Aim{};
-  c.bursts.reset();
   c.cmd_speed = 0.0;
   c.last_keep_t = -1.0;
   c.hs_commanded = false;
   c.strafe_state = fire::StrafeState{};
   c.strafe = fire::StrafeCmd{};
   c.strafe_in = fire::StrafeInputs{};
-  c.strafe_block.clear();
   c.last_strafe_t = -1.0;
-  c.face_target = fire::kNaN;
   c.sticks_commanded = false;
 }
 

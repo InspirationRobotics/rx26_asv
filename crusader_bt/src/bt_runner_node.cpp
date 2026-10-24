@@ -648,7 +648,6 @@ private:
     // Freshness at THIS instant: ingest places bays only on a fresh pose.
     ctx_->pose_fresh = ctx_->origin_set && (t - pose_t_).seconds() < stream_timeout_s_;
     ingestDockObservation(*ctx_, f);
-    ingestFireWindows(*ctx_, nowS(), f);
     dock_t_ = t;
     have_dock_ = true;
   }
