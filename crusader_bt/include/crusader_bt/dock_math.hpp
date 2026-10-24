@@ -319,6 +319,7 @@ struct BayTrack
   /// body origin, m): no heading in it, so no heading error either.
   double live_ahead_m = std::numeric_limits<double>::quiet_NaN();
   double live_left_m = std::numeric_limits<double>::quiet_NaN();
+  bool live_truncated = false;           ///< that sighting's face was cut by the image edge
   int lit_window_index = -1;
   double windows_t = -1.0;
 
@@ -420,6 +421,7 @@ struct DockBook
       fold(tracks[pr.ti], f.bays[pl.i], pl.q, pl.r, cam, heading_deg, m, f.t);
       tracks[pr.ti].live_ahead_m = m.x + pl.fb.x;
       tracks[pr.ti].live_left_m = m.y + pl.fb.y;
+      tracks[pr.ti].live_truncated = f.bays[pl.i].truncated;
       out[pl.i] = tracks[pr.ti].id;
     }
     // Unmatched: a new bay, unless the face is cut off (its centre is biased

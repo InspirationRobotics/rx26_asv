@@ -366,6 +366,7 @@ private:
       case PoseEvent::Tracked:
         break;
     }
+    ctx_->boat_t = nowS();
     pose_t_ = now();
   }
 

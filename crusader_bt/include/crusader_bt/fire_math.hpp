@@ -31,6 +31,8 @@
 #include <string>
 #include <vector>
 
+#include "crusader_bt/nav_math.hpp"
+
 namespace crusader_bt
 {
 namespace fire
@@ -418,6 +420,83 @@ inline StrafeCmd strafeKeep(
   c.sticks.yaw_us = slew(want.yaw_us, prev.yaw_us);
   st.prev = c.sticks;
   return c;
+}
+
+// ------------------------------------------------------------------ the bay, remembered
+//
+// The camera sees the committed bay at 1-15 fps, ~0.2 s late, and not at all once it is
+// off the edge of the picture or the face fills it. The boat's own track (/crsd/pose,
+// 20 Hz) is none of those. So each sighting is PINNED in the local frame (boat + heading
+// x the body offset) and averaged there, where the bay does not move, and the error is
+// the bay against where the boat is NOW, in the DOCK's frame:
+//   * bow wobble is no longer the bay sliding sideways (in the body frame it is ~9 cm a
+//     degree at 5 m, and the lateral loop chased it);
+//   * the rate is the boat's own velocity, not a difference of two late camera frames;
+//   * out of the picture the boat keeps centring on where it saw the bay, for keep_s.
+
+/// The bay's place in the local frame from its camera sightings: an average weighted to
+/// the newest (time constant tau_s), so a long gap ends on the new sighting.
+struct BayFix
+{
+  double tau_s = 0.5;
+  bool have = false;
+  nav::Vec2 p;                   // local frame, m
+  double t = -1e18;              // the newest sighting, on the caller's clock
+
+  void sight(nav::Vec2 q, double now)
+  {
+    if (!have) {
+      p = q;
+    } else {
+      const double a = 1.0 - std::exp(-std::clamp(now - t, 0.0, 5.0 * tau_s) / tau_s);
+      p = p + (q - p) * a;
+    }
+    have = true;
+    t = now;
+  }
+  double age(double now) const {return have ? now - t : kNaN;}
+};
+
+/// The boat's velocity (local frame, m/s) from its 20 Hz fixes, low-passed (tau_s). A fix
+/// seen again is ignored; a gap over 1 s starts it over.
+struct VelocityFilter
+{
+  double tau_s = 0.3;
+  bool valid = false;
+  nav::Vec2 v;
+
+  void feed(nav::Vec2 q, double t)
+  {
+    if (have_ && t <= t_) {return;}
+    if (have_ && t - t_ <= 1.0) {
+      const double dt = t - t_;
+      const nav::Vec2 vi = (q - p_) * (1.0 / dt);
+      v = valid ? v + (vi - v) * (1.0 - std::exp(-dt / tau_s)) : vi;
+      valid = true;
+    } else {
+      valid = false;
+      v = {};
+    }
+    have_ = true;
+    p_ = q;
+    t_ = t;
+  }
+
+private:
+  bool have_ = false;
+  nav::Vec2 p_;
+  double t_ = 0.0;
+};
+
+/// A local-frame vector in the dock's frame: along the dock heading (+ toward the dock)
+/// and across it (+ LEFT of that heading).
+struct DockFrame {double along = kNaN, left = kNaN;};
+
+inline DockFrame toDockFrame(nav::Vec2 d, double dock_heading_deg)
+{
+  if (!std::isfinite(dock_heading_deg)) {return {};}
+  const nav::Vec2 f = nav::headingVec(dock_heading_deg);
+  return {nav::dot(d, f), nav::dot(d, nav::portOf(f))};
 }
 
 // ------------------------------------------------------------------ the gate

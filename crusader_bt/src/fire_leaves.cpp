@@ -34,20 +34,34 @@ namespace crusader_bt
 namespace
 {
 
-/// The committed bay as the CAMERA sees it: its sightings in the body frame (ahead, left
-/// of the body origin, m), the median over the last second. No GPS and no heading in it.
-/// Feed it every tick, under mu. `seen` is false while the bay is out of the picture;
-/// `last_side` (+1 left, -1 right, 0 never seen) is where the camera saw it last.
+/// The committed bay as the camera sees it, and where it was seen. Feed it every tick,
+/// under mu, with the heading to square to (NaN: the bow's).
+///   seen              in the picture now (the 1 s rule, inView)
+///   ahead_m, left_m   the bay in the body frame (ahead, left of the body origin, m), the
+///                     median over the last second: no GPS and no heading. NaN unless seen.
+///   held              its place is known: pinned in the local frame from the camera's
+///                     sightings (fire::BayFix), the newest within kKeepS. Between frames
+///                     and out of the picture the boat's own 20 Hz track carries it.
+///   along_m, across_m the bay from the boat NOW, along the square heading (+ ahead) and
+///                     across it (+ left): bow wobble is not in them. NaN unless held.
+///   along_rate, across_rate  their rates, from the boat's own velocity (+ = growing).
+///   last_side         +1 left, -1 right, 0 never seen: where the camera saw it last.
 class CameraBay
 {
 public:
-  void feed(const Context & c)
+  void feed(const Context & c, double square_deg)
   {
     const dock::BayTrack * t = c.dock.find(c.chosen_track);
     if (c.chosen_track != track_) {*this = CameraBay{}; track_ = c.chosen_track;}
+    if (c.pose_fresh && c.boat_t >= 0.0) {vel_.feed(c.boat, c.boat_t);}
     if (t != nullptr && t->last_seen > last_t_ && std::isfinite(t->live_left_m)) {
       last_t_ = t->last_seen;
       hist_.push_back({t->last_seen, t->live_ahead_m, t->live_left_m});
+      // a face cut by the image edge has its centre pulled toward the middle: no place
+      if (!t->live_truncated && c.pose_fresh && std::isfinite(c.heading_deg)) {
+        fix_.sight(dock::bodyToWorld(c.boat, c.heading_deg, t->live_ahead_m, t->live_left_m),
+          c.now_s);
+      }
     }
     while (!hist_.empty() && c.dock_t - hist_.front().t > kWindowS) {hist_.pop_front();}
     seen = t != nullptr && inView(c, *t) && !hist_.empty();
@@ -59,18 +73,34 @@ public:
       left_m = fire::median(l);
       last_side = left_m >= 0.0 ? 1.0 : -1.0;
     }
+    const double square = std::isfinite(square_deg) ? square_deg : c.heading_deg;
+    const fire::DockFrame v = vel_.valid ? fire::toDockFrame(vel_.v, square) : fire::DockFrame{};
+    along_rate = -v.along;                      // the boat closing on the bay shrinks along_m
+    across_rate = -v.left;
+    held = c.pose_fresh && fix_.have && fix_.age(c.now_s) <= kKeepS && std::isfinite(square);
+    const fire::DockFrame e = held ? fire::toDockFrame(fix_.p - c.boat, square) : fire::DockFrame{};
+    along_m = e.along;
+    across_m = e.left;
   }
 
-  bool seen = false;
+  /// Seconds since the newest sighting that placed it (NaN: none).
+  double fixAge(double now) const {return fix_.age(now);}
+
+  bool seen = false, held = false;
   double ahead_m = fire::kNaN, left_m = fire::kNaN;
+  double along_m = fire::kNaN, across_m = fire::kNaN;
+  double along_rate = fire::kNaN, across_rate = fire::kNaN;
   double last_side = 0.0;
 
 private:
   static constexpr double kWindowS = 1.0;
+  static constexpr double kKeepS = 8.0;
   struct Sighting {double t, ahead, left;};
   std::deque<Sighting> hist_;
   double last_t_ = -1e18;
   int track_ = -1;
+  fire::BayFix fix_;
+  fire::VelocityFilter vel_;
 };
 
 // ---------------------------------------------------------------- guards

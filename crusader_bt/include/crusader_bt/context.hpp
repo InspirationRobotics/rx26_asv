@@ -67,6 +67,7 @@ struct Context
   bool autonomous = false;                    ///< mode in shared.autonomous_modes
   bool pose_fresh = false;
   nav::Vec2 boat;
+  double boat_t = -1.0;                       ///< now_s's clock when `boat` came in; -1 = never
   double heading_deg = std::nan("");          ///< NaN when GPS yaw is unresolved
   std::vector<nav::Buoy> buoys;               ///< FUSED: plan + tracker
   bool have_entry = false;
