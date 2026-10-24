@@ -144,6 +144,9 @@ struct Context
   // samples are stamped with.
   double now_s = 0.0;
   std::string mode;                           ///< the autopilot's mode, upper case
+  /// The mode this run switched to itself (RequestMode), "" = none: the goal's mode
+  /// changing to it is planned, not the pilot taking over. Cleared at goal start.
+  std::string handed_mode;
   /// /crsd/autonomy_drop (latched): the drop latch (ch9) has cut autonomy.
   /// Unknown counts as tripped: no message is not permission.
   bool drop_tripped = true;
@@ -278,6 +281,8 @@ struct Context
   std::function<void(double, double, double)> sticks;
   /// Hand every channel back to the pilot (an all-zero override).
   std::function<void()> release_sticks;
+  /// Ask the autopilot for a flight mode: /crsd/set_mode (RequestMode).
+  std::function<void(const std::string &)> request_mode;
 };
 
 using ContextPtr = std::shared_ptr<Context>;

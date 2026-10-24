@@ -171,6 +171,7 @@ public:
     // The sticks (MANUAL): telemetry_bridge forwards them only in MANUAL, only
     // on its override_channels, clamped, and releases them on silence.
     rc_pub_ = create_publisher<crusader_msgs::msg::RcChannels>("/crsd/rc_override", 10);
+    set_mode_pub_ = create_publisher<std_msgs::msg::String>("/crsd/set_mode", 10);
     // Obstacle avoidance. The hazards are the WHOLE known field, each message
     // replacing the last, so a late-starting costmap must get the current one:
     // latched, like the datum it is drawn in.
@@ -543,6 +544,11 @@ private:
           m.channels[ch - 1] = static_cast<uint16_t>(std::lround(stick_neutral_[i] + d));
         }
         rc_pub_->publish(m);
+      };
+    ctx_->request_mode = [this](const std::string & mode) {
+        std_msgs::msg::String m;
+        m.data = mode;
+        set_mode_pub_->publish(m);
       };
     ctx_->release_sticks = [this]() {
         crusader_msgs::msg::RcChannels m;
@@ -982,6 +988,7 @@ private:
       resetTask3(*ctx_);
       resetFire(*ctx_);
       goal_mode_ = ctx_->mode;
+      ctx_->handed_mode.clear();
       // "Home" is where THIS attempt started, not the autopilot's HOME.
       ctx_->home = ctx_->boat;
       ctx_->have_home = ctx_->pose_fresh;
@@ -1056,11 +1063,13 @@ private:
           } else {
             std::lock_guard<std::mutex> lk(ctx_->mu);
             // The pilot took it back = the mode CHANGED. A MANUAL tree is never "autonomous".
-            if (ctx_->mode != goal_mode_ || (!ctx_->autonomous && goal_mode_ != "MANUAL")) {
+            // A switch the tree made itself (RequestMode) is the mode it expects now.
+            const std::string want = ctx_->handed_mode.empty() ? goal_mode_ : ctx_->handed_mode;
+            if (ctx_->mode != want || (!ctx_->autonomous && want != "MANUAL")) {
               outcome = RunMission::Result::OUTCOME_NOT_AUTONOMOUS;
               detail = ctx_->mode.empty() ? std::string("no flight mode yet (no HEARTBEAT)") :
-                "flight mode " + (ctx_->mode != goal_mode_ ?
-                goal_mode_ + " -> " + ctx_->mode : ctx_->mode + " is not autonomous") +
+                "flight mode " + (ctx_->mode != want ?
+                want + " -> " + ctx_->mode : ctx_->mode + " is not autonomous") +
                 ": the pilot took control; not fighting for it";
             } else {
               outcome = RunMission::Result::OUTCOME_FAILURE;
@@ -1232,6 +1241,7 @@ private:
   std::vector<int64_t> stick_ch_, stick_neutral_;
   std::vector<bool> stick_reverse_;
   rclcpp::Publisher<crusader_msgs::msg::RcChannels>::SharedPtr rc_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr set_mode_pub_;
   double last_hs_heading_ = std::nan("");
   rclcpp::Publisher<crusader_msgs::msg::GuidedHeadingSpeed>::SharedPtr hs_pub_;
   rclcpp::Publisher<crusader_msgs::msg::PumpCommand>::SharedPtr pump_pub_;

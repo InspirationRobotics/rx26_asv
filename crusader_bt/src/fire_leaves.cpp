@@ -131,17 +131,19 @@ public:
   static BT::PortsList providedPorts()
   {
     return {BT::InputPort<double>("max_age_s", 1.0, "seconds without a VALID wall range"),
-      BT::InputPort<double>("or_camera_s", 0.0, "or a dock window seen this recently; 0 = off")};
+      BT::InputPort<double>("or_camera_s", 0.0, "or a dock window seen this recently; 0 = off"),
+      BT::InputPort<bool>("use_lidar", true, "false: the LiDAR wall does not count")};
   }
   BT::NodeStatus tick() override
   {
     const double max_age = getInput<double>("max_age_s").value_or(1.0);
     const double cam = getInput<double>("or_camera_s").value_or(0.0);
+    const bool lidar = getInput<bool>("use_lidar").value_or(true);
     std::lock_guard<std::mutex> lk(ctx_->mu);
     const double now = ctx_->now_s;
     const bool seen = cam > 0.0 &&
       std::min(ctx_->fire_win_x[0].age(now), ctx_->fire_win_x[1].age(now)) <= cam;
-    return ctx_->wall.valid_age(now) <= max_age || seen ? BT::NodeStatus::SUCCESS :
+    return (lidar && ctx_->wall.valid_age(now) <= max_age) || seen ? BT::NodeStatus::SUCCESS :
            BT::NodeStatus::FAILURE;
   }
 };
@@ -545,6 +547,7 @@ public:
       BT::InputPort<double>("i_max_us", 80.0, "integral cap"),
       BT::InputPort<std::string>("range_fallback", "",
         "camera = with no LiDAR wall, the range is the camera's to the window"),
+      BT::InputPort<bool>("use_lidar", true, "false: ignore the LiDAR wall (camera only)"),
     };
   }
 
@@ -579,8 +582,10 @@ public:
       std::lock_guard<std::mutex> lk(ctx_->mu);
       const double now = ctx_->now_s;
       heading_now = ctx_->heading_deg;
-      si.range_m = ctx_->wall.range(now);
-      si.range_rate = ctx_->wall.rate(now);
+      if (getInput<bool>("use_lidar").value_or(true)) {
+        si.range_m = ctx_->wall.range(now);
+        si.range_rate = ctx_->wall.rate(now);
+      }
       const bool fresh = ctx_->fire_win_y[widx].age(now) <= cam_to;
       const double wx = fresh ? ctx_->fire_win_x[widx].median(now, 0.6) : fire::kNaN;
       const double wy = fresh ? ctx_->fire_win_y[widx].median(now, 0.6) : fire::kNaN;
@@ -770,6 +775,253 @@ public:
   }
 };
 
+// ---------------------------------------------------------------- the waypoint run
+
+/// The run's OWN switch from `from` (GUIDED) to `mode` (MANUAL), for the waypoint run:
+/// GUIDED cannot strafe on this hull, so everything after the waypoint is MANUAL on the
+/// sticks. Only FROM `from`: it never takes a mode the pilot chose. Asks on
+/// /crsd/set_mode twice a second until the autopilot reports `mode`; FAILURE after
+/// timeout_s or if the mode turns into anything else. Moving SC still takes the boat
+/// back (the next ModeIs ends the run). Shadow (publish_setpoints off): asks nothing and
+/// waits for the pilot to switch.
+class RequestMode : public CrusaderAction
+{
+public:
+  RequestMode(const std::string & n, const BT::NodeConfig & c) : CrusaderAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<std::string>("mode", "MANUAL", "the mode to switch to"),
+      BT::InputPort<std::string>("from", "GUIDED", "only from this mode"),
+      BT::InputPort<double>("timeout_s", 10.0, "give up after this")};
+  }
+
+  BT::NodeStatus onStart() override
+  {
+    want_ = upper(getInput<std::string>("mode").value_or("MANUAL"));
+    from_ = upper(getInput<std::string>("from").value_or("GUIDED"));
+    std::string mode;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      t0_ = ctx_->now_s;
+      mode = ctx_->mode;
+      shadow_ = !ctx_->publish_setpoints;
+      ctx_->task3_phase = "SWITCHING TO " + want_;
+    }
+    if (mode != want_ && mode != from_) {
+      RCLCPP_WARN(log(), "RequestMode: the mode is %s, not %s: not switching a mode the "
+        "pilot chose", mode.c_str(), from_.c_str());
+      return BT::NodeStatus::FAILURE;
+    }
+    RCLCPP_INFO(log(), "switching %s -> %s%s", from_.c_str(), want_.c_str(),
+      shadow_ ? " [shadow: not asking; waiting for the pilot]" : "");
+    last_ask_ = -1e18;
+    return onRunning();
+  }
+
+  BT::NodeStatus onRunning() override
+  {
+    double now = 0.0;
+    std::string mode;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      now = ctx_->now_s;
+      mode = ctx_->mode;
+      if (mode == want_) {ctx_->handed_mode = want_;}   // planned, not the pilot taking over
+    }
+    if (mode == want_) {
+      RCLCPP_INFO(log(), "mode is %s after %.1f s", want_.c_str(), now - t0_);
+      return BT::NodeStatus::SUCCESS;
+    }
+    if (mode != from_ || now - t0_ > getInput<double>("timeout_s").value_or(10.0)) {
+      RCLCPP_WARN(log(), "RequestMode: %s after %.0f s, not %s", mode.c_str(),
+        now - t0_, want_.c_str());
+      return BT::NodeStatus::FAILURE;
+    }
+    if (!shadow_ && now - last_ask_ >= 0.5 && ctx_->request_mode) {
+      last_ask_ = now;
+      ctx_->request_mode(want_);
+    }
+    return BT::NodeStatus::RUNNING;
+  }
+
+  void onHalted() override {}
+
+private:
+  static std::string upper(std::string s)
+  {
+    for (auto & ch : s) {ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));}
+    return s;
+  }
+
+  std::string want_, from_;
+  double t0_ = 0.0, last_ask_ = 0.0;
+  bool shadow_ = false;
+};
+
+/// Slide along the dock, bow square to its faces and at least min_out_m out, looking
+/// for the GREEN bay: leg_m one way of the start, then leg_m the other way, then
+/// FAILURE. Ended from outside (a ReactiveFallback on SafeBayKnown, or on
+/// CommittedBayInView with first="committed": toward the committed bay). With no dock
+/// layout in the book yet it slides across the bow and holds the start line.
+class StrafeSearch : public CrusaderAction
+{
+public:
+  StrafeSearch(const std::string & n, const BT::NodeConfig & c) : CrusaderAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<std::string>("first", "left",
+        "left | right: which way to slide first; committed: toward the committed bay"),
+      BT::InputPort<double>("leg_m", 4.0, "slide this far each way of the start"),
+      BT::InputPort<double>("lat_us", 70.0, "the lateral stick while sliding"),
+      BT::InputPort<double>("kp_yaw", 5.0, "us per deg (heading hold)"),
+      BT::InputPort<double>("kd_yaw", 0.5, "us per deg/s"),
+      BT::InputPort<double>("min_us", 30.0, "smallest yaw / surge stick that moves the hull"),
+      BT::InputPort<double>("max_us", 100.0, "yaw stick cap"),
+      BT::InputPort<double>("min_out_m", 3.5, "hold at least this far out from the faces"),
+      BT::InputPort<double>("kp_out", 80.0, "us per m (the distance hold)"),
+      BT::InputPort<double>("kd_out", 200.0, "us per m/s"),
+      BT::InputPort<double>("out_max_us", 80.0, "surge stick cap"),
+      BT::InputPort<double>("timeout_s", 120.0, "FAILURE after this"),
+    };
+  }
+
+  BT::NodeStatus onStart() override
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    if (!ctx_->pose_fresh || !ctx_->origin_set || !std::isfinite(ctx_->heading_deg)) {
+      RCLCPP_WARN(log(), "StrafeSearch: no pose or heading to slide by");
+      return BT::NodeStatus::FAILURE;
+    }
+    p0_ = ctx_->boat;
+    const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs);
+    if (L.ok) {
+      right_ = L.right;
+      out_ = L.out;
+      face_ = L.centre;
+      h0_ = nav::bearingDeg({0.0, 0.0}, L.out * -1.0);      // bow on the faces
+      out_target_ = std::max(nav::dot(p0_ - face_, out_),
+        getInput<double>("min_out_m").value_or(3.5));
+    } else {
+      h0_ = ctx_->heading_deg;
+      right_ = nav::starboardOf(nav::headingVec(h0_));
+      out_ = nav::headingVec(h0_) * -1.0;                   // the dock taken to be ahead
+      face_ = p0_;
+      out_target_ = 0.0;                                    // the start line
+    }
+    const std::string first = getInput<std::string>("first").value_or("left");
+    toward_ = first == "committed";
+    if (toward_) {
+      const dock::BayTrack * t = ctx_->dock.find(ctx_->chosen_track);
+      if (t == nullptr) {
+        RCLCPP_WARN(log(), "StrafeSearch: first=\"committed\", but no bay is committed");
+        return BT::NodeStatus::FAILURE;
+      }
+      dir_ = nav::dot(t->p - p0_, right_) >= 0.0 ? 1.0 : -1.0;
+    } else {
+      dir_ = first == "right" ? 1.0 : -1.0;
+    }
+    RCLCPP_INFO(log(), "StrafeSearch: %s, bow %.0f deg, sliding %s first",
+      L.ok ? "along the dock" : "no dock layout yet: across the bow", h0_,
+      dir_ > 0.0 ? "right" : "left");
+    leg_ = 0;
+    t0_ = ctx_->now_s;
+    t_prev_ = -1.0;
+    out_rate_ = 0.0;
+    ctx_->task3_phase = "SEARCH";
+    return BT::NodeStatus::RUNNING;
+  }
+
+  BT::NodeStatus onRunning() override
+  {
+    const double leg_m = getInput<double>("leg_m").value_or(4.0);
+    const double min_us = getInput<double>("min_us").value_or(30.0);
+    double yaw_us = 0.0, fwd_us = 0.0, lat_us = 0.0, d = 0.0, out_err = 0.0, yaw_err = 0.0;
+    bool publish = false, fail = false;
+    std::string why;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      const double now = ctx_->now_s;
+      if (!ctx_->pose_fresh || !std::isfinite(ctx_->heading_deg)) {
+        fail = true;
+        why = "lost the pose";
+      } else {
+        d = nav::dot(ctx_->boat - p0_, right_);           // how far right of the start (+)
+        if (dir_ * d >= leg_m) {
+          if (leg_ == 0) {
+            dir_ = -dir_;
+            leg_ = 1;
+          } else {
+            fail = true;
+            why = toward_ ? "the committed bay never came into view" : "no GREEN bay along the dock";
+          }
+        }
+        if (now - t0_ > getInput<double>("timeout_s").value_or(120.0)) {
+          fail = true;
+          why = "timed out";
+        }
+        yaw_err = fire::wrap180(h0_ - ctx_->heading_deg);   // + = turn right
+        const double rate = ctx_->yaw_rate_dps;
+        yaw_us = fire::axisLaw(yaw_err, std::isfinite(rate) ? -rate : fire::kNaN,
+          getInput<double>("kp_yaw").value_or(5.0), getInput<double>("kd_yaw").value_or(0.5),
+          3.0, min_us, getInput<double>("max_us").value_or(100.0));
+        out_err = nav::dot(ctx_->boat - face_, out_) - out_target_;   // + = too far out
+        if (t_prev_ >= 0.0 && now > t_prev_) {
+          out_rate_ = 0.7 * out_rate_ + 0.3 * (out_err - out_prev_) / (now - t_prev_);
+        }
+        t_prev_ = now;
+        out_prev_ = out_err;
+        if (std::fabs(yaw_err) <= 30.0) {
+          fwd_us = fire::axisLaw(out_err, out_rate_, getInput<double>("kp_out").value_or(80.0),
+            getInput<double>("kd_out").value_or(200.0), 0.25, min_us,
+            getInput<double>("out_max_us").value_or(80.0));
+        }
+        // turn first, then slide
+        lat_us = std::fabs(yaw_err) > 15.0 ? 0.0 :
+          dir_ * getInput<double>("lat_us").value_or(70.0);
+        publish = ctx_->publish_setpoints;
+        if (publish) {ctx_->sticks_commanded = true;}
+      }
+    }
+    if (publish && ctx_->sticks) {
+      if (fail) {ctx_->sticks(0.0, 0.0, 0.0);} else {ctx_->sticks(fwd_us, lat_us, yaw_us);}
+    }
+    if (fail) {
+      RCLCPP_WARN(log(), "StrafeSearch: %s (%.1f m %s of the start)", why.c_str(),
+        std::fabs(d), d >= 0.0 ? "right" : "left");
+      return BT::NodeStatus::FAILURE;
+    }
+    if (ctx_->node) {
+      RCLCPP_INFO_THROTTLE(log(), *ctx_->node->get_clock(), 1000,
+        "%s: %.1f m %s of the start, sliding %s | out %+.2f m, bow %+.0f deg off | "
+        "sticks fwd %+.0f lat %+.0f yaw %+.0f us%s",
+        toward_ ? "bringing the GREEN bay into view" : "searching for the GREEN bay",
+        std::fabs(d), d >= 0.0 ? "right" : "left", dir_ > 0.0 ? "right" : "left",
+        out_err, yaw_err, fwd_us, lat_us, yaw_us,
+        publish ? "" : " [shadow: publish_setpoints is off]");
+    }
+    return BT::NodeStatus::RUNNING;
+  }
+
+  void onHalted() override
+  {
+    bool publish = false;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      publish = ctx_->publish_setpoints;
+    }
+    if (publish && ctx_->sticks) {ctx_->sticks(0.0, 0.0, 0.0);}
+  }
+
+private:
+  double h0_ = 0.0, dir_ = -1.0, t0_ = 0.0;
+  nav::Vec2 p0_, right_{1.0, 0.0}, out_{0.0, -1.0}, face_;
+  double out_target_ = 0.0, out_prev_ = 0.0, out_rate_ = 0.0, t_prev_ = -1.0;
+  int leg_ = 0;
+  bool toward_ = false;      ///< first="committed": toward the committed bay
+};
+
 }  // namespace
 
 void registerFireNodes(BT::BehaviorTreeFactory & factory)
@@ -787,6 +1039,8 @@ void registerFireNodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<StopBoat>("StopBoat");
   factory.registerNodeType<StrafeKeep>("StrafeKeep");
   factory.registerNodeType<AwaitStrafeSolution>("AwaitStrafeSolution");
+  factory.registerNodeType<RequestMode>("RequestMode");
+  factory.registerNodeType<StrafeSearch>("StrafeSearch");
 }
 
 }  // namespace crusader_bt

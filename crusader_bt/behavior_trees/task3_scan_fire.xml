@@ -1,0 +1,102 @@
+<?xml version="1.0"?>
+<!-- MISSION: Task 3 - GPS waypoint (GUIDED), then MANUAL: slide along the dock to the GREEN bay, pan/tilt cannon. -->
+<!--
+  task3_scan_fire.xml - Task 3 in one run, from the GCS with an APPROACH POINT (the Run
+  box's approach lat/lon: a few metres in front of the dock, facing it).
+
+    0. GUIDED to the approach point. Started in MANUAL, this step is skipped.
+    1. the tree switches GUIDED -> MANUAL itself (RequestMode: only from GUIDED; SC still
+       takes the boat back). GUIDED cannot strafe on this hull.
+    2. SEARCH: slide along the dock (StrafeSearch: 4 m left, then right), bow square to it,
+       3.5 m out, until one bay reads GREEN; commit it.
+    3. LINE UP: slide toward that bay until it is within 20 deg of the bow, bow square.
+    4. CANNON: approach to 1.2 m on the camera's range (the LiDAR's too with use_lidar),
+       wait for a steady RED window, spray it until GREEN, read the code, repeat.
+
+  THE LIDAR TOGGLE: use_lidar below. false = GPS and camera only (the LiDAR wall is
+  ignored); true = the LiDAR wall holds the range once it has the dock.
+
+  SWITCHES. bt_runner_node publish_setpoints (the sticks and the mode switch, G1);
+  telemetry_bridge cannon_pump (water, G7). Shadow (publish_setpoints off): nothing
+  moves, the tree waits for the pilot to flip SC to MANUAL and logs the sticks it would use.
+-->
+<root BTCPP_format="4" main_tree_to_execute="ScanFire">
+  <BehaviorTree ID="ScanFire">
+    <Sequence name="scan_fire">
+      <Script code="use_lidar := false"/>
+
+      <!-- 0-1. GUIDED to the waypoint, then MANUAL -->
+      <Fallback name="to_the_waypoint">
+        <ModeIs mode="MANUAL"/>
+        <Sequence>
+          <ReactiveSequence name="guided_leg">
+            <IsAutonomous/>
+            <UpdateDockBook/>
+            <NavigateTo target="approach" tolerance="1.0"/>
+          </ReactiveSequence>
+          <RequestMode mode="MANUAL" from="GUIDED" timeout_s="10.0"/>
+        </Sequence>
+      </Fallback>
+
+      <!-- 2-3. find the GREEN bay, commit it, line up on it -->
+      <ReactiveSequence name="which_bay">
+        <ModeIs mode="MANUAL"/>
+        <NotDropped/>
+        <AttitudeAlive max_age_s="0.5"/>
+        <DockCameraAlive max_age_s="3.0"/>
+        <UpdateDockBook/>
+        <Fallback>
+          <BayChosen/>
+          <Sequence>
+            <ReactiveFallback name="search_until_known">
+              <SafeBayKnown need_others_red="false"/>
+              <StrafeSearch first="left" leg_m="4.0" lat_us="70" min_out_m="3.5"/>
+            </ReactiveFallback>
+            <CommitSafeBay bay="{bay}"/>
+          </Sequence>
+        </Fallback>
+        <ReactiveFallback name="bay_in_view">
+          <CommittedBayInView max_age_s="1.0" max_bearing_deg="20.0" max_yaw_off_deg="15.0"/>
+          <StrafeSearch first="committed" leg_m="6.0" lat_us="70" min_out_m="3.5"/>
+        </ReactiveFallback>
+      </ReactiveSequence>
+
+      <!-- 4. the cannon -->
+      <ReactiveSequence name="guard_band">
+        <ModeIs mode="MANUAL"/>
+        <NotDropped/>
+        <WallRangeAlive max_age_s="1.0" or_camera_s="1.0" use_lidar="{use_lidar}"/>
+        <AttitudeAlive max_age_s="0.5"/>
+        <DockCameraAlive max_age_s="3.0"/>
+        <UpdateDockBook/>
+        <StrafeKeep fire_range_m="1.2" window_index="0" lateral_bias_m="0.0" nozzle_y_m="0.0"
+                    cam_timeout_s="0.5" face_timeout_s="3.0"
+                    range_check_m="0" face_setback_m="0.0"
+                    deadband_range_m="0.05" deadband_lat_m="0.04" deadband_yaw_deg="3.0"
+                    kp_fwd="90" kd_fwd="60" kp_lat="100" kd_lat="200" kp_yaw="5" kd_yaw="0.5"
+                    ki_fwd="40" ki_lat="10" i_max_us="100"
+                    min_us="30" max_us="120" slew_us_s="200"
+                    min_range_m="0.6" square_first_deg="10"
+                    range_fallback="camera" use_lidar="{use_lidar}"/>
+        <Sequence name="mission">
+          <AwaitStrafeSolution fire_range_m="1.2" range_tol_m="0.40" lat_tol_m="0.30"
+                               yaw_tol_deg="10.0" hold_s="0.5" gap_s="0.0" timeout_s="1000000"/>
+          <AwaitStrafeSolution fire_range_m="1.2" range_tol_m="0.10" lat_tol_m="0.15"
+                               yaw_tol_deg="8.0" hold_s="2.0" gap_s="0.0" timeout_s="1000000"/>
+          <ReportDocking bay="{bay}"/>
+          <KeepRunningUntilFailure>
+            <ForceSuccess>
+              <Sequence name="one_fire">
+                <AwaitFireTarget bay="{bay}" timeout_s="1000000" resend_s="10.0"/>
+                <SprayUntilHit timeout_s="90.0" min_green_s="0.4" max_aim_age_s="3.0"/>
+                <ForceSuccess>
+                  <DecodeResourceRequest timeout_s="80.0" hold_s="5.0" min_frames="20"/>
+                </ForceSuccess>
+              </Sequence>
+            </ForceSuccess>
+          </KeepRunningUntilFailure>
+        </Sequence>
+      </ReactiveSequence>
+    </Sequence>
+  </BehaviorTree>
+</root>

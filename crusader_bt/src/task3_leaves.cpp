@@ -298,6 +298,65 @@ public:
   }
 };
 
+/// A bay is committed in this run (CommitSafeBay).
+class BayChosen : public CrusaderCondition
+{
+public:
+  BayChosen(const std::string & n, const BT::NodeConfig & c)
+  : CrusaderCondition(n, c) {}
+  static BT::PortsList providedPorts() {return {};}
+
+  BT::NodeStatus tick() override
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    return ctx_->chosen_bay > 0 ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
+  }
+};
+
+/// The committed bay is in the camera's picture NOW and the boat lined up on it: seen
+/// within max_age_s, no more than max_bearing_deg off the bow (the camera faces ahead),
+/// and with max_yaw_off_deg > 0 the bow that close to square to the faces. A bay
+/// committed while sliding can be out of the picture; StrafeSearch first="committed"
+/// slides toward it until this holds.
+class CommittedBayInView : public CrusaderCondition
+{
+public:
+  CommittedBayInView(const std::string & n, const BT::NodeConfig & c)
+  : CrusaderCondition(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<double>("max_age_s", 1.0, "seen this recently (s, the camera's clock)"),
+      BT::InputPort<double>("max_bearing_deg", 20.0, "this far off the bow at most"),
+      BT::InputPort<double>("max_yaw_off_deg", 0.0, "> 0: the bow this close to square")};
+  }
+
+  BT::NodeStatus tick() override
+  {
+    const double max_age = getInput<double>("max_age_s").value_or(1.0);
+    const double max_brg = getInput<double>("max_bearing_deg").value_or(20.0);
+    const double max_yaw = getInput<double>("max_yaw_off_deg").value_or(0.0);
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    const dock::BayTrack * t = ctx_->dock.find(ctx_->chosen_track);
+    if (t == nullptr || ctx_->dock_obs_age_s > max_age || ctx_->dock_t - t->last_seen > max_age ||
+      !ctx_->pose_fresh || !std::isfinite(ctx_->heading_deg))
+    {
+      return BT::NodeStatus::FAILURE;
+    }
+    const double brg = fire::wrap180(nav::bearingDeg(ctx_->boat, t->p) - ctx_->heading_deg);
+    if (std::fabs(brg) > max_brg) {return BT::NodeStatus::FAILURE;}
+    if (max_yaw > 0.0) {
+      const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs);
+      if (!L.ok) {return BT::NodeStatus::FAILURE;}
+      const double square = nav::bearingDeg({0.0, 0.0}, L.out * -1.0);
+      if (std::fabs(fire::wrap180(ctx_->heading_deg - square)) > max_yaw) {
+        return BT::NodeStatus::FAILURE;
+      }
+    }
+    return BT::NodeStatus::SUCCESS;
+  }
+};
+
 /// Commit to the one GREEN bay. From here on the berthing legs steer to THIS
 /// bay even if a later frame's votes wobble; ChosenBaySafe is what can undo it.
 class CommitSafeBay : public CrusaderSyncAction
@@ -721,6 +780,8 @@ void registerTask3Nodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<UpdateDockBook>("UpdateDockBook");
   factory.registerNodeType<PickVantage>("PickVantage");
   factory.registerNodeType<CommitSafeBay>("CommitSafeBay");
+  factory.registerNodeType<BayChosen>("BayChosen");
+  factory.registerNodeType<CommittedBayInView>("CommittedBayInView");
   factory.registerNodeType<DockWaypoint>("DockWaypoint");
   factory.registerNodeType<ReportDocking>("ReportDocking");
   factory.registerNodeType<AwaitFireTarget>("AwaitFireTarget");
