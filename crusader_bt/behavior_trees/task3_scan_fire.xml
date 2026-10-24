@@ -9,8 +9,8 @@
     2. SEARCH: turn to dock_heading, slide left and right along the dock until a bay reads
        GREEN with confidence (CommitFirstGreen: the first one, not every bay; numbered
        left to right for the docking report).
-    3. APPROACH: turn until that bay is centred on the bow, then a steady, gently ramped
-       push straight in, no sway (ApproachBay), to 1.8 m.
+    3. APPROACH: square to the bay, strafe onto its centreline, then a steady, gently
+       ramped push straight in (ApproachBay), to 1.8 m.
     4. HOLD: the bay's face at 1.2 m, centred, square (StrafeKeep); on station -> the
        docking report.
     5. THE FIRE, in a loop: a window of our bay steady RED -> the cannon sprays it,
@@ -59,8 +59,8 @@
             </ReactiveFallback>
           </Fallback>
 
-          <ApproachBay fwd_us="60" slew_us_s="40" turn_first_deg="10" handover_m="1.8"
-                       heading_deg="{dock_heading}" max_off_deg="40" use_lidar="{use_lidar}"/>
+          <ApproachBay fwd_us="60" slew_us_s="40" centre_tol_m="0.25" handover_m="1.8"
+                       heading_deg="{dock_heading}" use_lidar="{use_lidar}"/>
 
           <ReactiveSequence name="docked">
             <StrafeKeep fire_range_m="1.2" heading_deg="{dock_heading}" use_lidar="{use_lidar}"
