@@ -36,7 +36,7 @@
           <ReactiveSequence name="guided_leg">
             <IsAutonomous/>
             <UpdateDockBook/>
-            <NavigateTo target="approach" tolerance="1.0"/>
+            <NavigateTo target="approach" tolerance="0.5"/>
           </ReactiveSequence>
           <RequestMode mode="MANUAL" from="GUIDED" timeout_s="10.0"/>
         </Sequence>
@@ -49,15 +49,14 @@
         <AttitudeAlive max_age_s="0.5"/>
         <DockCameraAlive max_age_s="3.0"/>
         <UpdateDockBook/>
+        <!-- slide until the first bay that reads GREEN with confidence; no need to
+             see every bay. CommitFirstGreen numbers it for the docking report -->
         <Fallback>
           <BayChosen/>
-          <Sequence>
-            <ReactiveFallback name="search_until_known">
-              <SafeBayKnown need_others_red="false"/>
-              <StrafeSearch first="left" leg_m="4.0" lat_us="70" min_out_m="3.5" heading_deg="{dock_heading}"/>
-            </ReactiveFallback>
-            <CommitSafeBay bay="{bay}"/>
-          </Sequence>
+          <ReactiveFallback name="search_until_green">
+            <CommitFirstGreen bay="{bay}" min_votes="8" min_share="0.8"/>
+            <StrafeSearch first="left" leg_m="4.0" lat_us="70" min_out_m="3.5" heading_deg="{dock_heading}"/>
+          </ReactiveFallback>
         </Fallback>
         <ReactiveFallback name="bay_in_view">
           <CommittedBayInView max_age_s="1.0" max_bearing_deg="20.0" max_yaw_off_deg="15.0"/>

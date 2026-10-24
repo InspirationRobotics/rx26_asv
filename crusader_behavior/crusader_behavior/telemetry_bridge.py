@@ -265,7 +265,8 @@ class TelemetryBridge(Node):
                 was = self.latch.allowed
                 if self.latch.rc_sample(rc, t):
                     self._handle_trip()
-                elif self.latch.allowed != was:     # STARTUP -> ACTIVE: say so (the topic is latched)
+                elif self.latch.allowed != was:     # cleared (SD back to safe): say so, it is latched
+                    self.get_logger().warn(f"drop cleared: ch{self.latch.channel} back to safe")
                     self._publish_drop_state()
             elif mtype == "SERVO_OUTPUT_RAW":
                 pwm = pump_core.servo_raw(msg, self.pump.p.servo_channel)

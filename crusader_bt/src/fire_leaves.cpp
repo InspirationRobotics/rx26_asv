@@ -940,6 +940,7 @@ public:
     t0_ = ctx_->now_s;
     t_prev_ = -1.0;
     out_rate_ = 0.0;
+    anchored_ = L.ok;            // no layout: the start line is set once the turn is done
     ctx_->task3_phase = "SEARCH";
     return BT::NodeStatus::RUNNING;
   }
@@ -973,6 +974,12 @@ public:
           why = "timed out";
         }
         yaw_err = fire::wrap180(h0_ - ctx_->heading_deg);   // + = turn right
+        if (!anchored_ && std::fabs(yaw_err) <= 15.0) {     // the turn drifts the boat
+          anchored_ = true;
+          p0_ = ctx_->boat;
+          face_ = ctx_->boat;
+          d = 0.0;
+        }
         const double rate = ctx_->yaw_rate_dps;
         yaw_us = fire::axisLaw(yaw_err, std::isfinite(rate) ? -rate : fire::kNaN,
           getInput<double>("kp_yaw").value_or(5.0), getInput<double>("kd_yaw").value_or(0.5),
@@ -1031,6 +1038,7 @@ private:
   double out_target_ = 0.0, out_prev_ = 0.0, out_rate_ = 0.0, t_prev_ = -1.0;
   int leg_ = 0;
   bool toward_ = false;      ///< first="committed": toward the committed bay
+  bool anchored_ = false;    ///< the start line is set (after the turn, with no layout)
 };
 
 }  // namespace

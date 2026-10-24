@@ -346,12 +346,82 @@ public:
     const double brg = fire::wrap180(nav::bearingDeg(ctx_->boat, t->p) - ctx_->heading_deg);
     if (std::fabs(brg) > max_brg) {return BT::NodeStatus::FAILURE;}
     if (max_yaw > 0.0) {
-      const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs);
-      if (!L.ok) {return BT::NodeStatus::FAILURE;}
-      const double square = nav::bearingDeg({0.0, 0.0}, L.out * -1.0);
+      const double square = nav::bearingDeg({0.0, 0.0}, t->outward() * -1.0);
       if (std::fabs(fire::wrap180(ctx_->heading_deg - square)) > max_yaw) {
         return BT::NodeStatus::FAILURE;
       }
+    }
+    return BT::NodeStatus::SUCCESS;
+  }
+};
+
+/// Commit to the FIRST bay that reads GREEN with confidence, without waiting to see
+/// every bay (the scan stops here): any confirmed track whose votes say GREEN
+/// (dock::verdict, min_votes reads, min_share of them green, recent ones agreeing);
+/// the most-seen if several. The bay NUMBER (DockingReport, bays numbered left to
+/// right facing them) is the layout's when all the bays are known, else its place
+/// among the bays seen so far, else 1, the last two logged as guesses. FAILURE until
+/// a GREEN bay is in hand.
+class CommitFirstGreen : public CrusaderSyncAction
+{
+public:
+  CommitFirstGreen(const std::string & n, const BT::NodeConfig & c)
+  : CrusaderSyncAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<int>("min_votes", 8, "GREEN/RED reads before a bay has a verdict"),
+      BT::InputPort<double>("min_share", 0.8, "share of them GREEN"),
+      BT::OutputPort<int>("bay", "the committed bay's number, 1-based left to right")};
+  }
+
+  BT::NodeStatus tick() override
+  {
+    dock::VoteParams v;
+    int bay = 0, seen = 0, red = 0, green = 0, id = -1;
+    bool guess = false;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      v = ctx_->dock_votes;
+      v.min_votes = getInput<int>("min_votes").value_or(v.min_votes);
+      v.min_share = getInput<double>("min_share").value_or(v.min_share);
+      const dock::BayTrack * best = nullptr;
+      for (const auto & t : ctx_->dock.tracks) {
+        if (t.n < ctx_->dock_min_obs || dock::verdict(t, v) != dock::Verdict::Green) {continue;}
+        if (best == nullptr || t.n > best->n) {best = &t;}
+      }
+      if (best == nullptr) {return BT::NodeStatus::FAILURE;}
+      const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs);
+      bay = L.ok ? L.numberOf(best->id) : 0;
+      if (bay <= 0) {             // its place among the bays seen so far, left to right
+        guess = true;
+        const nav::Vec2 right = nav::starboardOf(best->outward() * -1.0);
+        std::vector<double> along;   // the other confirmed bays, metres right of the GREEN one
+        for (const auto & t : ctx_->dock.tracks) {
+          if (t.n < ctx_->dock_min_obs || t.id == best->id) {continue;}
+          const double d = nav::dot(t.p - best->p, right);
+          bool same = std::fabs(d) < 0.6;
+          for (double o : along) {same = same || std::fabs(o - d) < 0.6;}
+          if (!same) {along.push_back(d);}
+        }
+        bay = 1;
+        for (double d : along) {if (d < 0.0) {++bay;}}
+        seen = static_cast<int>(along.size()) + 1;
+      }
+      ctx_->chosen_track = best->id;
+      ctx_->chosen_bay = bay;
+      ctx_->berth = dock::Berth{};
+      ctx_->task3_phase = "DOCKING";
+      id = best->id;
+      red = best->red;
+      green = best->green;
+    }
+    setOutput("bay", bay);
+    if (guess) {
+      RCLCPP_INFO(log(), "GREEN bay found: track %d (R%d/G%d), bay %d (guess: %d of %d bays seen)",
+        id, red, green, bay, bay, seen);
+    } else {
+      RCLCPP_INFO(log(), "GREEN bay found: track %d (R%d/G%d), bay %d", id, red, green, bay);
     }
     return BT::NodeStatus::SUCCESS;
   }
@@ -780,6 +850,7 @@ void registerTask3Nodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<UpdateDockBook>("UpdateDockBook");
   factory.registerNodeType<PickVantage>("PickVantage");
   factory.registerNodeType<CommitSafeBay>("CommitSafeBay");
+  factory.registerNodeType<CommitFirstGreen>("CommitFirstGreen");
   factory.registerNodeType<BayChosen>("BayChosen");
   factory.registerNodeType<CommittedBayInView>("CommittedBayInView");
   factory.registerNodeType<DockWaypoint>("DockWaypoint");
