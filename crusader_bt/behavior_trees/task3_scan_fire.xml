@@ -24,6 +24,10 @@
   <BehaviorTree ID="ScanFire">
     <Sequence name="scan_fire">
       <Script code="use_lidar := false"/>
+      <!-- the bow's heading facing the dock, degrees true (QGC's heading with the bow on
+           the dock face): the slide turns to it first and slides across it. EDIT PER SITE;
+           remove heading_deg below to use the dock's layout / the heading at the start -->
+      <Script code="dock_heading := 250.0"/>
 
       <!-- 0-1. GUIDED to the waypoint, then MANUAL -->
       <Fallback name="to_the_waypoint">
@@ -50,14 +54,14 @@
           <Sequence>
             <ReactiveFallback name="search_until_known">
               <SafeBayKnown need_others_red="false"/>
-              <StrafeSearch first="left" leg_m="4.0" lat_us="70" min_out_m="3.5"/>
+              <StrafeSearch first="left" leg_m="4.0" lat_us="70" min_out_m="3.5" heading_deg="{dock_heading}"/>
             </ReactiveFallback>
             <CommitSafeBay bay="{bay}"/>
           </Sequence>
         </Fallback>
         <ReactiveFallback name="bay_in_view">
           <CommittedBayInView max_age_s="1.0" max_bearing_deg="20.0" max_yaw_off_deg="15.0"/>
-          <StrafeSearch first="committed" leg_m="6.0" lat_us="70" min_out_m="3.5"/>
+          <StrafeSearch first="committed" leg_m="6.0" lat_us="70" min_out_m="3.5" heading_deg="{dock_heading}"/>
         </ReactiveFallback>
       </ReactiveSequence>
 

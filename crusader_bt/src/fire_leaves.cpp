@@ -884,11 +884,15 @@ public:
       BT::InputPort<double>("kd_out", 200.0, "us per m/s"),
       BT::InputPort<double>("out_max_us", 80.0, "surge stick cap"),
       BT::InputPort<double>("timeout_s", 120.0, "FAILURE after this"),
+      BT::InputPort<double>("heading_deg", fire::kNaN,
+        "the bow's heading facing the dock (deg true, the EKF yaw): turn to it, slide across "
+        "it; unset = the dock's layout, else the heading at the start"),
     };
   }
 
   BT::NodeStatus onStart() override
   {
+    const double set_h = getInput<double>("heading_deg").value_or(fire::kNaN);
     std::lock_guard<std::mutex> lk(ctx_->mu);
     if (!ctx_->pose_fresh || !ctx_->origin_set || !std::isfinite(ctx_->heading_deg)) {
       RCLCPP_WARN(log(), "StrafeSearch: no pose or heading to slide by");
@@ -910,6 +914,13 @@ public:
       face_ = p0_;
       out_target_ = 0.0;                                    // the start line
     }
+    if (std::isfinite(set_h)) {                             // a heading given: it wins
+      h0_ = set_h;
+      right_ = nav::starboardOf(nav::headingVec(h0_));
+      out_ = nav::headingVec(h0_) * -1.0;
+      out_target_ = L.ok ? std::max(nav::dot(p0_ - face_, out_),
+        getInput<double>("min_out_m").value_or(3.5)) : 0.0;
+    }
     const std::string first = getInput<std::string>("first").value_or("left");
     toward_ = first == "committed";
     if (toward_) {
@@ -922,9 +933,9 @@ public:
     } else {
       dir_ = first == "right" ? 1.0 : -1.0;
     }
-    RCLCPP_INFO(log(), "StrafeSearch: %s, bow %.0f deg, sliding %s first",
+    RCLCPP_INFO(log(), "StrafeSearch: %s, bow %.0f deg%s, sliding %s first",
       L.ok ? "along the dock" : "no dock layout yet: across the bow", h0_,
-      dir_ > 0.0 ? "right" : "left");
+      std::isfinite(set_h) ? " (set)" : "", dir_ > 0.0 ? "right" : "left");
     leg_ = 0;
     t0_ = ctx_->now_s;
     t_prev_ = -1.0;
