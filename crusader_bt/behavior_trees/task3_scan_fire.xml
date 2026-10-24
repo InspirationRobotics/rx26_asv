@@ -54,7 +54,10 @@
             <BayChosen/>
             <ReactiveFallback name="search_until_green">
               <CommitFirstGreen bay="{bay}" min_votes="8" min_share="0.8"/>
-              <StrafeSearch first="left" leg_m="4.0" lat_us="70" min_out_m="3.5"
+              <!-- one way only: slide LEFT along the dock (start the run at its right
+                   end). leg_m is longer than the dock, so it never turns back; past it,
+                   it would sweep back the other way -->
+              <StrafeSearch first="left" leg_m="20.0" lat_us="70" min_out_m="3.5"
                             heading_deg="{dock_heading}" forever="true"/>
             </ReactiveFallback>
           </Fallback>
