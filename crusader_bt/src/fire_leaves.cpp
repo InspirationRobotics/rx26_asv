@@ -43,6 +43,9 @@ struct BayView
   double square_deg = fire::kNaN;       ///< the heading that faces it square
 };
 
+/// The camera saw the committed bay this recently (s): it is in the picture.
+constexpr double kInViewS = 1.0;
+
 /// CALL UNDER mu. Not ok with no committed bay or no fresh pose.
 BayView bayView(const Context & c)
 {
@@ -374,7 +377,7 @@ public:
   {
     auto in = [this](const char * k, double d) {return getInput<double>(k).value_or(d);};
     const double base = in("heading_deg", fire::kNaN), max_off = in("max_off_deg", 40.0);
-    double yaw_us = 0.0, want_fwd = 0.0, range = fire::kNaN, off = fire::kNaN;
+    double yaw_us = 0.0, want_fwd = 0.0, lat_us = 0.0, range = fire::kNaN, off = fire::kNaN;
     bool publish = false, done = false;
     std::string why;
     {
@@ -389,16 +392,25 @@ public:
       if (!b.ok) {
         why = "no bay or no pose: waiting";
       } else {
-        // the heading to face the bay, kept near the dock's
+        // the heading to face the bay, kept near the dock's; out of the camera's view
+        // (slid past it), square to the dock and slide back toward where it is
+        const dock::BayTrack * t = ctx_->dock.find(ctx_->chosen_track);
+        const bool in_view = ctx_->dock_t - t->last_seen <= kInViewS;
         double target = fire::wrap360(ctx_->heading_deg - b.bearing_deg);
-        if (std::isfinite(base)) {
+        if (!in_view) {
+          target = std::isfinite(base) ? base : ctx_->heading_deg;
+          lat_us = (b.left_m > 0.0 ? -1.0 : 1.0) * in("fwd_us", 60.0);   // lat + = starboard
+        } else if (std::isfinite(base)) {
           target = fire::wrap360(base + std::clamp(fire::wrap180(target - base), -max_off, max_off));
         }
         off = fire::wrap180(target - ctx_->heading_deg);       // + = turn right
         const double rate = ctx_->yaw_rate_dps;
         yaw_us = fire::axisLaw(off, std::isfinite(rate) ? -rate : fire::kNaN, in("kp_yaw", 4.0),
           in("kd_yaw", 3.0), 3.0, in("min_us", 30.0), in("max_yaw_us", 80.0));
-        if (std::isfinite(range) && range <= in("handover_m", 1.8)) {
+        if (!in_view) {
+          why = b.left_m > 0.0 ? "bay out of view: sliding left to it" :
+            "bay out of view: sliding right to it";
+        } else if (std::isfinite(range) && range <= in("handover_m", 1.8)) {
           done = true;
         } else if (std::fabs(off) <= in("turn_first_deg", 10.0)) {
           want_fwd = in("fwd_us", 60.0);
@@ -412,7 +424,9 @@ public:
       publish = ctx_->publish_setpoints;
       if (publish) {ctx_->sticks_commanded = true;}
     }
-    if (publish && ctx_->sticks) {ctx_->sticks(done ? 0.0 : fwd_, 0.0, done ? 0.0 : yaw_us);}
+    if (publish && ctx_->sticks) {
+      ctx_->sticks(done ? 0.0 : fwd_, done ? 0.0 : lat_us, done ? 0.0 : yaw_us);
+    }
     if (done) {
       RCLCPP_INFO(log(), "approach: %.2f m from the bay: handing over to the hold", range);
       return BT::NodeStatus::SUCCESS;

@@ -247,6 +247,8 @@ ocs_client:
 # (crusader_bt/behavior_trees/<name>.xml). The two gates are read once at start.
 bt_runner_node:
   ros__parameters:
+    default_timeout_s: 0.0                 # 0 = no limit: only the pilot (SC, SD) ends a run;
+                                           # a timeout typed in the GCS still applies
     publish_setpoints: false               # FALSE = this node CANNOT move the boat; legs
                                            # still poll for arrival, so a human can drive
                                            # and the tree follows. True is a G1 gate.

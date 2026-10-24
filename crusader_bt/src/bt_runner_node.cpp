@@ -1007,9 +1007,11 @@ private:
       BT::Tree tree = loadMission(factory, dirs_, file, bb);
       TreeView view(tree);
 
+      const std::string limit = timeout_s > 0.0 ?
+        std::to_string(static_cast<int>(timeout_s)) + "s" : std::string("none");
       RCLCPP_INFO(
-        get_logger(), "GOAL %s timeout=%.0fs approach=(%.7f, %.7f)", goal->name.c_str(),
-        timeout_s, goal->approach_latitude, goal->approach_longitude);
+        get_logger(), "GOAL %s timeout=%s approach=(%.7f, %.7f)", goal->name.c_str(),
+        limit.c_str(), goal->approach_latitude, goal->approach_longitude);
 
       rclcpp::Rate rate(tick_hz_);
       auto fb = std::make_shared<RunMission::Feedback>();
@@ -1024,7 +1026,7 @@ private:
           break;
         }
         const double elapsed = (now() - started).seconds();
-        if (elapsed >= timeout_s) {
+        if (timeout_s > 0.0 && elapsed >= timeout_s) {   // 0 = never give up
           tree.haltTree();
           outcome = RunMission::Result::OUTCOME_TIMEOUT;
           detail = "mission timeout " + std::to_string(static_cast<int>(timeout_s)) + "s expired";
