@@ -4,6 +4,8 @@
   task3_scan_fire.xml - Task 3 in one run, from the GCS with an APPROACH POINT (the Run
   box's approach lat/lon: a few metres in front of the dock) and a long timeout (3600 s).
 
+    camera: SetCameraModel puts camera_node on the dock model and waits until it sees with
+       it. A camera restart comes back on buoy, which never sees the dock.
     0. GUIDED to the approach point. Started in MANUAL, this step is skipped.
     1. the tree switches GUIDED -> MANUAL itself (only from GUIDED; SC still takes it back).
     2. SEARCH: turn to the dock heading, slide one way (the Run panel's "slide first", else
@@ -23,6 +25,8 @@
   <BehaviorTree ID="ScanFire">
     <Sequence name="scan_fire">
       <Script code="use_lidar := false"/>
+
+      <SetCameraModel model="dock" timeout_s="15.0"/>
 
       <!-- 0-1. GUIDED to the waypoint, then MANUAL -->
       <Fallback name="to_the_waypoint">

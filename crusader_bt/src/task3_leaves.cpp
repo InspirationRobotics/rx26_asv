@@ -18,6 +18,7 @@
 // view this tick" is not a reason to end the mission.
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -73,6 +74,96 @@ public:
     return ctx_->dock_obs_age_s <= max_age ? BT::NodeStatus::SUCCESS :
            BT::NodeStatus::FAILURE;
   }
+};
+
+/// Put camera_node on `model` (its live parameter, as the GCS's Sensors tab does) and
+/// wait until it is on it. For "dock" that means a DockObservation newer than the ask:
+/// the model running, not just the parameter accepted. Already on the dock model:
+/// SUCCESS at once, nothing asked. FAILURE when camera_node is not up, refuses, or
+/// timeout_s passes. A camera restart comes back on its YAML model (buoy), which is
+/// blind to the dock: this is what stops a Task 3 run sliding past it.
+class SetCameraModel : public CrusaderAction
+{
+public:
+  SetCameraModel(const std::string & n, const BT::NodeConfig & c) : CrusaderAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<std::string>("model", "dock", "none | buoy | dock"),
+      BT::InputPort<double>("timeout_s", 15.0, "FAILURE when not on it after this")};
+  }
+
+  BT::NodeStatus onStart() override
+  {
+    model_ = getInput<std::string>("model").value_or("dock");
+    bool there = false;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      t0_ = ctx_->now_s;
+      seq0_ = ctx_->dock_seq;
+      there = model_ == "dock" && ctx_->dock_obs_age_s <= kFreshS;
+      ctx_->camera_model_ack = 0;
+      ctx_->camera_model_why.clear();
+    }
+    if (there) {
+      RCLCPP_INFO(log(), "camera already on the dock model");
+      return BT::NodeStatus::SUCCESS;
+    }
+    std::string why = "bt_runner_node has no way to ask camera_node";
+    if (!ctx_->set_camera_model || !ctx_->set_camera_model(model_, why)) {
+      return fail(why);
+    }
+    RCLCPP_INFO(log(), "camera_node model -> %s", model_.c_str());
+    return BT::NodeStatus::RUNNING;
+  }
+
+  BT::NodeStatus onRunning() override
+  {
+    double waited = 0.0;
+    int ack = 0;
+    bool there = false;
+    std::string why;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      waited = ctx_->now_s - t0_;
+      ack = ctx_->camera_model_ack;
+      why = ctx_->camera_model_why;
+      there = model_ == "dock" ?
+        ctx_->dock_seq != seq0_ && ctx_->dock_obs_age_s <= kFreshS : ack > 0;
+    }
+    if (ack < 0) {
+      return fail("camera_node refused the " + model_ + " model: " + why);
+    }
+    if (there) {
+      RCLCPP_INFO(log(), "camera on the %s model after %.1f s", model_.c_str(), waited);
+      return BT::NodeStatus::SUCCESS;
+    }
+    if (waited > getInput<double>("timeout_s").value_or(15.0)) {
+      char buf[160];
+      std::snprintf(buf, sizeof buf, "camera not on the %s model %.0f s after asking (%s)",
+        model_.c_str(), waited, ack > 0 ? "accepted, no dock frames since" : "no answer");
+      return fail(buf);
+    }
+    return BT::NodeStatus::RUNNING;
+  }
+
+  void onHalted() override {}
+
+private:
+  /// The reason goes in camera_model_why too: bt_runner_node's FAILURE detail, the GCS's
+  /// Tree box, quotes it.
+  BT::NodeStatus fail(const std::string & why)
+  {
+    RCLCPP_WARN(log(), "SetCameraModel: %s", why.c_str());
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    ctx_->camera_model_why = why;
+    return BT::NodeStatus::FAILURE;
+  }
+
+  static constexpr double kFreshS = 1.0;
+  std::string model_;
+  double t0_ = 0.0;
+  std::uint32_t seq0_ = 0;
 };
 
 /// Exactly one bay reads GREEN (see dock::chooseSafeBay). With
@@ -817,6 +908,7 @@ public:
 void registerTask3Nodes(BT::BehaviorTreeFactory & factory)
 {
   factory.registerNodeType<DockCameraAlive>("DockCameraAlive");
+  factory.registerNodeType<SetCameraModel>("SetCameraModel");
   factory.registerNodeType<SafeBayKnown>("SafeBayKnown");
   factory.registerNodeType<ChosenBaySafe>("ChosenBaySafe");
   factory.registerNodeType<DockedInBay>("DockedInBay");

@@ -277,6 +277,11 @@ struct Context
   std::function<void()> release_sticks;
   /// Ask the autopilot for a flight mode: /crsd/set_mode (RequestMode).
   std::function<void(const std::string &)> request_mode;
+  /// Ask camera_node for a model (its live `model` parameter, SetCameraModel). False, with
+  /// the reason in `why`, when it cannot be asked; the answer lands in camera_model_ack.
+  std::function<bool(const std::string &, std::string & why)> set_camera_model;
+  int camera_model_ack = 0;                   ///< the last ask: 0 waiting, 1 applied, -1 refused
+  std::string camera_model_why;               ///< camera_node's refusal, then the leaf's FAILURE
 };
 
 using ContextPtr = std::shared_ptr<Context>;

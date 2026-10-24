@@ -1,5 +1,5 @@
 // test_mission_nodes — WaitForRunStart, TaskAttempt and PassagePlanFresh, ticked against a Context;
-// FailureTrace on the Task 3 guards.
+// FailureTrace on the Task 3 guards; SetCameraModel.
 //
 // Links the leaves, so it needs ROS: build with colcon, run from the build directory
 //
@@ -481,6 +481,97 @@ static void failureTraceTests()
   chk("a port wins over the GCS", crusader_bt::searchFirst(c, "committed") == "committed");
 }
 
+/// A Rig whose camera_node answers through `up`: false = no parameter service.
+struct CameraRig : Rig
+{
+  std::vector<std::string> asks;
+  bool up = true;
+
+  CameraRig()
+  {
+    ctx->set_camera_model = [this](const std::string & m, std::string & why) {
+        if (!up) {why = "/camera_node has no parameter service"; return false;}
+        asks.push_back(m);
+        return true;
+      };
+  }
+
+  /// A DockObservation arrives: what the dock model, running, publishes every frame.
+  void observation()
+  {
+    ++ctx->dock_seq;
+    ctx->dock_obs_age_s = 0.1;
+  }
+};
+
+static void setCameraModelTests()
+{
+  std::printf("\n7. SetCameraModel\n");
+  const std::string dock = "<SetCameraModel model=\"dock\" timeout_s=\"15\"/>";
+  {
+    CameraRig r;
+    r.observation();
+    r.load(dock);
+    chk("dock observations already arriving: SUCCESS, camera_node not asked",
+      r.tick() == OK && r.asks.empty());
+  }
+  {
+    CameraRig r;                                        // dock_obs_age_s: never (1e9)
+    r.load(dock);
+    chk("on buoy: asks camera_node for dock, RUNNING", r.tick() == RUN && r.asks.size() == 1 &&
+      r.asks[0] == "dock");
+    r.ctx->camera_model_ack = 1;
+    r.ctx->now_s = 2.0;
+    chk("accepted, no observation yet: still RUNNING", r.tick() == RUN);
+    r.observation();
+    chk("the first observation: SUCCESS, asked once", r.tick() == OK && r.asks.size() == 1);
+  }
+  {
+    CameraRig r;
+    r.ctx->dock_obs_age_s = 3.0;                        // stale: older than the ask
+    r.load(dock);
+    r.tick();
+    r.ctx->camera_model_ack = 1;
+    chk("an observation from before the ask does not count", r.tick() == RUN);
+  }
+  {
+    CameraRig r;
+    r.load(dock);
+    r.tick();
+    r.ctx->camera_model_ack = 1;
+    r.ctx->now_s = 15.5;
+    chk("no observation 15.5 s after asking: FAILURE", r.tick() == BAD);
+  }
+  {
+    CameraRig r;
+    r.load(dock);
+    r.tick();
+    r.ctx->camera_model_ack = -1;
+    r.ctx->camera_model_why = "model must be one of none, buoy, dock";
+    chk("camera_node refuses: FAILURE, its reason kept for the GCS", r.tick() == BAD &&
+      r.ctx->camera_model_why.find("refused the dock model: model must be") == 0);
+  }
+  {
+    CameraRig r;
+    r.up = false;
+    r.load(dock);
+    chk("camera_node not running: FAILURE on the first tick", r.tick() == BAD && r.asks.empty());
+  }
+  {
+    Rig r;                                              // bt_runner never wired the hook
+    r.load(dock);
+    chk("no hook: FAILURE, not a crash", r.tick() == BAD);
+  }
+  {
+    CameraRig r;
+    r.observation();                                    // dock frames do not mean buoy
+    r.load("<SetCameraModel model=\"buoy\"/>");
+    chk("buoy: asks, even with dock frames arriving", r.tick() == RUN && r.asks.size() == 1);
+    r.ctx->camera_model_ack = 1;
+    chk("buoy accepted: SUCCESS", r.tick() == OK);
+  }
+}
+
 int main()
 {
   rclcpp::init(0, nullptr);
@@ -490,6 +581,7 @@ int main()
   waitForRunStartTests();
   tunableTests();
   failureTraceTests();
+  setCameraModelTests();
   rclcpp::shutdown();
   std::printf("\n%d checks, %d failed\n", g_checks, g_fails);
   std::printf("%s\n", g_fails == 0 ? "PASS" : "FAIL");

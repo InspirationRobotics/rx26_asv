@@ -148,6 +148,9 @@ public:
     ctx_->cam_mount.pitch_deg = declare_parameter<double>("cam_pitch_deg", 0.0);
     ctx_->dock_face_dz = declare_parameter<double>("dock_face_dz_m", 0.39);
     dock_topic_ = declare_parameter<std::string>("dock_topic", "dock/observations");
+    // SetCameraModel sets this node's live `model` parameter, as the GCS Sensors tab does.
+    camera_node_ = declare_parameter<std::string>("camera_node", "/camera_node");
+    camera_params_ = std::make_shared<rclcpp::AsyncParametersClient>(this, camera_node_);
     declareNavParams();
     nav_set_cb_ = add_on_set_parameters_callback(&BtRunner::checkNavSet);
 
@@ -552,12 +555,54 @@ private:
         m.data = mode;
         set_mode_pub_->publish(m);
       };
+    ctx_->set_camera_model = [this](const std::string & model, std::string & why) {
+        return askCameraModel(model, why);
+      };
     ctx_->release_sticks = [this]() {
         crusader_msgs::msg::RcChannels m;
         m.header.stamp = now();
         for (auto & c : m.channels) {c = 0;}
         rc_pub_->publish(m);
       };
+  }
+
+  /// SetCameraModel's ask. camera_node's `model` is read first: a set reloads the model even
+  /// to the value in force, seconds with no detections. The answer lands in
+  /// ctx_->camera_model_ack, and only the newest ask's does.
+  bool askCameraModel(const std::string & model, std::string & why)
+  {
+    if (!camera_params_->service_is_ready()) {
+      why = camera_node_ + " has no parameter service: is it running?";
+      return false;
+    }
+    const int ask = ++camera_ask_;
+    auto answer = [this, ask](int ack, const std::string & reason) {
+        std::lock_guard<std::mutex> lk(ctx_->mu);
+        if (ask != camera_ask_) {return;}
+        ctx_->camera_model_ack = ack;
+        ctx_->camera_model_why = reason;
+      };
+    using Params = std::shared_future<std::vector<rclcpp::Parameter>>;
+    using Results = std::shared_future<std::vector<rcl_interfaces::msg::SetParametersResult>>;
+    camera_params_->get_parameters({"model"}, [this, model, answer](Params f) {
+        try {
+          const auto now = f.get();
+          if (!now.empty() && now[0].get_type() == rclcpp::ParameterType::PARAMETER_STRING &&
+          now[0].as_string() == model)
+          {
+            answer(1, "");
+            return;
+          }
+          camera_params_->set_parameters({rclcpp::Parameter("model", model)}, [answer](Results r) {
+              try {
+                const auto res = r.get();
+                if (res.empty()) {answer(-1, "an empty reply"); return;}
+                answer(res[0].successful ? 1 : -1, res[0].reason);
+              } catch (const std::exception & e) {answer(-1, e.what());}
+            });
+        } catch (const std::exception & e) {answer(-1, e.what());}
+      });
+    return true;
   }
 
   /// Motion was commanded last tick and not this one: say STOP, once. A leaf
@@ -1172,6 +1217,8 @@ private:
       }
     } else if (type == "ModeIs") {
       why = "the autopilot is in " + mode;
+    } else if (type == "SetCameraModel") {
+      why = ctx_->camera_model_why + "; the Sensors tab shows camera_node's model state";
     } else {
       why = "its own warning, if it gave one, is in the bt_runner_node log";
     }
@@ -1276,6 +1323,9 @@ private:
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr cannon_pub_;
   rclcpp::Subscription<crusader_msgs::msg::DockObservation>::SharedPtr dock_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr ocs_sub_;
+  std::string camera_node_;
+  rclcpp::AsyncParametersClient::SharedPtr camera_params_;
+  std::atomic<int> camera_ask_{0};      // SetCameraModel asks; a reply to an older one is dropped
 
   // The fixed-nozzle shot
   std::chrono::steady_clock::time_point t0_{};
