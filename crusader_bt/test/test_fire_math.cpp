@@ -246,6 +246,67 @@ int main()
     chk_near("I is capped", c.sticks.lat_us, -80.0, 1e-9);
   }
 
+  std::printf("\nthe GREEN indicator, remembered (SpotKalman, CentreTarget, TickRate)\n");
+  {
+    using crusader_bt::nav::Vec2;
+    SpotKalman k;
+    chk("nothing seen: no spot, no age", !k.have && !std::isfinite(k.age(1.0)));
+    k.sight({1.0, 4.0}, 4.0, 100.0, 5.0);
+    chk("the first sighting is the spot", k.p.x == 1.0 && k.p.y == 4.0);
+    chk_near("... with its own noise: (3 cm + 2 cm/m x 4 m)^2", k.var, 0.11 * 0.11, 1e-12);
+    chk_near("age on the live clock, not the camera's stamp", k.age(6.5), 1.5, 1e-12);
+    const double v0 = k.var;
+    k.sight({1.0, 4.0}, 4.0, 100.0, 5.0);           // two frames in one tick still count
+    chk("a second look narrows it", k.var < v0);
+
+    SpotKalman jit;                                  // 10 fps, +-10 cm of noise across
+    for (int i = 0; i < 50; ++i) {
+      jit.sight({(i % 2 ? 0.1 : -0.1), 2.0}, 2.0, 0.1 * i, 0.1 * i);
+    }
+    chk_near("noise averages out", jit.p.x, 0.0, 0.03);
+
+    SpotKalman step;                                 // the spot was misplaced by 30 cm
+    for (int i = 0; i < 50; ++i) {step.sight({0.0, 2.0}, 2.0, 0.1 * i, 0.1 * i);}
+    for (int i = 50; i < 70; ++i) {step.sight({0.3, 2.0}, 2.0, 0.1 * i, 0.1 * i);}
+    chk("... and a real move is followed within 2 s", step.p.x > 0.2);
+
+    SpotKalman nearf, farf;                          // one far look, then one near one
+    nearf.sight({0.0, 0.0}, 6.0, 0.0, 0.0);
+    nearf.sight({0.2, 0.0}, 1.0, 0.1, 0.1);
+    farf.sight({0.0, 0.0}, 1.0, 0.0, 0.0);
+    farf.sight({0.2, 0.0}, 6.0, 0.1, 0.1);
+    chk("a close look moves it more than a far one", nearf.p.x > farf.p.x + 0.05);
+    chk("the 1-sigma grows while unseen", k.sigma(20.0) > k.sigma(5.0));
+
+    CentreTarget c;
+    c.sight({0.5, 4.0}, true, {}, false, 4.0, 1.0, 1.0);
+    chk("before the indicator: the face stands in", c.fix.have && c.fix.p.x == 0.5 &&
+      std::string(c.source()) == "face");
+    c.sight({0.5, 4.0}, true, {0.8, 4.0}, true, 4.0, 1.1, 1.1);
+    chk("the first indicator starts it over on the indicator", c.fix.p.x == 0.8 &&
+      std::string(c.source()) == "indicator");
+    c.sight({0.5, 4.0}, true, {}, false, 4.0, 1.2, 1.2);
+    chk("from then on a face alone does not move it", c.fix.p.x == 0.8);
+    chk_near("... and does not refresh its age either", c.age(2.2), 1.1, 1e-12);
+
+    TickRate r;
+    chk("first value: no rate", !std::isfinite(r.update(0.0, 0.1)));
+    chk_near("0.1 m in 0.1 s: 0.3 of 1 m/s", r.update(0.1, 0.1), 0.3, 1e-12);
+    chk_near("no time passed: the same rate", r.update(5.0, 0.0), 0.3, 1e-12);
+    chk_near("then smoothed", r.update(0.2, 0.1), 0.7 * 0.3 + 0.3 * 1.0, 1e-12);
+    chk("NaN starts it over", !std::isfinite(r.update(kNaN, 0.1)) &&
+      !std::isfinite(r.update(0.3, 0.1)));
+    r.update(0.4, 0.1);
+    chk("a gap over 1 s starts it over", !std::isfinite(r.update(0.5, 1.5)));
+
+    const DockFrame e = toDockFrame(Vec2{1.0, 0.0}, 90.0);     // facing EAST
+    chk_near("dock frame: east, facing east, is along", e.along, 1.0, 1e-12);
+    chk_near("... and not across", e.left, 0.0, 1e-12);
+    const DockFrame n = toDockFrame(Vec2{0.0, 1.0}, 90.0);
+    chk_near("north, facing east, is LEFT (+)", n.left, 1.0, 1e-12);
+    chk("no dock heading: NaN", !std::isfinite(toDockFrame(Vec2{1.0, 0.0}, kNaN).along));
+  }
+
   std::printf("\n%d checks, %d failed\n", g_checks, g_fails);
   return g_fails == 0 ? 0 : 1;
 }

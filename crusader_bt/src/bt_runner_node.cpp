@@ -366,7 +366,6 @@ private:
       case PoseEvent::Tracked:
         break;
     }
-    ctx_->boat_t = nowS();
     pose_t_ = now();
   }
 
@@ -671,6 +670,7 @@ private:
       s.indicator_present = b.indicator_present;
       s.indicator = dock::colourFromCv(b.indicator_colour);
       s.indicator_conf = b.indicator_confidence;
+      if (b.indicator_present) {s.ind_u_px = 0.5 * (b.indicator_bbox[0] + b.indicator_bbox[2]);}
       s.lit_window_index = b.lit_window_index;
       for (const auto & w : b.windows) {
         dock::WindowSighting ws;
@@ -681,6 +681,7 @@ private:
         ws.x = w.x;
         ws.y = w.y;
         ws.z = w.z;
+        ws.u_px = 0.5 * (w.bbox[0] + w.bbox[2]);
         s.windows.push_back(ws);
       }
       f.bays.push_back(s);

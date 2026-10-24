@@ -425,67 +425,103 @@ inline StrafeCmd strafeKeep(
 // ------------------------------------------------------------------ the bay, remembered
 //
 // The camera sees the committed bay at 1-15 fps, ~0.2 s late, and not at all once it is
-// off the edge of the picture or the face fills it. The boat's own track (/crsd/pose,
-// 20 Hz) is none of those. So each sighting is PINNED in the local frame (boat + heading
-// x the body offset) and averaged there, where the bay does not move, and the error is
-// the bay against where the boat is NOW, in the DOCK's frame:
-//   * bow wobble is no longer the bay sliding sideways (in the body frame it is ~9 cm a
-//     degree at 5 m, and the lateral loop chased it);
-//   * the rate is the boat's own velocity, not a difference of two late camera frames;
-//   * out of the picture the boat keeps centring on where it saw the bay, for keep_s.
+// off the edge of the picture or the face fills it. So the GREEN indicator's spot is kept
+// on the map (the local frame) by a Kalman filter, and the error is that spot against
+// where the boat is NOW (/crsd/pose, 20 Hz), across the dock heading:
+//   * bow wobble is no longer the indicator sliding sideways (in the body frame it is
+//     ~9 cm a degree at 5 m, and the lateral loop chased it);
+//   * while the camera has lost it, the boat's own track predicts where it is, so the
+//     boat keeps centring on it for a few seconds instead of stopping beside the bay.
 
-/// The bay's place in the local frame from its camera sightings: an average weighted to
-/// the newest (time constant tau_s), so a long gap ends on the new sighting.
-struct BayFix
+/// A Kalman filter on one fixed spot in the local frame. The dock does not move (much),
+/// so the state is the spot alone: each camera sighting is a measurement whose noise
+/// grows with its range (sigma0_m + sigma_per_m x range: the stereo plane, and the
+/// heading that placed it), and between sightings only the uncertainty grows (q_m2_s, the
+/// dock swinging on its moorings). Isotropic: one variance for both axes. Two clocks: the
+/// prediction runs on the sightings' own stamps (two frames that reach the runner in one
+/// tick are still two looks), the age on the caller's live clock (a dead camera's last
+/// stamp never ages).
+struct SpotKalman
 {
-  double tau_s = 0.5;
+  double sigma0_m = 0.03;
+  double sigma_per_m = 0.02;
+  double q_m2_s = 0.0025;        // (5 cm)^2 a second
   bool have = false;
   nav::Vec2 p;                   // local frame, m
-  double t = -1e18;              // the newest sighting, on the caller's clock
+  double var = 0.0;              // m^2, each axis
+  double t = -1e18;              // the newest sighting's stamp
+  double seen_s = -1e18;         // ... and the live clock when it came in
 
-  void sight(nav::Vec2 q, double now)
+  void sight(nav::Vec2 z, double range_m, double t_obs, double now)
   {
+    const double s = sigma0_m + sigma_per_m * (std::isfinite(range_m) ? std::fabs(range_m) : 5.0);
+    const double r = s * s;
     if (!have) {
-      p = q;
+      p = z;
+      var = r;
     } else {
-      const double a = 1.0 - std::exp(-std::clamp(now - t, 0.0, 5.0 * tau_s) / tau_s);
-      p = p + (q - p) * a;
+      var += q_m2_s * std::clamp(t_obs - t, 0.0, 10.0);      // predict
+      const double k = var / (var + r);                       // update
+      p = p + (z - p) * k;
+      var *= 1.0 - k;
     }
     have = true;
-    t = now;
+    t = t_obs;
+    seen_s = now;
   }
-  double age(double now) const {return have ? now - t : kNaN;}
+  double age(double now) const {return have ? now - seen_s : kNaN;}
+  /// The spot's 1-sigma, m, predicted to `now`.
+  double sigma(double now) const
+  {
+    return have ? std::sqrt(var + q_m2_s * std::max(0.0, now - seen_s)) : kNaN;
+  }
 };
 
-/// The boat's velocity (local frame, m/s) from its 20 Hz fixes, low-passed (tau_s). A fix
-/// seen again is ignored; a gap over 1 s starts it over.
-struct VelocityFilter
+/// The spot the boat centres on: the GREEN indicator (SpotKalman). Until the camera has
+/// placed the indicator itself, the bay face's centre stands in (a face cut by the image
+/// edge is never given: its centre is biased); from the first indicator on, only the
+/// indicator moves it, so the two are never mixed.
+struct CentreTarget
 {
-  double tau_s = 0.3;
-  bool valid = false;
-  nav::Vec2 v;
+  int track = -1;                // the DockBook track it follows
+  SpotKalman fix;
+  bool from_indicator = false;
 
-  void feed(nav::Vec2 q, double t)
+  void sight(nav::Vec2 face, bool have_face, nav::Vec2 ind, bool have_ind, double range_m,
+    double t_obs, double now)
   {
-    if (have_ && t <= t_) {return;}
-    if (have_ && t - t_ <= 1.0) {
-      const double dt = t - t_;
-      const nav::Vec2 vi = (q - p_) * (1.0 / dt);
-      v = valid ? v + (vi - v) * (1.0 - std::exp(-dt / tau_s)) : vi;
-      valid = true;
-    } else {
-      valid = false;
-      v = {};
+    if (have_ind) {
+      if (!from_indicator) {fix = SpotKalman{};}
+      fix.sight(ind, range_m, t_obs, now);
+      from_indicator = true;
+    } else if (have_face && !from_indicator) {
+      fix.sight(face, range_m, t_obs, now);
     }
-    have_ = true;
-    p_ = q;
-    t_ = t;
   }
+  double age(double now) const {return fix.age(now);}
+  const char * source() const {return from_indicator ? "indicator" : "face";}
+};
 
-private:
-  bool have_ = false;
-  nav::Vec2 p_;
-  double t_ = 0.0;
+/// A D term's rate: d(value)/dt from one tick to the next, smoothed (each new difference
+/// weighs 0.3). NaN in, or a gap over 1 s, starts it over; a tick with no time passed
+/// changes nothing.
+struct TickRate
+{
+  double last = kNaN, rate = kNaN;
+
+  double update(double x, double dt)
+  {
+    if (dt == 0.0 && std::isfinite(x) && std::isfinite(last)) {return rate;}
+    if (!std::isfinite(x) || !std::isfinite(last) || !(dt > 0.0) || dt > 1.0) {
+      last = x;
+      rate = kNaN;
+      return rate;
+    }
+    rate = 0.7 * (std::isfinite(rate) ? rate : 0.0) + 0.3 * (x - last) / dt;
+    last = x;
+    return rate;
+  }
+  void reset() {*this = TickRate{};}
 };
 
 /// A local-frame vector in the dock's frame: along the dock heading (+ toward the dock)

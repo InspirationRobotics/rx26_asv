@@ -67,7 +67,6 @@ struct Context
   bool autonomous = false;                    ///< mode in shared.autonomous_modes
   bool pose_fresh = false;
   nav::Vec2 boat;
-  double boat_t = -1.0;                       ///< now_s's clock when `boat` came in; -1 = never
   double heading_deg = std::nan("");          ///< NaN when GPS yaw is unresolved
   std::vector<nav::Buoy> buoys;               ///< FUSED: plan + tracker
   bool have_entry = false;
@@ -136,6 +135,16 @@ struct Context
   /// RoboCommand's ReadinessConfirm for the docking report (/crsd/ocs_command): stops the
   /// report being re-sent. The light is what the leaves wait on.
   bool readiness_confirmed = false;
+  /// now_s when the docking report last went out; < 0 = not yet this run. AwaitFireTarget
+  /// re-sends from it, so a fire branch running beside the docking never reports early.
+  double docking_report_s = -1.0;
+  /// Fires put out this run (SprayUntilHit SUCCESS): after one, a RED must hold longer
+  /// than the resource code's 1 s flashes before it is another fire.
+  int fires_out = 0;
+  /// The committed bay's centring spot (the GREEN indicator), kept on the map by a Kalman
+  /// filter from every frame that saw it (ingestDockObservation): one memory for ApproachBay
+  /// and StrafeKeep, so the hand-over does not start the hold blind.
+  fire::CentreTarget centre;
 
   /// Where the boat was when the goal was accepted. "Go home" in a mission
   /// means "back to where this attempt started", not the autopilot's HOME —
@@ -625,6 +634,24 @@ inline void ingestDockObservation(Context & c, const dock::Frame & f)
   if (c.origin_set && c.pose_fresh && std::isfinite(c.heading_deg)) {
     c.dock.prm.face_dz = c.dock_face_dz;
     c.dock.ingest(f, c.boat, c.heading_deg, c.cam_mount);
+    // The committed bay's centring point, if this frame saw it (fold stamps last_seen
+    // with the frame's time): the indicator, else the face unless it is cut off.
+    if (c.centre.track != c.chosen_track) {
+      c.centre = fire::CentreTarget{};
+      c.centre.track = c.chosen_track;
+    }
+    const dock::BayTrack * t = c.dock.find(c.chosen_track);
+    if (t != nullptr && t->last_seen == f.t) {
+      const bool face = !t->live_truncated && std::isfinite(t->live_left_m);
+      const bool ind = std::isfinite(t->live_ind_left_m);
+      c.centre.sight(
+        face ? dock::bodyToWorld(c.boat, c.heading_deg, t->live_ahead_m, t->live_left_m) :
+        nav::Vec2{}, face,
+        ind ? dock::bodyToWorld(c.boat, c.heading_deg, t->live_ind_ahead_m,
+        t->live_ind_left_m) : nav::Vec2{}, ind,
+        ind ? std::hypot(t->live_ind_ahead_m, t->live_ind_left_m) :
+        std::hypot(t->live_ahead_m, t->live_left_m), f.t, c.now_s);
+    }
   }
   ++c.dock_seq;
   c.dock_t = f.t;
@@ -708,6 +735,9 @@ inline void resetTask3(Context & c)
   c.chosen_bay = 0;
   c.berth = dock::Berth{};
   c.readiness_confirmed = false;
+  c.docking_report_s = -1.0;
+  c.fires_out = 0;
+  c.centre = fire::CentreTarget{};
 }
 
 /// A place to go, passed BETWEEN LEAVES on the blackboard: a compute leaf writes

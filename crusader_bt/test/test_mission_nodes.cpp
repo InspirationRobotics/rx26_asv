@@ -1,5 +1,6 @@
 // test_mission_nodes — WaitForRunStart, TaskAttempt and PassagePlanFresh, ticked against a Context;
-// FailureTrace on the Task 3 guards; SetCameraModel.
+// FailureTrace on the Task 3 guards; SetCameraModel; the cannon beside the docking and the
+// centring on the GREEN indicator.
 //
 // Links the leaves, so it needs ROS: build with colcon, run from the build directory
 //
@@ -549,7 +550,7 @@ static void setCameraModelTests()
     r.ctx->camera_model_ack = -1;
     r.ctx->camera_model_why = "model must be one of none, buoy, dock";
     chk("camera_node refuses: FAILURE, its reason kept for the GCS", r.tick() == BAD &&
-      r.ctx->camera_model_why.find("refused the dock model: model must be") == 0);
+      r.ctx->camera_model_why.find("camera_node refused the dock model: model must be") == 0);
   }
   {
     CameraRig r;
@@ -572,6 +573,218 @@ static void setCameraModelTests()
   }
 }
 
+/// Task 3 on the sticks with the cannon: a boat at the origin heading north, and a camera
+/// that sees one bay face straight ahead. Records the reports, the cannon and the sticks.
+struct FireRig : Rig
+{
+  std::vector<std::string> reports;
+  int cannon_calls = 0;
+  bool cannon_on = false;
+  double cannon_x = 0.0, cannon_y = 0.0;
+  double fwd = 0.0, lat = 0.0, yaw = 0.0;
+
+  FireRig()
+  {
+    ctx->report = [this](const std::string & kind, const std::string &) {reports.push_back(kind);};
+    ctx->cannon = [this](bool on, double x, double y, double) {
+        ++cannon_calls; cannon_on = on; cannon_x = x; cannon_y = y;
+      };
+    ctx->sticks = [this](double f, double l, double y) {fwd = f; lat = l; yaw = y;};
+    withPose();
+    ctx->heading_deg = 0.0;
+    ctx->dock_heading = 0.0;
+  }
+
+  static crusader_bt::dock::WindowSighting win(int i, crusader_bt::dock::Colour c,
+    double x = 2.0)
+  {
+    crusader_bt::dock::WindowSighting w;
+    w.index = i;
+    w.state = c;
+    w.has_position = true;
+    w.x = x;
+    w.y = 0.3 - 0.6 * i;
+    w.z = 0.2;
+    return w;
+  }
+
+  /// One DockObservation stamped t: the face `ahead` m in front of the camera, square to
+  /// it, with these windows. The bay it makes is track 0, committed.
+  void frame(double t, std::vector<crusader_bt::dock::WindowSighting> ws, double ahead = 2.0)
+  {
+    crusader_bt::dock::BaySighting s;
+    s.bearing_deg = 0.0;
+    s.has_normal = true;
+    s.nx = -1.0;
+    s.d = ahead;
+    s.range_m = ahead;
+    s.windows = ws;
+    crusader_bt::dock::Frame f;
+    f.t = t;
+    f.bays.push_back(s);
+    std::lock_guard<std::mutex> lk(ctx->mu);
+    crusader_bt::ingestDockObservation(*ctx, f);
+    ctx->chosen_track = 0;
+  }
+
+  /// The centring spot, seen at now_s: `left` m left of the bow's line, `ahead` m ahead.
+  void spot(double left, double ahead)
+  {
+    ctx->chosen_track = 0;
+    ctx->centre = crusader_bt::fire::CentreTarget{};
+    ctx->centre.track = 0;
+    ctx->centre.from_indicator = true;
+    ctx->centre.fix.sight({-left, ahead}, ahead, ctx->now_s, ctx->now_s);
+  }
+};
+
+static void fireBesideDockingTests()
+{
+  using crusader_bt::dock::Colour;
+  std::printf("\n8. Task 3: the cannon beside the docking, and the centring\n");
+  {
+    FireRig r;
+    r.frame(10.0, {});
+    r.load("<AwaitFireTarget bay=\"2\" target=\"{target}\" min_red_s=\"0.2\" timeout_s=\"100\"/>");
+    chk("no light: RUNNING", r.tick() == RUN);
+    r.frame(10.0, {FireRig::win(0, Colour::Off), FireRig::win(1, Colour::Red)});
+    chk("RED in one frame: not yet (0.2 s)", r.tick() == RUN);
+    r.frame(10.1, {FireRig::win(1, Colour::Red)});
+    r.tick();
+    r.frame(10.25, {FireRig::win(0, Colour::Off), FireRig::win(1, Colour::Red)});
+    chk("our bay's window RED for 0.25 s: SUCCESS, docked or not", r.tick() == OK);
+    int target = -1;
+    chk("... and the target is that window", r.bb->get("target", target) && target == 1);
+  }
+  {
+    FireRig r;
+    r.frame(10.0, {});
+    r.load("<AwaitFireTarget bay=\"2\" min_red_s=\"0.2\" timeout_s=\"1000\" resend_s=\"10\"/>");
+    r.tick();
+    r.ctx->now_s = 30.0;
+    r.tick();
+    chk("beside a docking still under way: no docking report", r.reports.empty());
+    r.ctx->docking_report_s = 30.0;                       // ReportDocking sent it
+    r.ctx->now_s = 35.0;
+    r.tick();
+    chk("5 s after ReportDocking: not yet re-sent", r.reports.empty());
+    r.ctx->now_s = 40.5;
+    r.tick();
+    chk("10 s after it, unconfirmed: re-sent once", r.reports.size() == 1 &&
+      r.reports[0] == "docking");
+    r.ctx->now_s = 45.0;
+    r.tick();
+    chk("... and not again 4.5 s later", r.reports.size() == 1);
+    r.ctx->readiness_confirmed = true;
+    r.ctx->now_s = 60.0;
+    r.tick();
+    chk("confirmed: no more", r.reports.size() == 1);
+  }
+  {
+    FireRig r;
+    r.ctx->fires_out = 1;                                  // the code flashes after a hit
+    r.frame(10.0, {});
+    r.load("<AwaitFireTarget target=\"{target}\" min_red_s=\"0.2\" refire_red_s=\"1.5\" "
+      "timeout_s=\"100\"/>");
+    double t = 10.0;
+    for (; t < 10.95; t += 0.1) {r.frame(t, {FireRig::win(0, Colour::Red)}); r.tick();}
+    r.frame(t, {FireRig::win(0, Colour::Off)});
+    chk("after a fire: a 1 s RED flash is not another fire", r.tick() == RUN);
+    bool early = false;
+    for (t = 12.0; t < 13.45; t += 0.1) {
+      r.frame(t, {FireRig::win(0, Colour::Red)});
+      early = early || r.tick() != RUN;
+    }
+    chk("... nor is 1.4 s of it", !early);
+    r.frame(13.6, {FireRig::win(0, Colour::Red)});
+    chk("... a RED held 1.6 s is", r.tick() == OK);
+  }
+  {
+    FireRig r;
+    r.frame(10.0, {});
+    r.ctx->dock_pattern = "steady";
+    r.ctx->dock_colours = {Colour::Red};
+    r.ctx->dock_target_window = 0;
+    r.load("<AwaitFireTarget target=\"{target}\" timeout_s=\"100\"/>");
+    int target = -1;
+    chk("min_red_s unset: the timing layer's steady RED, as before",
+      r.tick() == OK && r.bb->get("target", target) && target == 0);
+  }
+  {
+    FireRig r;
+    r.load("<SprayUntilHit target=\"1\" window=\"{window}\" timeout_s=\"100\" "
+      "max_aim_age_s=\"5.0\"/>");
+    r.ctx->now_s = 1.0;
+    r.frame(10.0, {FireRig::win(0, Colour::Off), FireRig::win(1, Colour::Red, 2.0)});
+    chk("RED, aim point seen: spraying it on the first tick", r.tick() == RUN && r.cannon_on &&
+      r.cannon_x == 2.0);
+    r.ctx->now_s = 3.0;
+    r.frame(10.1, {FireRig::win(0, Colour::Off)});        // window 1 lost
+    chk("window lost for 2 s: still spraying its last aim point", r.tick() == RUN &&
+      r.cannon_on && r.cannon_x == 2.0);
+    r.ctx->now_s = 5.9;
+    chk("... for 4.9 s too", r.tick() == RUN && r.cannon_on);
+    r.ctx->now_s = 6.2;
+    chk("past max_aim_age_s (5 s): holding fire", r.tick() == RUN && !r.cannon_on);
+    r.ctx->now_s = 6.3;
+    r.frame(10.2, {FireRig::win(1, Colour::Red, 2.1)});
+    chk("seen again: spraying again, at the new aim point", r.tick() == RUN && r.cannon_on &&
+      r.cannon_x == 2.1);
+    r.frame(10.3, {FireRig::win(1, Colour::Green, 2.1)});
+    r.tick();
+    r.frame(10.8, {FireRig::win(1, Colour::Green, 2.1)});
+    int window = -1;
+    chk("GREEN 0.5 s after RED: SUCCESS, cannon off", r.tick() == OK && !r.cannon_on &&
+      r.bb->get("window", window) && window == 1);
+    chk("... a fire out, counted", r.ctx->fires_out == 1);
+  }
+  {
+    FireRig r;
+    r.load("<SprayUntilHit target=\"0\" window=\"{window}\" timeout_s=\"100\"/>");
+    double t = 20.0;
+    for (; t < 21.95; t += 0.1) {
+      r.frame(t, {FireRig::win(0, Colour::Off), FireRig::win(1, Colour::Red)});
+      r.tick();
+    }
+    chk("window 1 RED, ours (0) dark for 1.9 s since the trigger: still spraying 0",
+      r.cannon_on && r.cannon_y > 0.0);
+    for (; t < 22.55; t += 0.1) {
+      r.frame(t, {FireRig::win(0, Colour::Off), FireRig::win(1, Colour::Red)});
+      r.tick();
+    }
+    r.frame(t, {FireRig::win(1, Colour::Green)});
+    r.tick();
+    r.frame(t + 0.5, {FireRig::win(1, Colour::Green)});
+    int window = -1;
+    chk("triggered on window 0 by a misread, window 1 RED for 2.5 s: it switches and puts "
+      "1 out", r.tick() == OK && r.bb->get("window", window) && window == 1);
+  }
+  {
+    FireRig r;
+    r.load("<ApproachBay use_lidar=\"false\" handover_m=\"1.8\" recentre_m=\"0.40\"/>");
+    r.spot(1.0, 1.5);                                      // inside 1.8 m, 1 m to the left
+    r.tick();                                              // onStart
+    r.ctx->now_s += 0.1;
+    chk("inside the hand-over distance but 1 m off: RUNNING, not handed over",
+      r.tick() == RUN);
+    chk("... strafing LEFT to it (lat + = starboard)", r.lat < 0.0);
+    r.ctx->now_s += 0.1;
+    r.spot(-0.1, 1.5);
+    chk("10 cm off: handed over", r.tick() == OK);
+  }
+  {
+    FireRig r;
+    r.load("<StrafeKeep fire_range_m=\"1.2\" use_lidar=\"false\"/>");
+    r.spot(-0.8, 1.2);                                     // 0.8 m RIGHT, not in the picture
+    r.tick();
+    chk("bay out of the picture, its spot kept: strafing RIGHT to it (the 20:03 stall)",
+      r.lat > 0.0);
+    r.ctx->now_s += 9.0;
+    r.tick();
+    chk("9 s on, nothing seen: the spot has lapsed, no sideways push", r.lat == 0.0);
+  }
+}
+
 int main()
 {
   rclcpp::init(0, nullptr);
@@ -582,6 +795,7 @@ int main()
   tunableTests();
   failureTraceTests();
   setCameraModelTests();
+  fireBesideDockingTests();
   rclcpp::shutdown();
   std::printf("\n%d checks, %d failed\n", g_checks, g_fails);
   std::printf("%s\n", g_fails == 0 ? "PASS" : "FAIL");

@@ -590,6 +590,145 @@ int main()
     chk("cannon off", cannonJson(false, 0, 0, 0).find("\"fire\":false") != std::string::npos);
   }
 
+  std::printf("\nthe indicator's spot (Pinhole, live indicator, RedWatch)\n");
+  {
+    // A camera with fx 1000 px and cx 960 px, as dock_obs_core.pixel_ray has it: a point
+    // (x fwd, y left) is seen at column u = cx - fx * y / x.
+    const double fx = 1000.0, cx = 960.0;
+    auto col = [&](double x, double y) {return cx - fx * y / x;};
+    Pinhole ph;
+    ph.add(col(3.0, 0.78), 3.0, 0.78);
+    chk("one window: not trusted yet", !ph.ok() && !std::isfinite(ph.bearingDeg(960.0)));
+    ph.add(col(3.0, 0.70), 3.0, 0.70);
+    chk("two windows 27 px apart: still not (spread under 40 px)", !ph.ok());
+    ph.add(col(2.5, -1.02), 2.5, -1.02);
+    chk("windows spread across the picture: trusted", ph.ok());
+    chk_near("the centre column is dead ahead", ph.bearingDeg(cx), 0.0, 1e-9);
+    chk_near("500 px LEFT of centre is +26.57 deg (+ left)", ph.bearingDeg(460.0),
+      std::atan(0.5) / nav::kDeg, 1e-9);
+    chk_near("... and 500 px right is -26.57", ph.bearingDeg(1460.0),
+      -std::atan(0.5) / nav::kDeg, 1e-9);
+    Pinhole bad;
+    bad.add(100.0, 3.0, -1.0);                       // left of the picture, but y RIGHT
+    bad.add(1800.0, 3.0, 1.0);
+    chk("a mirrored line (k > 0) is refused", !bad.ok());
+    bad.add(500.0, 0.05, 0.0);
+    chk("a point behind or at the lens adds nothing", bad.n == 2.0);
+
+    // The camera placing the indicator: boat at the origin heading north, the face 4 m
+    // ahead (its centre 0.5 m right of the bow's line), the indicator 0.3 m further right
+    // on the same face, two windows seen with their aim points.
+    DockBook b;
+    const Mount m;                                   // 0.37 m ahead, level, straight
+    const Vec2 boat{0.0, 0.0};
+    const double h = 0.0;
+    const Vec2 cam = bodyToWorld(boat, h, m.x, m.y);
+    const Vec2 f = nav::headingVec(h), l = nav::portOf(f);
+    auto camxy = [&](Vec2 p) {return Vec2{nav::dot(p - cam, f), nav::dot(p - cam, l)};};
+    const Vec2 face{0.5, 4.0}, ind{0.8, 4.0}, w0{0.2, 4.0}, w1{0.8, 4.0};
+    Frame fr;
+    fr.t = 10.0;
+    BaySighting s = see(boat, h, m, face, Vec2{0.0, -1.0}, Colour::Green);
+    for (Vec2 w : {w0, w1}) {
+      const Vec2 c = camxy(w);
+      WindowSighting ws;
+      ws.index = static_cast<int>(s.windows.size());
+      ws.has_position = true;
+      ws.x = c.x;
+      ws.y = c.y;
+      ws.u_px = col(c.x, c.y);
+      s.windows.push_back(ws);
+    }
+    s.ind_u_px = col(camxy(ind).x, camxy(ind).y);
+    fr.bays.push_back(s);
+    const std::vector<int> ids = b.ingest(fr, boat, h, m);
+    const BayTrack * t = b.find(ids[0]);
+    chk("the face is placed", t != nullptr && std::isfinite(t->live_left_m));
+    chk_near("face: 0.5 m RIGHT of the body origin", t->live_left_m, nav::dot(face - boat, l), 1e-6);
+    chk_near("indicator: 0.8 m right, not the face's 0.5", t->live_ind_left_m,
+      nav::dot(ind - boat, l), 1e-6);
+    chk_near("indicator: 4 m ahead of the body origin", t->live_ind_ahead_m,
+      nav::dot(ind - boat, f), 1e-6);
+
+    DockBook b2;                                     // the same frame with no windows
+    Frame fr2 = fr;
+    fr2.bays[0].windows.clear();
+    const BayTrack * t2 = b2.find(b2.ingest(fr2, boat, h, m)[0]);
+    chk("no windows yet, no line: the face is placed, the indicator is not",
+      t2 != nullptr && std::isfinite(t2->live_left_m) && !std::isfinite(t2->live_ind_left_m));
+    Frame fr3 = fr;
+    fr3.bays[0].indicator_present = false;
+    fr3.bays[0].indicator = Colour::Unknown;
+    fr3.t = 10.1;
+    b.ingest(fr3, boat, h, m);
+    chk("no indicator in this frame: last frame's spot is not carried over",
+      !std::isfinite(b.find(ids[0])->live_ind_left_m));
+    Frame fr4 = fr;
+    fr4.bays[0].has_normal = false;
+    fr4.t = 10.2;
+    b.ingest(fr4, boat, h, m);
+    chk("no face plane: the indicator is not placed",
+      !std::isfinite(b.find(ids[0])->live_ind_left_m));
+
+    // the mount's yaw: a camera aimed 90 deg to port sees "1 m ahead" 1 m to port
+    Mount yawed;
+    yawed.yaw_deg = 90.0;
+    const Vec2 cb = camToBody(yawed, Vec2{1.0, 0.0});
+    chk_near("yawed mount: ahead of the camera is port of the body (x)", cb.x, yawed.x, 1e-9);
+    chk_near("... (y)", cb.y, yawed.y + 1.0, 1e-9);
+
+    // a merge keeps the newer view, indicator and all
+    DockBook mb;
+    BayTrack k, d;
+    k.id = 0; k.p = {0.0, 4.0}; k.w = 2.0; k.last_seen = 1.0; k.live_left_m = 0.1;
+    d.id = 1; d.p = {0.5, 4.0}; d.w = 1.0; d.last_seen = 2.0; d.live_left_m = 0.4;
+    d.live_ind_left_m = 0.3; d.live_ind_ahead_m = 4.0; d.live_truncated = true;
+    mb.tracks = {k, d};
+    mb.mergeClose();
+    const BayTrack * kt = mb.find(1);
+    chk("merged: the newer sighting's indicator and truncation come along",
+      kt != nullptr && kt->live_ind_left_m == 0.3 && kt->live_truncated && kt->live_left_m == 0.4);
+  }
+  {
+    auto win = [](int i, Colour c) {WindowSighting w; w.index = i; w.state = c; return w;};
+    RedWatch r;
+    r.update({win(0, Colour::Off), win(1, Colour::Red)}, 0.0);
+    chk("one RED frame: lit with hold 0", r.lit(0.0, 0.0) == 1);
+    chk("... not with hold 0.2", r.lit(0.0, 0.2) == -1);
+    r.update({win(1, Colour::Red)}, 0.1);
+    r.update({win(1, Colour::Red)}, 0.25);
+    chk("RED for 0.25 s: lit with hold 0.2", r.lit(0.25, 0.2) == 1);
+    r.update({win(1, Colour::Unknown)}, 0.3);
+    r.update({win(0, Colour::Off)}, 0.35);           // window 1 missing from this frame
+    chk("an UNKNOWN frame and a missing one do not break the run", r.lit(0.35, 0.2) == 1);
+    chk("... but it must be recent (gap 0.5 s)", r.lit(0.8, 0.2) == -1);
+    r.update({win(1, Colour::Off)}, 0.4);
+    chk("OFF ends it", r.lit(0.4, 0.0) == -1);
+    chk_near("lastRed remembers the last RED reading", r.lastRed(1), 0.25, 1e-12);
+    chk("lastRed: never RED is NaN", !std::isfinite(r.lastRed(0)) && !std::isfinite(r.lastRed(7)));
+    r.update({win(1, Colour::Red)}, 1.0);
+    r.update({win(1, Colour::Red)}, 2.0);            // 1 s without a frame
+    chk("a gap over 0.5 s starts the run again", r.lit(2.0, 0.5) == -1 && r.lit(2.0, 0.0) == 1);
+
+    // the resource code after a hit: RED 1 s, off 1 s, over and over, at 20 fps
+    RedWatch code;
+    bool fired = false;
+    for (int i = 0; i < 200; ++i) {
+      const double t = 0.05 * i;
+      const bool on = std::fmod(t, 2.0) < 1.0;
+      code.update({win(0, on ? Colour::Red : Colour::Off)}, t);
+      fired = fired || code.lit(t, 1.5) >= 0;
+    }
+    chk("the code's 1 s RED flashes never hold 1.5 s", !fired);
+    RedWatch fire;
+    for (int i = 0; i < 40; ++i) {fire.update({win(0, Colour::Red)}, 0.05 * i);}
+    chk("a steady RED does", fire.lit(1.95, 1.5) == 0);
+    RedWatch two;
+    two.update({win(0, Colour::Red), win(1, Colour::Red)}, 0.0);
+    two.update({win(1, Colour::Red)}, 0.3);
+    chk("two RED: the longer run wins", two.lit(0.3, 0.0) == 1);
+  }
+
   std::printf("\n%d checks, %d failed\n", g_checks, g_fails);
   std::printf("%s\n", g_fails == 0 ? "PASS" : "FAIL");
   return g_fails == 0 ? 0 : 1;

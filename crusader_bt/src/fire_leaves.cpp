@@ -34,17 +34,23 @@ namespace crusader_bt
 namespace
 {
 
-/// The committed bay as the camera sees it, and where it was seen. Feed it every tick,
-/// under mu, with the heading to square to (NaN: the bow's).
+/// Seconds the centring point is trusted after the last frame that placed it: the boat's
+/// own track carries it that long out of the picture.
+constexpr double kKeepS = 8.0;
+
+/// The committed bay as the camera sees it, and the point to centre on. Feed it every
+/// tick, under mu, with the heading to square to (NaN: the bow's).
 ///   seen              in the picture now (the 1 s rule, inView)
-///   ahead_m, left_m   the bay in the body frame (ahead, left of the body origin, m), the
+///   ahead_m, left_m   the face in the body frame (ahead, left of the body origin, m), the
 ///                     median over the last second: no GPS and no heading. NaN unless seen.
-///   held              its place is known: pinned in the local frame from the camera's
-///                     sightings (fire::BayFix), the newest within kKeepS. Between frames
+///                     The fallback when nothing is held.
+///   held              the centring spot is known: Context::centre, the GREEN indicator
+///                     (the face until the indicator is placed) pinned in the local frame
+///                     by every frame that saw it, the newest within kKeepS. Between frames
 ///                     and out of the picture the boat's own 20 Hz track carries it.
-///   along_m, across_m the bay from the boat NOW, along the square heading (+ ahead) and
+///   along_m, across_m that spot from the boat NOW, along the dock heading (+ ahead) and
 ///                     across it (+ left): bow wobble is not in them. NaN unless held.
-///   along_rate, across_rate  their rates, from the boat's own velocity (+ = growing).
+///   source            what built the spot: "indicator" or "face".
 ///   last_side         +1 left, -1 right, 0 never seen: where the camera saw it last.
 class CameraBay
 {
@@ -53,15 +59,9 @@ public:
   {
     const dock::BayTrack * t = c.dock.find(c.chosen_track);
     if (c.chosen_track != track_) {*this = CameraBay{}; track_ = c.chosen_track;}
-    if (c.pose_fresh && c.boat_t >= 0.0) {vel_.feed(c.boat, c.boat_t);}
     if (t != nullptr && t->last_seen > last_t_ && std::isfinite(t->live_left_m)) {
       last_t_ = t->last_seen;
       hist_.push_back({t->last_seen, t->live_ahead_m, t->live_left_m});
-      // a face cut by the image edge has its centre pulled toward the middle: no place
-      if (!t->live_truncated && c.pose_fresh && std::isfinite(c.heading_deg)) {
-        fix_.sight(dock::bodyToWorld(c.boat, c.heading_deg, t->live_ahead_m, t->live_left_m),
-          c.now_s);
-      }
     }
     while (!hist_.empty() && c.dock_t - hist_.front().t > kWindowS) {hist_.pop_front();}
     seen = t != nullptr && inView(c, *t) && !hist_.empty();
@@ -74,34 +74,88 @@ public:
       last_side = left_m >= 0.0 ? 1.0 : -1.0;
     }
     const double square = std::isfinite(square_deg) ? square_deg : c.heading_deg;
-    const fire::DockFrame v = vel_.valid ? fire::toDockFrame(vel_.v, square) : fire::DockFrame{};
-    along_rate = -v.along;                      // the boat closing on the bay shrinks along_m
-    across_rate = -v.left;
-    held = c.pose_fresh && fix_.have && fix_.age(c.now_s) <= kKeepS && std::isfinite(square);
-    const fire::DockFrame e = held ? fire::toDockFrame(fix_.p - c.boat, square) : fire::DockFrame{};
+    const fire::CentreTarget & ct = c.centre;
+    held = c.pose_fresh && ct.track == c.chosen_track && ct.fix.have &&
+      ct.age(c.now_s) <= kKeepS && std::isfinite(square);
+    const fire::DockFrame e = held ? fire::toDockFrame(ct.fix.p - c.boat, square) :
+      fire::DockFrame{};
     along_m = e.along;
     across_m = e.left;
+    source = held ? ct.source() : "none";
+    if (held && std::isfinite(across_m)) {last_side = across_m >= 0.0 ? 1.0 : -1.0;}
   }
-
-  /// Seconds since the newest sighting that placed it (NaN: none).
-  double fixAge(double now) const {return fix_.age(now);}
 
   bool seen = false, held = false;
   double ahead_m = fire::kNaN, left_m = fire::kNaN;
   double along_m = fire::kNaN, across_m = fire::kNaN;
-  double along_rate = fire::kNaN, across_rate = fire::kNaN;
+  const char * source = "none";
   double last_side = 0.0;
 
 private:
   static constexpr double kWindowS = 1.0;
-  static constexpr double kKeepS = 8.0;
   struct Sighting {double t, ahead, left;};
   std::deque<Sighting> hist_;
   double last_t_ = -1e18;
   int track_ = -1;
-  fire::BayFix fix_;
-  fire::VelocityFilter vel_;
 };
+
+/// A D term's rate on one measured error (fire::TickRate), started over whenever the
+/// error's source changes (LiDAR to pinned, indicator to live face): a jump between two
+/// sources is not motion.
+struct Damped
+{
+  fire::TickRate r;
+  std::string src;
+
+  double update(double x, const std::string & from, double dt)
+  {
+    if (from != src) {r.reset(); src = from;}
+    return r.update(x, dt);
+  }
+};
+
+/// The range to hold or close on, best first: the LiDAR wall (with use_lidar, and its
+/// own rate), the pinned spot's distance along the dock heading (the boat's own track
+/// moves it, so it is not late), the camera's live face (a 1 s median, half a second
+/// late). NaN and "no range" when there is none.
+struct RangeFix
+{
+  double range = fire::kNaN, lidar_rate = fire::kNaN;
+  const char * src = "no range";
+
+  /// Its rate: the LiDAR's own, else `d`'s on this range (fed either way).
+  double rate(Damped & d, double dt) const
+  {
+    const double r = d.update(range, src, dt);
+    return std::isfinite(lidar_rate) ? lidar_rate : r;
+  }
+};
+
+RangeFix rangeFix(const Context & c, const CameraBay & cam, bool use_lidar)
+{
+  if (use_lidar && std::isfinite(c.wall.range(c.now_s))) {
+    return {c.wall.range(c.now_s), c.wall.rate(c.now_s), "LiDAR"};
+  }
+  if (cam.held && std::isfinite(cam.along_m)) {return {cam.along_m, fire::kNaN, "pinned"};}
+  if (cam.seen && std::isfinite(cam.ahead_m)) {return {cam.ahead_m, fire::kNaN, "camera"};}
+  return {};
+}
+
+/// The sideways error to centre on, + = LEFT of the bow's line, best first: the pinned
+/// spot across the dock heading (CameraBay::source), the camera's live face (bow wobble
+/// and all). NaN and "not seen" when there is neither.
+struct LatFix
+{
+  double err = fire::kNaN;
+  const char * src = "not seen";
+};
+
+LatFix latFix(const CameraBay & cam)
+{
+  if (cam.held) {return {cam.across_m, cam.source};}
+  if (cam.seen) {return {cam.left_m, "live face"};}
+  return {};
+}
 
 // ---------------------------------------------------------------- guards
 
@@ -176,10 +230,11 @@ public:
 
 // ---------------------------------------------------------------- the docked hold
 
-/// Hold off the committed bay on the STICKS, on what the camera sees (CameraBay): the bay
-/// fire_range_m ahead (surge; the LiDAR wall with use_lidar), its centre on the bow (sway),
-/// the bow on the dock heading (yaw). Out of view: only the heading is held. ALWAYS
-/// SUCCESS: "not there yet" is a stick command and a reason, never a FAILURE.
+/// Hold off the committed bay on the STICKS (CameraBay): the bay fire_range_m ahead (surge;
+/// rangeFix), its GREEN indicator on the bow's line (sway, across the dock heading, from
+/// the pinned point and the boat's own velocity), the bow on the dock heading (yaw). Out
+/// of view the pinned point still steers it for kKeepS; past that, only the heading is
+/// held. ALWAYS SUCCESS: "not there yet" is a stick command and a reason, never a FAILURE.
 class StrafeKeep : public CrusaderSyncAction
 {
 public:
@@ -232,33 +287,21 @@ public:
     fire::StrafeCmd cmd;
     fire::StrafeInputs si;
     bool publish = false;
-    std::string src = "no range";
+    RangeFix rf;
+    LatFix lf;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       const double now = ctx_->now_s;
-      cam_.feed(*ctx_);
+      const double square = dockHeading(*ctx_, in("heading_deg", fire::kNaN));
+      cam_.feed(*ctx_, square);
       const double dt = ctx_->last_strafe_t < 0 ? 0.1 : std::max(0.0, now - ctx_->last_strafe_t);
       ctx_->last_strafe_t = now;
-      if (lidar && std::isfinite(ctx_->wall.range(now))) {
-        si.range_m = ctx_->wall.range(now);
-        si.range_rate = ctx_->wall.rate(now);
-        src = "LiDAR";
-      } else if (cam_.seen) {
-        si.range_m = cam_.ahead_m;
-        src = "camera";
-      }
-      if (cam_.seen) {si.lat_err_m = cam_.left_m;}
-      // rates from the last tick (the bay's place moves only as the boat does)
-      if (dt > 0.0 && dt < 1.0) {
-        auto rate = [dt](double now_v, double prev_v, double prev_r) {
-            return std::isfinite(now_v) && std::isfinite(prev_v) ?
-                   0.7 * (std::isfinite(prev_r) ? prev_r : 0.0) + 0.3 * (now_v - prev_v) / dt :
-                   fire::kNaN;
-          };
-        if (src == "camera") {si.range_rate = rate(si.range_m, prev_.range_m, prev_.range_rate);}
-        si.lat_rate = rate(si.lat_err_m, prev_.lat_err_m, prev_.lat_rate);
-      }
-      const double square = dockHeading(*ctx_, in("heading_deg", fire::kNaN));
+      rf = rangeFix(*ctx_, cam_, lidar);
+      si.range_m = rf.range;
+      si.range_rate = rf.rate(range_rate_, dt);
+      lf = latFix(cam_);
+      si.lat_err_m = lf.err;
+      si.lat_rate = lat_rate_.update(lf.err, lf.src, dt);
       if (std::isfinite(square) && std::isfinite(ctx_->heading_deg)) {
         si.yaw_err_deg = fire::wrap180(square - ctx_->heading_deg);
       }
@@ -274,15 +317,14 @@ public:
       if (publish) {ctx_->sticks_commanded = true;}
       if (ctx_->task3_phase.rfind("LINE UP", 0) != 0) {ctx_->task3_phase = "HOLD: " + cmd.why;}
     }
-    prev_ = si;
     if (publish && ctx_->sticks) {
       ctx_->sticks(cmd.sticks.fwd_us, cmd.sticks.lat_us, cmd.sticks.yaw_us);
     }
     if (ctx_->node) {
       RCLCPP_INFO_THROTTLE(log(), *ctx_->node->get_clock(), 1000,
-        "hold: range %.2f m (%s), bay %+.2f m left, square %+.1f deg | sticks fwd %+.0f "
+        "hold: range %.2f m (%s), bay %+.2f m left (%s), square %+.1f deg | sticks fwd %+.0f "
         "lat %+.0f yaw %+.0f us (%s)%s",
-        si.range_m, src.c_str(), si.lat_err_m, si.yaw_err_deg, cmd.sticks.fwd_us,
+        si.range_m, rf.src, si.lat_err_m, lf.src, si.yaw_err_deg, cmd.sticks.fwd_us,
         cmd.sticks.lat_us, cmd.sticks.yaw_us, cmd.why.c_str(),
         publish ? "" : " [shadow: publish_setpoints is off]");
     }
@@ -290,8 +332,8 @@ public:
   }
 
 private:
-  fire::StrafeInputs prev_;
   CameraBay cam_;
+  Damped range_rate_, lat_rate_;
 };
 
 /// Wait until the hold has held the spot for hold_s: range, the bay centred, square, the
@@ -338,7 +380,7 @@ public:
       const fire::SteadyStatus st = ctx_->steady.status(now);
       char buf[96];
       if (!std::isfinite(si.lat_err_m)) {
-        why = "bay not in the camera's view";
+        why = "bay not seen for 8 s";
       } else if (!std::isfinite(si.yaw_err_deg)) {
         why = "no face angle yet";
       } else if (!fire::inBand(si.range_m, target, rtol)) {
@@ -377,11 +419,15 @@ private:
   double t0_ = 0.0;
 };
 
-/// Close in on the committed bay on what the camera sees (CameraBay), bow on the dock
-/// heading: strafe onto its centreline holding the distance, and only once it has stayed
-/// within centre_tol_m for centred_s drive straight in (a constant, ramped push), re-
-/// centring only past recentre_m. Out of view: strafe toward the side the camera saw it
-/// on last. SUCCESS at handover_m (the LiDAR wall with use_lidar); never FAILURE.
+/// Close in on the committed bay (CameraBay), bow on the dock heading: strafe its GREEN
+/// indicator onto the bow's line holding the distance, and only once it has stayed within
+/// centre_tol_m for centred_s drive straight in (a constant, ramped push), re-centring
+/// only past recentre_m. The sideways error is the indicator's spot (Context::centre)
+/// across the dock heading, damped on its own rate, so it keeps centring for kKeepS out
+/// of the picture; with nothing held, the live face; with nothing seen either, a slide
+/// toward the side it was seen on last. SUCCESS at handover_m (rangeFix) once within
+/// recentre_m of the line: inside handover_m but further off, it holds handover_m and
+/// strafes over first. Never FAILURE.
 class ApproachBay : public CrusaderAction
 {
 public:
@@ -394,12 +440,13 @@ public:
       BT::InputPort<double>("slew_us_s", 40.0, "forward ramp, both ways"),
       BT::InputPort<double>("centre_tol_m", 0.15, "centred: this close to the centreline..."),
       BT::InputPort<double>("centred_s", 1.0, "... for this long, then in"),
-      BT::InputPort<double>("recentre_m", 0.40, "moving in: stop and re-centre past this"),
+      BT::InputPort<double>("recentre_m", 0.40,
+        "moving in: stop and re-centre past this; the hand-over needs this close"),
       BT::InputPort<double>("handover_m", 1.8, "SUCCESS this far from the bay"),
       BT::InputPort<double>("heading_deg", fire::kNaN, "the bow's (else the GCS's dock heading)"),
       BT::InputPort<bool>("use_lidar", true, "the range from the LiDAR wall when it has one"),
       BT::InputPort<double>("kp_lat", 100.0, "us per m off the centreline"),
-      BT::InputPort<double>("kd_lat", 40.0, "us per m/s: light damping"),
+      BT::InputPort<double>("kd_lat", 40.0, "us per m/s of the offset's change"),
       BT::InputPort<double>("kp_hold", 60.0, "us per m: the distance held while centring"),
       BT::InputPort<double>("kp_yaw", 4.0, "us per deg"),
       BT::InputPort<double>("kd_yaw", 3.0, "us per deg/s"),
@@ -412,8 +459,9 @@ public:
   {
     fwd_ = 0.0;
     closing_ = false;
-    centred_since_ = hold_range_ = prev_off_ = fire::kNaN;
-    off_rate_ = 0.0;
+    centred_since_ = hold_range_ = fire::kNaN;
+    off_rate_ = Damped{};
+    range_rate_ = Damped{};
     std::lock_guard<std::mutex> lk(ctx_->mu);
     t_prev_ = ctx_->now_s;
     ctx_->task3_phase = "APPROACH";
@@ -425,41 +473,41 @@ public:
     auto in = [this](const char * k, double d) {return getInput<double>(k).value_or(d);};
     const double fwd_us = in("fwd_us", 60.0), strafe_us = in("strafe_us", 100.0);
     const double min_us = in("min_us", 30.0);
-    double yaw_us = 0.0, want_fwd = 0.0, lat_us = 0.0, range = fire::kNaN, off = fire::kNaN;
+    const double handover = in("handover_m", 1.8), recentre = in("recentre_m", 0.40);
+    double yaw_us = 0.0, want_fwd = 0.0, lat_us = 0.0, off = fire::kNaN;
+    RangeFix rf;
+    LatFix lf;
+    double square = fire::kNaN;
     bool publish = false, done = false;
     std::string why;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       const double now = ctx_->now_s, dt = std::clamp(now - t_prev_, 0.0, 0.5);
       t_prev_ = now;
-      cam_.feed(*ctx_);
-      const double square = dockHeading(*ctx_, in("heading_deg", fire::kNaN));
+      square = dockHeading(*ctx_, in("heading_deg", fire::kNaN));
+      cam_.feed(*ctx_, square);
       if (std::isfinite(square) && std::isfinite(ctx_->heading_deg)) {
         const double rate = ctx_->yaw_rate_dps;
         yaw_us = fire::axisLaw(fire::wrap180(square - ctx_->heading_deg),
           std::isfinite(rate) ? -rate : fire::kNaN, in("kp_yaw", 4.0), in("kd_yaw", 3.0), 3.0,
           min_us, in("max_yaw_us", 80.0));
       }
-      range = cam_.ahead_m;
-      if (getInput<bool>("use_lidar").value_or(true) && std::isfinite(ctx_->wall.range(now))) {
-        range = ctx_->wall.range(now);
-      }
-      if (!cam_.seen) {
-        // out of the picture: toward where the camera saw it last, no forward push
+      rf = rangeFix(*ctx_, cam_, getInput<bool>("use_lidar").value_or(true));
+      lf = latFix(cam_);
+      off = lf.err;
+      const double off_rate = off_rate_.update(off, lf.src, dt);
+      const double range_rate = rf.rate(range_rate_, dt);
+      if (!std::isfinite(off)) {
+        // nothing to centre on: toward where the camera saw it last, no forward push
         closing_ = false;
-        centred_since_ = prev_off_ = fire::kNaN;
+        centred_since_ = fire::kNaN;
         lat_us = -cam_.last_side * strafe_us;                // lat + = starboard
         why = cam_.last_side > 0 ? "bay out of view: sliding left to it" :
           cam_.last_side < 0 ? "bay out of view: sliding right to it" : "bay not seen yet";
       } else {
-        off = cam_.left_m;                                     // + = the centreline is LEFT
-        if (std::isfinite(prev_off_) && dt > 0.0) {
-          off_rate_ = 0.7 * off_rate_ + 0.3 * (off - prev_off_) / dt;
-        }
-        prev_off_ = off;
-        lat_us = -fire::axisLaw(off, off_rate_, in("kp_lat", 100.0), in("kd_lat", 40.0), 0.05,
+        lat_us = -fire::axisLaw(off, off_rate, in("kp_lat", 100.0), in("kd_lat", 40.0), 0.05,
           min_us, strafe_us);
-        if (closing_ && std::fabs(off) > in("recentre_m", 0.40)) {closing_ = false;}
+        if (closing_ && std::fabs(off) > recentre) {closing_ = false;}
         if (!closing_) {
           if (std::fabs(off) > in("centre_tol_m", 0.15)) {
             centred_since_ = fire::kNaN;
@@ -469,16 +517,24 @@ public:
             closing_ = true;
           }
         }
-        if (std::isfinite(range) && range <= in("handover_m", 1.8)) {
+        const bool inside = std::isfinite(rf.range) && rf.range <= handover;
+        if (inside && std::fabs(off) <= recentre) {
           done = true;
+        } else if (inside) {
+          // in close but off the line: the hold would start beside the bay
+          closing_ = false;
+          hold_range_ = fire::kNaN;
+          want_fwd = fire::axisLaw(rf.range - handover, range_rate, in("kp_hold", 60.0), 0.0,
+            0.10, min_us, fwd_us);
+          why = "at the hand-over distance: centring first";
         } else if (closing_) {
           hold_range_ = fire::kNaN;
           want_fwd = fwd_us;
           why = "closing in";
         } else {
           // centring: hold the distance it started centring at (no drifting in)
-          if (!std::isfinite(hold_range_)) {hold_range_ = range;}
-          want_fwd = fire::axisLaw(range - hold_range_, fire::kNaN, in("kp_hold", 60.0), 0.0,
+          if (!std::isfinite(hold_range_)) {hold_range_ = rf.range;}
+          want_fwd = fire::axisLaw(rf.range - hold_range_, range_rate, in("kp_hold", 60.0), 0.0,
             0.15, min_us, fwd_us);
           why = std::isfinite(centred_since_) ? "centred, settling" : "strafing to the centreline";
         }
@@ -492,14 +548,15 @@ public:
       ctx_->sticks(done ? 0.0 : fwd_, done ? 0.0 : lat_us, done ? 0.0 : yaw_us);
     }
     if (done) {
-      RCLCPP_INFO(log(), "approach: %.2f m from the bay: handing over to the hold", range);
+      RCLCPP_INFO(log(), "approach: %.2f m from the bay (%s), %+.2f m off its line (%s): "
+        "handing over to the hold", rf.range, rf.src, off, lf.src);
       return BT::NodeStatus::SUCCESS;
     }
     if (ctx_->node) {
       RCLCPP_INFO_THROTTLE(log(), *ctx_->node->get_clock(), 1000,
-        "approach: bay %.2f m out, %+.2f m left of centre | fwd %+.0f lat %+.0f yaw %+.0f us "
-        "(%s)%s", range, off, fwd_, lat_us, yaw_us, why.c_str(),
-        publish ? "" : " [shadow: publish_setpoints is off]");
+        "approach: bay %.2f m out (%s), %+.2f m left of the line (%s) | fwd %+.0f lat %+.0f "
+        "yaw %+.0f us (%s)%s", rf.range, rf.src, off, lf.src, fwd_, lat_us, yaw_us,
+        why.c_str(), publish ? "" : " [shadow: publish_setpoints is off]");
     }
     return BT::NodeStatus::RUNNING;
   }
@@ -516,10 +573,10 @@ public:
 
 private:
   CameraBay cam_;
+  Damped off_rate_, range_rate_;
   double fwd_ = 0.0, t_prev_ = 0.0;
   bool closing_ = false;
   double centred_since_ = fire::kNaN, hold_range_ = fire::kNaN;
-  double prev_off_ = fire::kNaN, off_rate_ = 0.0;
 };
 
 // ---------------------------------------------------------------- the waypoint run

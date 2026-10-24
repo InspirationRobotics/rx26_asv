@@ -193,6 +193,7 @@ struct WindowSighting
   double conf = 0.0;
   bool has_position = false;     ///< aim point below is valid
   double x = 0.0, y = 0.0, z = 0.0;   ///< camera frame, REP-103
+  double u_px = kNaN;            ///< its box's centre column, RGB px (DockWindow.bbox)
 };
 
 /// One bay face in one frame (DockBay, reduced to what we use).
@@ -208,9 +209,62 @@ struct BaySighting
   bool indicator_present = false;
   Colour indicator = Colour::Unknown;
   double indicator_conf = 0.0;
+  /// The indicator box's centre column, RGB px (DockBay.indicator_bbox); NaN = no box.
+  /// DockBay gives the indicator no bearing: Pinhole turns this into one.
+  double ind_u_px = kNaN;
   std::vector<WindowSighting> windows;
   int lit_window_index = -1;
 };
+
+/// The camera's column -> bearing map, learned from the windows' own aim points.
+///
+/// The CV puts each window's aim point on the ray through its box's centre pixel
+/// (dock_obs_core.pixel_ray: y/x = -(u - cx) / fx), so every positioned window is an
+/// EXACT sample of tan(bearing) = a + k u, whatever its depth. A least-squares line
+/// through them gives the bearing of any other column of the same image - the
+/// indicator's - with no intrinsics passed to the tree and no change to DockBay.
+struct Pinhole
+{
+  double min_spread_px = 40.0;   ///< columns this spread (std dev) before it is trusted
+  double n = 0.0, su = 0.0, st = 0.0, suu = 0.0, sut = 0.0;
+
+  void add(double u, double x, double y)
+  {
+    if (!std::isfinite(u) || !std::isfinite(x) || !std::isfinite(y) || x < 0.1) {return;}
+    const double t = y / x;
+    n += 1.0; su += u; st += t; suu += u * u; sut += u * t;
+  }
+
+  /// tan(bearing) = a + k u; false until the columns are spread and the slope is sane
+  /// (+ left: a column further right is a smaller bearing, so k < 0).
+  bool line(double & a, double & k) const
+  {
+    if (n < 2.0) {return false;}
+    const double var = suu / n - (su / n) * (su / n);
+    if (!(var >= min_spread_px * min_spread_px)) {return false;}
+    k = (n * sut - su * st) / (n * suu - su * su);
+    a = (st - k * su) / n;
+    return std::isfinite(k) && std::isfinite(a) && k < 0.0;
+  }
+  bool ok() const {double a, k; return line(a, k);}
+
+  /// The bearing of column u, deg, camera frame, + LEFT; NaN until ok().
+  double bearingDeg(double u) const
+  {
+    double a, k;
+    if (!std::isfinite(u) || !line(a, k)) {return kNaN;}
+    return std::atan(a + k * u) / nav::kDeg;
+  }
+};
+
+/// A point found in the camera frame (forward, left, levelled), in the BODY frame (ahead,
+/// left of the body origin): the mount's offset and yaw (+ = aimed to port).
+inline Vec2 camToBody(const Mount & m, Vec2 cam)
+{
+  const double y = m.yaw_deg * nav::kDeg;
+  return {m.x + cam.x * std::cos(y) - cam.y * std::sin(y),
+    m.y + cam.x * std::sin(y) + cam.y * std::cos(y)};
+}
 
 /// Where a face is, HORIZONTALLY, in the body frame (forward, left), from its
 /// plane - exactly, even with the camera pitched.
@@ -291,6 +345,9 @@ struct BookParams
   /// camera (faceInBody). Build guide: face centre ~0.8 m above the water;
   /// the camera is 0.41 m up. Irrelevant while the camera is level.
   double face_dz = 0.39;
+  /// The same for the GREEN/RED indicator, at the base of the structure: about the
+  /// camera's own height. Irrelevant while the camera is level.
+  double ind_dz = 0.0;
   double max_range_m = 14.0;    ///< beyond this a sighting places nothing
   double min_ind_conf = 0.5;    ///< indicator readings below are not votes
   double ema_alpha = 0.15;      ///< weight of one reading in green_ema
@@ -320,6 +377,10 @@ struct BayTrack
   double live_ahead_m = std::numeric_limits<double>::quiet_NaN();
   double live_left_m = std::numeric_limits<double>::quiet_NaN();
   bool live_truncated = false;           ///< that sighting's face was cut by the image edge
+  /// The same sighting's indicator, body frame, where the frame placed it (its box, the
+  /// learned Pinhole and the face plane); NaN when it did not.
+  double live_ind_ahead_m = std::numeric_limits<double>::quiet_NaN();
+  double live_ind_left_m = std::numeric_limits<double>::quiet_NaN();
   int lit_window_index = -1;
   double windows_t = -1.0;
 
@@ -345,6 +406,9 @@ struct DockBook
   /// elsewhere - the committed bay's, above all - stop resolving: find()
   /// follows these.
   std::vector<std::pair<int, int>> aliases;
+  /// Column -> bearing, learned from every positioned window of every frame (the search
+  /// along the dock spreads them across the picture long before the approach).
+  Pinhole pinhole;
 
   /// The id `id` lives under now, after any merges.
   int resolve(int id) const
@@ -379,6 +443,11 @@ struct DockBook
   std::vector<int> ingest(const Frame & f, Vec2 boat, double heading_deg, const Mount & m)
   {
     ++frames;
+    for (const auto & s : f.bays) {
+      for (const auto & w : s.windows) {
+        if (w.has_position) {pinhole.add(w.u_px, w.x, w.y);}
+      }
+    }
     std::vector<int> out(f.bays.size(), -1);
     if (!std::isfinite(heading_deg)) {return out;}   // cannot place anything
 
@@ -419,9 +488,7 @@ struct DockBook
       pused[pr.pi] = tused[pr.ti] = true;
       const Placed & pl = placed[pr.pi];
       fold(tracks[pr.ti], f.bays[pl.i], pl.q, pl.r, cam, heading_deg, m, f.t);
-      tracks[pr.ti].live_ahead_m = m.x + pl.fb.x;
-      tracks[pr.ti].live_left_m = m.y + pl.fb.y;
-      tracks[pr.ti].live_truncated = f.bays[pl.i].truncated;
+      live(tracks[pr.ti], f.bays[pl.i], pl.fb, m);
       out[pl.i] = tracks[pr.ti].id;
     }
     // Unmatched: a new bay, unless the face is cut off (its centre is biased
@@ -436,12 +503,32 @@ struct DockBook
       t.first_seen = f.t;
       tracks.push_back(t);
       fold(tracks.back(), f.bays[pl.i], pl.q, pl.r, cam, heading_deg, m, f.t);
-      tracks.back().live_ahead_m = m.x + pl.fb.x;
-      tracks.back().live_left_m = m.y + pl.fb.y;
+      live(tracks.back(), f.bays[pl.i], pl.fb, m);
       out[pl.i] = tracks.back().id;
     }
     mergeClose();
     return out;
+  }
+
+  /// Where this sighting put the face, and its indicator if the frame can place it: the
+  /// indicator's column through the learned Pinhole is its bearing, and that bearing meets
+  /// the face plane (faceInBody, at the indicator's height). No plane, no indicator.
+  void live(BayTrack & t, const BaySighting & s, Vec2 fb, const Mount & m) const
+  {
+    const Vec2 face = camToBody(m, fb);
+    t.live_ahead_m = face.x;
+    t.live_left_m = face.y;
+    t.live_truncated = s.truncated;
+    t.live_ind_ahead_m = t.live_ind_left_m = kNaN;
+    const double ib = s.indicator_present ? pinhole.bearingDeg(s.ind_u_px) : kNaN;
+    Vec2 ic;
+    if (std::isfinite(ib) && s.has_normal &&
+      faceInBody(ib, s.nx, s.ny, s.nz, s.d, m.pitch_deg, prm.ind_dz, ic))
+    {
+      const Vec2 ind = camToBody(m, ic);
+      t.live_ind_ahead_m = ind.x;
+      t.live_ind_left_m = ind.y;
+    }
   }
 
   /// Fold together any two tracks closer than merge_m, the lighter into the
@@ -484,6 +571,9 @@ private:
     if (d.last_seen > k.last_seen) {          // the newer camera view wins
       k.live_ahead_m = d.live_ahead_m;
       k.live_left_m = d.live_left_m;
+      k.live_truncated = d.live_truncated;
+      k.live_ind_ahead_m = d.live_ind_ahead_m;
+      k.live_ind_left_m = d.live_ind_left_m;
     }
     k.last_seen = std::max(k.last_seen, d.last_seen);
     if (d.windows_t > k.windows_t) {
@@ -1022,6 +1112,60 @@ struct HitWatch
       green_since = kNaN;
     }
     // Unknown: the colour rule abstained. Keep whatever we had.
+  }
+};
+
+/// "Is a window of our bay lit RED?", from the windows' own states on the frames that saw
+/// our bay - not the timing layer's "steady" verdict, which takes seconds to call and
+/// follows whichever bay reads GREEN. Per window: how long it has read RED with no gap
+/// over gap_s and no definite other colour (OFF, GREEN, BLUE). UNKNOWN (the colour rule
+/// abstained) neither breaks it nor extends it.
+struct RedWatch
+{
+  double gap_s = 0.5;
+  struct Run {int index; double since, last;};
+  std::vector<Run> runs;
+
+  void reset() {runs.clear();}
+
+  /// One frame's windows of our bay, stamped t (the camera's clock).
+  void update(const std::vector<WindowSighting> & ws, double t)
+  {
+    for (const auto & w : ws) {
+      if (w.index < 0 || w.state == Colour::Unknown) {continue;}
+      Run * r = nullptr;
+      for (auto & x : runs) {if (x.index == w.index) {r = &x;}}
+      if (r == nullptr) {runs.push_back({w.index, kNaN, kNaN}); r = &runs.back();}
+      if (w.state != Colour::Red) {
+        r->since = kNaN;
+      } else {
+        if (!std::isfinite(r->since) || t - r->last > gap_s) {r->since = t;}
+        r->last = t;
+      }
+    }
+  }
+
+  /// The window that has read RED longest, for at least hold_s and still within gap_s of
+  /// t; -1 if none.
+  int lit(double t, double hold_s) const
+  {
+    int best = -1;
+    double longest = -1.0;
+    for (const auto & r : runs) {
+      if (!std::isfinite(r.since) || t - r.last > gap_s) {continue;}
+      const double held = r.last - r.since;
+      if (held >= hold_s && held > longest) {best = r.index; longest = held;}
+    }
+    return best;
+  }
+
+  /// When window `index` last read RED, on the camera's clock (NaN: never).
+  double lastRed(int index) const
+  {
+    for (const auto & r : runs) {
+      if (r.index == index) {return r.last;}
+    }
+    return kNaN;
   }
 };
 

@@ -52,6 +52,18 @@ const dock::WindowSighting * chosenWindow(const Context & c, int index)
   return nullptr;
 }
 
+/// The chosen bay if the newest frame saw its windows and `seq` has not had that frame yet
+/// (now it has), else nullptr. CALL UNDER mu. The track keeps its last windows when the bay
+/// drops out of a frame, and feeding that stale state again would make a stale GREEN look
+/// like one held for seconds.
+const dock::BayTrack * newBayFrame(const Context & c, std::uint32_t & seq)
+{
+  const dock::BayTrack * t = c.dock.find(c.chosen_track);
+  if (t == nullptr || c.dock_seq == seq || t->windows_t != c.dock_t) {return nullptr;}
+  seq = c.dock_seq;
+  return t;
+}
+
 // ---------------------------------------------------------------- conditions
 
 /// Is the dock detector alive? It publishes EVERY frame, bays or not, so
@@ -596,6 +608,7 @@ public:
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       ctx_->readiness_confirmed = false;
+      ctx_->docking_report_s = ctx_->now_s;
       ctx_->task3_phase = "DOCKED";
     }
     sendReport(*ctx_, "docking", dock::dockingReportJson(bay));
@@ -606,12 +619,18 @@ public:
 
 // ------------------------------------------------------------- firefighting
 
-/// Wait for the fire: the timing layer calling one window of our bay steady
-/// RED. Re-sends the docking report every `resend_s` until RoboCommand
-/// confirms it, because a lost report means no fire, ever.
+/// Wait for the fire: a window of OUR bay lit RED. Two ways to see it, the first wins:
+///   * the windows' own states on the frames that saw our bay (dock::RedWatch), with
+///     min_red_s >= 0: RED for min_red_s (a misread frame or two is not a fire), or for
+///     refire_red_s once a fire is out this run (longer than the resource code's 1 s
+///     RED flashes, which follow a hit). A window missing from a frame or two keeps its
+///     run. This sees the light within a few frames, docked or not.
+///   * the timing layer calling one window steady RED (the only way with min_red_s < 0).
+/// `target` is the window to spray.
 ///
-/// NOTHING HOLDS STATION HERE and nothing needs to: the berth is the last
-/// setpoint, and GUIDED holds it.
+/// Re-sends the docking report every `resend_s` until RoboCommand confirms it, because a
+/// lost report means no fire, ever - but only once ReportDocking has sent it: beside a
+/// docking still under way, it must not report docking early.
 class AwaitFireTarget : public CrusaderAction
 {
 public:
@@ -622,15 +641,21 @@ public:
     return {
       BT::InputPort<int>("bay", "the bay docked in, for re-sending the docking report"),
       BT::InputPort<double>("timeout_s", 60.0, "give up waiting for the light"),
-      BT::InputPort<double>("resend_s", 10.0, "re-send the docking report this often")};
+      BT::InputPort<double>("resend_s", 10.0, "re-send the docking report this often"),
+      BT::InputPort<double>("min_red_s", -1.0,
+        ">= 0: fire on our bay's own window reading RED this long; < 0: the timing layer only"),
+      BT::InputPort<double>("refire_red_s", 1.5,
+        "... once a fire is out: this long (longer than the code's 1 s flashes)"),
+      BT::OutputPort<int>("target", "DockWindow.index of the RED window (SprayUntilHit's)")};
   }
 
   BT::NodeStatus onStart() override
   {
     t0_ = Clock::now();
-    last_ = t0_;
+    red_.reset();
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
+      seq_ = ctx_->dock_seq;
       ctx_->task3_phase = "AWAIT FIRE";
     }
     return onRunning();
@@ -639,20 +664,39 @@ public:
   BT::NodeStatus onRunning() override
   {
     const int bay = getInput<int>("bay").value_or(0);
+    const double min_red = getInput<double>("min_red_s").value_or(-1.0);
     bool resend = false;
+    int target = -1;
+    const char * how = "";
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       const bool red = ctx_->dock_pattern == "steady" && ctx_->dock_colours.size() == 1 &&
         ctx_->dock_colours[0] == dock::Colour::Red;
       if (red && ctx_->dock_target_window >= 0) {
-        RCLCPP_INFO(log(), "FIRE: window %d is steady RED", ctx_->dock_target_window);
-        return BT::NodeStatus::SUCCESS;
+        target = ctx_->dock_target_window;
+        how = "the timing layer: steady RED";
       }
-      resend = bay > 0 && !ctx_->readiness_confirmed &&
-        since(last_) >= getInput<double>("resend_s").value_or(10.0);
+      const dock::BayTrack * t = target < 0 && min_red >= 0.0 ? newBayFrame(*ctx_, seq_) :
+        nullptr;
+      if (t != nullptr) {
+        red_.update(t->windows, ctx_->dock_t);
+        const double need = ctx_->fires_out > 0 ?
+          std::max(min_red, getInput<double>("refire_red_s").value_or(1.5)) : min_red;
+        target = red_.lit(ctx_->dock_t, need);
+        if (target >= 0) {how = "our bay's window reads RED";}
+      }
+      if (target < 0) {
+        resend = bay > 0 && ctx_->docking_report_s >= 0.0 && !ctx_->readiness_confirmed &&
+          ctx_->now_s - ctx_->docking_report_s >= getInput<double>("resend_s").value_or(10.0);
+        if (resend) {ctx_->docking_report_s = ctx_->now_s;}
+      }
+    }
+    if (target >= 0) {
+      setOutput("target", target);
+      RCLCPP_INFO(log(), "FIRE: window %d (%s)", target, how);
+      return BT::NodeStatus::SUCCESS;
     }
     if (resend) {
-      last_ = Clock::now();
       sendReport(*ctx_, "docking", dock::dockingReportJson(bay));
       RCLCPP_INFO(log(), "no light and no confirmation yet: re-sent docking report (bay %d)", bay);
     }
@@ -664,14 +708,21 @@ public:
   }
 
 private:
-  Clock::time_point t0_, last_;
+  Clock::time_point t0_;
+  dock::RedWatch red_;
+  std::uint32_t seq_ = 0;
 };
 
 /// Spray the target window until it turns GREEN.
 ///
-/// Aimed EVERY TICK at the CV's latest aim point so drift in the berth is followed;
-/// with no fresh aim point it STOPS spraying rather than spray where the window used
-/// to be.
+/// The window is `target` (AwaitFireTarget's), else the timing layer's. Aimed EVERY TICK
+/// at the CV's latest aim point for it, so the boat moving is followed. When the window
+/// drops out (a glitch, a few lost frames, the other window seen alone) it keeps spraying
+/// at the last aim point for max_aim_age_s - water on a miss does no harm, and stopping
+/// on every lost frame wastes the shot - and past that holds fire until it is seen again.
+/// If another window of our bay reads RED while ours has not for retarget_s (counted from
+/// the trigger, which saw ours RED), and this spray never saw ours RED, it switches to that
+/// one: the trigger was a misread.
 ///
 /// Two independent "it's out" signals, either ends it: the timing layer's `hit` event
 /// (counted by the runner, since it lives on one frame) and the window's own state
@@ -686,52 +737,87 @@ public:
   static BT::PortsList providedPorts()
   {
     return {
+      BT::InputPort<int>("target", -1,
+        "the window to spray (AwaitFireTarget's); -1 = the timing layer's"),
       BT::OutputPort<int>("window", "DockWindow.index of the window put out"),
       BT::InputPort<double>("timeout_s", 60.0, "give up"),
       BT::InputPort<double>("min_green_s", 0.4, "GREEN this long after RED is a hit"),
-      BT::InputPort<double>("max_aim_age_s", 1.0, "do not fire at an older aim point")};
+      BT::InputPort<double>("max_aim_age_s", 1.0,
+        "keep spraying at the last aim point this long after the window was last seen"),
+      BT::InputPort<double>("retarget_s", 2.0,
+        "another window RED while ours has not been for this long: switch to it")};
   }
 
   BT::NodeStatus onStart() override
   {
     t0_ = Clock::now();
     watch_.reset();
+    red_.reset();
     firing_ = false;
-    std::lock_guard<std::mutex> lk(ctx_->mu);
-    hits0_ = ctx_->dock_hits;
-    window_ = ctx_->dock_target_window;
-    seq_ = ctx_->dock_seq;
-    ctx_->task3_phase = "FIREFIGHTING";
+    aim_t_ = aim_seen_s_ = -1e18;
+    const int target = getInput<int>("target").value_or(-1);
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      hits0_ = ctx_->dock_hits;
+      window_ = target >= 0 ? target : ctx_->dock_target_window;
+      seq_ = ctx_->dock_seq;
+      red0_t_ = ctx_->dock_t;
+      ctx_->task3_phase = "FIREFIGHTING";
+    }
     if (window_ < 0) {return BT::NodeStatus::FAILURE;}
-    return BT::NodeStatus::RUNNING;
+    return onRunning();                      // the window is lit now: aim on this tick
   }
 
   BT::NodeStatus onRunning() override
   {
     const double min_green = getInput<double>("min_green_s").value_or(0.4);
     const double max_age = getInput<double>("max_aim_age_s").value_or(1.0);
+    const double retarget_s = getInput<double>("retarget_s").value_or(2.0);
     bool hit = false, aim_ok = false;
-    double x = 0, y = 0, z = 0;
+    int switched_from = -1;
+    double x = 0, y = 0, z = 0, aim_age = 0.0;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
-      const dock::WindowSighting * w = chosenWindow(*ctx_, window_);
-      const dock::BayTrack * t = ctx_->dock.find(ctx_->chosen_track);
-      // A NEW frame in which OUR bay was seen. The track keeps its last
-      // windows when the bay drops out of a frame, and feeding that stale
-      // state again would make a stale GREEN look like one held for seconds.
-      if (w != nullptr && ctx_->dock_seq != seq_ && t->windows_t == ctx_->dock_t) {
-        seq_ = ctx_->dock_seq;
-        watch_.update(w->state, ctx_->dock_t, min_green);
+      if (const dock::BayTrack * t = newBayFrame(*ctx_, seq_)) {
+        red_.update(t->windows, ctx_->dock_t);
+        // ours was RED at the trigger (red0_t_), so it counts as RED from then on
+        const int other = red_.lit(ctx_->dock_t, 0.0);
+        const double ours = red_.lastRed(window_);
+        const double ours_t = std::isfinite(ours) ? std::max(ours, red0_t_) : red0_t_;
+        if (other >= 0 && other != window_ && !watch_.armed &&
+          ctx_->dock_t - ours_t > retarget_s)
+        {
+          switched_from = window_;
+          window_ = other;
+          watch_.reset();
+          aim_t_ = aim_seen_s_ = -1e18;
+        }
+        const dock::WindowSighting * w = chosenWindow(*ctx_, window_);
+        if (w != nullptr) {watch_.update(w->state, ctx_->dock_t, min_green);}
       }
       hit = watch_.hit || ctx_->dock_hits > hits0_;
-      if (w != nullptr && t != nullptr && w->has_position &&
-        ctx_->dock_t - t->windows_t <= max_age)
-      {
-        aim_ok = true;
-        x = w->x;
-        y = w->y;
-        z = w->z;
+      const dock::WindowSighting * w = chosenWindow(*ctx_, window_);
+      const double windows_t = w != nullptr ? ctx_->dock.find(ctx_->chosen_track)->windows_t :
+        -1e18;
+      if (w != nullptr && w->has_position && windows_t > aim_t_) {
+        aim_t_ = windows_t;                    // a new aim point: keep it
+        aim_seen_s_ = ctx_->now_s;
+        ax_ = w->x;
+        ay_ = w->y;
+        az_ = w->z;
       }
+      aim_age = ctx_->now_s - aim_seen_s_;
+      if (aim_age <= max_age) {
+        aim_ok = true;
+        x = ax_;
+        y = ay_;
+        z = az_;
+      }
+      if (hit) {++ctx_->fires_out;}
+    }
+    if (switched_from >= 0) {
+      RCLCPP_WARN(log(), "window %d reads RED and window %d has not for %.0f s: spraying %d",
+        window_, switched_from, retarget_s, window_);
     }
     if (hit) {
       setOutput("window", window_);
@@ -754,7 +840,8 @@ public:
       firing_ = true;
     } else if (firing_) {
       stop();
-      RCLCPP_WARN(log(), "lost the aim point for window %d: holding fire", window_);
+      RCLCPP_WARN(log(), "window %d not seen for %.1f s: holding fire until it is", window_,
+        aim_age);
     }
     return BT::NodeStatus::RUNNING;
   }
@@ -770,10 +857,14 @@ private:
 
   Clock::time_point t0_;
   dock::HitWatch watch_;
+  dock::RedWatch red_;
   int hits0_ = 0;
   int window_ = -1;
   std::uint32_t seq_ = 0;
   bool firing_ = false;
+  double aim_t_ = -1e18, aim_seen_s_ = -1e18;     // the kept aim point's stamp, and now_s then
+  double red0_t_ = 0.0;                            // dock_t at the trigger
+  double ax_ = 0.0, ay_ = 0.0, az_ = 0.0;
 };
 
 /// FirefightingReport(window_id). window_id = DockWindow.index + base.
