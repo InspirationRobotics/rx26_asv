@@ -130,7 +130,6 @@ struct Context
   int survey_attempt = 0;                     ///< PickVantage calls, all of them
   int survey_looks = 0;                       ///< ... of which placed from seen bays
   int chosen_track = -1;                      ///< committed by CommitSafeBay
-  int reacquired_from = -1;                   ///< the last frame moved chosen_track off this
   int chosen_bay = 0;                         ///< its 1-based number
   dock::Berth berth;                          ///< for the chosen bay
   /// RoboCommand's ReadinessConfirm for the docking report (/crsd/ocs_command): stops the
@@ -142,9 +141,19 @@ struct Context
   /// Fires put out this run (SprayUntilHit SUCCESS): after one, a RED must hold longer
   /// than the resource code's 1 s flashes before it is another fire.
   int fires_out = 0;
-  /// The committed bay's centring spot (the GREEN indicator), kept on the map by a Kalman
-  /// filter from every frame that saw it (ingestDockObservation): one memory for ApproachBay
-  /// and StrafeKeep, so the hand-over does not start the hold blind.
+  /// The GREEN bay, straight off the newest frame that showed one (pickGreen): Task 3 has
+  /// one GREEN indicator, so no track and no identity - the boat aligns and the cannon aims
+  /// on it wherever the frame puts it.
+  struct GreenBay
+  {
+    double t = -1.0;                          ///< that frame's stamp (dock_t's clock); < 0 never
+    dock::FrameBay bay;
+    std::vector<dock::WindowSighting> windows;  ///< from its newest frame that had windows
+    double windows_t = -1.0;
+  } green;
+  /// The centring spot (the GREEN indicator, else its face), kept on the map by a Kalman
+  /// filter from every frame that showed it: one memory for ApproachBay and StrafeKeep, so
+  /// the hand-over does not start the hold blind, and a few lost frames are ridden through.
   fire::CentreTarget centre;
 
   /// Where the boat was when the goal was accepted. "Go home" in a mission
@@ -622,6 +631,38 @@ inline void announceTask(Context & c, const std::string & token)
   RCLCPP_INFO(c.logger(), "current_task -> %s", token.c_str());
 }
 
+/// Across the dock heading, how far a bay whose indicator this frame did not read GREEN may
+/// be from where the GREEN one last was and still be it (pickGreen). Under half a bay's width.
+constexpr double kSameBayM = 0.6;
+
+/// This frame's GREEN bay: the bay it read GREEN (should two, the one nearer where it last
+/// was), else - a frame that read no GREEN - the bay not read RED within kSameBayM of where
+/// the GREEN one last was. Measured ACROSS the dock heading: the camera's range errors run
+/// along it. nullptr when neither. CALL UNDER ctx.mu.
+inline const dock::FrameBay * pickGreen(const Context & c)
+{
+  const double square = c.dock_heading >= 0.0 ? c.dock_heading : c.heading_deg;
+  const bool had = c.green.t >= 0.0;
+  auto across = [&](const dock::FrameBay & b) {
+      return had ? std::fabs(fire::toDockFrame(b.p - c.green.bay.p, square).left) : 0.0;
+    };
+  const dock::FrameBay * best = nullptr;
+  for (const auto & b : c.dock.frame_bays) {
+    if (b.indicator == dock::Colour::Green && (best == nullptr || across(b) < across(*best))) {
+      best = &b;
+    }
+  }
+  if (best != nullptr || !had) {return best;}
+  double best_m = kSameBayM;
+  for (const auto & b : c.dock.frame_bays) {
+    if (b.indicator != dock::Colour::Red && across(b) < best_m) {
+      best = &b;
+      best_m = across(b);
+    }
+  }
+  return best;
+}
+
 /// Fold one DockObservation into the context. CALL UNDER ctx.mu.
 ///
 /// Both runners convert their input (the ROS message, or the sim's JSON line)
@@ -630,62 +671,28 @@ inline void announceTask(Context & c, const std::string & token)
 /// The bays are placed only with a fresh pose and a resolved heading - a
 /// sighting placed from a stale pose is a bay in the wrong place, forever. The
 /// timing layer's verdict does not depend on the pose, so it is always taken.
-/// Across the dock heading, how far a bay this frame placed may be from the committed one
-/// and still be the same bay (reacquireChosen). Under half a bay's width.
-constexpr double kReacquireM = 0.6;
-
-/// One bay split into two tracks - a range off by more than the book's 0.7 m gate starts
-/// a new track - leaves the committed track unseen while the camera looks right at its bay.
-/// So when frame `t` did not place the committed bay, the bay it did place nearest the
-/// committed one ACROSS the dock heading (range errors run along it), within kReacquireM
-/// and not read RED (GREEN or not yet read), becomes the committed bay, keeping its
-/// centring spot. Returns the id it took over from, else -1. CALL UNDER ctx.mu.
-inline int reacquireChosen(Context & c, double t)
-{
-  const dock::BayTrack * k = c.dock.find(c.chosen_track);
-  if (k == nullptr || k->last_seen == t) {return -1;}
-  const double square = c.dock_heading >= 0.0 ? c.dock_heading : c.heading_deg;
-  int best = -1;
-  double best_m = kReacquireM;
-  for (const auto & o : c.dock.tracks) {
-    if (o.id == k->id || o.last_seen != t || o.red > o.green) {continue;}
-    const double d = std::fabs(fire::toDockFrame(o.p - k->p, square).left);
-    if (d < best_m) {
-      best = o.id;
-      best_m = d;
-    }
-  }
-  if (best < 0) {return -1;}
-  const int was = c.chosen_track;
-  c.chosen_track = best;
-  if (c.centre.track == was) {c.centre.track = best;}
-  return was;
-}
-
 inline void ingestDockObservation(Context & c, const dock::Frame & f)
 {
-  c.reacquired_from = -1;
   if (c.origin_set && c.pose_fresh && std::isfinite(c.heading_deg)) {
     c.dock.prm.face_dz = c.dock_face_dz;
     c.dock.ingest(f, c.boat, c.heading_deg, c.cam_mount);
-    c.reacquired_from = reacquireChosen(c, f.t);
-    // The committed bay's centring point, if this frame saw it (fold stamps last_seen
-    // with the frame's time): the indicator, else the face unless it is cut off.
-    if (c.centre.track != c.chosen_track) {
-      c.centre = fire::CentreTarget{};
-      c.centre.track = c.chosen_track;
-    }
-    const dock::BayTrack * t = c.dock.find(c.chosen_track);
-    if (t != nullptr && t->last_seen == f.t) {
-      const bool face = !t->live_truncated && std::isfinite(t->live_left_m);
-      const bool ind = std::isfinite(t->live_ind_left_m);
+    if (const dock::FrameBay * g = pickGreen(c)) {
+      c.green.t = f.t;
+      c.green.bay = *g;
+      if (!g->windows.empty()) {
+        c.green.windows = g->windows;
+        c.green.windows_t = f.t;
+      }
+      // Its centring point: the indicator, else the face unless it is cut off.
+      const bool face = !g->truncated && std::isfinite(g->left_m);
+      const bool ind = std::isfinite(g->ind_left_m);
       c.centre.sight(
-        face ? dock::bodyToWorld(c.boat, c.heading_deg, t->live_ahead_m, t->live_left_m) :
+        face ? dock::bodyToWorld(c.boat, c.heading_deg, g->ahead_m, g->left_m) :
         nav::Vec2{}, face,
-        ind ? dock::bodyToWorld(c.boat, c.heading_deg, t->live_ind_ahead_m,
-        t->live_ind_left_m) : nav::Vec2{}, ind,
-        ind ? std::hypot(t->live_ind_ahead_m, t->live_ind_left_m) :
-        std::hypot(t->live_ahead_m, t->live_left_m), f.t, c.now_s);
+        ind ? dock::bodyToWorld(c.boat, c.heading_deg, g->ind_ahead_m, g->ind_left_m) :
+        nav::Vec2{}, ind,
+        ind ? std::hypot(g->ind_ahead_m, g->ind_left_m) : std::hypot(g->ahead_m, g->left_m),
+        f.t, c.now_s);
     }
   }
   ++c.dock_seq;
@@ -772,6 +779,7 @@ inline void resetTask3(Context & c)
   c.readiness_confirmed = false;
   c.docking_report_s = -1.0;
   c.fires_out = 0;
+  c.green = Context::GreenBay{};
   c.centre = fire::CentreTarget{};
 }
 

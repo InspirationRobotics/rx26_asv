@@ -609,7 +609,7 @@ struct FireRig : Rig
   }
 
   /// One DockObservation stamped t: the face `ahead` m in front of the camera, square to
-  /// it, with these windows. The bay it makes is track 0, committed.
+  /// it, with these windows. The bay it makes reads GREEN, and is track 0, committed.
   void frame(double t, std::vector<crusader_bt::dock::WindowSighting> ws, double ahead = 2.0)
   {
     crusader_bt::dock::BaySighting s;
@@ -618,6 +618,9 @@ struct FireRig : Rig
     s.nx = -1.0;
     s.d = ahead;
     s.range_m = ahead;
+    s.indicator_present = true;
+    s.indicator = crusader_bt::dock::Colour::Green;
+    s.indicator_conf = 1.0;
     s.windows = ws;
     crusader_bt::dock::Frame f;
     f.t = t;
@@ -628,7 +631,7 @@ struct FireRig : Rig
   }
 
   /// A frame placing one bay `ahead` m in front of the camera and `left` m left of it, its
-  /// indicator reading `ind` (Unknown = none read); the committed bay is left alone.
+  /// indicator reading `ind` (Unknown = none read).
   void place(double t, double ahead, double left = 0.0,
     crusader_bt::dock::Colour ind = crusader_bt::dock::Colour::Unknown)
   {
@@ -653,7 +656,6 @@ struct FireRig : Rig
   {
     ctx->chosen_track = 0;
     ctx->centre = crusader_bt::fire::CentreTarget{};
-    ctx->centre.track = 0;
     ctx->centre.from_indicator = true;
     ctx->centre.fix.sight({-left, ahead}, ahead, ctx->now_s, ctx->now_s);
   }
@@ -805,24 +807,25 @@ static void fireBesideDockingTests()
     chk("9 s on, nothing seen: the spot has lapsed, no sideways push", r.lat == 0.0);
   }
   {
+    using crusader_bt::dock::Colour;
     FireRig r;
+    r.place(9.9, 2.0);
+    chk("no GREEN read yet: an unread bay is not the GREEN one", r.ctx->green.t < 0.0);
     r.frame(10.0, {}, 2.0);
+    chk("read GREEN: the GREEN bay", r.ctx->green.t == 10.0);
     r.place(10.1, 4.0);                                    // the same bay, ranged 2 m long
     chk("a range past the gate splits the bay: a second track", r.ctx->dock.tracks.size() == 2);
-    chk("... and the committed bay follows it (no indicator read: still taken)",
-      r.ctx->chosen_track == 1 && r.ctx->reacquired_from == 0);
-    r.place(10.2, 4.0);
-    chk("seen again itself: no switch", r.ctx->chosen_track == 1 && r.ctx->reacquired_from < 0);
-  }
-  {
-    FireRig r;
-    r.frame(10.0, {}, 2.0);
-    r.place(10.1, 4.0, 1.0);                               // 1 m across: the next bay over
-    chk("a bay 1 m across the dock is another bay: not taken", r.ctx->chosen_track == 0);
+    chk("... no matter: in line and not read RED, it is still the GREEN bay",
+      r.ctx->green.t == 10.1 && std::fabs(r.ctx->green.bay.ahead_m - 2.0) > 1.0);
+    r.place(10.2, 4.0, 1.0);                               // 1 m across: the next bay over
+    chk("a bay 1 m across the dock, unread, is another bay: not taken", r.ctx->green.t == 10.1);
+    r.place(10.3, 4.0, 1.0, Colour::Green);
+    chk("... but read GREEN it is the GREEN bay, whatever track it lands on",
+      r.ctx->green.t == 10.3 && r.ctx->green.bay.left_m > 0.5);
     FireRig q;
     q.frame(10.0, {}, 2.0);
-    q.place(10.1, 4.0, 0.0, crusader_bt::dock::Colour::Red);
-    chk("in line but reading RED: not taken", q.ctx->chosen_track == 0);
+    q.place(10.1, 4.0, 0.0, Colour::Red);
+    chk("in line but reading RED: not taken", q.ctx->green.t == 10.0);
   }
   {
     FireRig r;

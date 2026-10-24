@@ -41,27 +41,26 @@ double since(Clock::time_point t0)
   return std::chrono::duration<double>(Clock::now() - t0).count();
 }
 
-/// The chosen bay's latest window reading for `index`, or nullptr. CALL UNDER mu.
-const dock::WindowSighting * chosenWindow(const Context & c, int index)
+/// The GREEN bay's latest window reading for `index`, or nullptr. CALL UNDER mu.
+const dock::WindowSighting * greenWindow(const Context & c, int index)
 {
-  const dock::BayTrack * t = c.dock.find(c.chosen_track);
-  if (t == nullptr || index < 0) {return nullptr;}
-  for (const auto & w : t->windows) {
+  if (index < 0) {return nullptr;}
+  for (const auto & w : c.green.windows) {
     if (w.index == index) {return &w;}
   }
   return nullptr;
 }
 
-/// The chosen bay if the newest frame saw its windows and `seq` has not had that frame yet
-/// (now it has), else nullptr. CALL UNDER mu. The track keeps its last windows when the bay
-/// drops out of a frame, and feeding that stale state again would make a stale GREEN look
-/// like one held for seconds.
-const dock::BayTrack * newBayFrame(const Context & c, std::uint32_t & seq)
+/// The GREEN bay's windows if the newest frame saw them and `seq` has not had that frame
+/// yet (now it has), else nullptr. CALL UNDER mu. Context::green keeps its last windows
+/// when the bay drops out of a frame, and feeding that stale state again would make a stale
+/// GREEN look like one held for seconds.
+const std::vector<dock::WindowSighting> * newGreenWindows(
+  const Context & c, std::uint32_t & seq)
 {
-  const dock::BayTrack * t = c.dock.find(c.chosen_track);
-  if (t == nullptr || c.dock_seq == seq || t->windows_t != c.dock_t) {return nullptr;}
+  if (c.dock_seq == seq || c.green.windows_t != c.dock_t) {return nullptr;}
   seq = c.dock_seq;
-  return t;
+  return &c.green.windows;
 }
 
 // ---------------------------------------------------------------- conditions
@@ -676,10 +675,9 @@ public:
         target = ctx_->dock_target_window;
         how = "the timing layer: steady RED";
       }
-      const dock::BayTrack * t = target < 0 && min_red >= 0.0 ? newBayFrame(*ctx_, seq_) :
-        nullptr;
-      if (t != nullptr) {
-        red_.update(t->windows, ctx_->dock_t);
+      const auto * ws = target < 0 && min_red >= 0.0 ? newGreenWindows(*ctx_, seq_) : nullptr;
+      if (ws != nullptr) {
+        red_.update(*ws, ctx_->dock_t);
         const double need = ctx_->fires_out > 0 ?
           std::max(min_red, getInput<double>("refire_red_s").value_or(1.5)) : min_red;
         target = red_.lit(ctx_->dock_t, need);
@@ -778,8 +776,8 @@ public:
     double x = 0, y = 0, z = 0, aim_age = 0.0;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
-      if (const dock::BayTrack * t = newBayFrame(*ctx_, seq_)) {
-        red_.update(t->windows, ctx_->dock_t);
+      if (const auto * ws = newGreenWindows(*ctx_, seq_)) {
+        red_.update(*ws, ctx_->dock_t);
         // ours was RED at the trigger (red0_t_), so it counts as RED from then on
         const int other = red_.lit(ctx_->dock_t, 0.0);
         const double ours = red_.lastRed(window_);
@@ -792,15 +790,13 @@ public:
           watch_.reset();
           aim_t_ = aim_seen_s_ = -1e18;
         }
-        const dock::WindowSighting * w = chosenWindow(*ctx_, window_);
+        const dock::WindowSighting * w = greenWindow(*ctx_, window_);
         if (w != nullptr) {watch_.update(w->state, ctx_->dock_t, min_green);}
       }
       hit = watch_.hit || ctx_->dock_hits > hits0_;
-      const dock::WindowSighting * w = chosenWindow(*ctx_, window_);
-      const double windows_t = w != nullptr ? ctx_->dock.find(ctx_->chosen_track)->windows_t :
-        -1e18;
-      if (w != nullptr && w->has_position && windows_t > aim_t_) {
-        aim_t_ = windows_t;                    // a new aim point: keep it
+      const dock::WindowSighting * w = greenWindow(*ctx_, window_);
+      if (w != nullptr && w->has_position && ctx_->green.windows_t > aim_t_) {
+        aim_t_ = ctx_->green.windows_t;        // a new aim point: keep it
         aim_seen_s_ = ctx_->now_s;
         ax_ = w->x;
         ay_ = w->y;

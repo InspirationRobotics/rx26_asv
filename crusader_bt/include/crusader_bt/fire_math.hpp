@@ -483,7 +483,6 @@ struct SpotKalman
 /// indicator moves it, so the two are never mixed.
 struct CentreTarget
 {
-  int track = -1;                // the DockBook track it follows
   SpotKalman fix;
   bool from_indicator = false;
 

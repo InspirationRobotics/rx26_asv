@@ -394,6 +394,20 @@ struct BayTrack
   double greenShare() const {return votes() > 0 ? static_cast<double>(green) / votes() : 0.0;}
 };
 
+/// One bay of the newest frame as that frame placed it, before any track: Task 3 aligns and
+/// aims on the GREEN one of these (Context::green), whatever track it lands on.
+struct FrameBay
+{
+  Vec2 p;                                ///< face centre, local frame
+  double ahead_m = kNaN, left_m = kNaN;  ///< face centre, body frame (+ left)
+  bool truncated = false;                ///< cut by the image edge: centre biased
+  /// The indicator, body frame, where the frame placed it (its box, the learned Pinhole and
+  /// the face plane); NaN when it did not.
+  double ind_ahead_m = kNaN, ind_left_m = kNaN;
+  Colour indicator = Colour::Unknown;    ///< its reading; Unknown below min_ind_conf
+  std::vector<WindowSighting> windows;
+};
+
 /// The bays seen so far. Written by the runner on every DockObservation;
 /// read by the leaves.
 struct DockBook
@@ -409,6 +423,8 @@ struct DockBook
   /// Column -> bearing, learned from every positioned window of every frame (the search
   /// along the dock spreads them across the picture long before the approach).
   Pinhole pinhole;
+  /// The newest frame's bays, placed (FrameBay); empty when it could place none.
+  std::vector<FrameBay> frame_bays;
 
   /// The id `id` lives under now, after any merges.
   int resolve(int id) const
@@ -443,6 +459,7 @@ struct DockBook
   std::vector<int> ingest(const Frame & f, Vec2 boat, double heading_deg, const Mount & m)
   {
     ++frames;
+    frame_bays.clear();
     for (const auto & s : f.bays) {
       for (const auto & w : s.windows) {
         if (w.has_position) {pinhole.add(w.u_px, w.x, w.y);}
@@ -471,6 +488,7 @@ struct DockBook
       const double hr = nav::norm(fb);
       const Vec2 dir = camDirToWorld(heading_deg, m.yaw_deg, fb.x, fb.y);
       placed.push_back({i, cam + dir * hr, hr, fb});
+      frame_bays.push_back(frameBay(s, placed.back().q, fb, m));
     }
 
     struct Pair {double d; std::size_t pi; std::size_t ti;};
@@ -488,7 +506,7 @@ struct DockBook
       pused[pr.pi] = tused[pr.ti] = true;
       const Placed & pl = placed[pr.pi];
       fold(tracks[pr.ti], f.bays[pl.i], pl.q, pl.r, cam, heading_deg, m, f.t);
-      live(tracks[pr.ti], f.bays[pl.i], pl.fb, m);
+      live(tracks[pr.ti], frame_bays[pr.pi]);
       out[pl.i] = tracks[pr.ti].id;
     }
     // Unmatched: a new bay, unless the face is cut off (its centre is biased
@@ -503,32 +521,47 @@ struct DockBook
       t.first_seen = f.t;
       tracks.push_back(t);
       fold(tracks.back(), f.bays[pl.i], pl.q, pl.r, cam, heading_deg, m, f.t);
-      live(tracks.back(), f.bays[pl.i], pl.fb, m);
+      live(tracks.back(), frame_bays[pi]);
       out[pl.i] = tracks.back().id;
     }
     mergeClose();
     return out;
   }
 
-  /// Where this sighting put the face, and its indicator if the frame can place it: the
-  /// indicator's column through the learned Pinhole is its bearing, and that bearing meets
-  /// the face plane (faceInBody, at the indicator's height). No plane, no indicator.
-  void live(BayTrack & t, const BaySighting & s, Vec2 fb, const Mount & m) const
+  /// Where this sighting put the face (`q` local, `fb` camera), and its indicator if the
+  /// frame can place it: the indicator's column through the learned Pinhole is its bearing,
+  /// and that bearing meets the face plane (faceInBody, at the indicator's height). No
+  /// plane, no indicator.
+  FrameBay frameBay(const BaySighting & s, Vec2 q, Vec2 fb, const Mount & m) const
   {
+    FrameBay b;
+    b.p = q;
     const Vec2 face = camToBody(m, fb);
-    t.live_ahead_m = face.x;
-    t.live_left_m = face.y;
-    t.live_truncated = s.truncated;
-    t.live_ind_ahead_m = t.live_ind_left_m = kNaN;
+    b.ahead_m = face.x;
+    b.left_m = face.y;
+    b.truncated = s.truncated;
     const double ib = s.indicator_present ? pinhole.bearingDeg(s.ind_u_px) : kNaN;
     Vec2 ic;
     if (std::isfinite(ib) && s.has_normal &&
       faceInBody(ib, s.nx, s.ny, s.nz, s.d, m.pitch_deg, prm.ind_dz, ic))
     {
       const Vec2 ind = camToBody(m, ic);
-      t.live_ind_ahead_m = ind.x;
-      t.live_ind_left_m = ind.y;
+      b.ind_ahead_m = ind.x;
+      b.ind_left_m = ind.y;
     }
+    if (s.indicator_present && s.indicator_conf >= prm.min_ind_conf) {b.indicator = s.indicator;}
+    b.windows = s.windows;
+    return b;
+  }
+
+  /// The track's view of its latest sighting.
+  static void live(BayTrack & t, const FrameBay & b)
+  {
+    t.live_ahead_m = b.ahead_m;
+    t.live_left_m = b.left_m;
+    t.live_truncated = b.truncated;
+    t.live_ind_ahead_m = b.ind_ahead_m;
+    t.live_ind_left_m = b.ind_left_m;
   }
 
   /// Fold together any two tracks closer than merge_m, the lighter into the

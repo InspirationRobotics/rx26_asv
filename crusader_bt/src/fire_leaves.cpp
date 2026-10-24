@@ -38,16 +38,17 @@ namespace
 /// own track carries it that long out of the picture.
 constexpr double kKeepS = 8.0;
 
-/// The committed bay as the camera sees it, and the point to centre on. Feed it every
-/// tick, under mu, with the heading to square to (NaN: the bow's).
-///   seen              in the picture now (the 1 s rule, inView)
+/// The GREEN bay (Context::green, off each frame, no track) as the camera sees it, and the
+/// point to centre on. Feed it every tick, under mu, with the heading to square to (NaN:
+/// the bow's).
+///   seen              in the picture now: a frame showed it within the last second
 ///   ahead_m, left_m   the face in the body frame (ahead, left of the body origin, m), the
 ///                     median over the last second: no GPS and no heading. NaN unless seen.
 ///                     The fallback when nothing is held.
 ///   held              the centring spot is known: Context::centre, the GREEN indicator
 ///                     (the face until the indicator is placed) pinned in the local frame
-///                     by every frame that saw it, the newest within kKeepS. Between frames
-///                     and out of the picture the boat's own 20 Hz track carries it.
+///                     by every frame that showed it, the newest within kKeepS. Between
+///                     frames and out of the picture the boat's own 20 Hz track carries it.
 ///   along_m, across_m that spot from the boat NOW, along the dock heading (+ ahead) and
 ///                     across it (+ left): bow wobble is not in them. NaN unless held.
 ///   source            what built the spot: "indicator" or "face".
@@ -58,14 +59,13 @@ class CameraBay
 public:
   void feed(const Context & c, double square_deg)
   {
-    const dock::BayTrack * t = c.dock.find(c.chosen_track);
-    if (c.chosen_track != track_) {*this = CameraBay{}; track_ = c.chosen_track;}
-    if (t != nullptr && t->last_seen > last_t_ && std::isfinite(t->live_left_m)) {
-      last_t_ = t->last_seen;
-      hist_.push_back({t->last_seen, t->live_ahead_m, t->live_left_m});
+    const Context::GreenBay & g = c.green;
+    if (g.t > last_t_ && std::isfinite(g.bay.left_m)) {
+      last_t_ = g.t;
+      hist_.push_back({g.t, g.bay.ahead_m, g.bay.left_m});
     }
     while (!hist_.empty() && c.dock_t - hist_.front().t > kWindowS) {hist_.pop_front();}
-    seen = t != nullptr && inView(c, *t) && !hist_.empty();
+    seen = !hist_.empty();
     ahead_m = left_m = fire::kNaN;
     if (seen) {
       std::vector<double> a, l;
@@ -76,8 +76,7 @@ public:
     }
     const double square = std::isfinite(square_deg) ? square_deg : c.heading_deg;
     const fire::CentreTarget & ct = c.centre;
-    held = c.pose_fresh && ct.track == c.chosen_track && ct.fix.have &&
-      ct.age(c.now_s) <= kKeepS && std::isfinite(square);
+    held = c.pose_fresh && ct.fix.have && ct.age(c.now_s) <= kKeepS && std::isfinite(square);
     const fire::DockFrame e = held ? fire::toDockFrame(ct.fix.p - c.boat, square) :
       fire::DockFrame{};
     along_m = e.along;
@@ -103,7 +102,6 @@ private:
   struct Sighting {double t, ahead, left;};
   std::deque<Sighting> hist_;
   double last_t_ = -1e18;
-  int track_ = -1;
 };
 
 /// A D term's rate on one measured error (fire::TickRate), started over whenever the
