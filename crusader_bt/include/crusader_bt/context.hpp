@@ -130,6 +130,7 @@ struct Context
   int survey_attempt = 0;                     ///< PickVantage calls, all of them
   int survey_looks = 0;                       ///< ... of which placed from seen bays
   int chosen_track = -1;                      ///< committed by CommitSafeBay
+  int reacquired_from = -1;                   ///< the last frame moved chosen_track off this
   int chosen_bay = 0;                         ///< its 1-based number
   dock::Berth berth;                          ///< for the chosen bay
   /// RoboCommand's ReadinessConfirm for the docking report (/crsd/ocs_command): stops the
@@ -629,11 +630,45 @@ inline void announceTask(Context & c, const std::string & token)
 /// The bays are placed only with a fresh pose and a resolved heading - a
 /// sighting placed from a stale pose is a bay in the wrong place, forever. The
 /// timing layer's verdict does not depend on the pose, so it is always taken.
+/// Across the dock heading, how far a bay this frame placed may be from the committed one
+/// and still be the same bay (reacquireChosen). Under half a bay's width.
+constexpr double kReacquireM = 0.6;
+
+/// One bay split into two tracks - a range off by more than the book's 0.7 m gate starts
+/// a new track - leaves the committed track unseen while the camera looks right at its bay.
+/// So when frame `t` did not place the committed bay, the bay it did place nearest the
+/// committed one ACROSS the dock heading (range errors run along it), within kReacquireM
+/// and not read RED (GREEN or not yet read), becomes the committed bay, keeping its
+/// centring spot. Returns the id it took over from, else -1. CALL UNDER ctx.mu.
+inline int reacquireChosen(Context & c, double t)
+{
+  const dock::BayTrack * k = c.dock.find(c.chosen_track);
+  if (k == nullptr || k->last_seen == t) {return -1;}
+  const double square = c.dock_heading >= 0.0 ? c.dock_heading : c.heading_deg;
+  int best = -1;
+  double best_m = kReacquireM;
+  for (const auto & o : c.dock.tracks) {
+    if (o.id == k->id || o.last_seen != t || o.red > o.green) {continue;}
+    const double d = std::fabs(fire::toDockFrame(o.p - k->p, square).left);
+    if (d < best_m) {
+      best = o.id;
+      best_m = d;
+    }
+  }
+  if (best < 0) {return -1;}
+  const int was = c.chosen_track;
+  c.chosen_track = best;
+  if (c.centre.track == was) {c.centre.track = best;}
+  return was;
+}
+
 inline void ingestDockObservation(Context & c, const dock::Frame & f)
 {
+  c.reacquired_from = -1;
   if (c.origin_set && c.pose_fresh && std::isfinite(c.heading_deg)) {
     c.dock.prm.face_dz = c.dock_face_dz;
     c.dock.ingest(f, c.boat, c.heading_deg, c.cam_mount);
+    c.reacquired_from = reacquireChosen(c, f.t);
     // The committed bay's centring point, if this frame saw it (fold stamps last_seen
     // with the frame's time): the indicator, else the face unless it is cut off.
     if (c.centre.track != c.chosen_track) {

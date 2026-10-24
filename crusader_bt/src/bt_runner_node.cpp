@@ -697,6 +697,10 @@ private:
     // Freshness at THIS instant: ingest places bays only on a fresh pose.
     ctx_->pose_fresh = ctx_->origin_set && (t - pose_t_).seconds() < stream_timeout_s_;
     ingestDockObservation(*ctx_, f);
+    if (ctx_->reacquired_from >= 0) {
+      RCLCPP_INFO(get_logger(), "committed bay re-acquired: track %d -> %d (the same bay, "
+        "split off by a range past the gate)", ctx_->reacquired_from, ctx_->chosen_track);
+    }
     dock_t_ = t;
     have_dock_ = true;
   }

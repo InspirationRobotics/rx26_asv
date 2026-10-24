@@ -627,6 +627,27 @@ struct FireRig : Rig
     ctx->chosen_track = 0;
   }
 
+  /// A frame placing one bay `ahead` m in front of the camera and `left` m left of it, its
+  /// indicator reading `ind` (Unknown = none read); the committed bay is left alone.
+  void place(double t, double ahead, double left = 0.0,
+    crusader_bt::dock::Colour ind = crusader_bt::dock::Colour::Unknown)
+  {
+    crusader_bt::dock::BaySighting s;
+    s.bearing_deg = std::atan2(left, ahead) / crusader_bt::nav::kDeg;
+    s.has_normal = true;
+    s.nx = -1.0;
+    s.d = ahead;
+    s.range_m = std::hypot(ahead, left);
+    s.indicator_present = ind != crusader_bt::dock::Colour::Unknown;
+    s.indicator = ind;
+    s.indicator_conf = 1.0;
+    crusader_bt::dock::Frame f;
+    f.t = t;
+    f.bays.push_back(s);
+    std::lock_guard<std::mutex> lk(ctx->mu);
+    crusader_bt::ingestDockObservation(*ctx, f);
+  }
+
   /// The centring spot, seen at now_s: `left` m left of the bow's line, `ahead` m ahead.
   void spot(double left, double ahead)
   {
@@ -782,6 +803,54 @@ static void fireBesideDockingTests()
     r.ctx->now_s += 9.0;
     r.tick();
     chk("9 s on, nothing seen: the spot has lapsed, no sideways push", r.lat == 0.0);
+  }
+  {
+    FireRig r;
+    r.frame(10.0, {}, 2.0);
+    r.place(10.1, 4.0);                                    // the same bay, ranged 2 m long
+    chk("a range past the gate splits the bay: a second track", r.ctx->dock.tracks.size() == 2);
+    chk("... and the committed bay follows it (no indicator read: still taken)",
+      r.ctx->chosen_track == 1 && r.ctx->reacquired_from == 0);
+    r.place(10.2, 4.0);
+    chk("seen again itself: no switch", r.ctx->chosen_track == 1 && r.ctx->reacquired_from < 0);
+  }
+  {
+    FireRig r;
+    r.frame(10.0, {}, 2.0);
+    r.place(10.1, 4.0, 1.0);                               // 1 m across: the next bay over
+    chk("a bay 1 m across the dock is another bay: not taken", r.ctx->chosen_track == 0);
+    FireRig q;
+    q.frame(10.0, {}, 2.0);
+    q.place(10.1, 4.0, 0.0, crusader_bt::dock::Colour::Red);
+    chk("in line but reading RED: not taken", q.ctx->chosen_track == 0);
+  }
+  {
+    FireRig r;
+    r.load("<ApproachBay use_lidar=\"false\" recentre_m=\"0.40\"/>");
+    r.spot(0.05, 4.0);                                     // last seen on the line
+    r.tick();
+    r.ctx->now_s += 0.1;
+    r.tick();
+    r.ctx->now_s += 9.0;
+    r.tick();
+    chk("lost 5 cm off the line: holding, not a full slide on a coin toss", r.lat == 0.0);
+    FireRig q;
+    q.load("<ApproachBay use_lidar=\"false\" recentre_m=\"0.40\"/>");
+    q.spot(1.0, 4.0);
+    q.tick();
+    q.ctx->now_s += 0.1;
+    q.tick();
+    q.ctx->now_s += 9.0;
+    q.tick();
+    chk("lost 1 m left of the line: still slides left to it", q.lat < 0.0);
+  }
+  {
+    FireRig r;
+    r.load("<StrafeKeep fire_range_m=\"1.5\" use_lidar=\"false\"/>");
+    r.spot(0.0, 1.5 + r.ctx->cam_mount.x);
+    r.tick();
+    chk("range from the camera's lens, not the body origin",
+      std::fabs(r.ctx->strafe_in.range_m - 1.5) < 1e-9);
   }
 }
 

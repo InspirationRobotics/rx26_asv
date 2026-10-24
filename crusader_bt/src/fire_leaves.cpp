@@ -52,6 +52,7 @@ constexpr double kKeepS = 8.0;
 ///                     across it (+ left): bow wobble is not in them. NaN unless held.
 ///   source            what built the spot: "indicator" or "face".
 ///   last_side         +1 left, -1 right, 0 never seen: where the camera saw it last.
+///   last_off          ... and how far (+ left, m; NaN never seen).
 class CameraBay
 {
 public:
@@ -71,7 +72,7 @@ public:
       for (const auto & h : hist_) {a.push_back(h.ahead); l.push_back(h.left);}
       ahead_m = fire::median(a);
       left_m = fire::median(l);
-      last_side = left_m >= 0.0 ? 1.0 : -1.0;
+      side(left_m);
     }
     const double square = std::isfinite(square_deg) ? square_deg : c.heading_deg;
     const fire::CentreTarget & ct = c.centre;
@@ -82,16 +83,22 @@ public:
     along_m = e.along;
     across_m = e.left;
     source = held ? ct.source() : "none";
-    if (held && std::isfinite(across_m)) {last_side = across_m >= 0.0 ? 1.0 : -1.0;}
+    if (held && std::isfinite(across_m)) {side(across_m);}
   }
 
   bool seen = false, held = false;
   double ahead_m = fire::kNaN, left_m = fire::kNaN;
   double along_m = fire::kNaN, across_m = fire::kNaN;
   const char * source = "none";
-  double last_side = 0.0;
+  double last_side = 0.0, last_off = fire::kNaN;
 
 private:
+  void side(double off)
+  {
+    last_side = off >= 0.0 ? 1.0 : -1.0;
+    last_off = off;
+  }
+
   static constexpr double kWindowS = 1.0;
   struct Sighting {double t, ahead, left;};
   std::deque<Sighting> hist_;
@@ -115,9 +122,10 @@ struct Damped
 };
 
 /// The range to hold or close on, best first: the LiDAR wall (with use_lidar, and its
-/// own rate), the pinned spot's distance along the dock heading (the boat's own track
-/// moves it, so it is not late), the camera's live face (a 1 s median, half a second
-/// late). NaN and "no range" when there is none.
+/// own rate), the camera's depth to the live face (a 1 s median), the pinned spot's
+/// distance along the dock heading (the boat's own track carries it out of view). The
+/// camera's two are from the LENS (the mount is cam_mount.x ahead of the body origin), so
+/// fire_range_m is how far the camera stands off the panel. NaN and "no range" when none.
 struct RangeFix
 {
   double range = fire::kNaN, lidar_rate = fire::kNaN;
@@ -136,8 +144,9 @@ RangeFix rangeFix(const Context & c, const CameraBay & cam, bool use_lidar)
   if (use_lidar && std::isfinite(c.wall.range(c.now_s))) {
     return {c.wall.range(c.now_s), c.wall.rate(c.now_s), "LiDAR"};
   }
-  if (cam.held && std::isfinite(cam.along_m)) {return {cam.along_m, fire::kNaN, "pinned"};}
-  if (cam.seen && std::isfinite(cam.ahead_m)) {return {cam.ahead_m, fire::kNaN, "camera"};}
+  const double lens = c.cam_mount.x;
+  if (cam.seen && std::isfinite(cam.ahead_m)) {return {cam.ahead_m - lens, fire::kNaN, "camera"};}
+  if (cam.held && std::isfinite(cam.along_m)) {return {cam.along_m - lens, fire::kNaN, "pinned"};}
   return {};
 }
 
@@ -498,12 +507,17 @@ public:
       const double off_rate = off_rate_.update(off, lf.src, dt);
       const double range_rate = rf.rate(range_rate_, dt);
       if (!std::isfinite(off)) {
-        // nothing to centre on: toward where the camera saw it last, no forward push
+        // nothing to centre on: toward where the camera saw it last, no forward push - but
+        // not if it was last on the line: that side is noise, and a full slide on it ran
+        // 10-24 s the wrong way (10-24 21:19)
         closing_ = false;
         centred_since_ = fire::kNaN;
-        lat_us = -cam_.last_side * strafe_us;                // lat + = starboard
-        why = cam_.last_side > 0 ? "bay out of view: sliding left to it" :
-          cam_.last_side < 0 ? "bay out of view: sliding right to it" : "bay not seen yet";
+        const bool on_line = !(std::fabs(cam_.last_off) > recentre);
+        lat_us = on_line ? 0.0 : -cam_.last_side * strafe_us;  // lat + = starboard
+        why = cam_.last_side == 0.0 ? "bay not seen yet" :
+          on_line ? "bay out of view, last seen on the line: holding" :
+          cam_.last_side > 0 ? "bay out of view: sliding left to it" :
+          "bay out of view: sliding right to it";
       } else {
         lat_us = -fire::axisLaw(off, off_rate, in("kp_lat", 100.0), in("kd_lat", 40.0), 0.05,
           min_us, strafe_us);
