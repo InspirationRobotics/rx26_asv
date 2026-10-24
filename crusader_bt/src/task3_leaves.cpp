@@ -331,6 +331,8 @@ public:
       BT::InputPort<int>("min_votes", 8, "GREEN/RED reads before a bay has a verdict"),
       BT::InputPort<double>("min_share", 0.8, "share of them GREEN"),
       BT::InputPort<int>("min_obs", 5, "sightings before a track is a bay"),
+      BT::InputPort<double>("max_turn_deg", 0.0,
+        "> 0: not while the bow is further than this off the dock heading (still turning)"),
       BT::OutputPort<int>("bay", "the committed bay's number, 1-based left to right")};
   }
 
@@ -338,6 +340,7 @@ public:
   {
     dock::VoteParams v;
     const int min_obs = getInput<int>("min_obs").value_or(5);
+    const double max_turn = getInput<double>("max_turn_deg").value_or(0.0);
     int bay = 0, seen = 0, red = 0, green = 0, id = -1;
     bool guess = false;
     {
@@ -345,6 +348,13 @@ public:
       v = ctx_->dock_votes;
       v.min_votes = getInput<int>("min_votes").value_or(v.min_votes);
       v.min_share = getInput<double>("min_share").value_or(v.min_share);
+      // mid-turn the camera sweeps the dock: wait until the bow is on the dock heading
+      const double dock_h = dockHeading(*ctx_, fire::kNaN);
+      if (max_turn > 0.0 && std::isfinite(dock_h) &&
+        !(std::fabs(fire::wrap180(dock_h - ctx_->heading_deg)) <= max_turn))
+      {
+        return BT::NodeStatus::FAILURE;
+      }
       const dock::BayTrack * best = nullptr;
       for (const auto & t : ctx_->dock.tracks) {
         if (t.n < min_obs || dock::verdict(t, v) != dock::Verdict::Green ||
