@@ -6,7 +6,8 @@
 
     0. GUIDED to the approach point. Started in MANUAL, this step is skipped.
     1. the tree switches GUIDED -> MANUAL itself (only from GUIDED; SC still takes it back).
-    2. SEARCH: turn to the dock heading, slide one way (left) along the dock until a bay
+    2. SEARCH: turn to the dock heading, slide one way (the Run panel's "slide first", else
+       left) along the dock until a bay
        the camera sees reads GREEN with confidence (CommitFirstGreen: the first one, not every bay; numbered
        left to right for the docking report).
     3. APPROACH: square to the bay, strafe onto its centreline, then a steady, gently
@@ -48,11 +49,11 @@
             <BayChosen/>
             <ReactiveFallback name="search_until_green">
               <CommitFirstGreen bay="{bay}" min_votes="4" min_share="0.5" min_obs="4" max_turn_deg="15"/>
-              <!-- one way only: slide LEFT along the dock (start the run at its right
-                   end). leg_m is longer than the dock, so it never turns back; past it,
-                   it would sweep back the other way -->
-              <StrafeSearch first="left" leg_m="20.0" lat_us="100" min_out_m="3.5"
-                            forever="true"/>
+              <!-- one way only: the GCS Run panel's "slide first" (bt_runner_node
+                   search_first), LEFT when unset (start the run at the dock's right end).
+                   leg_m is longer than the dock, so it never turns back; past it, it
+                   would sweep back the other way -->
+              <StrafeSearch leg_m="20.0" lat_us="100" min_out_m="3.5" forever="true"/>
             </ReactiveFallback>
           </Fallback>
 

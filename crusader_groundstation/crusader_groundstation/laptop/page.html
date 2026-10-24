@@ -276,7 +276,10 @@ body.ed-dragging { cursor: grabbing; user-select: none; }
           <button id="m-here">Boat here</button></div>
         <div id="m-dockh" style="margin-top: 6px; display: none" title="Task 3: the bow's heading facing the dock, deg true (bt_runner_node dock_heading_deg, read at Start)">
           dock heading <input id="m-dockh-v" class="num" type="number" min="0" max="359.9" step="1"> deg
-          <button id="m-dockh-set">Set</button> <span id="m-dockh-now" class="muted"></span></div>
+          <button id="m-dockh-set">Set</button> <span id="m-dockh-now" class="muted"></span>
+          <div style="margin-top: 6px" title="Task 3: which way the search slides along the dock (bt_runner_node search_first, read at Start); not set = left">
+            slide first <select id="m-slide"><option>left</option><option>right</option></select>
+            <button id="m-slide-set">Set</button> <span id="m-slide-now" class="muted"></span></div></div>
         <div style="margin-top: 6px">
           <button class="primary" id="m-start">Start</button>
           <button class="danger" id="m-stop">Stop</button>
@@ -761,15 +764,22 @@ async function loadDockHeading() {
   const r = await req("params_list", {node}, true);
   const row = r.ok ? r.data.params.find(p => p.name === "dock_heading_deg") : null;
   $("m-dockh-now").textContent = !row ? "" : row.value < 0 ? "not set" : `now ${row.value} deg`;
+  const sf = r.ok ? r.data.params.find(p => p.name === "search_first") : null;
+  $("m-slide-now").textContent = !sf ? "" : sf.value ? `now ${sf.value}` : "not set: left";
 }
 $("m-name").addEventListener("change", loadDockHeading);
-$("m-dockh-set").onclick = async () => {
-  const v = parseFloat($("m-dockh-v").value), node = btNode();
-  if (!(v >= 0 && v < 360)) return toast("dock heading: 0 to 359.9 deg", false);
+async function setBtParams(values) {
+  const node = btNode();
   if (!node) return toast("bt_runner_node is not running", false);
-  await req("params_set", {node, values: {dock_heading_deg: v}});
+  await req("params_set", {node, values});
   loadDockHeading();
+}
+$("m-dockh-set").onclick = () => {
+  const v = parseFloat($("m-dockh-v").value);
+  if (!(v >= 0 && v < 360)) return toast("dock heading: 0 to 359.9 deg", false);
+  setBtParams({dock_heading_deg: v});
 };
+$("m-slide-set").onclick = () => setBtParams({search_first: $("m-slide").value});
 $("m-here").onclick = () => {
   const b = (G.state || {}).boat || {};
   if (!num(b.lat) || !num(b.lon)) return toast("no boat position yet", false);

@@ -1,4 +1,5 @@
-// test_mission_nodes — WaitForRunStart, TaskAttempt and PassagePlanFresh, ticked against a Context.
+// test_mission_nodes — WaitForRunStart, TaskAttempt and PassagePlanFresh, ticked against a Context;
+// FailureTrace on the Task 3 guards.
 //
 // Links the leaves, so it needs ROS: build with colcon, run from the build directory
 //
@@ -15,6 +16,7 @@
 #include "rclcpp/rclcpp.hpp"
 
 #include "crusader_bt/context.hpp"
+#include "crusader_bt/tree_view.hpp"
 
 using crusader_bt::Context;
 using crusader_bt::ContextPtr;
@@ -387,6 +389,98 @@ static void tunableTests()
   chk("... and empty ones still fall back", std::abs(rad - 9.0) < 0.05 && hops > hops5);
 }
 
+/// Task 3's scan_fire guards, cut down: the waypoint leg, then the MANUAL body.
+static const char * kScanFireGuards =
+  "<Sequence name=\"scan_fire\">"
+  "<Fallback name=\"to_the_waypoint\"><ModeIs mode=\"MANUAL\"/>"
+  "<ReactiveSequence name=\"guided_leg\"><IsAutonomous/><NotDropped/><Scripted/></ReactiveSequence>"
+  "</Fallback>"
+  "<ReactiveSequence name=\"manual\"><ModeIs mode=\"MANUAL\"/><NotDropped/><Scripted/></ReactiveSequence>"
+  "</Sequence>";
+
+/// Ticks once through a FailureTrace and returns where it says the tree failed.
+static std::string failedAt(Rig & r, BT::NodeStatus * st = nullptr)
+{
+  crusader_bt::FailureTrace trace(r.tree);
+  trace.beginTick();
+  const BT::NodeStatus s = r.tick();
+  if (st) {*st = s;}
+  return trace.text();
+}
+
+static void failureTraceTests()
+{
+  std::printf("\n5. FailureTrace names the node that failed the tree\n");
+  BT::NodeStatus st = RUN;
+  {
+    Rig r;
+    r.load(kScanFireGuards);
+    r.ctx->mode = "MANUAL";
+    r.ctx->drop_tripped = true;
+    g_child = RUN;
+    const std::string at = failedAt(r, &st);
+    chk("MANUAL with SD latched: FAILURE on the first tick", st == BAD);
+    chk("... at NotDropped in scan_fire > manual (got '" + at + "')",
+      at == "NotDropped in scan_fire > manual");
+  }
+  {
+    Rig r;
+    r.load(kScanFireGuards);
+    r.ctx->mode = "HOLD";
+    r.ctx->autonomous = false;
+    const std::string at = failedAt(r, &st);
+    chk("HOLD: ModeIs fails first, but IsAutonomous is what failed the tree (got '" + at + "')",
+      st == BAD && at == "IsAutonomous in scan_fire > to_the_waypoint > guided_leg");
+  }
+  {
+    Rig r;
+    r.load(std::string("<ReactiveSequence><IsAutonomous/><Sequence name=\"mission\">") +
+      kScanFireGuards + "</Sequence></ReactiveSequence>");
+    r.ctx->mode = "MANUAL";
+    r.ctx->autonomous = false;
+    const std::string at = failedAt(r, &st);
+    chk("a Mission-tab copy in MANUAL fails at its own outer guard (got '" + at + "')",
+      st == BAD && at == "IsAutonomous");
+  }
+  {
+    Rig r;
+    r.load(kScanFireGuards);
+    r.ctx->mode = "MANUAL";
+    r.ctx->drop_tripped = false;     // Context starts latched, as the bridge does
+    g_child = RUN;
+    crusader_bt::FailureTrace trace(r.tree);
+    trace.beginTick();
+    chk("SD safe: the body runs", r.tick() == RUN && trace.text().empty());
+    r.ctx->drop_tripped = true;
+    trace.beginTick();
+    chk("SD flipped mid-run: the next tick fails at NotDropped",
+      r.tick() == BAD && trace.text() == "NotDropped in scan_fire > manual");
+  }
+  {
+    Rig r;
+    r.load("<Sequence name=\"s\"><Inverter><AlwaysSuccess/></Inverter></Sequence>");
+    const std::string at = failedAt(r, &st);
+    chk("no leaf failed: the first node that did, the Inverter (got '" + at + "')",
+      st == BAD && at == "Inverter in s");
+  }
+  {
+    Rig r;
+    r.load("<Sequence name=\"s\"><Fallback><AlwaysFailure name=\"first\"/><Scripted/></Fallback>"
+      "</Sequence>");
+    g_child = BAD;
+    const std::string at = failedAt(r, &st);
+    chk("a Fallback whose children all fail: the last one (got '" + at + "')",
+      st == BAD && at == "Scripted in s");
+  }
+
+  std::printf("\n6. searchFirst: the leaf's port, else the GCS, else left\n");
+  Context c;
+  chk("nothing set: left", crusader_bt::searchFirst(c, "") == "left");
+  c.search_first = "right";
+  chk("the GCS's right", crusader_bt::searchFirst(c, "") == "right");
+  chk("a port wins over the GCS", crusader_bt::searchFirst(c, "committed") == "committed");
+}
+
 int main()
 {
   rclcpp::init(0, nullptr);
@@ -395,6 +489,7 @@ int main()
   planFreshTests();
   waitForRunStartTests();
   tunableTests();
+  failureTraceTests();
   rclcpp::shutdown();
   std::printf("\n%d checks, %d failed\n", g_checks, g_fails);
   std::printf("%s\n", g_fails == 0 ? "PASS" : "FAIL");

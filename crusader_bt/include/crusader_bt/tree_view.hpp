@@ -1,5 +1,6 @@
 // tree_view.hpp — the tree's shape with every node's status: a log rendering reprinted only on
 // change (BT.CPP's own logger prints one line per transition), and JSON for /crsd/bt_status.
+// FailureTrace: which node made a failed tree fail.
 #ifndef CRUSADER_BT__TREE_VIEW_HPP_
 #define CRUSADER_BT__TREE_VIEW_HPP_
 
@@ -184,6 +185,81 @@ private:
 
   BT::TreeNode * root_ = nullptr;
   std::string last_;
+};
+
+/// Which node failed the tree. TreeView cannot say: by the time a tree that returned
+/// FAILURE is drawn, its parents have reset every node to IDLE. So the transitions are
+/// watched as they happen. The LAST leaf to fail during the tick that failed the tree is
+/// the one whose failure climbed to the root (a Fallback's first child failing is not the
+/// cause when a later one fails too); a tick with no failing leaf (an Inverter, a
+/// Timeout) names the first node that failed. Call beginTick() before every tickOnce().
+class FailureTrace
+{
+public:
+  struct Failed
+  {
+    std::string type;    ///< the registration name: NotDropped
+    std::string name;    ///< the instance name, same as type unless the XML named it
+    std::string where;   ///< the named ancestors, outermost first: "scan_fire > manual"
+  };
+
+  explicit FailureTrace(BT::Tree & tree) {watch(tree.rootNode(), "");}
+  // The callbacks hold `this`; declare it after the tree so it goes first.
+  FailureTrace(const FailureTrace &) = delete;
+  FailureTrace & operator=(const FailureTrace &) = delete;
+
+  void beginTick()
+  {
+    last_ = Failed{};
+    leaf_ = false;
+  }
+
+  /// The failing node of the last tick; empty type when nothing failed.
+  const Failed & failed() const {return last_;}
+
+  /// "NotDropped (in scan_fire > manual)", or "" when nothing failed.
+  std::string text() const
+  {
+    if (last_.type.empty()) {return {};}
+    std::string s = last_.name;
+    if (last_.name != last_.type) {s += " (" + last_.type + ")";}
+    if (!last_.where.empty()) {s += " in " + last_.where;}
+    return s;
+  }
+
+private:
+  void watch(BT::TreeNode * node, const std::string & where)
+  {
+    if (node == nullptr) {return;}
+    auto * ctrl = dynamic_cast<BT::ControlNode *>(node);
+    auto * dec = dynamic_cast<BT::DecoratorNode *>(node);
+    const bool leaf = ctrl == nullptr && dec == nullptr;
+    const Failed me{node->registrationName(), node->name(), where};
+    subs_.push_back(node->subscribeToStatusChange(
+      [this, leaf, me](BT::TimePoint, const BT::TreeNode &, BT::NodeStatus, BT::NodeStatus now) {
+        if (now != BT::NodeStatus::FAILURE) {return;}
+        if (leaf) {
+          last_ = me;
+          leaf_ = true;
+        } else if (!leaf_ && last_.type.empty()) {
+          last_ = me;
+        }
+      }));
+    // Only the names the XML gave are worth printing: "Sequence > ReactiveSequence" says nothing.
+    std::string inner = where;
+    if (!leaf && node->name() != node->registrationName()) {
+      inner += (inner.empty() ? "" : " > ") + node->name();
+    }
+    if (ctrl) {
+      for (auto * c : ctrl->children()) {watch(c, inner);}
+    } else if (dec) {
+      watch(dec->child(), inner);
+    }
+  }
+
+  std::vector<BT::TreeNode::StatusChangeSubscriber> subs_;
+  Failed last_;
+  bool leaf_ = false;    ///< a leaf has failed this tick
 };
 
 }  // namespace crusader_bt

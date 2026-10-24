@@ -103,6 +103,7 @@ public:
     tick_hz_ = declare_parameter<double>("tick_hz", 10.0);
     default_timeout_s_ = declare_parameter<double>("default_timeout_s", 600.0);
     declare_parameter<double>("dock_heading_deg", -1.0);   // live: the GCS sets it, read per goal
+    declare_parameter<std::string>("search_first", "");    // live, per goal: left | right | "" = the tree's
     mode_grace_s_ = declare_parameter<double>("mode_grace_s", 3.0);
     stream_timeout_s_ = declare_parameter<double>("stream_timeout_s", 1.0);
     assoc_radius_m_ = declare_parameter<double>("assoc_radius_m", 5.0);
@@ -990,6 +991,19 @@ private:
       goal_mode_ = ctx_->mode;
       ctx_->handed_mode.clear();
       ctx_->dock_heading = get_parameter("dock_heading_deg").as_double();
+      ctx_->search_first = get_parameter("search_first").as_string();
+      if (!ctx_->search_first.empty() && ctx_->search_first != "left" &&
+        ctx_->search_first != "right")
+      {
+        RCLCPP_WARN(get_logger(), "search_first '%s' is not left or right: the tree's own",
+          ctx_->search_first.c_str());
+        ctx_->search_first.clear();
+      }
+      goal_inputs_ = "mode=" + (ctx_->mode.empty() ? std::string("?") : ctx_->mode) +
+        (ctx_->drop_tripped ? " DROP-LATCHED" : "") +
+        " dock_heading=" + (ctx_->dock_heading >= 0.0 ?
+        std::to_string(static_cast<int>(std::lround(ctx_->dock_heading))) : std::string("unset")) +
+        " search_first=" + (ctx_->search_first.empty() ? std::string("tree") : ctx_->search_first);
       // "Home" is where THIS attempt started, not the autopilot's HOME.
       ctx_->home = ctx_->boat;
       ctx_->have_home = ctx_->pose_fresh;
@@ -1008,12 +1022,13 @@ private:
       bb->set("ctx", ctx_);
       BT::Tree tree = loadMission(factory, dirs_, file, bb);
       TreeView view(tree);
+      FailureTrace failed_at(tree);
 
       const std::string limit = timeout_s > 0.0 ?
         std::to_string(static_cast<int>(timeout_s)) + "s" : std::string("none");
       RCLCPP_INFO(
-        get_logger(), "GOAL %s timeout=%s approach=(%.7f, %.7f)", goal->name.c_str(),
-        limit.c_str(), goal->approach_latitude, goal->approach_longitude);
+        get_logger(), "GOAL %s timeout=%s approach=(%.7f, %.7f) %s", goal->name.c_str(),
+        limit.c_str(), goal->approach_latitude, goal->approach_longitude, goal_inputs_.c_str());
 
       rclcpp::Rate rate(tick_hz_);
       auto fb = std::make_shared<RunMission::Feedback>();
@@ -1043,6 +1058,7 @@ private:
         }
 
         refreshFreshness();
+        failed_at.beginTick();
         const BT::NodeStatus st = tree.tickOnce();
         stopIfSilent(false);
         publishLegStatus(elapsed);
@@ -1076,7 +1092,7 @@ private:
                 ": the pilot took control; not fighting for it";
             } else {
               outcome = RunMission::Result::OUTCOME_FAILURE;
-              detail = "tree " + goal->name + " returned FAILURE (the tree log says which leaf)";
+              detail = "tree " + goal->name + " returned FAILURE" + failureWhy(failed_at);
             }
           }
           break;
@@ -1133,6 +1149,33 @@ private:
     autonomy_pub_->publish(off);
     busy_ = false;
     publishIdle();
+  }
+
+  /// " at NotDropped in scan_fire > manual: <why, in the pilot's words>" for a FAILURE
+  /// result, which the GCS shows. Under ctx_->mu. The guards fail silently (a condition
+  /// has nothing to log), so they are the ones that need saying here.
+  std::string failureWhy(const FailureTrace & trace) const
+  {
+    const std::string at = trace.text();
+    if (at.empty()) {return " (no leaf reported a failure)";}
+    const std::string & type = trace.failed().type;
+    const std::string mode = ctx_->mode.empty() ? std::string("unknown") : ctx_->mode;
+    std::string why;
+    if (type == "NotDropped") {
+      why = "the autonomy-drop latch is set (SD in the drop position, or RC lost): "
+        "SD back to safe, then Start";
+    } else if (type == "IsAutonomous") {
+      why = "flight mode " + mode + " is not autonomous";
+      if (mode == "MANUAL") {
+        why += "; a mission saved from the Mission tab always starts with IsAutonomous, "
+          "so it cannot run in MANUAL: run the built-in tree";
+      }
+    } else if (type == "ModeIs") {
+      why = "the autopilot is in " + mode;
+    } else {
+      why = "its own warning, if it gave one, is in the bt_runner_node log";
+    }
+    return " at " + at + ": " + why;
   }
 
   /// Feedback and /crsd/bt_status while a goal runs (kRunningStatusPeriodS).
@@ -1241,6 +1284,7 @@ private:
   bool hs_active_ = false;              // motion commanded last tick (tick thread only)
   bool sticks_active_ = false;          // the sticks commanded last tick (tick thread only)
   std::string goal_mode_;               // the mode when this goal started (under ctx_->mu)
+  std::string goal_inputs_;             // mode, drop latch and GCS settings at the start, for GOAL
   std::vector<int64_t> stick_ch_, stick_neutral_;
   std::vector<bool> stick_reverse_;
   rclcpp::Publisher<crusader_msgs::msg::RcChannels>::SharedPtr rc_pub_;

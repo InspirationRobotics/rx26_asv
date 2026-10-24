@@ -122,6 +122,9 @@ struct Context
   /// The bow's heading facing the dock, deg true: bt_runner_node dock_heading_deg (the
   /// GCS sets it), read at goal start. < 0 = not set.
   double dock_heading = -1.0;
+  /// Which way StrafeSearch slides first: bt_runner_node search_first (the GCS sets it),
+  /// read at goal start. "left" | "right", "" = not set.
+  std::string search_first;
 
   std::string task3_phase;                    ///< for feedback and the viewers
   int survey_attempt = 0;                     ///< PickVantage calls, all of them
@@ -664,6 +667,13 @@ inline double dockHeading(const Context & c, double port)
 {
   if (std::isfinite(port)) {return port;}
   return c.dock_heading >= 0.0 ? c.dock_heading : std::numeric_limits<double>::quiet_NaN();
+}
+
+/// A leaf's first port, else the GCS's search_first, else "left".
+inline std::string searchFirst(const Context & c, const std::string & port)
+{
+  if (!port.empty()) {return port;}
+  return c.search_first.empty() ? std::string("left") : c.search_first;
 }
 
 /// Forget the last attempt's shots. Called at goal start with resetTask3.

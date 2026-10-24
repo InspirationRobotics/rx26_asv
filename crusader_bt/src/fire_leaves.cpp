@@ -588,8 +588,9 @@ public:
   static BT::PortsList providedPorts()
   {
     return {
-      BT::InputPort<std::string>("first", "left",
-        "left | right: which way to slide first; committed: toward the committed bay"),
+      BT::InputPort<std::string>("first", "",
+        "left | right: which way to slide first; committed: toward the committed bay; "
+        "unset = the GCS's search_first, else left"),
       BT::InputPort<double>("leg_m", 4.0, "slide this far each way of the start"),
       BT::InputPort<double>("lat_us", 70.0, "the lateral stick while sliding"),
       BT::InputPort<double>("kp_yaw", 5.0, "us per deg (heading hold)"),
@@ -640,7 +641,7 @@ public:
       out_target_ = L.ok ? std::max(nav::dot(p0_ - face_, out_),
         getInput<double>("min_out_m").value_or(3.5)) : 0.0;
     }
-    const std::string first = getInput<std::string>("first").value_or("left");
+    const std::string first = searchFirst(*ctx_, getInput<std::string>("first").value_or(""));
     toward_ = first == "committed";
     if (toward_) {
       const dock::BayTrack * t = ctx_->dock.find(ctx_->chosen_track);
