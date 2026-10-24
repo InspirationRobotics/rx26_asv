@@ -330,12 +330,14 @@ public:
     return {
       BT::InputPort<int>("min_votes", 8, "GREEN/RED reads before a bay has a verdict"),
       BT::InputPort<double>("min_share", 0.8, "share of them GREEN"),
+      BT::InputPort<int>("min_obs", 5, "sightings before a track is a bay"),
       BT::OutputPort<int>("bay", "the committed bay's number, 1-based left to right")};
   }
 
   BT::NodeStatus tick() override
   {
     dock::VoteParams v;
+    const int min_obs = getInput<int>("min_obs").value_or(5);
     int bay = 0, seen = 0, red = 0, green = 0, id = -1;
     bool guess = false;
     {
@@ -345,7 +347,7 @@ public:
       v.min_share = getInput<double>("min_share").value_or(v.min_share);
       const dock::BayTrack * best = nullptr;
       for (const auto & t : ctx_->dock.tracks) {
-        if (t.n < ctx_->dock_min_obs || dock::verdict(t, v) != dock::Verdict::Green ||
+        if (t.n < min_obs || dock::verdict(t, v) != dock::Verdict::Green ||
           !inView(*ctx_, t))
         {
           continue;                 // only a GREEN bay the camera sees NOW

@@ -24,7 +24,7 @@
         <Sequence name="dock_and_fire">
           <RetryUntilSuccessful num_attempts="-1">
             <Fallback>
-              <CommitFirstGreen bay="{bay}" min_votes="8" min_share="0.8"/>
+              <CommitFirstGreen bay="{bay}" min_votes="4" min_share="0.5" min_obs="4"/>
               <ForceFailure>
                 <Sleep msec="500"/>
               </ForceFailure>

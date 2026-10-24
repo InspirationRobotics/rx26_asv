@@ -55,17 +55,18 @@
           <Fallback name="the_green_bay">
             <BayChosen/>
             <ReactiveFallback name="search_until_green">
-              <CommitFirstGreen bay="{bay}" min_votes="8" min_share="0.8"/>
+              <CommitFirstGreen bay="{bay}" min_votes="4" min_share="0.5" min_obs="4"/>
               <!-- one way only: slide LEFT along the dock (start the run at its right
                    end). leg_m is longer than the dock, so it never turns back; past it,
                    it would sweep back the other way -->
-              <StrafeSearch first="left" leg_m="20.0" lat_us="70" min_out_m="3.5"
+              <StrafeSearch first="left" leg_m="20.0" lat_us="100" min_out_m="3.5"
                             forever="true"/>
             </ReactiveFallback>
           </Fallback>
 
-          <ApproachBay fwd_us="60" slew_us_s="40" centre_tol_m="0.25" handover_m="1.8"
-                       use_lidar="{use_lidar}"/>
+          <ApproachBay fwd_us="60" strafe_us="100" slew_us_s="40" centre_tol_m="0.15"
+                       centred_s="1.0" recentre_m="0.40" kp_lat="100" kd_lat="40"
+                       handover_m="1.8" use_lidar="{use_lidar}"/>
 
           <ReactiveSequence name="docked">
             <StrafeKeep fire_range_m="1.2" use_lidar="{use_lidar}"
