@@ -763,6 +763,28 @@ static void fireBesideDockingTests()
   }
   {
     FireRig r;
+    r.load("<SprayUntilHit target=\"1\" window=\"{window}\" timeout_s=\"100\" "
+      "max_aim_age_s=\"5.0\" keep_after_docking=\"true\"/>");
+    r.ctx->now_s = 1.0;
+    r.frame(10.0, {FireRig::win(1, Colour::Red, 2.0)});
+    r.tick();
+    r.ctx->now_s = 6.2;
+    r.frame(10.1, {FireRig::win(0, Colour::Off)});        // window 1 lost
+    chk("keep_after_docking, not docked yet: holds fire past max_aim_age_s as before",
+      r.tick() == RUN && !r.cannon_on);
+    r.ctx->docking_report_s = 6.5;                         // ReportDocking sent it
+    r.ctx->now_s = 7.0;
+    chk("docked: sprays the lost window's last aim point again", r.tick() == RUN &&
+      r.cannon_on && r.cannon_x == 2.0);
+    r.ctx->now_s = 60.0;
+    chk("... and 59 s after it was last seen, still", r.tick() == RUN && r.cannon_on &&
+      r.cannon_x == 2.0);
+    r.frame(10.2, {FireRig::win(1, Colour::Red, 2.4)});
+    chk("seen again: re-aimed at the new point, the water never off", r.tick() == RUN &&
+      r.cannon_on && r.cannon_x == 2.4);
+  }
+  {
+    FireRig r;
     r.load("<SprayUntilHit target=\"0\" window=\"{window}\" timeout_s=\"100\"/>");
     double t = 20.0;
     for (; t < 21.95; t += 0.1) {

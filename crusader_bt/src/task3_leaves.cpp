@@ -718,6 +718,9 @@ private:
 /// drops out (a glitch, a few lost frames, the other window seen alone) it keeps spraying
 /// at the last aim point for max_aim_age_s - water on a miss does no harm, and stopping
 /// on every lost frame wastes the shot - and past that holds fire until it is seen again.
+/// With keep_after_docking, once the docking report is out it never holds fire for a lost
+/// window: it sprays the last aim point until the window is seen again (and re-aims there)
+/// or the fire is out.
 /// If another window of our bay reads RED while ours has not for retarget_s (counted from
 /// the trigger, which saw ours RED), and this spray never saw ours RED, it switches to that
 /// one: the trigger was a misread.
@@ -742,6 +745,8 @@ public:
       BT::InputPort<double>("min_green_s", 0.4, "GREEN this long after RED is a hit"),
       BT::InputPort<double>("max_aim_age_s", 1.0,
         "keep spraying at the last aim point this long after the window was last seen"),
+      BT::InputPort<bool>("keep_after_docking", false,
+        "once the docking report is out, spray the last aim point however long it is lost"),
       BT::InputPort<double>("retarget_s", 2.0,
         "another window RED while ours has not been for this long: switch to it")};
   }
@@ -751,7 +756,7 @@ public:
     t0_ = Clock::now();
     watch_.reset();
     red_.reset();
-    firing_ = false;
+    firing_ = held_ = false;
     aim_t_ = aim_seen_s_ = -1e18;
     const int target = getInput<int>("target").value_or(-1);
     {
@@ -771,7 +776,8 @@ public:
     const double min_green = getInput<double>("min_green_s").value_or(0.4);
     const double max_age = getInput<double>("max_aim_age_s").value_or(1.0);
     const double retarget_s = getInput<double>("retarget_s").value_or(2.0);
-    bool hit = false, aim_ok = false;
+    const bool keep = getInput<bool>("keep_after_docking").value_or(false);
+    bool hit = false, aim_ok = false, held = false;
     int switched_from = -1;
     double x = 0, y = 0, z = 0, aim_age = 0.0;
     {
@@ -803,7 +809,8 @@ public:
         az_ = w->z;
       }
       aim_age = ctx_->now_s - aim_seen_s_;
-      if (aim_age <= max_age) {
+      held = keep && ctx_->docking_report_s >= 0.0 && aim_seen_s_ > -1e17 && aim_age > max_age;
+      if (aim_age <= max_age || held) {
         aim_ok = true;
         x = ax_;
         y = ay_;
@@ -827,6 +834,11 @@ public:
         window_, since(t0_));
       return BT::NodeStatus::FAILURE;
     }
+    if (held && !held_) {
+      RCLCPP_INFO(log(), "window %d not seen for %.1f s: docked, so spraying on at its last "
+        "aim point", window_, aim_age);
+    }
+    held_ = held;
     if (aim_ok) {
       if (ctx_->cannon) {ctx_->cannon(true, x, y, z);}
       if (!firing_) {
@@ -857,7 +869,7 @@ private:
   int hits0_ = 0;
   int window_ = -1;
   std::uint32_t seq_ = 0;
-  bool firing_ = false;
+  bool firing_ = false, held_ = false;             // held_: spraying a lost window, docked
   double aim_t_ = -1e18, aim_seen_s_ = -1e18;     // the kept aim point's stamp, and now_s then
   double red0_t_ = 0.0;                            // dock_t at the trigger
   double ax_ = 0.0, ay_ = 0.0, az_ = 0.0;
