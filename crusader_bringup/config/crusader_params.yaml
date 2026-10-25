@@ -70,7 +70,8 @@ telemetry_bridge:
     cannon_pump: false                     # G7 for the cannon: false = aims, water DRY
     cannon_nozzle_xyz: [0.37, 0.279, 0.75] # pivot: level with the camera, 11 in to port
     cannon_cam_xyz: [0.37, 0.0, 0.65]      # = target_tracker cam_x/y/z
-    cannon_exit_speed_mps: 0.0             # 0 = from the throw: 9 ft at 30 deg onto the water
+    cannon_exit_speed_mps: 4.2             # 0 = from the throw below (4.85). 4.2: 5 shots, 2026-10-09
+                                           # (3.9-4.3); 4.85 landed short on 2026-10-24
     cannon_throw_range_m: 2.74
     cannon_throw_elev_deg: 30.0
     cannon_throw_drop_m: 0.51
