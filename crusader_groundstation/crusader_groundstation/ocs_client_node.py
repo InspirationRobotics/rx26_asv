@@ -1,11 +1,17 @@
 """ocs_client — Crusader's link to the Operator Control Station, which holds the team's one
-connection to RoboNation's RoboCommand. Not in core.launch.py: start it from the Nodes tab.
+connection to RoboNation's RoboCommand. In core.launch.py, respawning: it actuates nothing,
+and the OCS forwards nothing before a declaration, so it is always on.
 
   out to the OCS: the handbook's 2 Hz heartbeat (latest-wins) and every task report from
-                  /crsd/robocommand/report (in order, none dropped), each as
-                  {team_id, vehicle_id, sent_at, <kind>: body}
+                  /crsd/robocommand/report (in order, none dropped, numbered and sent again
+                  after a reconnect until the OCS receipts it), each as
+                  {team_id, vehicle_id, sent_at, [seq,] <kind>: body}
   in:             OCS commands -> /crsd/ocs_command. THIS NODE NEVER ACTS on one.
-  echo:           /crsd/ocs_traffic, JSON {dir, kind, body, status, stamp}, for the GCS
+                  `ocs_receipt`s (what became of each report) are echoed, not republished.
+  echo:           /crsd/ocs_traffic, JSON {dir, kind, body, status, stamp}, for the GCS. A
+                  numbered report's items carry `vseq`, its receipts `receipt: true` too.
+                  Where the OCS link stands rides on each heartbeat item as `link`, and in a
+                  dir "link" item of its own on a change or after LINK_ECHO_S without one.
 
 `current_task` comes from /crsd/current_task: handbook 3.4.11 makes the transition INTO a
 task the start of that attempt, and above Core the beacons activate on it. Unknown tokens
@@ -52,6 +58,13 @@ PARAMS = {
 }
 HEARTBEAT_ECHO_S = 5.0                  # one heartbeat in the traffic echo per this, and
                                         # every change of state or task
+LINK_ECHO_S = 5.0                       # the OCS link's state, likewise
+ENVELOPE = ("team_id", "vehicle_id", "sent_at", "seq")
+
+
+def kind_of(frame, default="?"):
+    """The report or command kind: the one key that is not the envelope."""
+    return next((k for k in frame if k not in ENVELOPE), default)
 
 
 class OcsClient(Node):
@@ -67,11 +80,13 @@ class OcsClient(Node):
         self._auto_modes = {str(m).upper() for m in p["autonomous_modes"]}
         self._t0 = time.time()
         self._echoed = (None, 0.0)          # (state, task), when
+        self._link_echoed = (None, 0.0)     # (connected, peer, unreceipted), when
 
         # The link thread hands frames over through these, drained by the timer:
         # rclpy publishers are not promised thread-safe.
         self._inbox = deque(maxlen=32)      # commands from the OCS
         self._outbox = deque(maxlen=500)    # frames that went out
+        self._receipts = deque(maxlen=200)  # ocs_receipts
         self._cmd_pub = self.create_publisher(String, "/crsd/ocs_command", 10)
         self._traffic_pub = self.create_publisher(String, "/crsd/ocs_traffic", 50)
         self.create_subscription(RoboCommandReport, "/crsd/robocommand/report",
@@ -97,7 +112,8 @@ class OcsClient(Node):
 
         self.link = OcsLink(
             str(p["ocs_host"]).strip(), int(p["ocs_port"]), on_command=self._inbox.append,
-            on_sent=self._outbox.append, log=lambda m: self.get_logger().info(str(m)),
+            on_sent=self._outbox.append, on_receipt=self._receipts.append,
+            log=lambda m: self.get_logger().info(str(m)),
             team=str(p["team_id"]), discovery_port=int(p["ocs_discovery_port"]),
             fallback_hosts=list(p["ocs_fallback_hosts"]))
         self.link.start()
@@ -113,10 +129,10 @@ class OcsClient(Node):
         return {"team_id": self.p["team_id"], "vehicle_id": self.p["vehicle_id"],
                 "sent_at": rfc3339(), kind: body}
 
-    def _echo(self, direction, kind, body, status):
+    def _echo(self, direction, kind, body, status, **extra):
         self._traffic_pub.publish(String(data=json.dumps(json_safe(
             {"dir": direction, "kind": kind, "body": body, "status": status,
-             "stamp": time.time()}), default=str)))
+             "stamp": time.time(), **extra}), default=str)))
 
     # ---- inputs ----------------------------------------------------------
 
@@ -131,10 +147,10 @@ class OcsClient(Node):
             self.get_logger().error(f"report {msg.kind!r} is not JSON ({e}): not sent")
             self._echo("tx", msg.kind, msg.body_json, f"refused: not JSON ({e})")
             return
-        self.link.send_report(self._envelope(msg.kind, body))
-        self.get_logger().info(f"report {msg.kind} queued for the OCS")
+        seq = self.link.send_report(self._envelope(msg.kind, body))
+        self.get_logger().info(f"report {msg.kind} seq {seq} queued for the OCS")
         self._echo("tx", msg.kind, body, "queued" if self.link.connected else
-                   "queued: no OCS link yet")
+                   "queued: no OCS link yet", vseq=seq)
 
     def _on_task(self, msg):
         """Accept a task token only if RoboCommand's RxTask enum has it: ParseDict rejects
@@ -163,23 +179,47 @@ class OcsClient(Node):
             cmd = self._inbox.popleft()
             self._cmd_pub.publish(String(data=json.dumps(cmd)))
             self.get_logger().info("OCS command -> /crsd/ocs_command: %s" % sorted(cmd))
-            self._echo("rx", next((k for k in cmd if k not in ("team_id", "vehicle_id",
-                                                              "sent_at")), "command"),
-                       cmd, "republished")
+            self._echo("rx", kind_of(cmd, "command"), cmd, "republished")
+        while self._receipts:
+            r = self._receipts.popleft()
+            self._echo("rx", r.get("kind", "?"), r, "%s: %s" % (
+                str(r.get("verdict", "?")).upper(), r.get("detail", "")),
+                vseq=r.get("vehicle_seq"), receipt=True)
         while self._outbox:
             self._echo_sent(self._outbox.popleft())
+        self._echo_link(time.monotonic())
         report = self._heartbeat(time.monotonic())
         if report is not None:
             self.link.publish(report)
 
     def _echo_sent(self, frame):
-        kind = next((k for k in frame if k not in ("team_id", "vehicle_id", "sent_at")), "?")
-        if kind == "heartbeat":
-            key, now = (frame[kind]["state"], frame[kind]["current_task"]), time.monotonic()
-            if key == self._echoed[0] and now - self._echoed[1] < HEARTBEAT_ECHO_S:
-                return
-            self._echoed = (key, now)
-        self._echo("tx", kind, frame[kind], "sent")
+        kind = kind_of(frame)
+        if kind != "heartbeat":
+            self._echo("tx", kind, frame[kind], "sent", vseq=frame.get("seq"))
+            return
+        key, now = (frame[kind]["state"], frame[kind]["current_task"]), time.monotonic()
+        if key == self._echoed[0] and now - self._echoed[1] < HEARTBEAT_ECHO_S:
+            return
+        self._echoed = (key, now)
+        self._echo("tx", kind, frame[kind], "sent", link=self._link_state(now))
+
+    def _link_state(self, now):
+        """The OCS link as the GUI's OCS tile shows it: up or not, where, and how many
+        reports wait for a receipt. Each echo carrying it counts as the tile's keepalive."""
+        state = {"connected": self.link.connected, "peer": self.link.peer,
+                 "unreceipted": self.link.unreceipted, "target": self.link.describe()}
+        self._link_echoed = ((state["connected"], state["peer"], state["unreceipted"]), now)
+        return state
+
+    def _echo_link(self, now):
+        """A link item of its own when the link changed, or when no heartbeat echo has
+        carried its state for LINK_ECHO_S: the GCS's 300-item replay is for reports."""
+        key = (self.link.connected, self.link.peer, self.link.unreceipted)
+        if key == self._link_echoed[0] and now - self._link_echoed[1] < LINK_ECHO_S:
+            return
+        state = self._link_state(now)
+        self._echo("link", "link", state, "connected to %s" % state["peer"]
+                   if state["connected"] else "not connected")
 
     def _heartbeat(self, now):
         p = self.p

@@ -29,6 +29,16 @@ TWO THINGS THE OBVIOUS TCP CLIENT GETS WRONG:
     TASK REPORTS are the opposite: each one scores once, so they wait in a FIFO
     (send_report) and go out in order, before the heartbeat, on every pass.
 
+RECEIPTS. A task report goes out numbered with this link's own `seq` and is kept
+until the OCS's `ocs_receipt` for it says something final: acknowledged (RoboCommand's
+broker has it), held (no run declared) or dropped (and why). "published" is not
+final: the OCS sent it, the PUBACK has not come. A report sent just before a link
+dropped is sent again on the next one, and the OCS answers that resend from what
+became of the first instead of publishing it twice -- but only once the OCS has sent a
+receipt, since one that does not receipt would publish every resend: until then a
+reconnect holds its resends back, and the first receipt releases them. Numbering starts from the clock (_first_seq) so that a late receipt for a report from
+before a restart cannot match a new one.
+
 FINDING THE OCS. `OcsLink("192.168.8.107", 37564)` dials that address only.
 `OcsLink("auto", 37564, team=..., discovery_port=37565, fallback_hosts=[...])`
 listens for the OCS's UDP beacon (other half: OCS/rx_bridge/beacon.py). While
@@ -57,6 +67,16 @@ MAX_FRAME = 1 << 20
 #: How long a read blocks before we go round and check for something to send.
 _READ_TIMEOUT_S = 0.05
 REPORT_QUEUE = 200        # task reports held through a dropped link
+#: The `ocs_receipt` verdicts that end a report's resend (module docstring).
+FINAL_VERDICTS = frozenset(("acknowledged", "held", "dropped"))
+_SEQ_LIMIT = 1 << 32       # RxReport.seq is a uint32
+
+
+def _first_seq(now: float | None = None) -> int:
+    """Where a link's task-report numbering starts: tenths of a second since the epoch,
+    mod 2**32. A node restarted later starts above everything the old one sent unless it
+    sent ten reports a second. Never 0, which the OCS reads as "no seq"."""
+    return int((time.time() if now is None else now) * 10) % _SEQ_LIMIT or 1
 
 # ---- RxTask, transcribed from RoboCommand's own schema ----------------------
 #
@@ -172,6 +192,11 @@ BEACON_VERSION = 1
 #: A beacon older than this is a past address, not a present one. The OCS sends
 #: one a second, so this survives four lost datagrams.
 BEACON_FRESH_S = 5.0
+
+#: How often a beacon port that could not be bound is tried again. A port taken at
+#: start -- a second ocs_client, or the last one still exiting -- must not leave
+#: the boat on its fallback hosts for the rest of the run.
+LISTEN_RETRY_S = 5.0
 
 #: `ocs_host` value that means "find it from the beacon".
 AUTO_HOST = "auto"
@@ -322,6 +347,7 @@ class BeaconListener:
         self.heard = 0                  #: beacons accepted
         self.ignored = 0                #: datagrams that were not ours
         self.listening = False
+        self.bind_error = ""            #: why the last start() could not bind; "" once bound
         self._sock = None
         self._stop = threading.Event()
         self._thread = None
@@ -353,8 +379,9 @@ class BeaconListener:
         return False
 
     def start(self) -> bool:
-        """Bind and listen. False (logged) if the port is taken: the link then
-        runs on its fallback hosts alone rather than not at all.
+        """Bind and listen. False if the port is taken: the link then runs on its
+        fallback hosts alone rather than not at all, and OcsLink tries again every
+        LISTEN_RETRY_S. A failure that holds is logged once, not on every try.
 
         No SO_REUSEADDR, deliberately: two listeners would split the datagrams,
         and the loser sees silence rather than an error.
@@ -364,9 +391,15 @@ class BeaconListener:
             sock.bind(("0.0.0.0", self.port))
         except OSError as exc:
             sock.close()
-            self.log("OCS link: cannot listen for beacons on UDP %d -- %s -- "
-                     "using the fallback hosts only" % (self.port, exc))
+            if str(exc) != self.bind_error:
+                self.log("OCS link: cannot listen for beacons on UDP %d -- %s -- using "
+                         "the fallback hosts only, trying again every %g s"
+                         % (self.port, exc, LISTEN_RETRY_S))
+            self.bind_error = str(exc)
             return False
+        if self.bind_error:
+            self.log("OCS link: listening for beacons on UDP %d now" % self.port)
+            self.bind_error = ""
         sock.settimeout(0.5)
         self._sock = sock
         self.listening = True
@@ -405,22 +438,24 @@ class BeaconListener:
 class OcsLink:
     """Keeps one connection to the OCS alive, in the background.
 
-    on_command(dict) is called for every RxCommand that arrives, and on_sent(dict) for
-    every frame that went out. Both run on the link thread, so they must not block --
-    hand the work to ROS and return.
+    on_command(dict) is called for every RxCommand that arrives, on_sent(dict) for
+    every frame that went out, and on_receipt(dict) for every `ocs_receipt` (the body).
+    All run on the link thread, so they must not block -- hand the work to ROS and
+    return.
 
     `host` is an address to dial, or "auto": find the OCS from its beacon,
     falling back to `fallback_hosts` in turn. Only "auto" uses `team`,
     `discovery_port` and `fallback_hosts`; `discovery_port` 0 means no listener.
     """
 
-    def __init__(self, host: str, port: int, *, on_command=None, on_sent=None, log=print,
-                 retry_s: float = 5.0, team: str = "",
+    def __init__(self, host: str, port: int, *, on_command=None, on_sent=None,
+                 on_receipt=None, log=print, retry_s: float = 5.0, team: str = "",
                  discovery_port: int = 0, fallback_hosts=()) -> None:
         self.host = host
         self.port = port
         self.on_command = on_command
         self.on_sent = on_sent
+        self.on_receipt = on_receipt
         self.log = log
         self.retry_s = retry_s
         self.team = team
@@ -442,12 +477,18 @@ class OcsLink:
                                                 self._chooser, log)
 
         self._sock: socket.socket | None = None
+        self._peer: str | None = None          # "host:port" while connected
         self._reader = FrameReader()
         self._pending: dict | None = None      # the latest-wins heartbeat slot
         self._reports: deque = deque(maxlen=REPORT_QUEUE)
+        self._unreceipted: dict = {}           # own seq -> report, until a final receipt
+        self._next_seq = _first_seq()
+        self._receipts_seen = False            # this OCS answers resends (docstring)
+        self._held_back: set = set()           # resends waiting for that first receipt
         self._tx_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._listen_tried = 0.0               # monotonic time of the last bind attempt
         self._sent = 0
         self._received = 0
 
@@ -459,16 +500,38 @@ class OcsLink:
         with self._tx_lock:
             self._pending = report
 
-    def send_report(self, report: dict) -> None:
-        """Queue one task report; reports go out in order, none replaced."""
+    def send_report(self, report: dict) -> int:
+        """Queue one task report; reports go out in order, none replaced. It goes out
+        numbered, and is kept until a final receipt (module docstring). Returns the seq."""
         with self._tx_lock:
+            seq = self._next_seq
+            self._next_seq = seq % (_SEQ_LIMIT - 1) + 1
+            report = dict(report, seq=seq)
+            if len(self._unreceipted) >= REPORT_QUEUE:
+                oldest = next(iter(self._unreceipted))
+                self.log("OCS link: %d reports without a receipt -- giving up on seq %d"
+                         % (REPORT_QUEUE, oldest))
+                del self._unreceipted[oldest]
+            self._unreceipted[seq] = report
             if len(self._reports) == self._reports.maxlen:
                 self.log("OCS link: report queue full -- dropping the oldest report")
             self._reports.append(report)
+        return seq
 
     @property
     def connected(self) -> bool:
         return self._sock is not None
+
+    @property
+    def peer(self) -> str | None:
+        """"host:port" of the OCS while connected, else None."""
+        return self._peer
+
+    @property
+    def unreceipted(self) -> int:
+        """Task reports with no final receipt yet."""
+        with self._tx_lock:
+            return len(self._unreceipted)
 
     @property
     def counts(self) -> tuple:
@@ -476,6 +539,7 @@ class OcsLink:
 
     def start(self) -> None:
         if self._listener is not None:
+            self._listen_tried = time.monotonic()
             self._listener.start()
         self._thread = threading.Thread(target=self._run, name="ocs-link",
                                         daemon=True)
@@ -498,7 +562,8 @@ class OcsLink:
         elif self._listener.listening:
             how = "beacons on UDP %d for team %s" % (self._listener.port, self.team)
         else:
-            how = "beacon listener on UDP %d NOT RUNNING" % self._listener.port
+            how = "beacon listener on UDP %d NOT RUNNING (%s; retrying)" % (
+                self._listener.port, self._listener.bind_error or "not started")
         return "auto (%s; fallback %s)" % (
             how, ", ".join(self._chooser.fallback) or "none")
 
@@ -506,6 +571,7 @@ class OcsLink:
 
     def _run(self) -> None:
         while not self._stop.is_set():
+            self._relisten()
             if self._sock is None:
                 if not self._connect():
                     self._stop.wait(self.retry_s)
@@ -514,6 +580,16 @@ class OcsLink:
                 self._close()
                 # Reconnect happens on the next pass, so one code path owns it.
         self._close()
+
+    def _relisten(self) -> None:
+        """Bind the beacon port again if it was taken (LISTEN_RETRY_S)."""
+        listener = self._listener
+        if listener is None or listener.listening:
+            return
+        now = time.monotonic()
+        if now - self._listen_tried >= LISTEN_RETRY_S:
+            self._listen_tried = now
+            listener.start()
 
     def _pick_target(self):
         """(host, port) to dial now, or None when there is nowhere to dial yet.
@@ -545,11 +621,35 @@ class OcsLink:
             return False
         sock.settimeout(_READ_TIMEOUT_S)
         self._sock = sock
+        self._peer = "%s:%d" % (host, port)
         self._reader = FrameReader()
         if self._chooser is not None:
             self._chooser.note_connected(host)
         self.log("OCS link: connected to %s:%d" % (host, port))
+        self._requeue()
         return True
+
+    def _requeue(self) -> None:
+        """A new connection: every report sent on an old one with no final receipt goes
+        again -- or, until the OCS has sent a receipt, waits for one (_on_receipt)."""
+        with self._tx_lock:
+            sent = set(self._unreceipted) - {r["seq"] for r in self._reports}
+            if not self._receipts_seen:
+                self._held_back |= sent
+                return
+        self._resend(sent)
+
+    def _resend(self, seqs) -> None:
+        """Those of `seqs` still without a final receipt and not already queued go out
+        again, oldest first, ahead of anything newer."""
+        with self._tx_lock:
+            queued = {r["seq"] for r in self._reports}
+            again = [r for seq, r in self._unreceipted.items()
+                     if seq in seqs and seq not in queued]
+            self._reports.extendleft(reversed(again))
+        if again:
+            self.log("OCS link: sending %d report(s) again, no receipt yet: seq %s"
+                     % (len(again), ", ".join(str(r["seq"]) for r in again)))
 
     def _pump(self) -> bool:
         """One read, then one send. False means the link is gone."""
@@ -615,6 +715,9 @@ class OcsLink:
         except (UnicodeDecodeError, ValueError) as exc:
             self.log("OCS link: undecodable command -- %s" % exc)
             return
+        if isinstance(cmd, dict) and isinstance(cmd.get("ocs_receipt"), dict):
+            self._on_receipt(cmd["ocs_receipt"])
+            return
         self.log("OCS link: command %s" % sorted(cmd))
         if self.on_command is not None:
             try:
@@ -623,7 +726,26 @@ class OcsLink:
                 # A throwing callback must not take the link down with it.
                 self.log("OCS link: command handler raised -- %s" % exc)
 
+    def _on_receipt(self, receipt: dict) -> None:
+        """The OCS's word on one numbered report. A final verdict ends its resend; the
+        first receipt releases the resends a reconnect held back (_requeue)."""
+        seq, verdict = receipt.get("vehicle_seq"), receipt.get("verdict")
+        with self._tx_lock:
+            self._receipts_seen = True
+            if verdict in FINAL_VERDICTS:
+                self._unreceipted.pop(seq, None)
+            held, self._held_back = self._held_back, set()
+        self.log("OCS link: receipt for seq %s: %s" % (seq, verdict))
+        if held:
+            self._resend(held)
+        if self.on_receipt is not None:
+            try:
+                self.on_receipt(receipt)
+            except Exception as exc:            # noqa: BLE001
+                self.log("OCS link: receipt handler raised -- %s" % exc)
+
     def _close(self) -> None:
+        self._peer = None
         sock, self._sock = self._sock, None
         if sock is None:
             return
