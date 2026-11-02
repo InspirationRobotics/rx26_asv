@@ -119,6 +119,12 @@ struct Context
   /// must apply the SAME rule: a condition looser than its commit stalls the tree.
   dock::VoteParams dock_votes;
   int dock_min_obs = 5;
+  /// The bow's heading facing the dock, deg true: bt_runner_node dock_heading_deg (the
+  /// GCS sets it), read at goal start. < 0 = not set.
+  double dock_heading = -1.0;
+  /// Which way StrafeSearch slides first: bt_runner_node search_first (the GCS sets it),
+  /// read at goal start. "left" | "right", "" = not set.
+  std::string search_first;
 
   std::string task3_phase;                    ///< for feedback and the viewers
   int survey_attempt = 0;                     ///< PickVantage calls, all of them
@@ -129,6 +135,26 @@ struct Context
   /// RoboCommand's ReadinessConfirm for the docking report (/crsd/ocs_command): stops the
   /// report being re-sent. The light is what the leaves wait on.
   bool readiness_confirmed = false;
+  /// now_s when the docking report last went out; < 0 = not yet this run. AwaitFireTarget
+  /// re-sends from it, so a fire branch running beside the docking never reports early.
+  double docking_report_s = -1.0;
+  /// Fires put out this run (SprayUntilHit SUCCESS): after one, a RED must hold longer
+  /// than the resource code's 1 s flashes before it is another fire.
+  int fires_out = 0;
+  /// The GREEN bay, straight off the newest frame that showed one (pickGreen): Task 3 has
+  /// one GREEN indicator, so no track and no identity - the boat aligns and the cannon aims
+  /// on it wherever the frame puts it.
+  struct GreenBay
+  {
+    double t = -1.0;                          ///< that frame's stamp (dock_t's clock); < 0 never
+    dock::FrameBay bay;
+    std::vector<dock::WindowSighting> windows;  ///< from its newest frame that had windows
+    double windows_t = -1.0;
+  } green;
+  /// The centring spot (the GREEN indicator, else its face), kept on the map by a Kalman
+  /// filter from every frame that showed it: one memory for ApproachBay and StrafeKeep, so
+  /// the hand-over does not start the hold blind, and a few lost frames are ridden through.
+  fire::CentreTarget centre;
 
   /// Where the boat was when the goal was accepted. "Go home" in a mission
   /// means "back to where this attempt started", not the autopilot's HOME —
@@ -144,6 +170,9 @@ struct Context
   // samples are stamped with.
   double now_s = 0.0;
   std::string mode;                           ///< the autopilot's mode, upper case
+  /// The mode this run switched to itself (RequestMode), "" = none: the goal's mode
+  /// changing to it is planned, not the pilot taking over. Cleared at goal start.
+  std::string handed_mode;
   /// /crsd/autonomy_drop (latched): the drop latch (ch9) has cut autonomy.
   /// Unknown counts as tripped: no message is not permission.
   bool drop_tripped = true;
@@ -162,29 +191,17 @@ struct Context
   bool fire_pump = false;
   std::uint32_t pump_seq = 100000;            ///< the tree's burst numbering
   // written by the fire leaves
-  fire::Aim aim;                              ///< StationKeep's latest solution
-  fire::BurstBook bursts;
   double cmd_speed = 0.0;                     ///< the last speed StationKeep asked for
   double last_keep_t = -1.0;
   /// Set by StationKeep on every tick it commands; the runner sends STOP when it
   /// stops being set (stopIfSilent).
   bool hs_commanded = false;
 
-  // ---- the strafe keep (MANUAL; fire_math's second half) ----
-  // The camera's windows of the bay ahead, in the BODY frame, per
-  // DockWindow.index (0 = upper-left, 1 = lower-right), stamped on now_s's
-  // clock at receipt (ingestFireWindows). And the compass heading that squares
-  // the bow to that face, from the two windows (or the face plane).
-  fire::Series fire_win_x[2];
-  fire::Series fire_win_y[2];
-  fire::Series face_heading{true};
-  std::string face_src;                       ///< "windows" / "plane": the last source
-  double face_target = fire::kNaN;            ///< the last good square heading, held
+  // ---- the docked hold (MANUAL, StrafeKeep): the committed bay, on the sticks ----
   double yaw_rate_dps = fire::kNaN;           ///< ATTITUDE.yawspeed, + = turning right
   fire::StrafeState strafe_state;             ///< the keep's slew and integrators
   fire::StrafeInputs strafe_in;               ///< what the keep saw last tick, for the gate
   fire::StrafeCmd strafe;                     ///< ... and what it made of it
-  std::string strafe_block;                   ///< non-empty: the keep refuses (why)
   double last_strafe_t = -1.0;
   /// Set by StrafeKeep on every tick it commands the sticks; the runner RELEASES
   /// them when it stops being set.
@@ -278,6 +295,13 @@ struct Context
   std::function<void(double, double, double)> sticks;
   /// Hand every channel back to the pilot (an all-zero override).
   std::function<void()> release_sticks;
+  /// Ask the autopilot for a flight mode: /crsd/set_mode (RequestMode).
+  std::function<void(const std::string &)> request_mode;
+  /// Ask camera_node for a model (its live `model` parameter, SetCameraModel). False, with
+  /// the reason in `why`, when it cannot be asked; the answer lands in camera_model_ack.
+  std::function<bool(const std::string &, std::string & why)> set_camera_model;
+  int camera_model_ack = 0;                   ///< the last ask: 0 waiting, 1 applied, -1 refused
+  std::string camera_model_why;               ///< camera_node's refusal, then the leaf's FAILURE
 };
 
 using ContextPtr = std::shared_ptr<Context>;
@@ -607,6 +631,38 @@ inline void announceTask(Context & c, const std::string & token)
   RCLCPP_INFO(c.logger(), "current_task -> %s", token.c_str());
 }
 
+/// Across the dock heading, how far a bay whose indicator this frame did not read GREEN may
+/// be from where the GREEN one last was and still be it (pickGreen). Under half a bay's width.
+constexpr double kSameBayM = 0.6;
+
+/// This frame's GREEN bay: the bay it read GREEN (should two, the one nearer where it last
+/// was), else - a frame that read no GREEN - the bay not read RED within kSameBayM of where
+/// the GREEN one last was. Measured ACROSS the dock heading: the camera's range errors run
+/// along it. nullptr when neither. CALL UNDER ctx.mu.
+inline const dock::FrameBay * pickGreen(const Context & c)
+{
+  const double square = c.dock_heading >= 0.0 ? c.dock_heading : c.heading_deg;
+  const bool had = c.green.t >= 0.0;
+  auto across = [&](const dock::FrameBay & b) {
+      return had ? std::fabs(fire::toDockFrame(b.p - c.green.bay.p, square).left) : 0.0;
+    };
+  const dock::FrameBay * best = nullptr;
+  for (const auto & b : c.dock.frame_bays) {
+    if (b.indicator == dock::Colour::Green && (best == nullptr || across(b) < across(*best))) {
+      best = &b;
+    }
+  }
+  if (best != nullptr || !had) {return best;}
+  double best_m = kSameBayM;
+  for (const auto & b : c.dock.frame_bays) {
+    if (b.indicator != dock::Colour::Red && across(b) < best_m) {
+      best = &b;
+      best_m = across(b);
+    }
+  }
+  return best;
+}
+
 /// Fold one DockObservation into the context. CALL UNDER ctx.mu.
 ///
 /// Both runners convert their input (the ROS message, or the sim's JSON line)
@@ -620,6 +676,24 @@ inline void ingestDockObservation(Context & c, const dock::Frame & f)
   if (c.origin_set && c.pose_fresh && std::isfinite(c.heading_deg)) {
     c.dock.prm.face_dz = c.dock_face_dz;
     c.dock.ingest(f, c.boat, c.heading_deg, c.cam_mount);
+    if (const dock::FrameBay * g = pickGreen(c)) {
+      c.green.t = f.t;
+      c.green.bay = *g;
+      if (!g->windows.empty()) {
+        c.green.windows = g->windows;
+        c.green.windows_t = f.t;
+      }
+      // Its centring point: the indicator, else the face unless it is cut off.
+      const bool face = !g->truncated && std::isfinite(g->left_m);
+      const bool ind = std::isfinite(g->ind_left_m);
+      c.centre.sight(
+        face ? dock::bodyToWorld(c.boat, c.heading_deg, g->ahead_m, g->left_m) :
+        nav::Vec2{}, face,
+        ind ? dock::bodyToWorld(c.boat, c.heading_deg, g->ind_ahead_m, g->ind_left_m) :
+        nav::Vec2{}, ind,
+        ind ? std::hypot(g->ind_ahead_m, g->ind_left_m) : std::hypot(g->ahead_m, g->left_m),
+        f.t, c.now_s);
+    }
   }
   ++c.dock_seq;
   c.dock_t = f.t;
@@ -656,62 +730,37 @@ inline void ingestAttitude(
   c.yaw_rate_dps = yaw_rate * d;     // NED yaw rate: + = clockwise = turning right
 }
 
-/// The strafe keep's view of one DockObservation. CALL UNDER ctx.mu, after
-/// ingestDockObservation, with `t` on now_s's clock (the frame's own stamp is
-/// another clock). Takes the bay nearest the bow with a positioned window, puts
-/// its windows into the body frame, and derives the heading that squares the bow
-/// to it: from both windows at the face's spacing, else the face plane's normal.
-inline void ingestFireWindows(Context & c, double t, const dock::Frame & f)
+/// The camera saw this bay within the last second: it is in the picture now.
+inline bool inView(const Context & c, const dock::BayTrack & t)
 {
-  constexpr double kFaceSepM = 0.45, kFaceSepTolM = 0.15;   // UL-LR, build guide
-  const dock::BaySighting * best = nullptr;
-  for (const auto & b : f.bays) {
-    bool any = false;
-    for (const auto & w : b.windows) {any = any || (w.has_position && w.index >= 0 && w.index <= 1);}
-    if (!any) {continue;}
-    if (best == nullptr || std::fabs(b.bearing_deg) < std::fabs(best->bearing_deg)) {best = &b;}
-  }
-  if (best == nullptr) {return;}
-  const auto & m = c.cam_mount;
-  fire::P3 body[2];
-  bool have[2] = {false, false};
-  for (const auto & w : best->windows) {
-    if (!w.has_position || w.index < 0 || w.index > 1) {continue;}
-    body[w.index] = fire::camToBody(fire::P3{w.x, w.y, w.z}, m.x, m.y, m.yaw_deg, m.pitch_deg);
-    have[w.index] = true;
-    c.fire_win_x[w.index].add(t, body[w.index].x);
-    c.fire_win_y[w.index].add(t, body[w.index].y);
-  }
-  if (!std::isfinite(c.heading_deg)) {return;}
-  double left = fire::kNaN;
-  if (have[0] && have[1]) {
-    left = fire::squareFromWindows(body[0].x, body[0].y, body[1].x, body[1].y,
-        kFaceSepM, kFaceSepTolM);
-    if (std::isfinite(left)) {c.face_src = "windows";}
-  }
-  if (!std::isfinite(left) && best->has_normal) {
-    const fire::P3 n = fire::camToBody(fire::P3{best->nx, best->ny, best->nz}, 0, 0,
-        m.yaw_deg, m.pitch_deg, false);
-    left = fire::squareFromNormal(n.x, n.y);
-    if (std::isfinite(left)) {c.face_src = "plane";}
-  }
-  if (std::isfinite(left)) {c.face_heading.add(t, fire::wrap360(c.heading_deg - left));}
+  constexpr double kInViewS = 1.0;
+  return c.dock_t - t.last_seen <= kInViewS;
+}
+
+/// A leaf's heading_deg port, else the GCS's dock heading, else NaN.
+inline double dockHeading(const Context & c, double port)
+{
+  if (std::isfinite(port)) {return port;}
+  return c.dock_heading >= 0.0 ? c.dock_heading : std::numeric_limits<double>::quiet_NaN();
+}
+
+/// A leaf's first port, else the GCS's search_first, else "left".
+inline std::string searchFirst(const Context & c, const std::string & port)
+{
+  if (!port.empty()) {return port;}
+  return c.search_first.empty() ? std::string("left") : c.search_first;
 }
 
 /// Forget the last attempt's shots. Called at goal start with resetTask3.
 inline void resetFire(Context & c)
 {
-  c.aim = fire::Aim{};
-  c.bursts.reset();
   c.cmd_speed = 0.0;
   c.last_keep_t = -1.0;
   c.hs_commanded = false;
   c.strafe_state = fire::StrafeState{};
   c.strafe = fire::StrafeCmd{};
   c.strafe_in = fire::StrafeInputs{};
-  c.strafe_block.clear();
   c.last_strafe_t = -1.0;
-  c.face_target = fire::kNaN;
   c.sticks_commanded = false;
 }
 
@@ -728,6 +777,10 @@ inline void resetTask3(Context & c)
   c.chosen_bay = 0;
   c.berth = dock::Berth{};
   c.readiness_confirmed = false;
+  c.docking_report_s = -1.0;
+  c.fires_out = 0;
+  c.green = Context::GreenBay{};
+  c.centre = fire::CentreTarget{};
 }
 
 /// A place to go, passed BETWEEN LEAVES on the blackboard: a compute leaf writes

@@ -97,100 +97,6 @@ int main()
     chk_near("lat median of finite samples", k.lat(0.2), 0.06, 1e-9);
   }
 
-  std::printf("the aim: upper-left window, 0.22 m left, from 3.2 m\n");
-  {
-    AimParams p;
-    p.fire_range_m = 3.22;
-    p.window_lat_m = 0.22;
-    // boat on the centreline, wall normal due north (000)
-    Aim a = solveAim(p, Lateral::Centreline, 3.2, 0.0, 0.0, kNaN, kNaN);
-    chk("centreline aim ok", a.ok);
-    const double psi = std::atan2(0.22, 3.2) / kDeg;
-    chk_near("aim is ~3.9 deg left", a.aim_left_deg, 3.93, 0.02);
-    // LEFT of north is 356: the heading gets SMALLER
-    chk_near("heading target is 356.1 (left of 000)", a.heading_deg, wrap360(-psi), 1e-6);
-    chk_near("range target = r_cal * cos(psi)", a.range_target_m, 3.22 * std::cos(psi * kDeg), 1e-9);
-    chk("range correction is millimetres", std::fabs(a.range_target_m - 3.22) < 0.01);
-
-    // fingers: the boat already 0.10 m LEFT of centre -> only 0.12 m to go
-    Aim f = solveAim(p, Lateral::Fingers, 3.2, 90.0, 90.0, 0.10, kNaN);
-    chk("fingers aim ok", f.ok);
-    chk_near("aim from fingers", f.aim_left_deg, std::atan2(0.12, 3.2) / kDeg, 1e-9);
-    chk_near("heading about an east-facing wall", f.heading_deg, 90.0 - std::atan2(0.12, 3.2) / kDeg, 1e-9);
-    // the boat 0.30 m LEFT: the window is now to its RIGHT -> heading larger
-    Aim r = solveAim(p, Lateral::Fingers, 3.2, 90.0, 90.0, 0.30, kNaN);
-    chk("past the window: aim right (heading > normal)", r.heading_deg > 90.0);
-    chk("no fingers -> refused, says why",
-        !solveAim(p, Lateral::Fingers, 3.2, 90.0, 90.0, kNaN, kNaN).ok);
-
-    // camera: the window seen 5 deg LEFT while heading 010, wall normal 000
-    Aim c = solveAim(p, Lateral::Camera, 3.2, 0.0, 10.0, kNaN, 5.0);
-    chk("camera aim ok", c.ok);
-    const double y = (3.2 - p.cam_x_m) * std::tan(5.0 * kDeg);
-    const double turn = std::atan2(y, 3.2) / kDeg;
-    chk_near("camera: turn left from the CURRENT heading", c.heading_deg, 10.0 - turn, 1e-9);
-    chk_near("camera: aim reported about the normal", c.aim_left_deg, -(10.0 - turn), 1e-9);
-    chk("camera: window not in view -> refused",
-        !solveAim(p, Lateral::Camera, 3.2, 0.0, 10.0, kNaN, kNaN).ok);
-
-    // yaw bias adds straight on
-    AimParams pb = p; pb.yaw_bias_deg = 1.5;
-    chk_near("yaw bias + aims further left",
-             solveAim(pb, Lateral::Centreline, 3.2, 0.0, 0.0, kNaN, kNaN).aim_left_deg,
-             a.aim_left_deg + 1.5, 1e-9);
-    // guard rails
-    chk("no range -> refused", !solveAim(p, Lateral::Centreline, kNaN, 0.0, 0.0, kNaN, kNaN).ok);
-    chk("no wall bearing -> refused", !solveAim(p, Lateral::Centreline, 3.2, kNaN, 0.0, kNaN, kNaN).ok);
-    AimParams pw = p; pw.window_lat_m = 2.0;
-    Aim wide = solveAim(pw, Lateral::Centreline, 3.2, 0.0, 0.0, kNaN, kNaN);
-    chk("an aim wider than 20 deg is refused", !wide.ok && !wide.why.empty());
-  }
-
-  std::printf("the keep: banded, gentle, never forward past the floor\n");
-  {
-    KeepParams k;
-    // at the target: nothing
-    KeepCmd c = stationKeep(k, 3.22, 3.22, 0.0, 0.0, 0.0, 0.1);
-    chk_near("in the band: zero speed", c.speed_mps, 0.0, 1e-12);
-    chk("heading passes through", c.heading_deg == 0.0);
-    // just outside the band: at least v_min, not 0.6*0.06 = 3.6 cm/s
-    KeepParams fast = k; fast.accel = 100.0;
-    c = stationKeep(fast, 3.28, 3.22, 0.0, 0.0, 0.0, 0.1);
-    chk_near("just too far: v_min forward (no creeping)", c.speed_mps, k.v_min, 1e-9);
-    c = stationKeep(fast, 3.16, 3.22, 0.0, 0.0, 0.0, 0.1);
-    chk_near("just too close: v_min astern", c.speed_mps, -k.v_min, 1e-9);
-    c = stationKeep(fast, 5.0, 3.22, 0.0, 0.0, 0.0, 0.1);
-    chk_near("far: capped forward", c.speed_mps, k.v_max_fwd, 1e-9);
-    c = stationKeep(fast, 2.0, 3.22, 0.0, 0.0, 0.0, 0.1);
-    chk_near("close: capped astern", c.speed_mps, -k.v_max_rev, 1e-9);
-    // slew: from rest, one 0.1 s tick allows accel*dt
-    c = stationKeep(k, 5.0, 3.22, 0.0, 0.0, 0.0, 0.1);
-    chk_near("slew-limited from rest", c.speed_mps, k.accel * 0.1, 1e-9);
-    c = stationKeep(k, 3.22, 3.22, 0.0, 0.0, 0.2, 0.1);
-    chk("a stop is immediate (only growing speed is slewed)", c.speed_mps == 0.0);
-    c = stationKeep(k, 1.4, 3.22, 0.0, 0.0, 0.2, 0.1);
-    chk("reversing ahead->astern goes through zero gently", c.speed_mps < 0.0 &&
-      c.speed_mps >= -k.accel * 0.1 - 1e-9);
-    c = stationKeep(k, 1.5, 1.0, 0.0, 0.0, 0.2, 0.1);
-    chk("at the floor, forward is cut at once", c.speed_mps == 0.0);
-    // turn before driving
-    c = stationKeep(fast, 5.0, 3.22, 30.0, 0.0, 0.0, 0.1);
-    chk_near("heading error 30 deg: turn first, zero speed", c.speed_mps, 0.0, 1e-12);
-    chk("says so", c.why == "turning first");
-    // the floor: never forward closer than min_range
-    KeepParams fl = fast; fl.min_range_m = 3.3;
-    c = stationKeep(fl, 3.25, 3.0, 0.0, 0.0, 0.0, 0.1);
-    chk_near("at the floor, no forward even if asked", c.speed_mps, 0.0, 1e-12);
-    c = stationKeep(fl, 3.25, 3.6, 0.0, 0.0, 0.0, 0.1);
-    chk("astern still allowed at the floor", c.speed_mps < 0);
-    // no range: stop
-    c = stationKeep(fast, kNaN, 3.22, 0.0, 0.0, 0.0, 0.1);
-    chk_near("no range: zero", c.speed_mps, 0.0, 1e-12);
-    // sign: too far out is FORWARD (closing in)
-    c = stationKeep(fast, 3.6, 3.22, 0.0, 0.0, 0.0, 0.1);
-    chk("too far out -> forward", c.speed_mps > 0 && c.why == "closing in");
-  }
-
   std::printf("steady\n");
   {
     SteadyMonitor m;
@@ -243,71 +149,17 @@ int main()
     chk("a break resets", !g.update(1.1, false));
     chk("and it starts over", !g.update(1.2, true) && !g.update(2.1, true) && g.update(2.2, true));
     chk("in band", inBand(3.25, 3.22, 0.05) && !inBand(3.30, 3.22, 0.05) && !inBand(kNaN, 3.22, 1));
-    chk("aimed across north", aimed(359.0, 1.0, 3.0) && !aimed(355.0, 1.0, 3.0));
-
-    BurstBook b;
-    chk("ready at first", b.ready(0.0, 2.0));
-    const double blank = b.record(10.0, 0.5, 0.8);
-    chk_near("blank until burst + flight", blank, 11.3, 1e-9);
-    chk("counted", b.fired == 1);
-    chk("gap from the burst's END", !b.ready(12.0, 2.0) && b.ready(12.5, 2.0));
   }
 
-  std::printf("square first, then aim\n");
-  {
-    Aim a; a.ok = true; a.heading_deg = 356.0;
-    chk_near("far out: square", keepHeading(a, 0.0, 4.5, 3.22, 0.5), 0.0, 1e-9);
-    chk_near("too close: square astern", keepHeading(a, 0.0, 2.0, 3.22, 0.5), 0.0, 1e-9);
-    chk_near("near the range: aim", keepHeading(a, 0.0, 3.5, 3.22, 0.5), 356.0, 1e-9);
-    Aim none;
-    chk_near("far with no aim: still square", keepHeading(none, 90.0, 6.0, 3.22, 0.5), 90.0, 1e-9);
-    chk("close with no aim: nothing", std::isnan(keepHeading(none, 90.0, 3.3, 3.22, 0.5)));
-    chk("no wall bearing, no aim: nothing", std::isnan(keepHeading(none, kNaN, 6.0, 3.22, 0.5)));
-  }
-
-  std::printf("the LiDAR / camera cross-check\n");
+  std::printf("the plane distance\n");
   {
     // a face 20 m north facing south; the boat 3.2 m in front of it
     chk_near("in front", planeDistance(0.3, 16.8, 0.0, 20.0, 0.0, -1.0), 3.2, 1e-9);
     chk_near("behind is negative", planeDistance(0.0, 21.0, 0.0, 20.0, 0.0, -1.0), -1.0, 1e-9);
-    chk("agree within tol", rangesAgree(3.22, 3.40, 0.5));
-    chk("finger tips: 2 m short", !rangesAgree(1.22, 3.22, 0.5));
-    chk("no camera: no check", rangesAgree(1.22, kNaN, 0.5));
-    chk("tol 0: off", rangesAgree(1.22, 3.22, 0.0));
-    chk("no LiDAR with a camera: disagree", !rangesAgree(kNaN, 3.22, 0.5));
   }
 
-  std::printf("the camera, for the strafe keep\n");
+  std::printf("the wall filter's rate\n");
   {
-    const P3 a = camToBody(P3{3.0, 0.2, 0.5}, 0.37, 0.0, 0.0, 0.0);
-    chk("level: a translation", std::fabs(a.x - 3.37) < 1e-9 && std::fabs(a.y - 0.2) < 1e-9 &&
-      std::fabs(a.z - 0.5) < 1e-9);
-    const P3 up = camToBody(P3{1.0, 0.0, 0.0}, 0.0, 0.0, 0.0, -25.0, false);
-    chk_near("pitched UP 25: its axis climbs", up.z, std::sin(25.0 * kDeg), 1e-9);
-    const P3 left = camToBody(P3{1.0, 0.0, 0.0}, 0.0, 0.0, 10.0, 0.0, false);
-    chk("yawed LEFT: its axis points left", left.y > 0.17 && left.y < 0.18);
-
-    chk_near("square on: no turn", squareFromWindows(3.0, 0.22, 3.0, -0.23, 0.45, 0.15), 0.0, 1e-9);
-    // the boat yawed 5 deg RIGHT: the face appears rotated the other way
-    const double th = 5.0 * kDeg;
-    const double ulx = 3 * std::cos(th) - 0.22 * std::sin(th), uly = 3 * std::sin(th) + 0.22 * std::cos(th);
-    const double lrx = 3 * std::cos(th) + 0.23 * std::sin(th), lry = 3 * std::sin(th) - 0.23 * std::cos(th);
-    chk_near("yawed right 5: turn LEFT 5", squareFromWindows(ulx, uly, lrx, lry, 0.45, 0.15), 5.0, 1e-9);
-    chk("wrong spacing: not trusted", std::isnan(squareFromWindows(3.0, 0.5, 3.0, -0.5, 0.45, 0.15)));
-    chk("windows swapped: not trusted", std::isnan(squareFromWindows(3.0, -0.22, 3.0, 0.23, 0.45, 0.15)));
-    chk_near("normal square on", squareFromNormal(-1.0, 0.0), 0.0, 1e-9);
-    chk_near("normal, yawed right 5: turn left 5",
-      squareFromNormal(-std::cos(th), -std::sin(th)), 5.0, 1e-9);
-    chk("a normal facing away: not trusted", std::isnan(squareFromNormal(0.2, 0.9)));
-
-    Series h(true);
-    h.add(0.0, 359.0); h.add(0.1, 1.0); h.add(0.2, 2.0);
-    chk_near("circular median across north", h.median(0.2, 1.0), 1.0, 1e-9);
-    Series y;
-    for (int i = 0; i <= 10; ++i) {y.add(i * 0.1, 0.5 - 0.2 * i * 0.1);}
-    chk_near("slope", y.slope(1.0, 2.0), -0.2, 1e-9);
-    chk("age", std::fabs(y.age(1.5) - 0.5) < 1e-9);
-
     WallFilter w;
     for (int i = 0; i <= 10; ++i) {w.add(WallSample{i * 0.1, true, 3.5 - 0.1 * i * 0.1, 0, kNaN, 0});}
     chk_near("range rate", w.rate(1.0), -0.1, 1e-9);
@@ -392,6 +244,67 @@ int main()
     chk("... and holding is not correcting", !c.correcting && c.lat_ok);
     for (int i = 0; i < 2000; ++i) {c = strafeKeep(p, in, cur, 0.1);}
     chk_near("I is capped", c.sticks.lat_us, -80.0, 1e-9);
+  }
+
+  std::printf("\nthe GREEN indicator, remembered (SpotKalman, CentreTarget, TickRate)\n");
+  {
+    using crusader_bt::nav::Vec2;
+    SpotKalman k;
+    chk("nothing seen: no spot, no age", !k.have && !std::isfinite(k.age(1.0)));
+    k.sight({1.0, 4.0}, 4.0, 100.0, 5.0);
+    chk("the first sighting is the spot", k.p.x == 1.0 && k.p.y == 4.0);
+    chk_near("... with its own noise: (3 cm + 2 cm/m x 4 m)^2", k.var, 0.11 * 0.11, 1e-12);
+    chk_near("age on the live clock, not the camera's stamp", k.age(6.5), 1.5, 1e-12);
+    const double v0 = k.var;
+    k.sight({1.0, 4.0}, 4.0, 100.0, 5.0);           // two frames in one tick still count
+    chk("a second look narrows it", k.var < v0);
+
+    SpotKalman jit;                                  // 10 fps, +-10 cm of noise across
+    for (int i = 0; i < 50; ++i) {
+      jit.sight({(i % 2 ? 0.1 : -0.1), 2.0}, 2.0, 0.1 * i, 0.1 * i);
+    }
+    chk_near("noise averages out", jit.p.x, 0.0, 0.03);
+
+    SpotKalman step;                                 // the spot was misplaced by 30 cm
+    for (int i = 0; i < 50; ++i) {step.sight({0.0, 2.0}, 2.0, 0.1 * i, 0.1 * i);}
+    for (int i = 50; i < 70; ++i) {step.sight({0.3, 2.0}, 2.0, 0.1 * i, 0.1 * i);}
+    chk("... and a real move is followed within 2 s", step.p.x > 0.2);
+
+    SpotKalman nearf, farf;                          // one far look, then one near one
+    nearf.sight({0.0, 0.0}, 6.0, 0.0, 0.0);
+    nearf.sight({0.2, 0.0}, 1.0, 0.1, 0.1);
+    farf.sight({0.0, 0.0}, 1.0, 0.0, 0.0);
+    farf.sight({0.2, 0.0}, 6.0, 0.1, 0.1);
+    chk("a close look moves it more than a far one", nearf.p.x > farf.p.x + 0.05);
+    chk("the 1-sigma grows while unseen", k.sigma(20.0) > k.sigma(5.0));
+
+    CentreTarget c;
+    c.sight({0.5, 4.0}, true, {}, false, 4.0, 1.0, 1.0);
+    chk("before the indicator: the face stands in", c.fix.have && c.fix.p.x == 0.5 &&
+      std::string(c.source()) == "face");
+    c.sight({0.5, 4.0}, true, {0.8, 4.0}, true, 4.0, 1.1, 1.1);
+    chk("the first indicator starts it over on the indicator", c.fix.p.x == 0.8 &&
+      std::string(c.source()) == "indicator");
+    c.sight({0.5, 4.0}, true, {}, false, 4.0, 1.2, 1.2);
+    chk("from then on a face alone does not move it", c.fix.p.x == 0.8);
+    chk_near("... and does not refresh its age either", c.age(2.2), 1.1, 1e-12);
+
+    TickRate r;
+    chk("first value: no rate", !std::isfinite(r.update(0.0, 0.1)));
+    chk_near("0.1 m in 0.1 s: 0.3 of 1 m/s", r.update(0.1, 0.1), 0.3, 1e-12);
+    chk_near("no time passed: the same rate", r.update(5.0, 0.0), 0.3, 1e-12);
+    chk_near("then smoothed", r.update(0.2, 0.1), 0.7 * 0.3 + 0.3 * 1.0, 1e-12);
+    chk("NaN starts it over", !std::isfinite(r.update(kNaN, 0.1)) &&
+      !std::isfinite(r.update(0.3, 0.1)));
+    r.update(0.4, 0.1);
+    chk("a gap over 1 s starts it over", !std::isfinite(r.update(0.5, 1.5)));
+
+    const DockFrame e = toDockFrame(Vec2{1.0, 0.0}, 90.0);     // facing EAST
+    chk_near("dock frame: east, facing east, is along", e.along, 1.0, 1e-12);
+    chk_near("... and not across", e.left, 0.0, 1e-12);
+    const DockFrame n = toDockFrame(Vec2{0.0, 1.0}, 90.0);
+    chk_near("north, facing east, is LEFT (+)", n.left, 1.0, 1e-12);
+    chk("no dock heading: NaN", !std::isfinite(toDockFrame(Vec2{1.0, 0.0}, kNaN).along));
   }
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fails);

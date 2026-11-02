@@ -47,9 +47,10 @@ class DropLatch:
                 # switch already in drop position at boot: stay blocked, don't latch
                 return False
             return False
-        # safe position, fresh data
-        if self.state == DropState.STARTUP:
+        # safe position, fresh data: the switch back to safe also clears a drop
+        if self.state in (DropState.STARTUP, DropState.DROPPED):
             self.state = DropState.ACTIVE
+            self.trip_reason = None
         return False
 
     def tick(self, t: float) -> bool:

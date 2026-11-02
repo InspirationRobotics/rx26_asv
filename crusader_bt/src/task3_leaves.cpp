@@ -18,6 +18,7 @@
 // view this tick" is not a reason to end the mission.
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -40,15 +41,26 @@ double since(Clock::time_point t0)
   return std::chrono::duration<double>(Clock::now() - t0).count();
 }
 
-/// The chosen bay's latest window reading for `index`, or nullptr. CALL UNDER mu.
-const dock::WindowSighting * chosenWindow(const Context & c, int index)
+/// The GREEN bay's latest window reading for `index`, or nullptr. CALL UNDER mu.
+const dock::WindowSighting * greenWindow(const Context & c, int index)
 {
-  const dock::BayTrack * t = c.dock.find(c.chosen_track);
-  if (t == nullptr || index < 0) {return nullptr;}
-  for (const auto & w : t->windows) {
+  if (index < 0) {return nullptr;}
+  for (const auto & w : c.green.windows) {
     if (w.index == index) {return &w;}
   }
   return nullptr;
+}
+
+/// The GREEN bay's windows if the newest frame saw them and `seq` has not had that frame
+/// yet (now it has), else nullptr. CALL UNDER mu. Context::green keeps its last windows
+/// when the bay drops out of a frame, and feeding that stale state again would make a stale
+/// GREEN look like one held for seconds.
+const std::vector<dock::WindowSighting> * newGreenWindows(
+  const Context & c, std::uint32_t & seq)
+{
+  if (c.dock_seq == seq || c.green.windows_t != c.dock_t) {return nullptr;}
+  seq = c.dock_seq;
+  return &c.green.windows;
 }
 
 // ---------------------------------------------------------------- conditions
@@ -73,6 +85,96 @@ public:
     return ctx_->dock_obs_age_s <= max_age ? BT::NodeStatus::SUCCESS :
            BT::NodeStatus::FAILURE;
   }
+};
+
+/// Put camera_node on `model` (its live parameter, as the GCS's Sensors tab does) and
+/// wait until it is on it. For "dock" that means a DockObservation newer than the ask:
+/// the model running, not just the parameter accepted. Already on the dock model:
+/// SUCCESS at once, nothing asked. FAILURE when camera_node is not up, refuses, or
+/// timeout_s passes. A camera restart comes back on its YAML model (buoy), which is
+/// blind to the dock: this is what stops a Task 3 run sliding past it.
+class SetCameraModel : public CrusaderAction
+{
+public:
+  SetCameraModel(const std::string & n, const BT::NodeConfig & c) : CrusaderAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<std::string>("model", "dock", "none | buoy | dock"),
+      BT::InputPort<double>("timeout_s", 15.0, "FAILURE when not on it after this")};
+  }
+
+  BT::NodeStatus onStart() override
+  {
+    model_ = getInput<std::string>("model").value_or("dock");
+    bool there = false;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      t0_ = ctx_->now_s;
+      seq0_ = ctx_->dock_seq;
+      there = model_ == "dock" && ctx_->dock_obs_age_s <= kFreshS;
+      ctx_->camera_model_ack = 0;
+      ctx_->camera_model_why.clear();
+    }
+    if (there) {
+      RCLCPP_INFO(log(), "camera already on the dock model");
+      return BT::NodeStatus::SUCCESS;
+    }
+    std::string why = "bt_runner_node has no way to ask camera_node";
+    if (!ctx_->set_camera_model || !ctx_->set_camera_model(model_, why)) {
+      return fail(why);
+    }
+    RCLCPP_INFO(log(), "camera_node model -> %s", model_.c_str());
+    return BT::NodeStatus::RUNNING;
+  }
+
+  BT::NodeStatus onRunning() override
+  {
+    double waited = 0.0;
+    int ack = 0;
+    bool there = false;
+    std::string why;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      waited = ctx_->now_s - t0_;
+      ack = ctx_->camera_model_ack;
+      why = ctx_->camera_model_why;
+      there = model_ == "dock" ?
+        ctx_->dock_seq != seq0_ && ctx_->dock_obs_age_s <= kFreshS : ack > 0;
+    }
+    if (ack < 0) {
+      return fail("camera_node refused the " + model_ + " model: " + why);
+    }
+    if (there) {
+      RCLCPP_INFO(log(), "camera on the %s model after %.1f s", model_.c_str(), waited);
+      return BT::NodeStatus::SUCCESS;
+    }
+    if (waited > getInput<double>("timeout_s").value_or(15.0)) {
+      char buf[160];
+      std::snprintf(buf, sizeof buf, "camera not on the %s model %.0f s after asking (%s)",
+        model_.c_str(), waited, ack > 0 ? "accepted, no dock frames since" : "no answer");
+      return fail(buf);
+    }
+    return BT::NodeStatus::RUNNING;
+  }
+
+  void onHalted() override {}
+
+private:
+  /// The reason goes in camera_model_why too: bt_runner_node's FAILURE detail, the GCS's
+  /// Tree box, quotes it.
+  BT::NodeStatus fail(const std::string & why)
+  {
+    RCLCPP_WARN(log(), "SetCameraModel: %s", why.c_str());
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    ctx_->camera_model_why = why;
+    return BT::NodeStatus::FAILURE;
+  }
+
+  static constexpr double kFreshS = 1.0;
+  std::string model_;
+  double t0_ = 0.0;
+  std::uint32_t seq0_ = 0;
 };
 
 /// Exactly one bay reads GREEN (see dock::chooseSafeBay). With
@@ -298,6 +400,109 @@ public:
   }
 };
 
+/// A bay is committed in this run (CommitSafeBay).
+class BayChosen : public CrusaderCondition
+{
+public:
+  BayChosen(const std::string & n, const BT::NodeConfig & c)
+  : CrusaderCondition(n, c) {}
+  static BT::PortsList providedPorts() {return {};}
+
+  BT::NodeStatus tick() override
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    return ctx_->chosen_bay > 0 ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
+  }
+};
+
+/// Commit to the FIRST bay that reads GREEN with confidence, without waiting to see
+/// every bay (the scan stops here): any confirmed track whose votes say GREEN
+/// (dock::verdict, min_votes reads, min_share of them green, recent ones agreeing);
+/// the most-seen if several. The bay NUMBER (DockingReport, bays numbered left to
+/// right facing them) is the layout's when all the bays are known, else its place
+/// among the bays seen so far, else 1, the last two logged as guesses. FAILURE until
+/// a GREEN bay is in hand.
+class CommitFirstGreen : public CrusaderSyncAction
+{
+public:
+  CommitFirstGreen(const std::string & n, const BT::NodeConfig & c)
+  : CrusaderSyncAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<int>("min_votes", 8, "GREEN/RED reads before a bay has a verdict"),
+      BT::InputPort<double>("min_share", 0.8, "share of them GREEN"),
+      BT::InputPort<int>("min_obs", 5, "sightings before a track is a bay"),
+      BT::InputPort<double>("max_turn_deg", 0.0,
+        "> 0: not while the bow is further than this off the dock heading (still turning)"),
+      BT::OutputPort<int>("bay", "the committed bay's number, 1-based left to right")};
+  }
+
+  BT::NodeStatus tick() override
+  {
+    dock::VoteParams v;
+    const int min_obs = getInput<int>("min_obs").value_or(5);
+    const double max_turn = getInput<double>("max_turn_deg").value_or(0.0);
+    int bay = 0, seen = 0, red = 0, green = 0, id = -1;
+    bool guess = false;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      v = ctx_->dock_votes;
+      v.min_votes = getInput<int>("min_votes").value_or(v.min_votes);
+      v.min_share = getInput<double>("min_share").value_or(v.min_share);
+      // mid-turn the camera sweeps the dock: wait until the bow is on the dock heading
+      const double dock_h = dockHeading(*ctx_, fire::kNaN);
+      if (max_turn > 0.0 && std::isfinite(dock_h) &&
+        !(std::fabs(fire::wrap180(dock_h - ctx_->heading_deg)) <= max_turn))
+      {
+        return BT::NodeStatus::FAILURE;
+      }
+      const dock::BayTrack * best = nullptr;
+      for (const auto & t : ctx_->dock.tracks) {
+        if (t.n < min_obs || dock::verdict(t, v) != dock::Verdict::Green ||
+          !inView(*ctx_, t))
+        {
+          continue;                 // only a GREEN bay the camera sees NOW
+        }
+        if (best == nullptr || t.n > best->n) {best = &t;}
+      }
+      if (best == nullptr) {return BT::NodeStatus::FAILURE;}
+      const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs);
+      bay = L.ok ? L.numberOf(best->id) : 0;
+      if (bay <= 0) {             // its place among the bays seen so far, left to right
+        guess = true;
+        const nav::Vec2 right = nav::starboardOf(best->outward() * -1.0);
+        std::vector<double> along;   // the other confirmed bays, metres right of the GREEN one
+        for (const auto & t : ctx_->dock.tracks) {
+          if (t.n < ctx_->dock_min_obs || t.id == best->id) {continue;}
+          const double d = nav::dot(t.p - best->p, right);
+          bool same = std::fabs(d) < 0.6;
+          for (double o : along) {same = same || std::fabs(o - d) < 0.6;}
+          if (!same) {along.push_back(d);}
+        }
+        bay = 1;
+        for (double d : along) {if (d < 0.0) {++bay;}}
+        seen = static_cast<int>(along.size()) + 1;
+      }
+      ctx_->chosen_track = best->id;
+      ctx_->chosen_bay = bay;
+      ctx_->berth = dock::Berth{};
+      ctx_->task3_phase = "DOCKING";
+      id = best->id;
+      red = best->red;
+      green = best->green;
+    }
+    setOutput("bay", bay);
+    if (guess) {
+      RCLCPP_INFO(log(), "GREEN bay found: track %d (R%d/G%d), bay %d (guess: %d of %d bays seen)",
+        id, red, green, bay, bay, seen);
+    } else {
+      RCLCPP_INFO(log(), "GREEN bay found: track %d (R%d/G%d), bay %d", id, red, green, bay);
+    }
+    return BT::NodeStatus::SUCCESS;
+  }
+};
+
 /// Commit to the one GREEN bay. From here on the berthing legs steer to THIS
 /// bay even if a later frame's votes wobble; ChosenBaySafe is what can undo it.
 class CommitSafeBay : public CrusaderSyncAction
@@ -402,6 +607,7 @@ public:
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       ctx_->readiness_confirmed = false;
+      ctx_->docking_report_s = ctx_->now_s;
       ctx_->task3_phase = "DOCKED";
     }
     sendReport(*ctx_, "docking", dock::dockingReportJson(bay));
@@ -412,12 +618,18 @@ public:
 
 // ------------------------------------------------------------- firefighting
 
-/// Wait for the fire: the timing layer calling one window of our bay steady
-/// RED. Re-sends the docking report every `resend_s` until RoboCommand
-/// confirms it, because a lost report means no fire, ever.
+/// Wait for the fire: a window of OUR bay lit RED. Two ways to see it, the first wins:
+///   * the windows' own states on the frames that saw our bay (dock::RedWatch), with
+///     min_red_s >= 0: RED for min_red_s (a misread frame or two is not a fire), or for
+///     refire_red_s once a fire is out this run (longer than the resource code's 1 s
+///     RED flashes, which follow a hit). A window missing from a frame or two keeps its
+///     run. This sees the light within a few frames, docked or not.
+///   * the timing layer calling one window steady RED (the only way with min_red_s < 0).
+/// `target` is the window to spray.
 ///
-/// NOTHING HOLDS STATION HERE and nothing needs to: the berth is the last
-/// setpoint, and GUIDED holds it.
+/// Re-sends the docking report every `resend_s` until RoboCommand confirms it, because a
+/// lost report means no fire, ever - but only once ReportDocking has sent it: beside a
+/// docking still under way, it must not report docking early.
 class AwaitFireTarget : public CrusaderAction
 {
 public:
@@ -428,15 +640,21 @@ public:
     return {
       BT::InputPort<int>("bay", "the bay docked in, for re-sending the docking report"),
       BT::InputPort<double>("timeout_s", 60.0, "give up waiting for the light"),
-      BT::InputPort<double>("resend_s", 10.0, "re-send the docking report this often")};
+      BT::InputPort<double>("resend_s", 10.0, "re-send the docking report this often"),
+      BT::InputPort<double>("min_red_s", -1.0,
+        ">= 0: fire on our bay's own window reading RED this long; < 0: the timing layer only"),
+      BT::InputPort<double>("refire_red_s", 1.5,
+        "... once a fire is out: this long (longer than the code's 1 s flashes)"),
+      BT::OutputPort<int>("target", "DockWindow.index of the RED window (SprayUntilHit's)")};
   }
 
   BT::NodeStatus onStart() override
   {
     t0_ = Clock::now();
-    last_ = t0_;
+    red_.reset();
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
+      seq_ = ctx_->dock_seq;
       ctx_->task3_phase = "AWAIT FIRE";
     }
     return onRunning();
@@ -445,20 +663,38 @@ public:
   BT::NodeStatus onRunning() override
   {
     const int bay = getInput<int>("bay").value_or(0);
+    const double min_red = getInput<double>("min_red_s").value_or(-1.0);
     bool resend = false;
+    int target = -1;
+    const char * how = "";
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       const bool red = ctx_->dock_pattern == "steady" && ctx_->dock_colours.size() == 1 &&
         ctx_->dock_colours[0] == dock::Colour::Red;
       if (red && ctx_->dock_target_window >= 0) {
-        RCLCPP_INFO(log(), "FIRE: window %d is steady RED", ctx_->dock_target_window);
-        return BT::NodeStatus::SUCCESS;
+        target = ctx_->dock_target_window;
+        how = "the timing layer: steady RED";
       }
-      resend = bay > 0 && !ctx_->readiness_confirmed &&
-        since(last_) >= getInput<double>("resend_s").value_or(10.0);
+      const auto * ws = target < 0 && min_red >= 0.0 ? newGreenWindows(*ctx_, seq_) : nullptr;
+      if (ws != nullptr) {
+        red_.update(*ws, ctx_->dock_t);
+        const double need = ctx_->fires_out > 0 ?
+          std::max(min_red, getInput<double>("refire_red_s").value_or(1.5)) : min_red;
+        target = red_.lit(ctx_->dock_t, need);
+        if (target >= 0) {how = "our bay's window reads RED";}
+      }
+      if (target < 0) {
+        resend = bay > 0 && ctx_->docking_report_s >= 0.0 && !ctx_->readiness_confirmed &&
+          ctx_->now_s - ctx_->docking_report_s >= getInput<double>("resend_s").value_or(10.0);
+        if (resend) {ctx_->docking_report_s = ctx_->now_s;}
+      }
+    }
+    if (target >= 0) {
+      setOutput("target", target);
+      RCLCPP_INFO(log(), "FIRE: window %d (%s)", target, how);
+      return BT::NodeStatus::SUCCESS;
     }
     if (resend) {
-      last_ = Clock::now();
       sendReport(*ctx_, "docking", dock::dockingReportJson(bay));
       RCLCPP_INFO(log(), "no light and no confirmation yet: re-sent docking report (bay %d)", bay);
     }
@@ -470,14 +706,24 @@ public:
   }
 
 private:
-  Clock::time_point t0_, last_;
+  Clock::time_point t0_;
+  dock::RedWatch red_;
+  std::uint32_t seq_ = 0;
 };
 
 /// Spray the target window until it turns GREEN.
 ///
-/// Aimed EVERY TICK at the CV's latest aim point so drift in the berth is followed;
-/// with no fresh aim point it STOPS spraying rather than spray where the window used
-/// to be.
+/// The window is `target` (AwaitFireTarget's), else the timing layer's. Aimed EVERY TICK
+/// at the CV's latest aim point for it, so the boat moving is followed. When the window
+/// drops out (a glitch, a few lost frames, the other window seen alone) it keeps spraying
+/// at the last aim point for max_aim_age_s - water on a miss does no harm, and stopping
+/// on every lost frame wastes the shot - and past that holds fire until it is seen again.
+/// With keep_after_docking, once the docking report is out it never holds fire for a lost
+/// window: it sprays the last aim point until the window is seen again (and re-aims there)
+/// or the fire is out.
+/// If another window of our bay reads RED while ours has not for retarget_s (counted from
+/// the trigger, which saw ours RED), and this spray never saw ours RED, it switches to that
+/// one: the trigger was a misread.
 ///
 /// Two independent "it's out" signals, either ends it: the timing layer's `hit` event
 /// (counted by the runner, since it lives on one frame) and the window's own state
@@ -492,52 +738,89 @@ public:
   static BT::PortsList providedPorts()
   {
     return {
+      BT::InputPort<int>("target", -1,
+        "the window to spray (AwaitFireTarget's); -1 = the timing layer's"),
       BT::OutputPort<int>("window", "DockWindow.index of the window put out"),
       BT::InputPort<double>("timeout_s", 60.0, "give up"),
       BT::InputPort<double>("min_green_s", 0.4, "GREEN this long after RED is a hit"),
-      BT::InputPort<double>("max_aim_age_s", 1.0, "do not fire at an older aim point")};
+      BT::InputPort<double>("max_aim_age_s", 1.0,
+        "keep spraying at the last aim point this long after the window was last seen"),
+      BT::InputPort<bool>("keep_after_docking", false,
+        "once the docking report is out, spray the last aim point however long it is lost"),
+      BT::InputPort<double>("retarget_s", 2.0,
+        "another window RED while ours has not been for this long: switch to it")};
   }
 
   BT::NodeStatus onStart() override
   {
     t0_ = Clock::now();
     watch_.reset();
-    firing_ = false;
-    std::lock_guard<std::mutex> lk(ctx_->mu);
-    hits0_ = ctx_->dock_hits;
-    window_ = ctx_->dock_target_window;
-    seq_ = ctx_->dock_seq;
-    ctx_->task3_phase = "FIREFIGHTING";
+    red_.reset();
+    firing_ = held_ = false;
+    aim_t_ = aim_seen_s_ = -1e18;
+    const int target = getInput<int>("target").value_or(-1);
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      hits0_ = ctx_->dock_hits;
+      window_ = target >= 0 ? target : ctx_->dock_target_window;
+      seq_ = ctx_->dock_seq;
+      red0_t_ = ctx_->dock_t;
+      ctx_->task3_phase = "FIREFIGHTING";
+    }
     if (window_ < 0) {return BT::NodeStatus::FAILURE;}
-    return BT::NodeStatus::RUNNING;
+    return onRunning();                      // the window is lit now: aim on this tick
   }
 
   BT::NodeStatus onRunning() override
   {
     const double min_green = getInput<double>("min_green_s").value_or(0.4);
     const double max_age = getInput<double>("max_aim_age_s").value_or(1.0);
-    bool hit = false, aim_ok = false;
-    double x = 0, y = 0, z = 0;
+    const double retarget_s = getInput<double>("retarget_s").value_or(2.0);
+    const bool keep = getInput<bool>("keep_after_docking").value_or(false);
+    bool hit = false, aim_ok = false, held = false;
+    int switched_from = -1;
+    double x = 0, y = 0, z = 0, aim_age = 0.0;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
-      const dock::WindowSighting * w = chosenWindow(*ctx_, window_);
-      const dock::BayTrack * t = ctx_->dock.find(ctx_->chosen_track);
-      // A NEW frame in which OUR bay was seen. The track keeps its last
-      // windows when the bay drops out of a frame, and feeding that stale
-      // state again would make a stale GREEN look like one held for seconds.
-      if (w != nullptr && ctx_->dock_seq != seq_ && t->windows_t == ctx_->dock_t) {
-        seq_ = ctx_->dock_seq;
-        watch_.update(w->state, ctx_->dock_t, min_green);
+      if (const auto * ws = newGreenWindows(*ctx_, seq_)) {
+        red_.update(*ws, ctx_->dock_t);
+        // ours was RED at the trigger (red0_t_), so it counts as RED from then on
+        const int other = red_.lit(ctx_->dock_t, 0.0);
+        const double ours = red_.lastRed(window_);
+        const double ours_t = std::isfinite(ours) ? std::max(ours, red0_t_) : red0_t_;
+        if (other >= 0 && other != window_ && !watch_.armed &&
+          ctx_->dock_t - ours_t > retarget_s)
+        {
+          switched_from = window_;
+          window_ = other;
+          watch_.reset();
+          aim_t_ = aim_seen_s_ = -1e18;
+        }
+        const dock::WindowSighting * w = greenWindow(*ctx_, window_);
+        if (w != nullptr) {watch_.update(w->state, ctx_->dock_t, min_green);}
       }
       hit = watch_.hit || ctx_->dock_hits > hits0_;
-      if (w != nullptr && t != nullptr && w->has_position &&
-        ctx_->dock_t - t->windows_t <= max_age)
-      {
-        aim_ok = true;
-        x = w->x;
-        y = w->y;
-        z = w->z;
+      const dock::WindowSighting * w = greenWindow(*ctx_, window_);
+      if (w != nullptr && w->has_position && ctx_->green.windows_t > aim_t_) {
+        aim_t_ = ctx_->green.windows_t;        // a new aim point: keep it
+        aim_seen_s_ = ctx_->now_s;
+        ax_ = w->x;
+        ay_ = w->y;
+        az_ = w->z;
       }
+      aim_age = ctx_->now_s - aim_seen_s_;
+      held = keep && ctx_->docking_report_s >= 0.0 && aim_seen_s_ > -1e17 && aim_age > max_age;
+      if (aim_age <= max_age || held) {
+        aim_ok = true;
+        x = ax_;
+        y = ay_;
+        z = az_;
+      }
+      if (hit) {++ctx_->fires_out;}
+    }
+    if (switched_from >= 0) {
+      RCLCPP_WARN(log(), "window %d reads RED and window %d has not for %.0f s: spraying %d",
+        window_, switched_from, retarget_s, window_);
     }
     if (hit) {
       setOutput("window", window_);
@@ -551,6 +834,11 @@ public:
         window_, since(t0_));
       return BT::NodeStatus::FAILURE;
     }
+    if (held && !held_) {
+      RCLCPP_INFO(log(), "window %d not seen for %.1f s: docked, so spraying on at its last "
+        "aim point", window_, aim_age);
+    }
+    held_ = held;
     if (aim_ok) {
       if (ctx_->cannon) {ctx_->cannon(true, x, y, z);}
       if (!firing_) {
@@ -560,7 +848,8 @@ public:
       firing_ = true;
     } else if (firing_) {
       stop();
-      RCLCPP_WARN(log(), "lost the aim point for window %d: holding fire", window_);
+      RCLCPP_WARN(log(), "window %d not seen for %.1f s: holding fire until it is", window_,
+        aim_age);
     }
     return BT::NodeStatus::RUNNING;
   }
@@ -576,10 +865,14 @@ private:
 
   Clock::time_point t0_;
   dock::HitWatch watch_;
+  dock::RedWatch red_;
   int hits0_ = 0;
   int window_ = -1;
   std::uint32_t seq_ = 0;
-  bool firing_ = false;
+  bool firing_ = false, held_ = false;             // held_: spraying a lost window, docked
+  double aim_t_ = -1e18, aim_seen_s_ = -1e18;     // the kept aim point's stamp, and now_s then
+  double red0_t_ = 0.0;                            // dock_t at the trigger
+  double ax_ = 0.0, ay_ = 0.0, az_ = 0.0;
 };
 
 /// FirefightingReport(window_id). window_id = DockWindow.index + base.
@@ -714,6 +1007,7 @@ public:
 void registerTask3Nodes(BT::BehaviorTreeFactory & factory)
 {
   factory.registerNodeType<DockCameraAlive>("DockCameraAlive");
+  factory.registerNodeType<SetCameraModel>("SetCameraModel");
   factory.registerNodeType<SafeBayKnown>("SafeBayKnown");
   factory.registerNodeType<ChosenBaySafe>("ChosenBaySafe");
   factory.registerNodeType<DockedInBay>("DockedInBay");
@@ -721,6 +1015,8 @@ void registerTask3Nodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<UpdateDockBook>("UpdateDockBook");
   factory.registerNodeType<PickVantage>("PickVantage");
   factory.registerNodeType<CommitSafeBay>("CommitSafeBay");
+  factory.registerNodeType<CommitFirstGreen>("CommitFirstGreen");
+  factory.registerNodeType<BayChosen>("BayChosen");
   factory.registerNodeType<DockWaypoint>("DockWaypoint");
   factory.registerNodeType<ReportDocking>("ReportDocking");
   factory.registerNodeType<AwaitFireTarget>("AwaitFireTarget");

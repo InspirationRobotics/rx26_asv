@@ -102,6 +102,8 @@ public:
     action_name_ = declare_parameter<std::string>("action_name", "/crsd/run_mission");
     tick_hz_ = declare_parameter<double>("tick_hz", 10.0);
     default_timeout_s_ = declare_parameter<double>("default_timeout_s", 600.0);
+    declare_parameter<double>("dock_heading_deg", -1.0);   // live: the GCS sets it, read per goal
+    declare_parameter<std::string>("search_first", "");    // live, per goal: left | right | "" = the tree's
     mode_grace_s_ = declare_parameter<double>("mode_grace_s", 3.0);
     stream_timeout_s_ = declare_parameter<double>("stream_timeout_s", 1.0);
     assoc_radius_m_ = declare_parameter<double>("assoc_radius_m", 5.0);
@@ -146,6 +148,9 @@ public:
     ctx_->cam_mount.pitch_deg = declare_parameter<double>("cam_pitch_deg", 0.0);
     ctx_->dock_face_dz = declare_parameter<double>("dock_face_dz_m", 0.39);
     dock_topic_ = declare_parameter<std::string>("dock_topic", "dock/observations");
+    // SetCameraModel sets this node's live `model` parameter, as the GCS Sensors tab does.
+    camera_node_ = declare_parameter<std::string>("camera_node", "/camera_node");
+    camera_params_ = std::make_shared<rclcpp::AsyncParametersClient>(this, camera_node_);
     declareNavParams();
     nav_set_cb_ = add_on_set_parameters_callback(&BtRunner::checkNavSet);
 
@@ -171,6 +176,7 @@ public:
     // The sticks (MANUAL): telemetry_bridge forwards them only in MANUAL, only
     // on its override_channels, clamped, and releases them on silence.
     rc_pub_ = create_publisher<crusader_msgs::msg::RcChannels>("/crsd/rc_override", 10);
+    set_mode_pub_ = create_publisher<std_msgs::msg::String>("/crsd/set_mode", 10);
     // Obstacle avoidance. The hazards are the WHOLE known field, each message
     // replacing the last, so a late-starting costmap must get the current one:
     // latched, like the datum it is drawn in.
@@ -544,12 +550,59 @@ private:
         }
         rc_pub_->publish(m);
       };
+    ctx_->request_mode = [this](const std::string & mode) {
+        std_msgs::msg::String m;
+        m.data = mode;
+        set_mode_pub_->publish(m);
+      };
+    ctx_->set_camera_model = [this](const std::string & model, std::string & why) {
+        return askCameraModel(model, why);
+      };
     ctx_->release_sticks = [this]() {
         crusader_msgs::msg::RcChannels m;
         m.header.stamp = now();
         for (auto & c : m.channels) {c = 0;}
         rc_pub_->publish(m);
       };
+  }
+
+  /// SetCameraModel's ask. camera_node's `model` is read first: a set reloads the model even
+  /// to the value in force, seconds with no detections. The answer lands in
+  /// ctx_->camera_model_ack, and only the newest ask's does.
+  bool askCameraModel(const std::string & model, std::string & why)
+  {
+    if (!camera_params_->service_is_ready()) {
+      why = camera_node_ + " has no parameter service: is it running?";
+      return false;
+    }
+    const int ask = ++camera_ask_;
+    auto answer = [this, ask](int ack, const std::string & reason) {
+        std::lock_guard<std::mutex> lk(ctx_->mu);
+        if (ask != camera_ask_) {return;}
+        ctx_->camera_model_ack = ack;
+        ctx_->camera_model_why = reason;
+      };
+    using Params = std::shared_future<std::vector<rclcpp::Parameter>>;
+    using Results = std::shared_future<std::vector<rcl_interfaces::msg::SetParametersResult>>;
+    camera_params_->get_parameters({"model"}, [this, model, answer](Params f) {
+        try {
+          const auto now = f.get();
+          if (!now.empty() && now[0].get_type() == rclcpp::ParameterType::PARAMETER_STRING &&
+          now[0].as_string() == model)
+          {
+            answer(1, "");
+            return;
+          }
+          camera_params_->set_parameters({rclcpp::Parameter("model", model)}, [answer](Results r) {
+              try {
+                const auto res = r.get();
+                if (res.empty()) {answer(-1, "an empty reply"); return;}
+                answer(res[0].successful ? 1 : -1, res[0].reason);
+              } catch (const std::exception & e) {answer(-1, e.what());}
+            });
+        } catch (const std::exception & e) {answer(-1, e.what());}
+      });
+    return true;
   }
 
   /// Motion was commanded last tick and not this one: say STOP, once. A leaf
@@ -617,6 +670,7 @@ private:
       s.indicator_present = b.indicator_present;
       s.indicator = dock::colourFromCv(b.indicator_colour);
       s.indicator_conf = b.indicator_confidence;
+      if (b.indicator_present) {s.ind_u_px = 0.5 * (b.indicator_bbox[0] + b.indicator_bbox[2]);}
       s.lit_window_index = b.lit_window_index;
       for (const auto & w : b.windows) {
         dock::WindowSighting ws;
@@ -627,6 +681,7 @@ private:
         ws.x = w.x;
         ws.y = w.y;
         ws.z = w.z;
+        ws.u_px = 0.5 * (w.bbox[0] + w.bbox[2]);
         s.windows.push_back(ws);
       }
       f.bays.push_back(s);
@@ -642,7 +697,6 @@ private:
     // Freshness at THIS instant: ingest places bays only on a fresh pose.
     ctx_->pose_fresh = ctx_->origin_set && (t - pose_t_).seconds() < stream_timeout_s_;
     ingestDockObservation(*ctx_, f);
-    ingestFireWindows(*ctx_, nowS(), f);
     dock_t_ = t;
     have_dock_ = true;
   }
@@ -982,6 +1036,21 @@ private:
       resetTask3(*ctx_);
       resetFire(*ctx_);
       goal_mode_ = ctx_->mode;
+      ctx_->handed_mode.clear();
+      ctx_->dock_heading = get_parameter("dock_heading_deg").as_double();
+      ctx_->search_first = get_parameter("search_first").as_string();
+      if (!ctx_->search_first.empty() && ctx_->search_first != "left" &&
+        ctx_->search_first != "right")
+      {
+        RCLCPP_WARN(get_logger(), "search_first '%s' is not left or right: the tree's own",
+          ctx_->search_first.c_str());
+        ctx_->search_first.clear();
+      }
+      goal_inputs_ = "mode=" + (ctx_->mode.empty() ? std::string("?") : ctx_->mode) +
+        (ctx_->drop_tripped ? " DROP-LATCHED" : "") +
+        " dock_heading=" + (ctx_->dock_heading >= 0.0 ?
+        std::to_string(static_cast<int>(std::lround(ctx_->dock_heading))) : std::string("unset")) +
+        " search_first=" + (ctx_->search_first.empty() ? std::string("tree") : ctx_->search_first);
       // "Home" is where THIS attempt started, not the autopilot's HOME.
       ctx_->home = ctx_->boat;
       ctx_->have_home = ctx_->pose_fresh;
@@ -1000,10 +1069,13 @@ private:
       bb->set("ctx", ctx_);
       BT::Tree tree = loadMission(factory, dirs_, file, bb);
       TreeView view(tree);
+      FailureTrace failed_at(tree);
 
+      const std::string limit = timeout_s > 0.0 ?
+        std::to_string(static_cast<int>(timeout_s)) + "s" : std::string("none");
       RCLCPP_INFO(
-        get_logger(), "GOAL %s timeout=%.0fs approach=(%.7f, %.7f)", goal->name.c_str(),
-        timeout_s, goal->approach_latitude, goal->approach_longitude);
+        get_logger(), "GOAL %s timeout=%s approach=(%.7f, %.7f) %s", goal->name.c_str(),
+        limit.c_str(), goal->approach_latitude, goal->approach_longitude, goal_inputs_.c_str());
 
       rclcpp::Rate rate(tick_hz_);
       auto fb = std::make_shared<RunMission::Feedback>();
@@ -1018,7 +1090,7 @@ private:
           break;
         }
         const double elapsed = (now() - started).seconds();
-        if (elapsed >= timeout_s) {
+        if (timeout_s > 0.0 && elapsed >= timeout_s) {   // 0 = never give up
           tree.haltTree();
           outcome = RunMission::Result::OUTCOME_TIMEOUT;
           detail = "mission timeout " + std::to_string(static_cast<int>(timeout_s)) + "s expired";
@@ -1033,6 +1105,7 @@ private:
         }
 
         refreshFreshness();
+        failed_at.beginTick();
         const BT::NodeStatus st = tree.tickOnce();
         stopIfSilent(false);
         publishLegStatus(elapsed);
@@ -1056,15 +1129,17 @@ private:
           } else {
             std::lock_guard<std::mutex> lk(ctx_->mu);
             // The pilot took it back = the mode CHANGED. A MANUAL tree is never "autonomous".
-            if (ctx_->mode != goal_mode_ || (!ctx_->autonomous && goal_mode_ != "MANUAL")) {
+            // A switch the tree made itself (RequestMode) is the mode it expects now.
+            const std::string want = ctx_->handed_mode.empty() ? goal_mode_ : ctx_->handed_mode;
+            if (ctx_->mode != want || (!ctx_->autonomous && want != "MANUAL")) {
               outcome = RunMission::Result::OUTCOME_NOT_AUTONOMOUS;
               detail = ctx_->mode.empty() ? std::string("no flight mode yet (no HEARTBEAT)") :
-                "flight mode " + (ctx_->mode != goal_mode_ ?
-                goal_mode_ + " -> " + ctx_->mode : ctx_->mode + " is not autonomous") +
+                "flight mode " + (ctx_->mode != want ?
+                want + " -> " + ctx_->mode : ctx_->mode + " is not autonomous") +
                 ": the pilot took control; not fighting for it";
             } else {
               outcome = RunMission::Result::OUTCOME_FAILURE;
-              detail = "tree " + goal->name + " returned FAILURE (the tree log says which leaf)";
+              detail = "tree " + goal->name + " returned FAILURE" + failureWhy(failed_at);
             }
           }
           break;
@@ -1121,6 +1196,35 @@ private:
     autonomy_pub_->publish(off);
     busy_ = false;
     publishIdle();
+  }
+
+  /// " at NotDropped in scan_fire > manual: <why, in the pilot's words>" for a FAILURE
+  /// result, which the GCS shows. Under ctx_->mu. The guards fail silently (a condition
+  /// has nothing to log), so they are the ones that need saying here.
+  std::string failureWhy(const FailureTrace & trace) const
+  {
+    const std::string at = trace.text();
+    if (at.empty()) {return " (no leaf reported a failure)";}
+    const std::string & type = trace.failed().type;
+    const std::string mode = ctx_->mode.empty() ? std::string("unknown") : ctx_->mode;
+    std::string why;
+    if (type == "NotDropped") {
+      why = "the autonomy-drop latch is set (SD in the drop position, or RC lost): "
+        "SD back to safe, then Start";
+    } else if (type == "IsAutonomous") {
+      why = "flight mode " + mode + " is not autonomous";
+      if (mode == "MANUAL") {
+        why += "; a mission saved from the Mission tab always starts with IsAutonomous, "
+          "so it cannot run in MANUAL: run the built-in tree";
+      }
+    } else if (type == "ModeIs") {
+      why = "the autopilot is in " + mode;
+    } else if (type == "SetCameraModel") {
+      why = ctx_->camera_model_why + "; the Sensors tab shows camera_node's model state";
+    } else {
+      why = "its own warning, if it gave one, is in the bt_runner_node log";
+    }
+    return " at " + at + ": " + why;
   }
 
   /// Feedback and /crsd/bt_status while a goal runs (kRunningStatusPeriodS).
@@ -1221,6 +1325,9 @@ private:
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr cannon_pub_;
   rclcpp::Subscription<crusader_msgs::msg::DockObservation>::SharedPtr dock_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr ocs_sub_;
+  std::string camera_node_;
+  rclcpp::AsyncParametersClient::SharedPtr camera_params_;
+  std::atomic<int> camera_ask_{0};      // SetCameraModel asks; a reply to an older one is dropped
 
   // The fixed-nozzle shot
   std::chrono::steady_clock::time_point t0_{};
@@ -1229,9 +1336,11 @@ private:
   bool hs_active_ = false;              // motion commanded last tick (tick thread only)
   bool sticks_active_ = false;          // the sticks commanded last tick (tick thread only)
   std::string goal_mode_;               // the mode when this goal started (under ctx_->mu)
+  std::string goal_inputs_;             // mode, drop latch and GCS settings at the start, for GOAL
   std::vector<int64_t> stick_ch_, stick_neutral_;
   std::vector<bool> stick_reverse_;
   rclcpp::Publisher<crusader_msgs::msg::RcChannels>::SharedPtr rc_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr set_mode_pub_;
   double last_hs_heading_ = std::nan("");
   rclcpp::Publisher<crusader_msgs::msg::GuidedHeadingSpeed>::SharedPtr hs_pub_;
   rclcpp::Publisher<crusader_msgs::msg::PumpCommand>::SharedPtr pump_pub_;

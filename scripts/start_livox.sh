@@ -138,4 +138,4 @@ INNER_EOF
 # the launch instead of orphaning it inside the container on `systemctl stop`.
 # Plain `bash -c`, not `-lc`: the environment is built above, explicitly, rather
 # than depending on whatever this container's profile happens to do.
-exec docker exec -i "$CONTAINER" bash -c "$INNER"
+exec docker exec -i -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" "$CONTAINER" bash -c "$INNER"

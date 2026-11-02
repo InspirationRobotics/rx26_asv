@@ -46,8 +46,8 @@ from crusader_msgs.msg import (Attitude, Cluster3DArray, FcuHealth, FcuStatus, H
                                TrackedTargetArray)
 
 from crusader_groundstation import (bag_recorder, camera_profiles, gcs_wire, mission_store,
-                                    mission_xml, param_client, planner_profiles, power_client,
-                                    proc_scan, system_info)
+                                    mission_xml, operator_settings, param_client, planner_profiles,
+                                    power_client, proc_scan, system_info)
 from crusader_groundstation import node_registry as reg
 from crusader_groundstation.log_buffer import LogBuffer
 from crusader_groundstation.process_manager import ProcessManager
@@ -78,6 +78,7 @@ PARAMS = {
     "record_min_free_gb": 2.0,
     "planner_profiles_dir": "/root/robotx_ws/src/rx26_asv/crusader_sim/config/tuning_profiles",
     "planner_profiles_save_dir": "~/.cache/crusader/planner_profiles",
+    "operator_settings_file": "~/.cache/crusader/operator_settings.json",   # dock heading, search side
 }
 
 LEG_TOPIC = "/crsd/nav/leg_status"      # = bt_runner_node.nav_leg_topic (check_config)
@@ -327,6 +328,8 @@ class GcsBridge(Node):
         self._cpu = system_info.CpuMeter()
         self.procs = ProcessManager(p["params_file"], logger=self.get_logger().info)
         self.params_bridge = param_client.ParamBridge(self)
+        self.settings = operator_settings.Store(p["operator_settings_file"])
+        self._bt_seen, self._restoring = None, False
         self.logs = LogBuffer(int(p["log_capacity"]))
         self.radio = RadioLog()
         self._ocs = deque(maxlen=REPLAY_EVENTS)
@@ -731,11 +734,47 @@ class GcsBridge(Node):
         except Exception:  # noqa: BLE001 - a discovery hiccup keeps the last answer
             pass
         self._pids = proc_scan.scan([s.executable for s in reg.REGISTRY])
+        self._watch_bt_runner()
         items, running = self._node_items()
         self._send_if_changed("nodes", {
             "t": "nodes", "items": items, "up": len(running), "graph": self._graph_full,
             "groups": [{"id": g, "label": label, "hint": hint} for g, label, hint in reg.GROUPS],
             "profiles": [{"id": k, "label": v[0]} for k, v in reg.PROFILES.items()]})
+
+    def _watch_bt_runner(self):
+        """A bt_runner_node that is new (first seen, or a new pid) gets the operator's dock
+        heading and search side back if it came up without them. Off the executor thread:
+        the parameter calls block on it."""
+        node = operator_settings.NODE_PATH
+        seen = (node, tuple(self._pids.get(reg.BY_NAME["bt_runner_node"].executable, [])))
+        if node not in self._graph_full:
+            self._bt_seen = None            # gone: whatever comes up next is new
+            return
+        if seen == self._bt_seen or self._restoring:
+            return
+        self._bt_seen, self._restoring = seen, True
+        self._pool.submit(self._restore_settings, node)
+
+    def _restore_settings(self, node):
+        try:
+            live = {r["name"]: r["value"] for r in self.params_bridge.list(node)}
+            values = self.settings.to_restore(live)
+            if not values:
+                return
+            ok, msg, _data = self._param_set(node, values, remember=False)
+            said = ", ".join(
+                (f"dock heading {float(v):g}°" if k == "dock_heading_deg" else f"search first {v}")
+                + f" (set {self.settings.set_at(k)})" for k, v in values.items())
+            if ok:
+                self.get_logger().info(f"restored {said} after bt_runner_node came up without them")
+            else:
+                self.get_logger().warn(f"could not restore {said}: {msg}")
+        except Exception as e:  # noqa: BLE001 - its param services may not be up yet
+            self._bt_seen = None            # the next graph scan tries again
+            self.get_logger().warn(f"dock heading/search side restore: {e}; retrying",
+                                   throttle_duration_sec=10.0)
+        finally:
+            self._restoring = False
 
     def _node_items(self):
         owned = self.procs.running()
@@ -1093,10 +1132,12 @@ class GcsBridge(Node):
             row["choices"] = choices.get(row["name"], [])
         return rows
 
-    def _param_set(self, node, values):
+    def _param_set(self, node, values, remember=True):
         if node not in self._graph_full:
             raise RuntimeError(f"{node or 'no node'} is not in the ROS graph")
         results = self.params_bridge.set(node, values)
+        if remember and node == operator_settings.NODE_PATH:
+            self._remember_settings({r["name"]: values[r["name"]] for r in results if r["ok"]})
         for r in results:
             line = f"{node} {r['name']} <- {values.get(r['name'])!r}: "
             if r["ok"]:                 # two call sites: rclpy fixes a line's severity
@@ -1107,6 +1148,17 @@ class GcsBridge(Node):
         msg = ("; ".join(f"{r['name']}: {r['reason'] or 'refused'}" for r in bad) if bad
                else f"applied {', '.join(sorted(values))} on {node.lstrip('/')}")
         return not bad, msg, {"results": results}
+
+    def _remember_settings(self, applied):
+        try:
+            kept = self.settings.remember(applied)
+        except OSError as e:
+            self.get_logger().warn(f"dock heading/search side not saved to "
+                                   f"{self.settings.path}: {e}; a bt_runner restart loses them")
+            return
+        if kept:
+            self.get_logger().info(f"saved {', '.join(kept)}: set back if bt_runner_node "
+                                   f"restarts without them")
 
     def _op_params_list(self, conn, req):
         node = req.get("node") or ""
