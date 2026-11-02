@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
@@ -398,6 +399,27 @@ class AutoOverLoopback(unittest.TestCase):
         self.assertTrue([m for m in self.logs if "cannot listen for beacons" in m])
         self.assertIn("NOT RUNNING", link.describe())
 
+    def test_a_taken_discovery_port_is_tried_again_and_heard_once_it_frees(self):
+        # 2026-10-31: a hand-run ocs_client held 37565 while the launch respawned its
+        # own; once the squatter died the respawned one stayed on its fallbacks for good.
+        squatter = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.addCleanup(squatter.close)
+        squatter.bind(("0.0.0.0", self.udp))
+        with mock.patch.object(ol, "LISTEN_RETRY_S", 0.05):
+            link = ol.OcsLink("auto", 1, team="ASTA", discovery_port=self.udp,
+                              fallback_hosts=[], log=self.logs.append, retry_s=0.05)
+            self.addCleanup(link.stop)
+            link.start()
+            time.sleep(0.4)                              # several tries while it is taken
+            self.assertFalse(link._listener.listening)
+            self.assertEqual(len([m for m in self.logs if "cannot listen for beacons" in m]), 1)
+            squatter.close()
+            self.assertTrue(wait_until(lambda: link._listener.listening))
+        self.assertIn("OCS link: listening for beacons on UDP %d now" % self.udp, self.logs)
+        self.assertNotIn("NOT RUNNING", link.describe())
+        send_beacon(self.udp, beacon(port=self.a.port))
+        self.assertTrue(wait_until(lambda: link.connected))
+
     def test_auto_with_a_listener_needs_the_team_code(self):
         with self.assertRaises(ValueError):
             ol.OcsLink("auto", 37564, discovery_port=37565)
@@ -536,6 +558,106 @@ class ReportQueue(unittest.TestCase):
             frames += reader.feed(conn.recv(4096))
         self.assertEqual([sorted(json.loads(f))[0] for f in frames],
                          ["docking", "firefighting", "heartbeat"])
+
+
+class Receipts(unittest.TestCase):
+    """Task reports go out numbered and are kept until a final ocs_receipt; after a reconnect
+    the rest go again -- once the OCS has shown it receipts, so it will not publish them twice."""
+
+    def setUp(self):
+        self.srv = Acceptor()
+        self.addCleanup(self.srv.close)
+        self.logs, self.receipts, self.commands = [], [], []
+        self.link = ol.OcsLink("127.0.0.1", self.srv.port, log=self.logs.append,
+                               retry_s=0.05, on_receipt=self.receipts.append,
+                               on_command=self.commands.append)
+        self.addCleanup(self.link.stop)
+        self.link.start()
+        self.assertTrue(wait_until(lambda: len(self.srv.conns) == 1))
+        self._conn = None
+
+    def _follow(self):
+        """The stand-in OCS's newest connection, and a fresh reader when it changed."""
+        conn = self.srv.conns[-1]
+        if conn is not self._conn:
+            self._conn, self._reader, self._got = conn, ol.FrameReader(), []
+        return conn
+
+    def read(self, n):
+        """The seqs of the next n frames the boat sent on its newest connection."""
+        conn = self._follow()
+        conn.settimeout(2.0)
+        while len(self._got) < n:
+            self._got += [json.loads(f) for f in self._reader.feed(conn.recv(4096))]
+        got, self._got = self._got[:n], self._got[n:]
+        return [f["seq"] for f in got]
+
+    def nothing_more(self):
+        conn = self._follow()
+        conn.settimeout(0.3)
+        with self.assertRaises(socket.timeout):
+            self._got += self._reader.feed(conn.recv(4096))
+        self.assertEqual(self._got, [])
+
+    def receipt(self, seq, verdict):
+        self._follow().sendall(ol.encode(json.dumps({"ocs_receipt": {
+            "vehicle_seq": seq, "kind": "docking", "verdict": verdict, "seq": 5,
+            "detail": ""}}).encode()))
+
+    def reconnect(self):
+        """The OCS drops the link; the boat dials straight back."""
+        self.srv.drop_all()
+        self.assertTrue(wait_until(lambda: len(self.srv.conns) == 1))
+
+    def report(self, n):
+        return self.link.send_report({"team_id": "ASTA", "vehicle_id": "USV1",
+                                      "sent_at": ol.rfc3339(), "docking": {"n": n}})
+
+    def test_reports_go_out_numbered_with_the_seq_send_report_returned(self):
+        a, b = self.report(1), self.report(2)
+        self.assertEqual(b, a + 1)
+        self.assertEqual(self.read(2), [a, b])
+        self.assertEqual(self.link.unreceipted, 2)
+
+    def test_a_final_receipt_ends_the_wait_and_published_does_not(self):
+        a, b = self.report(1), self.report(2)
+        self.read(2)
+        self.receipt(a, "published")
+        self.receipt(b, "held")
+        self.assertTrue(wait_until(lambda: len(self.receipts) == 2))
+        self.assertEqual(self.link.unreceipted, 1)          # a waits for RoboCommand's ack
+        self.receipt(a, "acknowledged")
+        self.assertTrue(wait_until(lambda: self.link.unreceipted == 0))
+        self.assertEqual([r["verdict"] for r in self.receipts],
+                         ["published", "held", "acknowledged"])
+        self.assertEqual(self.commands, [])                 # a receipt is not a command
+
+    def test_after_a_drop_the_unreceipted_go_again_oldest_first_and_ahead(self):
+        a, b, c = self.report(1), self.report(2), self.report(3)
+        self.read(3)
+        self.receipt(b, "acknowledged")
+        self.assertTrue(wait_until(lambda: self.link.unreceipted == 2))
+        self.reconnect()
+        d = self.report(4)
+        self.assertEqual(self.read(3), [a, c, d])
+        self.assertTrue([m for m in self.logs if "sending 2 report(s) again" in m])
+
+    def test_an_ocs_that_has_sent_no_receipt_gets_no_resend_until_it_does(self):
+        a = self.report(1)
+        self.read(1)
+        self.reconnect()
+        b = self.report(2)
+        self.assertEqual(self.read(1), [b])
+        self.nothing_more()                                 # it might publish a twice
+        self.receipt(b, "acknowledged")
+        self.assertEqual(self.read(1), [a])                 # its first receipt releases a
+
+    def test_numbering_starts_from_the_clock_and_skips_zero_when_it_wraps(self):
+        self.assertEqual(ol._first_seq(1000.0), 10000)
+        self.assertGreater(ol._first_seq(1000.5), ol._first_seq(1000.0))
+        self.assertEqual(ol._first_seq(0.0), 1)
+        self.link._next_seq = ol._SEQ_LIMIT - 1
+        self.assertEqual([self.report(1), self.report(2)], [ol._SEQ_LIMIT - 1, 1])
 
 
 if __name__ == "__main__":

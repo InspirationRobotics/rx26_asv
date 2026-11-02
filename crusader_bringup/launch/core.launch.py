@@ -12,6 +12,9 @@
   rfd_link_node     crusader_link: the RFD900 mesh to Ekko. Respawns, so a radio plugged in
                     after boot is picked up; never also start it by hand (two readers on one
                     serial port each get half the bytes)
+  ocs_client        crusader_groundstation: heartbeats and numbered task reports to the OCS
+                    (tcp 37564), found from its beacon. Respawns: it actuates nothing, and the
+                    OCS forwards nothing to RoboCommand before a declaration
 
 lidar_node is here because with PRX1_TYPE=2 the autopilot refuses to arm without a proximity
 source ("PreArm: PRX1: No Data"): on 2026-09-05 a power cycle left a hand-started LiDAR chain
@@ -47,4 +50,5 @@ def generate_launch_description():
         node("crusader_perception", "lidar_node"),
         node("crusader_perception", "camera_node"),
         node("crusader_link", "rfd_link_node", respawn=True, respawn_delay=5.0),
+        node("crusader_groundstation", "ocs_client", respawn=True, respawn_delay=5.0),
     ])

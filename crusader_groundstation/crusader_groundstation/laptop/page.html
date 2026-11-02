@@ -339,7 +339,7 @@ body.ed-dragging { cursor: grabbing; user-select: none; }
 </section>
 
 <section id="t-reports">
-  <label><input type="checkbox" id="ocs-hb"> show heartbeats</label>
+  <label><input type="checkbox" id="ocs-hb"> show heartbeats and link state</label>
   <div class="scroll"><table id="ocs"></table></div>
 </section>
 
@@ -459,7 +459,14 @@ const handlers = {
   log(f) { if (f.replay) G.logs = []; G.logs.push(...f.items); G.logs = G.logs.slice(-2000); logs(); },
   radio(f) { if (f.replay) G.radio = []; G.radio.push(...f.items); G.radio = G.radio.slice(-500);
              G.radioSummary = f; radio(); },
-  ocs(f) { if (f.replay) G.ocs = []; G.ocs.push(...f.items); G.ocs = G.ocs.slice(-300); ocs(); },
+  ocs(f) {
+    if (f.replay) G.ocs = [];
+    G.ocs.push(...f.items);
+    G.ocs = G.ocs.slice(-300);
+    const L = !f.replay && f.items.map(linkState).filter(Boolean).pop();   // a replay is not news
+    if (L) { G.ocsLink = L; G.ocsLinkAt = performance.now(); }
+    ocs();
+  },
 };
 const es = new EventSource("/events");
 es.onmessage = e => { const f = JSON.parse(e.data); (handlers[f.t] || (() => {}))(f); };
@@ -559,6 +566,16 @@ function linkTile(age) {
         `state ${ageText} old (warn above ${AGE_WARN_S} s, bad above ${AGE_BAD_S} s)`,
         `state rate ${hzText}`, dropped ? `${dropped} frames dropped` : ""].filter(Boolean).join("\n"));
 }
+const OCS_LINK_STALE_S = 12;      // ocs_client says where its OCS link stands at least every 5 s
+function ocsTile() {
+  const L = G.ocsLink, heard = L && sinceS(G.ocsLinkAt) <= OCS_LINK_STALE_S;
+  const tip = L ? `ocs_client -> ${L.target}` : "ocs_client reports its link to the OCS on /crsd/ocs_traffic";
+  if (!heard) return tile("ocs", "OCS", "stale", DASH, L ? "ocs_client silent" : "no word yet",
+                          `${tip}\nnothing from it for ${OCS_LINK_STALE_S} s: is ocs_client running?`);
+  const owed = L.unreceipted ? `${L.unreceipted} without a receipt` : "";
+  if (!L.connected) return tile("ocs", "OCS", "bad", "DOWN", owed || "not connected", tip);
+  tile("ocs", "OCS", owed ? "warn" : "ok", "UP", [L.peer, owed].filter(Boolean).join(" · "), tip);
+}
 
 const triTile = (v, hi, lo, tip) => v === 2 ? [hi[1], hi[0], "", tip] : v === 1 ? [lo[1], lo[0], "", tip] : null;
 function gpsTile(h) {
@@ -618,6 +635,7 @@ const TILES = [
 function strip() {
   const age = stateAge(), L = G.link, s = G.state || {};
   linkTile(age);
+  ocsTile();
   const live = !!(L && L.up && age != null && age <= AGE_BAD_S);
   const why = !L ? "no link yet" : !L.up ? "link down" : age == null ? "no state yet" : `state ${age.toFixed(0)} s old`;
   for (const [id, label, build] of TILES) {
@@ -996,13 +1014,53 @@ for (const b of document.querySelectorAll("button[data-verb]"))
   b.onclick = () => confirm(`${b.dataset.verb.toUpperCase()} the Jetson?`) && req("power", {verb: b.dataset.verb, hostname: $("pw-host").value.trim()});
 
 // ---- reports, radio, logs ---------------------------------------------------------
+// ocs_client numbers each task report (vseq) and echoes it queued, sent (again after a
+// reconnect) and each ocs_receipt the OCS sends for it: one row per report, ending at what
+// became of it. A final verdict stands even if a "published" is echoed after it.
+const FINAL = new Set(["acknowledged", "held", "dropped"]);
+const RECEIPT = {
+  acknowledged: ["ok", r => `acknowledged by RoboCommand, seq ${r.seq}`],
+  published: ["warn", r => `published to RoboCommand, seq ${r.seq}: ${String(r.detail).replace(/^seq=\d+, /, "")}`],
+  held: ["bad", r => `held by the OCS: ${r.detail}`],
+  dropped: ["bad", r => `dropped by the OCS: ${r.detail}`]};
+const linkState = o => o.dir === "link" ? o.body : o.link;
+function ocsRows(hb) {
+  const rows = [], reports = new Map();
+  for (const o of G.ocs) {
+    if (o.vseq == null) {
+      if (hb || (o.kind !== "heartbeat" && o.dir !== "link"))
+        rows.push({...o, cls: /^(sent|republished)$/.test(o.status) ? "ok" : "warn"});
+      continue;
+    }
+    let r = reports.get(o.vseq);
+    if (!r) {
+      reports.set(o.vseq, r = {stamp: o.stamp, dir: "tx", kind: o.kind, vseq: o.vseq, sends: 0, tx: "", receipt: null});
+      rows.push(r);
+    }
+    if (o.receipt) {
+      if (!(r.receipt && FINAL.has(r.receipt.verdict))) r.receipt = o.body;
+    } else {
+      if (r.body === undefined) r.body = o.body;
+      if (o.status === "sent") r.sends++;
+      r.tx = o.status;
+    }
+  }
+  for (const r of reports.values()) {
+    const [cls, text] = RECEIPT[r.receipt && r.receipt.verdict] ||
+      ["warn", () => r.tx === "sent" ? "sent, no receipt yet" : r.tx || "no receipt yet"];
+    r.cls = cls;
+    r.status = text(r.receipt) + (r.sends > 1 ? ` (sent ${r.sends}×)` : "");
+  }
+  return rows;
+}
 function ocs() {
   const hb = $("ocs-hb").checked;
   $("ocs").innerHTML = "<tr><th>time</th><th>dir</th><th>kind</th><th>status</th><th>body</th></tr>" +
-    G.ocs.filter(o => hb || o.kind !== "heartbeat").slice(-200).reverse().map(o =>
-      `<tr><td>${ago(o.stamp)}</td><td>${esc(o.dir)}</td><td><b>${esc(o.kind)}</b></td>
-       <td class="${/^(sent|republished)$/.test(o.status) ? "ok" : "warn"}">${esc(o.status)}</td>
-       <td class="mono">${esc(JSON.stringify(o.body))}</td></tr>`).join("");
+    ocsRows(hb).slice(-200).reverse().map(o =>
+      `<tr><td>${ago(o.stamp)}</td><td>${esc(o.dir)}</td>
+       <td title="${o.vseq == null ? "" : `vehicle seq ${o.vseq}`}"><b>${esc(o.kind)}</b></td>
+       <td class="${o.cls}">${esc(o.status)}</td>
+       <td class="mono">${esc(o.body === undefined ? DASH : JSON.stringify(o.body))}</td></tr>`).join("");
 }
 $("ocs-hb").onchange = ocs;
 function radio() {
