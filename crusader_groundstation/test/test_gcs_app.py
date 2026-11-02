@@ -488,6 +488,15 @@ class LinkTiming(unittest.TestCase):
         self.assertGreater(link.status()["state_age_s"], status["state_age_s"])
 
 
+class Hosts(unittest.TestCase):
+
+    def test_a_host_that_cannot_be_reached_is_passed_over_for_the_next(self):
+        boat = FakeBoat()           # listens on 127.0.0.1 only: 127.0.0.2 refuses
+        link = gcs_app.BoatLink("127.0.0.2, 127.0.0.1", boat.port, lambda h, b: None)
+        self.assertTrue(wait_for(lambda: link.up, seconds=15.0))
+        self.assertEqual(link.status()["boat"], f"127.0.0.1:{boat.port}")
+
+
 class SlowConsumers(unittest.TestCase):
 
     def test_full_outbox_drops_the_oldest_state_first_and_keeps_everything_else(self):

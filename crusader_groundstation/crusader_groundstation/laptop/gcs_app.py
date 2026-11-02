@@ -3,8 +3,10 @@
 on http://localhost:8150. Standard library only: plain Python 3.10 on Windows, no ROS. Works the
 same against the sim (--boat 127.0.0.1).
 
-    python crusader_groundstation/crusader_groundstation/laptop/gcs_app.py [--boat HOST]
+    python crusader_groundstation/crusader_groundstation/laptop/gcs_app.py [--boat HOST[,HOST...]]
     # or double-click tools/scripts/BOAT_GUI.cmd
+With several hosts (the boat's address on each network it may be on), the link tries them in
+turn and stays on the one that answered until it can no longer connect there.
 
 The page talks only to this process:
   GET  /events          server-sent events: every frame the boat sends, and the link's state
@@ -133,10 +135,12 @@ class LinkTiming:
 
 
 class BoatLink:
-    """One connection to gcs_bridge, kept up; frames fanned out to the page."""
+    """One connection to gcs_bridge, kept up; frames fanned out to the page. host may list several
+    addresses, comma-separated: a failed connect moves on to the next one."""
 
     def __init__(self, host, port, on_frame, clock=time.perf_counter):
-        self.host, self.port = host, port
+        self.hosts = [h.strip() for h in host.split(",") if h.strip()]
+        self.host, self.port = self.hosts[0], port
         self.on_frame = on_frame
         self.timing = LinkTiming(clock)
         self.up, self.error, self.since = False, "", time.time()
@@ -171,6 +175,7 @@ class BoatLink:
                 gcs_wire.keepalive(sock)
             except OSError as e:
                 self._set(False, f"cannot reach {self.host}:{self.port}: {e}")
+                self.host = self.hosts[(self.hosts.index(self.host) + 1) % len(self.hosts)]
                 time.sleep(2.0)
                 continue
             self._sock = sock
@@ -589,7 +594,8 @@ def make_handler(link, hub, allowed_hosts, missions=None):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--boat", default=os.environ.get("CRSD_BOAT", DEFAULT_BOAT),
-                    help=f"gcs_bridge's host (default {DEFAULT_BOAT}; 127.0.0.1 for the sim)")
+                    help=f"gcs_bridge's host, or several comma-separated, tried in turn "
+                         f"(default {DEFAULT_BOAT}; 127.0.0.1 for the sim)")
     ap.add_argument("--boat-port", type=int, default=gcs_wire.PORT)
     ap.add_argument("--port", type=int, default=8150, help="the page, on localhost only")
     ap.add_argument("--no-browser", action="store_true")
@@ -601,7 +607,8 @@ def main(argv=None):
     server = ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(link, hub, allowed))
     server.daemon_threads = True
     url = f"http://localhost:{a.port}/"
-    print(f"gcs_app: boat {a.boat}:{a.boat_port}, page {url}  (Ctrl+C to stop)", flush=True)
+    boats = " or ".join(f"{h}:{a.boat_port}" for h in link.hosts)
+    print(f"gcs_app: boat {boats}, page {url}  (Ctrl+C to stop)", flush=True)
     if not a.no_browser:
         threading.Timer(0.5, webbrowser.open, (url,)).start()
     try:
