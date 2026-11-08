@@ -48,6 +48,13 @@ class FcuHealthTest(unittest.TestCase):
         self.assertEqual(fh.estop(rc, 7, 1200), fh.TRI_YES)
         self.assertEqual(fh.estop([1500] * 4, 7, 1200), fh.TRI_UNKNOWN)
 
+    def test_rc_receiver_lost_needs_the_bit_present(self):
+        both = fh.PREARM_CHECK | fh.RC_RECEIVER
+        self.assertFalse(fh.rc_receiver_lost(sys_status(present=both, health=both)))
+        self.assertTrue(fh.rc_receiver_lost(sys_status(present=both, health=fh.PREARM_CHECK)))
+        self.assertFalse(fh.rc_receiver_lost(sys_status(present=fh.PREARM_CHECK, health=0)))
+        self.assertFalse(fh.rc_receiver_lost(None))       # stale SYS_STATUS: no claim either way
+
 
 class SetpointCheckTest(unittest.TestCase):
 

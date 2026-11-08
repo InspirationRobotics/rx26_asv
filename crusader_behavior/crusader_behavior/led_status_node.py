@@ -1,8 +1,8 @@
 """led_status_node: autopilot + RC state -> /crsd/led_state (1 RED, 2 YELLOW, 3 GREEN).
 
-RED = disarmed, e-stopped or RC lost (the SB e-stop keeps the boat armed, so it is read from
-RC_CHANNELS; a lost link reads 0). GREEN = an autonomous mode, or a mission ticking
-(/crsd/autonomy_active). YELLOW otherwise.
+RED = rc_watchdog's kill (/crsd/kill_active), which wins over everything else; or disarmed,
+e-stopped or RC lost (the SB e-stop keeps the boat armed, so it is read from RC_CHANNELS).
+GREEN = an autonomous mode, or a mission ticking (/crsd/autonomy_active). YELLOW otherwise.
 """
 import time
 
@@ -23,7 +23,7 @@ PARAMS = {
 }
 
 RED, YELLOW, GREEN = 1, 2, 3
-LABELS = {RED: "RED disarmed/e-stop", YELLOW: "YELLOW manual", GREEN: "GREEN auto"}
+LABELS = {RED: "RED disarmed/e-stop/RC lost", YELLOW: "YELLOW manual", GREEN: "GREEN auto"}
 
 
 class LedStatusNode(Node):
@@ -40,9 +40,11 @@ class LedStatusNode(Node):
         self.create_subscription(FcuStatus, "/crsd/fcu_status", self._fcu_cb, 10)
         self.create_subscription(RcChannels, "/crsd/rc_channels", self._rc_cb, 10)
         self.create_subscription(Bool, "/crsd/autonomy_active", self._auto_cb, 10)
+        self.create_subscription(Bool, "/crsd/kill_active", self._kill_cb, 10)
         self.mode = None
         self.armed = False
         self.estop_active = True          # killed until real RC arrives
+        self.kill_active = False
         self.autonomy_t = 0.0
         self.last_state = None
         self.create_timer(1.0 / p["rate_hz"], self._evaluate)
@@ -59,10 +61,15 @@ class LedStatusNode(Node):
         if msg.data:
             self.autonomy_t = time.time()
 
+    def _kill_cb(self, msg: Bool):
+        self.kill_active = msg.data
+
     def _evaluate(self):
-        if self.mode is None:
+        if self.kill_active:
+            state = RED
+        elif self.mode is None:
             return
-        if not self.armed or self.estop_active:
+        elif not self.armed or self.estop_active:
             state = RED
         elif (str(self.mode).upper() in self.auto_modes
               or time.time() - self.autonomy_t < self.autonomy_hold_s):

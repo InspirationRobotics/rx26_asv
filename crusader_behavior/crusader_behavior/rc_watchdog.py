@@ -1,10 +1,10 @@
 """rc_watchdog: force-disarm through telemetry_bridge when the RC transmitter link is lost.
 
 A software layer beside ArduPilot's own RC failsafe and the SB e-stop, never instead of them.
-The link is alive while `rc_channel` carries a valid PWM (ArduPilot reports 0 on RC loss).
-The machine itself is rc_heartbeat_core.
+The link is alive while `rc_channel` carries a valid PWM and the autopilot does not report its
+RC receiver unhealthy (/crsd/rc_link_lost, from SYS_STATUS). The machine itself is rc_heartbeat_core.
 
-  in:  /crsd/rc_channels, /crsd/fcu_status
+  in:  /crsd/rc_channels, /crsd/fcu_status, /crsd/rc_link_lost
   out: /crsd/force_disarm (Bool), /crsd/kill_active (Bool)
 """
 import time
@@ -57,6 +57,7 @@ class RcWatchdog(Node):
         self.kill_pub = self.create_publisher(Bool, "/crsd/kill_active", 10)
         self.create_subscription(RcChannels, "/crsd/rc_channels", self._rc_cb, 10)
         self.create_subscription(FcuStatus, "/crsd/fcu_status", self._fcu_cb, 10)
+        self.create_subscription(Bool, "/crsd/rc_link_lost", self._receiver_cb, 10)
         self.last_disarm_req = 0.0
         self.last_kill_published = None
         self.last_status_log = 0.0
@@ -70,6 +71,9 @@ class RcWatchdog(Node):
 
     def _fcu_cb(self, msg: FcuStatus):
         self.core.note_fcu(time.monotonic(), msg.armed)
+
+    def _receiver_cb(self, msg: Bool):
+        self.core.note_receiver(time.monotonic(), msg.data)
 
     def tick(self):
         now = time.monotonic()
@@ -95,6 +99,7 @@ class RcWatchdog(Node):
         if now - self.last_status_log >= 5.0:
             self.last_status_log = now
             log.info(f"armed={self.core.armed} rc_lost={self.core._link_lost(now)} "
+                     f"receiver_lost={self.core._receiver_lost(now)} "
                      f"killed={self.core.killed} bridge_ok={self.core._bridge_ok(now)} "
                      f"rc_age={now - self.core.last_rc_ok:.1f}s")
 

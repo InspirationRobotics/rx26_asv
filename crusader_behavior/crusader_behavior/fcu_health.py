@@ -8,6 +8,7 @@ import math
 TRI_UNKNOWN, TRI_NO, TRI_YES = 0, 1, 2
 
 PREARM_CHECK = 0x10000000          # MAV_SYS_STATUS_PREARM_CHECK
+RC_RECEIVER = 0x10000              # MAV_SYS_STATUS_SENSOR_RC_RECEIVER
 EKF_NEEDED = 1 | 2 | 16            # attitude, horizontal velocity, absolute horizontal position
 EKF_BAD = 128 | 1024 | 32768       # constant-position mode, uninitialised, GPS glitch
 
@@ -35,6 +36,13 @@ def prearm(sys_status):
     if sys_status is None or not sys_status["present"] & PREARM_CHECK:
         return TRI_UNKNOWN
     return tri(sys_status["health"] & PREARM_CHECK)
+
+
+def rc_receiver_lost(sys_status):
+    """The autopilot reports its RC receiver unhealthy (RC failsafe). False if stale or unreported."""
+    if sys_status is None or not sys_status["present"] & RC_RECEIVER:
+        return False
+    return not sys_status["health"] & RC_RECEIVER
 
 
 def ekf_ok(flags):

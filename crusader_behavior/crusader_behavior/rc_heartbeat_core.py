@@ -1,5 +1,8 @@
 """rc_heartbeat_core: the force-disarm-on-RC-loss state machine behind rc_watchdog. No ROS.
 
+RC is lost when the monitored channel has no valid PWM, or the autopilot reports its RC
+receiver unhealthy (an ELRS loss freezes the PWM at its last values instead of reading 0).
+
 The latch clears only on a deliberate LOW->HIGH toggle of the reset channel seen with valid
 PWM, so reconnecting with the switch already HIGH (or the 0 PWM of a lost link) never clears it.
 """
@@ -44,6 +47,8 @@ class RcHeartbeatCore:
         self.armed = False
         self.last_rc_ok = now
         self.last_bridge_msg = 0.0
+        self.receiver_lost = False   # the autopilot's RC failsafe (SYS_STATUS)
+        self.last_receiver_msg = None
 
     # ---------------- observations ----------------
     def note_rc(self, now: float, monitored_valid: bool, reset_pwm: int):
@@ -59,12 +64,22 @@ class RcHeartbeatCore:
         self.last_bridge_msg = now
         self.armed = armed
 
+    def note_receiver(self, now: float, lost: bool):
+        """/crsd/rc_link_lost arrived. ELRS loss freezes the PWM, so this is the reliable signal."""
+        self.last_bridge_msg = now
+        self.last_receiver_msg = now
+        self.receiver_lost = lost
+
     # ---------------- helpers ----------------
     def _bridge_ok(self, now: float) -> bool:
         return (now - self.last_bridge_msg) < self.cfg.link_timeout
 
+    def _receiver_lost(self, now: float) -> bool:
+        return (self.receiver_lost and self.last_receiver_msg is not None
+                and (now - self.last_receiver_msg) < self.cfg.link_timeout)
+
     def _link_lost(self, now: float) -> bool:
-        return (now - self.last_rc_ok) > self.cfg.heartbeat_timeout
+        return (now - self.last_rc_ok) > self.cfg.heartbeat_timeout or self._receiver_lost(now)
 
     def _poll_latch_reset(self) -> bool:
         """Return True iff a deliberate LOW->HIGH reset toggle cleared the latch.

@@ -1,7 +1,7 @@
 """telemetry_bridge: the only ROS node that talks to the autopilot (through MAVProxy's UDP rebroadcast).
 
 RX: /crsd/pose, /crsd/attitude, /crsd/fcu_status, /crsd/rc_channels, /crsd/autonomy_drop,
-    /crsd/pump_state, /crsd/fcu_health. A stream is republished only while it is fresh,
+    /crsd/pump_state, /crsd/fcu_health, /crsd/rc_link_lost (SYS_STATUS RC receiver health). A stream is republished only while it is fresh,
     stamped at receipt.
 TX: /crsd/force_disarm (never gated), /crsd/guided_setpoint and /crsd/guided_heading_speed
     (autonomous modes only; heading+speed also needs the drop latch), /crsd/rc_override
@@ -135,6 +135,7 @@ class TelemetryBridge(Node):
         self.drop_pub = self.create_publisher(Bool, "/crsd/autonomy_drop", latched)
         self.pump_pub = self.create_publisher(PumpState, "/crsd/pump_state", 10)
         self.health_pub = self.create_publisher(FcuHealth, "/crsd/fcu_health", 10)
+        self.rc_lost_pub = self.create_publisher(Bool, "/crsd/rc_link_lost", 10)
 
         self.create_subscription(RcChannels, "/crsd/rc_override", self._override_cb, 10)
         self.create_subscription(Bool, "/crsd/force_disarm", self._force_disarm_cb, 10)
@@ -313,6 +314,7 @@ class TelemetryBridge(Node):
         t = time.monotonic()
         with self._lock:
             pose, status, rc = self._pose.get(t), self._status.get(t), self._rc.get(t)
+            sys_status = self._sys.get(t)
             stale = [name for name, c in (("pose", self._pose), ("attitude", self._att),
                                           ("fcu_status", self._status), ("rc_channels", self._rc))
                      if c.went_stale(t)]
@@ -335,6 +337,9 @@ class TelemetryBridge(Node):
             m.header.stamp = self._rc.stamp
             m.channels = rc
             self.rc_pub.publish(m)
+        if sys_status is not None:
+            # ELRS loss freezes RC_CHANNELS at the last values; SYS_STATUS is what changes.
+            self.rc_lost_pub.publish(Bool(data=fcu_health.rc_receiver_lost(sys_status)))
         if t >= self._next_health:
             self._next_health = t + HEALTH_PERIOD_S
             self._publish_health(t, rc)
