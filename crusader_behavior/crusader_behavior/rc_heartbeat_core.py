@@ -81,13 +81,17 @@ class RcHeartbeatCore:
     def _link_lost(self, now: float) -> bool:
         return (now - self.last_rc_ok) > self.cfg.heartbeat_timeout or self._receiver_lost(now)
 
-    def _poll_latch_reset(self) -> bool:
+    def _poll_latch_reset(self, now: float) -> bool:
         """Return True iff a deliberate LOW->HIGH reset toggle cleared the latch.
 
         A valid LOW must be seen first (`reset_armed`) before a HIGH clears the
         latch, so reconnecting with the switch already HIGH -- or the 0 PWM that
-        appears during link loss -- can never auto-clear the kill.
+        appears during link loss -- can never auto-clear the kill. While the
+        autopilot reports the receiver lost, the PWM is not the pilot's hand.
         """
+        if self._receiver_lost(now):
+            self.reset_armed = False
+            return False
         pwm = self.reset_pwm
         if pwm < self.cfg.min_valid_pwm:
             return False  # no valid RC signal on this channel; not a real toggle
@@ -108,7 +112,7 @@ class RcHeartbeatCore:
         if self.killed:
             # Latched: look for the operator's RC reset toggle, otherwise keep
             # enforcing the kill.
-            if self._poll_latch_reset():
+            if self._poll_latch_reset(now):
                 d.latch_cleared = True
                 # latch just cleared; fall through and evaluate normally this tick
             else:

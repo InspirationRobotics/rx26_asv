@@ -133,11 +133,14 @@ led_status_node:
     estop_threshold: 1200
 
 # ---- rc_watchdog: force-disarm on RC-transmitter link loss ----
-# Reads telemetry_bridge's /crsd/rc_channels and /crsd/fcu_status and disarms through it
-# (/crsd/force_disarm). Defense in depth beside ArduPilot FS_THR/FS_GCS and the SB e-stop.
+# Reads telemetry_bridge's /crsd/rc_channels, /crsd/fcu_status and /crsd/rc_link_lost and
+# disarms through it (/crsd/force_disarm). Defense in depth beside ArduPilot FS_THR/FS_GCS and
+# the SB e-stop.
 rc_watchdog:
   ros__parameters:
     rc_channel: 7                          # SB, whose valid PWM is the RC heartbeat
+    enable_latch: true                     # the autopilot re-arms on reconnect (SB is ARM/EMSTOP):
+                                           # stay disarmed, LED RED, until the pilot resets
     reset_channel: 7                       # its low->high toggle clears an enable_latch kill
 
 # ---- crusader_perception: camera_node (the OAK-D) and lidar_node (the MID360) ----
