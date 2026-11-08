@@ -17,6 +17,10 @@ and the OCS forwards nothing before a declaration, so it is always on.
 task the start of that attempt, and above Core the beacons activate on it. Unknown tokens
 are refused and a vanished publisher stands us down.
 
+`state` (ocs_link.vehicle_state): KILLED while rc_watchdog's kill is on; AUTO when armed in
+an autonomous mode, or armed while a mission ticks (/crsd/autonomy_active, as the mast's
+GREEN), because Task 3 drives in MANUAL; MANUAL otherwise.
+
 FINDING THE OCS. `ocs_host: "auto"` listens for the OCS's UDP beacon (which must carry
 `team_id`) and dials the sender, falling back to `ocs_fallback_hosts`; a fixed IP is dialled
 and nothing else (ocs_link.py).
@@ -38,8 +42,8 @@ from crusader_common.stream_cache import StreamCache
 from crusader_msgs.msg import Attitude, FcuStatus, LatLonHead, RoboCommandReport
 
 from crusader_groundstation.ocs_link import (DEFAULT_DISCOVERY_PORT, DEFAULT_FALLBACK_HOSTS,
-                                             TASK_NONE, OcsLink, coerce_task, fake_report,
-                                             json_safe, rfc3339)
+                                             TASK_NONE, MissionTicks, OcsLink, coerce_task,
+                                             fake_report, json_safe, rfc3339, vehicle_state)
 
 PARAMS = {
     "ocs_host": "auto",                 # or a fixed OCS IP on the TEAM subnet, never a
@@ -52,6 +56,8 @@ PARAMS = {
     "rate_hz": 2.0,                     # the handbook's mandated heartbeat rate
     "fake_telemetry": False,            # a synthetic circle, for the bench with no Pixhawk
     "autonomous_modes": ["GUIDED", "AUTO", "LOITER", "RTL"],   # = telemetry_bridge's
+    "autonomy_hold_s": 1.0,             # a mission counts this long after bt_runner's last
+                                        # /crsd/autonomy_active (= led_status_node's)
     "pose_timeout_s": 1.0,
     "attitude_timeout_s": 1.0,          # stale -> roll/pitch omitted
     "status_timeout_s": 1.0,            # stale -> no heartbeat: the state is unknowable
@@ -75,6 +81,7 @@ class OcsClient(Node):
         self._att = StreamCache(p["attitude_timeout_s"])
         self._status = StreamCache(p["status_timeout_s"])
         self._kill = False
+        self._mission = MissionTicks(p["autonomy_hold_s"])
         self._task = TASK_NONE
         self._warned_tasks = set()
         self._auto_modes = {str(m).upper() for m in p["autonomous_modes"]}
@@ -104,6 +111,7 @@ class OcsClient(Node):
             self.create_subscription(FcuStatus, "/crsd/fcu_status",
                                      lambda m: self._status.set(m, time.monotonic()), 10)
             self.create_subscription(Bool, "/crsd/kill_active", self._on_kill, 10)
+            self.create_subscription(Bool, "/crsd/autonomy_active", self._on_autonomy, 10)
             # Latched like bt_runner's publisher: it publishes on transitions only.
             self.create_subscription(
                 String, "/crsd/current_task", self._on_task,
@@ -118,7 +126,8 @@ class OcsClient(Node):
             fallback_hosts=list(p["ocs_fallback_hosts"]))
         self.link.start()
         self.get_logger().info(f"ocs_client: {p['vehicle_id']} -> {self.link.describe()} at "
-                               f"{p['rate_hz']:.1f} Hz; STATE_AUTO in {sorted(self._auto_modes)}")
+                               f"{p['rate_hz']:.1f} Hz; STATE_AUTO armed in "
+                               f"{sorted(self._auto_modes)} or while a mission ticks")
         self.create_timer(1.0 / float(p["rate_hz"]), self._tick)
 
     def destroy_node(self):
@@ -138,6 +147,9 @@ class OcsClient(Node):
 
     def _on_kill(self, msg):
         self._kill = bool(msg.data)
+
+    def _on_autonomy(self, msg):
+        self._mission.note(bool(msg.data), time.monotonic())
 
     def _on_report(self, msg):
         """One task report from a BT leaf, queued for the OCS in arrival order."""
@@ -233,13 +245,8 @@ class OcsClient(Node):
                                           "OCS will show rising silence, which is the truth")
                 self._echo("tx", "heartbeat", None, "withheld: pose or fcu_status stale")
             return None
-        # A disarmed boat is not driving itself whatever the mode.
-        if self._kill:
-            state = "STATE_KILLED"
-        elif status.armed and str(status.mode).upper() in self._auto_modes:
-            state = "STATE_AUTO"
-        else:
-            state = "STATE_MANUAL"
+        state = vehicle_state(self._kill, status.armed, status.mode, self._auto_modes,
+                              self._mission.running(now))
         hb = {
             "state": state,
             "position": {"latitude": pose.latitude, "longitude": pose.longitude},

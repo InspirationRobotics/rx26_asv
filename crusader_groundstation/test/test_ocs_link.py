@@ -660,5 +660,77 @@ class Receipts(unittest.TestCase):
         self.assertEqual([self.report(1), self.report(2)], [ol._SEQ_LIMIT - 1, 1])
 
 
+def declared_literals(path):
+    """A node's PARAMS defaults that are plain literals, read from its source: the nodes
+    cannot be imported without rclpy."""
+    with open(path, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "PARAMS"):
+            out = {}
+            for key, value in zip(node.value.keys, node.value.values):
+                try:
+                    out[key.value] = ast.literal_eval(value)
+                except (ValueError, TypeError):
+                    pass                                    # a name or a call, not a literal
+            return out
+    return {}
+
+
+class HeartbeatState(unittest.TestCase):
+    """Heartbeat.state: who is driving the boat."""
+
+    MODES = {"GUIDED", "AUTO", "LOITER", "RTL"}
+
+    def state(self, killed=False, armed=True, mode="MANUAL", mission=False):
+        return ol.vehicle_state(killed, armed, mode, self.MODES, mission)
+
+    def test_armed_in_guided_is_auto_before_any_tree_runs(self):
+        self.assertEqual(self.state(mode="GUIDED"), "STATE_AUTO")
+
+    def test_a_mission_driving_in_manual_is_auto(self):     # Task 3's slide and fire
+        self.assertEqual(self.state(mode="MANUAL", mission=True), "STATE_AUTO")
+
+    def test_the_pilot_driving_is_manual(self):
+        self.assertEqual(self.state(mode="MANUAL"), "STATE_MANUAL")
+        self.assertEqual(self.state(mode="HOLD"), "STATE_MANUAL")
+
+    def test_disarmed_is_never_auto(self):
+        self.assertEqual(self.state(armed=False, mode="GUIDED", mission=True),
+                         "STATE_MANUAL")
+
+    def test_the_kill_wins(self):
+        self.assertEqual(self.state(killed=True, mode="GUIDED", mission=True),
+                         "STATE_KILLED")
+        self.assertEqual(self.state(killed=True, armed=False), "STATE_KILLED")
+
+
+class MissionRunning(unittest.TestCase):
+    """bt_runner's /crsd/autonomy_active, held like the mast light's GREEN."""
+
+    def test_nothing_heard_is_no_mission(self):
+        self.assertFalse(ol.MissionTicks(1.0).running(5.0))
+
+    def test_a_tick_counts_until_it_is_hold_s_old(self):
+        m = ol.MissionTicks(1.0)
+        m.note(True, 10.0)
+        self.assertTrue(m.running(10.9))
+        self.assertFalse(m.running(11.0))                   # the runner went quiet
+
+    def test_the_runners_false_ends_it_at_once(self):
+        m = ol.MissionTicks(1.0)
+        m.note(True, 10.0)
+        m.note(False, 10.1)
+        self.assertFalse(m.running(10.2))
+
+    def test_the_hold_is_the_mast_lights(self):
+        led = os.path.join(REPO, "crusader_behavior", "crusader_behavior",
+                           "led_status_node.py")
+        ours, theirs = declared_literals(NODE), declared_literals(led)
+        self.assertEqual(ours["autonomy_hold_s"], theirs["autonomy_hold_s"])
+        self.assertEqual(ours["autonomous_modes"], theirs["autonomous_modes"])
+
+
 if __name__ == "__main__":
     unittest.main()

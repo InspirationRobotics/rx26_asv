@@ -759,6 +759,44 @@ class OcsLink:
             pass
 
 
+# ---- Heartbeat.state: who is driving ------------------------------------------
+# The names the OCS parses. STATE_UNKNOWN (0) claims nothing and is never sent.
+STATE_AUTO, STATE_MANUAL, STATE_KILLED = "STATE_AUTO", "STATE_MANUAL", "STATE_KILLED"
+
+
+def vehicle_state(killed, armed, mode, auto_modes, mission_running) -> str:
+    """Heartbeat.state from rc_watchdog's kill, the autopilot and bt_runner.
+
+    The kill wins. A disarmed boat is not driving itself whatever the mode. Armed, it is
+    driving itself in an autonomous mode, or in any mode while a mission ticks: Task 3
+    slides and fires in MANUAL through the RC override, and MANUAL there would report the
+    boat out of autonomous mode mid-run (handbook 5.3). That is the mast light's GREEN
+    rule (led_status_node). RoboCommand starts a run on STATE_AUTO, so armed in GUIDED is
+    AUTO before any tree runs.
+    """
+    if killed:
+        return STATE_KILLED
+    if armed and (str(mode).upper() in auto_modes or mission_running):
+        return STATE_AUTO
+    return STATE_MANUAL
+
+
+class MissionTicks:
+    """bt_runner's /crsd/autonomy_active: true on every tick of a mission, false when it
+    ends. A mission counts until its last true is `hold_s` old, so a runner that dies
+    mid-mission stops counting by itself."""
+
+    def __init__(self, hold_s: float):
+        self.hold_s = float(hold_s)
+        self._last = None
+
+    def note(self, active: bool, now: float) -> None:
+        self._last = now if active else None
+
+    def running(self, now: float) -> bool:
+        return self._last is not None and now - self._last < self.hold_s
+
+
 # ---- standalone, for testing without ROS or a boat --------------------------
 
 def fake_report(vehicle_id: str, team_id: str, t0: float, fault: str = "") -> dict:

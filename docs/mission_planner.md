@@ -10,7 +10,7 @@ Branch `feat/mission-planner`. Design of 2026-10-17. Handbook refs are to the mi
 | Heartbeat at 2 Hz for every active vehicle, **at all times** in the course area | 3.4.11, 5.3 item 8.1 | The heartbeat *transport* stays in `ocs_client` (it must flow with no mission running). The tree owns the heartbeat's **`current_task`** field. |
 | A transition **into** a task value starts that attempt; a transition **to `TASK_NONE`** ends it and moves to the next | 3.4.11 | Every task subtree is wrapped in `TaskAttempt`, which sets the token on entry and `TASK_NONE` on every exit (success, failure, halt). |
 | Vehicles position-hold after switching to autonomous; begin only once the OCS has verified `RunStart` | 3.4.10 hint | `WaitForRunStart` holds station until RoboCommand's `run_start` reaches the boat. |
-| `RunStart` is issued only once every declared vehicle reports `STATE_AUTO` | 3.4.10 steps 5-9, 5.3 item 8.2 | The boat must already be armed + GUIDED (that is what `ocs_client` reports as AUTO) and ticking the tree while it waits. |
+| `RunStart` is issued only once every declared vehicle reports `STATE_AUTO` | 3.4.10 steps 5-9, 5.3 item 8.2 | The boat must already be armed + GUIDED, or armed with the tree ticking (`ocs_client` reports either as AUTO: Task 3 drives in MANUAL), and ticking the tree while it waits. |
 | Course elements activate only on a task-attempt heartbeat after `RunStart`; Task 1 beacons stay on only while the attempt is reported | 5.3 item 8.3, 3.3.2 | `current_task` must stay `TASK_SAFE_PASSAGE` for the whole Task 1 subtree. |
 | "SoS activates challenge by sending heartbeat messages" is 25 pts per task | Section 4 | Each task attempt must be a clean `TASK_NONE -> TASK_x -> TASK_NONE` transition. |
 
