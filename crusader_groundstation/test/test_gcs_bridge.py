@@ -257,6 +257,61 @@ class Bridge(unittest.TestCase):
         self.assertTrue(h["ok"], h["msg"])
         self.assertIn("task1_advanced", h["data"]["names"])
 
+    # ---------------------------------------------------------------- the OCS gate and tiers
+
+    TIERS = {"task1": "TIER_ADVANCED", "task2": "TIER_NONE", "task3": "TIER_CORE",
+             "task4": "TIER_NONE"}
+
+    def test_ocs_tiers_is_checked_then_published_for_ocs_client(self):
+        got = []
+        sub = self.probe.create_subscription(String, "/crsd/ocs_tiers", got.append, 10)
+        self.addCleanup(self.probe.destroy_subscription, sub)
+        time.sleep(0.3)
+        h, _ = self.req("ocs_tiers", tiers=dict(self.TIERS, task2="core"), mission="m")
+        self.assertFalse(h["ok"])                       # a lower-case word is not a TIER_*
+        h, _ = self.req("ocs_tiers", tiers={"task1": "TIER_CORE"}, mission="m")
+        self.assertFalse(h["ok"])
+        self.assertEqual(got, [])
+        h, _ = self.req("ocs_tiers", tiers=self.TIERS, mission="survey_all_core")
+        self.assertTrue(h["ok"], h["msg"])
+        deadline = time.monotonic() + 3
+        while not got and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(json.loads(got[-1].data), {"tiers": self.TIERS, "mission": "survey_all_core"})
+
+    def test_run_release_without_a_runner_says_bt_runner_is_not_up(self):
+        h, _ = self.req("run_release")
+        self.assertFalse(h["ok"])
+        self.assertIn("bt_runner_node", h["msg"])
+
+    def test_status_carries_the_ocs_run_with_its_age_and_the_waiting_time(self):
+        state, _ = self.wait_frame(lambda h: h["t"] == "state")
+        self.assertIsNone(state["ocs_run"])             # nothing heard: blank, not a default
+        cmd = self.probe.create_publisher(String, "/crsd/ocs_command", 10)
+        bt = {"state": "WAITING_RUN_START", "name": "m", "waiting_s": 12.5, "elapsed_s": 0.0}
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            cmd.publish(String(data=json.dumps({"ocs_run": {"state": "COURSE_RX",
+                                                            "tiers": self.TIERS}})))
+            self.bt.publish(String(data=json.dumps(bt)))
+            h = next((h for h, _ in reversed(self.frames)
+                      if h["t"] == "state" and h.get("ocs_run")), None)
+            if h and (h["mission"] or {}).get("waiting_s") == 12.5:
+                break
+            time.sleep(0.1)
+        self.assertEqual(h["ocs_run"]["state"], "COURSE_RX")
+        self.assertIsInstance(h["ocs_run"]["age"], float)
+        self.assertEqual(h["mission"]["waiting_s"], 12.5)
+
+    def test_templates_are_listed_and_one_can_be_fetched(self):
+        h, _ = self.req("mission_catalogue")
+        self.assertIsInstance(h["data"]["templates"], list)
+        for t in h["data"]["templates"]:
+            self.assertNotIn(t["name"], h["data"]["builtins"])
+            g, _ = self.req("mission_template", name=t["name"])
+            self.assertTrue(g["ok"], g["msg"])
+        self.assertFalse(self.req("mission_template", name="../task1_advanced")[0]["ok"])
+
     # ---------------------------------------------------------------- the mission files
 
     def mission_files(self):

@@ -43,6 +43,7 @@
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/string.hpp"
+#include "std_srvs/srv/trigger.hpp"
 
 #include "crusader_msgs/action/run_mission.hpp"
 #include "crusader_msgs/msg/attitude.hpp"
@@ -105,6 +106,9 @@ public:
     declare_parameter<double>("dock_heading_deg", -1.0);   // live: the GCS sets it, read per goal
     declare_parameter<std::string>("search_first", "");    // live, per goal: left | right | "" = the tree's
     mode_grace_s_ = declare_parameter<double>("mode_grace_s", 3.0);
+    // Backstop for the RunStart gate: a RunStart older than this never opens it, whatever the
+    // OCS did or did not clear. An hour covers a long wait for the previous team's run.
+    run_start_max_age_s_ = declare_parameter<double>("run_start_max_age_s", 3600.0);
     stream_timeout_s_ = declare_parameter<double>("stream_timeout_s", 1.0);
     assoc_radius_m_ = declare_parameter<double>("assoc_radius_m", 5.0);
     verbose_tree_ = declare_parameter<bool>("verbose_tree", true);
@@ -264,6 +268,21 @@ public:
         worker_ = std::thread([this, gh] {execute(gh);});
       },
       rcl_action_server_get_default_options(), group_);
+    // The bench/lake release: lets the ONE goal held at the RunStart gate start without
+    // RoboCommand. Answers only while a goal is held, so a stray call cannot pre-release the next.
+    release_srv_ = create_service<std_srvs::srv::Trigger>(
+      "/crsd/bt_runner/release_run_start",
+      [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+      std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
+        if (gate_waiting_) {
+          bench_release_ = true;
+          res->success = true;
+          res->message = "released the waiting mission without RoboCommand's RunStart";
+        } else {
+          res->success = false;
+          res->message = "no mission is waiting for RunStart";
+        }
+      });
     idle_timer_ = create_wall_timer(1s, [this] {if (!busy_) {publishIdle();}});
 
     RCLCPP_INFO(
@@ -713,6 +732,17 @@ private:
       run_start = ingestRunStart(*ctx_, nowS(), m->data, &run_id);
     }
     if (run_start) {RCLCPP_INFO(get_logger(), "RoboCommand RunStart received (run_id %d)", run_id);}
+    runstart::Directive dir;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      dir = ingestRunDirective(*ctx_, m->data);
+    }
+    if (dir != runstart::Directive::None) {
+      RCLCPP_INFO(
+        get_logger(), "RunStart latch cleared by the OCS (%s)",
+        dir == runstart::Directive::StandbyAuto ? "standby_auto: a new declaration" :
+        "run_end: the run is over");
+    }
     if (m->data.find("\"readiness_confirm\"") != std::string::npos) {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       ctx_->readiness_confirmed = true;
@@ -729,6 +759,14 @@ private:
     std_msgs::msg::String m;
     m.data = token;
     task_pub_->publish(m);
+  }
+
+  /// /crsd/autonomy_active: true every tick while a mission runs OR is held at the RunStart gate.
+  void publishAutonomy(bool on)
+  {
+    std_msgs::msg::Bool m;
+    m.data = on;
+    autonomy_pub_->publish(m);
   }
 
   void publishAvoidance(bool on)
@@ -1012,7 +1050,7 @@ private:
   {
     const auto goal = gh->get_goal();
     const double timeout_s = goal->timeout_s > 0.0f ? goal->timeout_s : default_timeout_s_;
-    const rclcpp::Time started = now();
+    rclcpp::Time started = now();    // restarted when the RunStart gate opens
     auto result = std::make_shared<RunMission::Result>();
     {
       std::lock_guard<std::mutex> lk(status_mu_);
@@ -1030,6 +1068,9 @@ private:
       ctx_->approach_lon = goal->approach_longitude;
       ctx_->has_approach = goal->approach_latitude != 0.0 || goal->approach_longitude != 0.0;
       ctx_->have_waypoint = false;
+      // The gate is per goal: a release (RunStart or bench) is never carried to the next.
+      ctx_->run_released = false;
+      bench_release_ = false;
       // Per-mission state starts empty: a second attempt must not inherit the first's.
       ctx_->cleared_gates.clear();
       ctx_->global_passage = Context::GlobalPassage{};
@@ -1081,6 +1122,11 @@ private:
       auto fb = std::make_shared<RunMission::Feedback>();
       double next_status = 0.0;
 
+      if (!awaitRunStart(gh, fb, goal->name, started, &outcome, &detail)) {
+        // Cancelled, no HEARTBEAT, or the node is stopping: nothing was ticked, nothing to halt.
+        throw GateClosed{};
+      }
+
       while (rclcpp::ok() && !stop_) {
         // Cancel first: a cancel that waits for anything does not work.
         if (gh->is_canceling()) {
@@ -1114,9 +1160,7 @@ private:
           if (!frame.empty()) {RCLCPP_INFO(get_logger(), "tree @ %5.1fs\n%s", elapsed, frame.c_str());}
         }
         // The mast light goes GREEN because a mission is ticking, not because a node is alive.
-        std_msgs::msg::Bool a;
-        a.data = true;
-        autonomy_pub_->publish(a);
+        publishAutonomy(true);
         if (elapsed >= next_status) {
           next_status = elapsed + kRunningStatusPeriodS;
           publishRunning(gh, fb, view, goal->name, elapsed);
@@ -1146,6 +1190,8 @@ private:
         }
         rate.sleep();
       }
+    } catch (const GateClosed &) {
+      // outcome and detail were set by awaitRunStart().
     } catch (const MissionError & e) {
       detail = e.what();
       RCLCPP_ERROR(get_logger(), "%s", detail.c_str());
@@ -1191,11 +1237,107 @@ private:
     resetLeg(result->elapsed_s);
     publishTask(kTaskNone);
     publishAvoidance(true);
-    std_msgs::msg::Bool off;
-    off.data = false;
-    autonomy_pub_->publish(off);
+    publishAutonomy(false);
     busy_ = false;
     publishIdle();
+  }
+
+  /// Thrown out of execute()'s try block when the RunStart gate ended the goal.
+  struct GateClosed {};
+
+  /// The RunStart gate: holds station and does NOT tick the tree until RoboCommand's RunStart
+  /// (relayed by the OCS) has reached the boat, or the bench release was pressed. True when it
+  /// opened; false with *outcome and *detail set when the goal ended while held. Every goal
+  /// goes through it, so no tree can skip it. The mission timeout does not run here.
+  ///
+  /// It publishes /crsd/autonomy_active true every tick: that is what makes ocs_client report
+  /// STATE_AUTO, and RoboCommand sends RunStart only to a vehicle in STATE_AUTO.
+  bool awaitRunStart(
+    const std::shared_ptr<GoalHandle> & gh, const std::shared_ptr<RunMission::Feedback> & fb,
+    const std::string & name, rclcpp::Time & started, uint8_t * outcome, std::string * detail)
+  {
+    gate_waiting_ = true;
+    const rclcpp::Time began = now();
+    rclcpp::Rate rate(tick_hz_);
+    double next_status = 0.0;
+    bool held = false;
+    bool opened = false;
+    RCLCPP_INFO(
+      get_logger(), "holding for RoboCommand's RunStart (max age %.0f s)", run_start_max_age_s_);
+    while (rclcpp::ok() && !stop_) {
+      if (gh->is_canceling()) {
+        *outcome = RunMission::Result::OUTCOME_CANCELLED;
+        *detail = "cancelled by the operator while waiting for RunStart";
+        break;
+      }
+      const double waiting = (now() - began).seconds();
+      if (!have_status_ && waiting > mode_grace_s_) {
+        *outcome = RunMission::Result::OUTCOME_FAULT;
+        *detail = "no HEARTBEAT: cannot tell whether we are allowed to drive";
+        break;
+      }
+      refreshFreshness();
+      // Once, retried only until the first send: the wait can begin before the first pose.
+      if (!held) {held = sendHold(*ctx_, get_logger(), "RunStart gate hold at");}
+      publishAutonomy(true);
+
+      runstart::Latch latch;
+      double now_s;
+      {
+        std::lock_guard<std::mutex> lk(ctx_->mu);
+        latch = ctx_->run_start;
+        now_s = ctx_->now_s;
+      }
+      const bool bench = bench_release_;
+      if (bench || latch.counts(now_s, run_start_max_age_s_)) {
+        if (bench) {
+          RCLCPP_WARN(get_logger(), "released WITHOUT RoboCommand's RunStart (bench)");
+        } else {
+          RCLCPP_INFO(
+            get_logger(), "RunStart accepted (run_id %d, received %.1f s ago): starting %s",
+            latch.id, std::max(0.0, now_s - latch.t_s), name.c_str());
+        }
+        opened = true;
+        break;
+      }
+      if (waiting >= next_status) {
+        next_status = waiting + kRunningStatusPeriodS;
+        publishWaiting(gh, fb, name, waiting);
+      }
+      rate.sleep();
+    }
+    gate_waiting_ = false;
+    if (!opened) {return false;}
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      ctx_->run_released = true;
+      // "Home" is where the attempt STARTS, which is now, not where the goal was accepted.
+      ctx_->home = ctx_->boat;
+      ctx_->have_home = ctx_->pose_fresh;
+      // So is the mode NOT_AUTONOMOUS compares against: the pilot may switch while held.
+      goal_mode_ = ctx_->mode;
+    }
+    started = now();
+    return true;
+  }
+
+  /// Feedback and /crsd/bt_status while the RunStart gate holds the goal.
+  void publishWaiting(
+    const std::shared_ptr<GoalHandle> & gh, const std::shared_ptr<RunMission::Feedback> & fb,
+    const std::string & name, double waiting)
+  {
+    const std::string warning = "waiting for RoboCommand's RunStart via the OCS";
+    fb->elapsed_s = waiting;
+    fb->running_node = "RunStart gate";
+    fb->current_task = kTaskNone;
+    fb->warning = warning;
+    gh->publish_feedback(fb);
+
+    std_msgs::msg::String m;
+    m.data = "{\"state\":\"WAITING_RUN_START\",\"name\":" + jsonQuote(name) +
+      ",\"waiting_s\":" + jsonNum(waiting, 1) + ",\"running_node\":\"\",\"current_task\":" +
+      jsonQuote(kTaskNone) + ",\"warning\":" + jsonQuote(warning) + "}";
+    bt_status_pub_->publish(m);
   }
 
   /// " at NotDropped in scan_fire > manual: <why, in the pilot's words>" for a FAILURE
@@ -1287,6 +1429,11 @@ private:
   std::string action_name_;
   MissionDirs dirs_;
   double tick_hz_ = 10.0, default_timeout_s_ = 600.0, mode_grace_s_ = 3.0;
+  double run_start_max_age_s_ = 3600.0;
+  /// The RunStart gate: held (worker_ writes, the service reads) and the bench release (the
+  /// service writes, worker_ reads and clears at every goal start).
+  std::atomic<bool> gate_waiting_{false}, bench_release_{false};
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr release_srv_;
   double stream_timeout_s_ = 1.0;
   double assoc_radius_m_ = 5.0;
   bool verbose_tree_ = true;

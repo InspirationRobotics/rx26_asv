@@ -46,8 +46,8 @@ from crusader_msgs.msg import (Attitude, Cluster3DArray, FcuHealth, FcuStatus, H
                                TrackedTargetArray)
 
 from crusader_groundstation import (bag_recorder, camera_profiles, gcs_wire, mission_store,
-                                    mission_xml, operator_settings, param_client, planner_profiles,
-                                    power_client, proc_scan, system_info)
+                                    mission_xml, ocs_link, operator_settings, param_client,
+                                    planner_profiles, power_client, proc_scan, system_info)
 from crusader_groundstation import node_registry as reg
 from crusader_groundstation.log_buffer import LogBuffer
 from crusader_groundstation.process_manager import ProcessManager
@@ -88,6 +88,7 @@ PREVIEW_TOPIC = "/crsd/lidar/preview"
 CLUSTERS_TOPIC = "/crsd/lidar_clusters"
 CAM_STREAMS = {"annotated": "image", "raw": "raw"}      # _op_cam's stream -> its lease key
 MISSION_ACTION = "/crsd/run_mission"
+RELEASE_SERVICE = "/crsd/bt_runner/release_run_start"    # the bench release (bt_runner_node)
 CHECK_TIMEOUT_S = 30.0                  # bt_tree_check loads the whole library: ~1 s, more on a busy Jetson
 STATE_PERIOD_S = 0.5
 EVENT_PERIOD_S = 0.25
@@ -333,6 +334,8 @@ class GcsBridge(Node):
         self.logs = LogBuffer(int(p["log_capacity"]))
         self.radio = RadioLog()
         self._ocs = deque(maxlen=REPLAY_EVENTS)
+        self._ocs_run = None                # (the newest `ocs_run` snapshot, monotonic time heard)
+        self._ocs_reply = None              # (the newest `reply` in any snapshot, when heard)
         self._ocs_seq = 0
         self.recorder = Recorder(p["record_dir"], p["record_min_free_gb"],
                                  logger=self.get_logger().warn)
@@ -391,11 +394,14 @@ class GcsBridge(Node):
         self.create_subscription(Log, "/rosout", self._on_rosout, 100)
         self.create_subscription(RadioFrame, "/crsd/radio/traffic", self._on_radio, 50)
         self.create_subscription(String, "/crsd/ocs_traffic", self._on_ocs, 50)
+        self.create_subscription(String, "/crsd/ocs_command", self._on_ocs_command, 10)
 
         self.plan_pub = self.create_publisher(PassagePlan, "/crsd/passage_plan", 10)
+        self.ocs_tiers_pub = self.create_publisher(String, "/crsd/ocs_tiers", 10)
         self.mission = ActionClient(self, RunMission, MISSION_ACTION)
         self._cancel = self.create_client(CancelGoal, MISSION_ACTION + "/_action/cancel_goal")
         self._radio_test = self.create_client(Trigger, "/crsd/radio/send_test")
+        self._run_release = self.create_client(Trigger, RELEASE_SERVICE)
         self._goal = None
         self._missions_lock = threading.Lock()      # one change to the mission files at a time
         self._nodes_cache = None                    # (bt_tree_check's stamp, its parsed --models)
@@ -522,6 +528,26 @@ class GcsBridge(Node):
         item["seq"] = self._ocs_seq
         self._ocs.append(item)
 
+    def _on_ocs_command(self, msg):
+        """Keeps the newest `ocs_run` the OCS sent: its state and the tiers it will declare. A
+        snapshot carries `reply` only in the direct answer to our `ocs_tiers`, so the newest reply
+        is kept beside it (with its own age) for the Mission tab to show after the next snapshot."""
+        try:
+            cmd = json.loads(msg.data)
+        except ValueError:
+            return
+        run = cmd.get("ocs_run") if isinstance(cmd, dict) else None
+        if isinstance(run, dict):
+            now = time.monotonic()
+            self._ocs_run = (run, now)
+            if isinstance(run.get("reply"), dict):
+                self._ocs_reply = (run["reply"], now)
+
+    def _ocs_run_view(self, now):
+        """The status frame's `ocs_run`: the latest snapshot, its age in s, and the newest reply
+        with ITS age. None until one has been heard; never aged out to a guess."""
+        return ocs_link.ocs_run_view(self._ocs_run, self._ocs_reply, now)
+
     def _store_latest(self, key, msg, payload):
         stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         with self._latest_cv:
@@ -624,8 +650,9 @@ class GcsBridge(Node):
                 "text": health.last_statustext, "sev": health.last_statustext_severity,
                 "age": _round(self._health.age(now), 1)},
             "mission": None if bt is None else {
-                k: bt.get(k) for k in ("state", "name", "elapsed_s", "running_node",
+                k: bt.get(k) for k in ("state", "name", "elapsed_s", "waiting_s", "running_node",
                                        "current_task", "warning", "last")},
+            "ocs_run": self._ocs_run_view(now),
             "camera": None if cam is None else {
                 k: cam.get(k) for k in ("source", "model", "model_state", "fps", "set")},
             "lidar": None if lidar is None else {
@@ -968,6 +995,16 @@ class GcsBridge(Node):
                     raise RuntimeError(f"bt_tree_check --models failed: {output.strip()[:300]}")
                 self._nodes_cache = (stamp, mission_store.parse_models(output))
             return self._nodes_cache[1]
+
+    @mission_op
+    def _op_mission_template(self, conn, req, store):
+        """One survey template's XML, for the Mission tab to open as an unsaved draft."""
+        name = str(req.get("name") or "")
+        try:
+            xml = mission_store.read_template(store.builtin_dir, name)
+        except KeyError:
+            return False, f"no template {name!r}", None
+        return True, "", {"name": name, "xml": xml}
 
     def _op_run_mission(self, conn, req):
         if not self.mission.wait_for_server(timeout_sec=1.0):
@@ -1347,16 +1384,39 @@ class GcsBridge(Node):
         except (power_client.PowerUnavailable, ValueError) as e:
             return False, str(e), None
 
-    def _op_radio_test(self, conn, req):
-        if not self._radio_test.wait_for_service(timeout_sec=1.0):
-            return False, "rfd_link_node does not offer /crsd/radio/send_test: is it up?", None
+    def _call_trigger(self, client, service, who, timeout_s):
+        """(ok, message, None) of a std_srvs Trigger call, or why it could not be made."""
+        if not client.wait_for_service(timeout_sec=1.0):
+            return False, f"{who} does not offer {service}: is it up?", None
         done = threading.Event()
-        future = self._radio_test.call_async(Trigger.Request())
+        future = client.call_async(Trigger.Request())
         future.add_done_callback(lambda _f: done.set())
-        if not done.wait(5.0):
-            return False, "rfd_link_node did not answer within 5 s", None
+        if not done.wait(timeout_s):
+            return False, f"{who} did not answer within {timeout_s:.0f} s", None
         res = future.result()
         return bool(res.success), res.message, None
+
+    def _op_radio_test(self, conn, req):
+        return self._call_trigger(self._radio_test, "/crsd/radio/send_test", "rfd_link_node", 5.0)
+
+    def _op_run_release(self, conn, req):
+        """The bench release: starts the ONE mission held at the RunStart gate without
+        RoboCommand. bt_runner_node refuses when nothing is waiting, and logs the release."""
+        self.get_logger().warn("run_release requested from the ground station")
+        return self._call_trigger(self._run_release, RELEASE_SERVICE, "bt_runner_node", 3.0)
+
+    def _op_ocs_tiers(self, conn, req):
+        """The operator's tier declaration, sent to the OCS through ocs_client's link. The OCS
+        answers with an `ocs_run` carrying `reply`, which the status frame shows."""
+        tiers, error = ocs_link.check_tiers(req.get("tiers"))
+        if error:
+            return False, f"not sent: {error}", None
+        if not self.ocs_tiers_pub.get_subscription_count():
+            return False, "nothing listens on /crsd/ocs_tiers: is ocs_client up?", None
+        self.ocs_tiers_pub.publish(String(data=json.dumps(
+            {"tiers": tiers, "mission": str(req.get("mission") or "")})))
+        self.get_logger().info(f"tiers {tiers} handed to ocs_client for the OCS")
+        return True, "handed to ocs_client; the OCS's answer shows beside the declaration", None
 
     def _op_log_level(self, conn, req):
         conn.min_level = max(0, min(50, int(req.get("level", 20))))

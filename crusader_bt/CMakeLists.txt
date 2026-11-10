@@ -12,11 +12,12 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(behaviortree_cpp REQUIRED)
 find_package(crusader_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 
-set(DEPS rclcpp rclcpp_action std_msgs behaviortree_cpp crusader_msgs ament_index_cpp)
+set(DEPS rclcpp rclcpp_action std_msgs std_srvs behaviortree_cpp crusader_msgs ament_index_cpp)
 
 # NAV2 IS OPTIONAL AT BUILD TIME. NavigateTo and CircleBuoy plan through Nav2's
 # planner_server when nav_mode is shadow or on (docs/nav2_avoidance_spec.md), and
@@ -134,6 +135,10 @@ if(BUILD_TESTING)
   # not a mission at the dock.
   file(GLOB CRSD_TREES ${CMAKE_CURRENT_SOURCE_DIR}/behavior_trees/*.xml)
   add_test(NAME builtin_trees_load COMMAND bt_tree_check ${CRSD_TREES})
+  # The survey templates are not runnable by name (the runner reads only top-level files) but
+  # install with the package and the ground station offers them, so they must load too.
+  file(GLOB CRSD_TEMPLATES ${CMAKE_CURRENT_SOURCE_DIR}/behavior_trees/templates/*.xml)
+  add_test(NAME survey_templates_load COMMAND bt_tree_check ${CRSD_TEMPLATES})
 endif()
 
 ament_package()

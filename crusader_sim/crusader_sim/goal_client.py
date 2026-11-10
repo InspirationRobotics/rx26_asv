@@ -69,13 +69,15 @@ class GoalRun:
 
 
 def run_goal(client, goal, spin, stop, say=print, accept_wait_s=15.0, cancel_wait_s=15.0,
-             clock=time.monotonic, names=None):
+             clock=time.monotonic, names=None, on_accepted=None):
     """Send `goal`, print its feedback, wait for the result; if `stop` is set, CANCEL the
     goal and wait for the server to finish it. Returns a GoalRun.
 
     client  an rclpy ActionClient (send_goal_async -> future of a handle with .accepted,
             .get_result_async(), .cancel_goal_async())
     spin    spin(timeout_s): service the node once, e.g. lambda t: rclpy.spin_once(node, timeout_sec=t)
+    on_accepted  called once the server has accepted the goal. bt_runner holds every goal at its
+            RunStart gate, and with no RoboCommand in the sim the script is the one to release it.
     stop    a threading.Event, set by a signal handler (install_stop) or a test
 
     A stop that arrives before the server has accepted the goal is held: the goal is
@@ -94,6 +96,8 @@ def run_goal(client, goal, spin, stop, say=print, accept_wait_s=15.0, cancel_wai
         say("[operator] goal REJECTED")
         return GoalRun("rejected")
     res_fut = handle.get_result_async()
+    if on_accepted is not None:
+        on_accepted()
     cancelled, t_cancel = False, None
     while not res_fut.done():
         if stop.is_set() and not cancelled:

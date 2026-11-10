@@ -586,5 +586,87 @@ class Problems(Mission):
         self.assertEqual(problems, [])
 
 
+ATTEMPT = node("TaskAttempt", "decorator", port("token", "std::string"))
+
+
+def attempt(token, *children):
+    return {"id": "TaskAttempt", "ports": {"token": token}, "children": list(children)}
+
+
+class Declaration(Mission):
+    """The tiers a run is entered at: root attributes, read back or derived, and the warnings."""
+
+    ALL = {"task1": "advanced", "task2": "none", "task3": "core", "task4": "none"}
+
+    def cat(self, **changes):
+        cat = super().cat(**changes)
+        cat["nodes"] = cat["nodes"] + [ATTEMPT]
+        return cat
+
+    def test_build_writes_the_four_attributes_and_the_boat_still_accepts_it(self):
+        xml, problems = mission_xml.build([gps()], self.cat(), "tour", self.ALL)
+        self.assertIn('declare_task1="advanced" declare_task2="none" declare_task3="core" '
+                      'declare_task4="none"', xml)
+        self.assertEqual(problems, [])
+
+    def test_without_a_declaration_nothing_is_written(self):
+        self.assertNotIn("declare_", mission_xml.build_xml([gps()], CATALOGUE))
+
+    def test_what_was_written_reads_back(self):
+        xml = mission_xml.build_xml([gps()], self.cat(), self.ALL)
+        self.assertEqual(mission_xml.read_declaration(xml, self.cat()), self.ALL)
+
+    def test_a_partial_declaration_fills_the_rest_from_the_blocks_then_none(self):
+        xml = mission_xml.build_xml([sub("Task3Core")], self.cat(), {"task1": "core"})
+        self.assertEqual(mission_xml.read_declaration(xml, self.cat()),
+                         {"task1": "core", "task2": "none", "task3": "core", "task4": "none"})
+
+    def test_a_mission_without_attributes_derives_from_its_task_blocks(self):
+        self.assertEqual(mission_xml.read_declaration(TASK1_ADVANCED_XML, CATALOGUE),
+                         {"task1": "advanced", "task2": "none", "task3": "none", "task4": "none"})
+        xml = self.built([sub("Task3Disruptive")])
+        self.assertEqual(mission_xml.read_declaration(xml)["task3"], "disruptive")   # by its name
+
+    def test_a_bad_tier_word_is_an_error(self):
+        xml, problems = mission_xml.build([gps()], self.cat(), "tour", {"task1": "extreme"})
+        self.assertTrue(any("declare_task1" in p["msg"] and "level" not in p for p in problems))
+        self.refused(xml, "is not a tier", catalogue=self.cat())
+
+    def test_the_declaration_must_name_tasks_one_to_four_with_words(self):
+        for bad in ({"task5": "core"}, {"task1": 3}, ["core"]):
+            with self.assertRaises(mission_xml.BlockError):
+                mission_xml.build_xml([gps()], CATALOGUE, bad)
+
+    def test_a_block_of_another_tier_than_declared_warns_and_does_not_refuse(self):
+        xml, problems = mission_xml.build([sub("Task1Advanced")], self.cat(), "tour",
+                                          {"task1": "core"})
+        warns = [p for p in problems if p.get("level") == "warn"]
+        self.assertEqual(len(warns), 1)
+        self.assertIn("Task 1 is declared core", warns[0]["msg"])
+        self.assertEqual(mission_xml.validate(xml, self.cat(), "tour"), [])
+        self.assertEqual(mission_xml.problems(xml, self.cat(), "tour"), [])
+
+    def test_the_declared_tier_matching_its_block_is_quiet(self):
+        _xml, problems = mission_xml.build([sub("Task1Advanced")], self.cat(), "tour",
+                                           {"task1": "advanced", "task3": "core"})
+        self.assertEqual(problems, [])
+
+    def test_an_attempt_for_a_task_declared_none_warns(self):
+        blocks = [attempt("TASK_INFRA_SURVEY_REPAIR", gps())]
+        xml, problems = mission_xml.build(blocks, self.cat(), "tour", self.ALL)
+        warns = mission_xml.warnings(xml, self.cat())
+        self.assertEqual([p["msg"] for p in problems if p.get("level") == "warn"],
+                         [w["msg"] for w in warns])
+        self.assertEqual(len(warns), 1)
+        self.assertIn("course elements stay off", warns[0]["msg"])
+        self.assertEqual(warns[0]["path"], [0])
+        self.assertEqual(mission_xml.problems(xml, self.cat(), "tour"), [])
+
+    def test_an_attempt_for_a_declared_task_or_with_no_declaration_is_quiet(self):
+        blocks = [attempt("TASK_COORDINATED_LOGISTICS", gps())]
+        self.assertEqual(mission_xml.build(blocks, self.cat(), "tour", self.ALL)[1], [])
+        self.assertEqual(mission_xml.build(blocks, self.cat(), "tour")[1], [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,10 @@ THE CATALOGUE (what mission_xml and the laptop's Mission tab build blocks from):
             known IDs (so a mission naming one validates), not blocks to offer
   builtins  the names a user mission may not take
   user      {name, bytes, mtime} of each uploaded mission
+  templates {name, description, declare} of each survey pattern in <trees_dir>/templates/. They
+            are STARTING POINTS: the runner resolves only top-level files, so a template is never
+            runnable by name and never a builtin; the Mission tab loads one as an unsaved draft
+            (read_template) and the operator saves it under a name of their own.
 
 THE FILES: <user_trees_dir>/<name>.xml. A file replaced or deleted is MOVED, never removed, into
 <user_trees_dir>/.archive/<name>.<YYYYmmdd-HHMMSS>.xml, and a new one is written beside the old and
@@ -28,6 +32,8 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 
+from crusader_groundstation import mission_xml
+
 ARCHIVE = ".archive"
 _KINDS = ("Action", "Condition", "Control", "Decorator")
 _DIRS = {"input_port": "in", "output_port": "out", "inout_port": "inout"}
@@ -36,6 +42,8 @@ _ABSENT = re.compile(r"\(absent\b", re.IGNORECASE)         # the leaves' own mar
 _BLACKBOARD = re.compile(r"\{([^{}]+)\}")
 _REAL, _INT = re.compile(r"[+-]?\d+\.\d+"), re.compile(r"[+-]?\d+")
 _NOT_A_TUNABLE = ("ID", "name", "_autoremap")
+TEMPLATES = "templates"
+_MISSION_COMMENT = re.compile(r"<!--\s*MISSION:\s*(.*?)\s*-->", re.DOTALL)
 
 # Input ports with no default that the leaf still runs without, and the doc does not say "absent".
 # NavigateTo reads `goal` only for target="port" (mission_xml checks that pairing itself);
@@ -143,10 +151,36 @@ def lib_subtrees(trees_dir, nodes):
     return out
 
 
+def templates(trees_dir):
+    """The catalogue's `templates`: {name, description, declare} per file of templates/. A file
+    that is not a mission (unreadable, not XML) is listed with the reason as its description and
+    no declaration, so a broken template shows up instead of vanishing."""
+    out = []
+    for name in stems(os.path.join(trees_dir, TEMPLATES)):
+        xml = read_template(trees_dir, name)
+        try:
+            declare = mission_xml.read_declaration(xml)
+        except ValueError as e:
+            out.append({"name": name, "description": f"unreadable: {e}", "declare": None})
+            continue
+        m = _MISSION_COMMENT.search(xml)
+        out.append({"name": name, "description": m.group(1) if m else "", "declare": declare})
+    return out
+
+
+def read_template(trees_dir, name):
+    """The XML of one template. KeyError unless `name` is in the listing, so it is never a path."""
+    if name not in stems(os.path.join(trees_dir, TEMPLATES)):
+        raise KeyError(name)
+    return _read(os.path.join(trees_dir, TEMPLATES, name + ".xml"))
+
+
 def catalogue(trees_dir, nodes, store):
-    """{nodes, subtrees, builtins, user}: what mission_catalogue answers. `nodes` is parse_models'."""
+    """{nodes, subtrees, builtins, user, templates}: what mission_catalogue answers. `nodes` is
+    parse_models'."""
     return {"nodes": nodes, "subtrees": lib_subtrees(trees_dir, nodes),
-            "builtins": store.builtins(), "user": store.user_entries()}
+            "builtins": store.builtins(), "user": store.user_entries(),
+            "templates": templates(trees_dir)}
 
 
 # ------------------------------------------------------------------------------------ the files

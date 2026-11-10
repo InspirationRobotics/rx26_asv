@@ -8,6 +8,8 @@
 # and prints the tree's running node, then task1_judge's verdict. The run is also written to
 # ~/.cache/crusader_sim/task1_last.log, so the verdict survives the window being
 # closed (not /tmp: WSL wipes /tmp every time the distro starts).
+# bt_runner holds every goal at its RunStart gate; with no RoboCommand here task1_goal calls
+# /crsd/bt_runner/release_run_start once the goal is accepted (logged as a sim release).
 # Ctrl-C cancels the goal and waits for the tree to finish it.
 COURSE="${1:-task1_core}"
 shift || true

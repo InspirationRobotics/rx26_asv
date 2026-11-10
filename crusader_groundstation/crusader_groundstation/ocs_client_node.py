@@ -6,7 +6,12 @@ and the OCS forwards nothing before a declaration, so it is always on.
                   /crsd/robocommand/report (in order, none dropped, numbered and sent again
                   after a reconnect until the OCS receipts it), each as
                   {team_id, vehicle_id, sent_at, [seq,] <kind>: body}
-  in:             OCS commands -> /crsd/ocs_command. THIS NODE NEVER ACTS on one.
+  in:             OCS commands -> /crsd/ocs_command. THIS NODE NEVER ACTS on one. That
+                  includes `ocs_run` (the OCS's state and tiers) and `ocs_directive`
+                  (standby_auto, run_end): gcs_bridge and bt_runner read them there.
+  tiers:          /crsd/ocs_tiers {tiers, mission} from gcs_bridge -> one `ocs_tiers`
+                  control frame (no seq, no receipt, not retried: the operator pressed a
+                  button and sees the OCS's `reply`, so a lost one is pressed again).
                   `ocs_receipt`s (what became of each report) are echoed, not republished.
   echo:           /crsd/ocs_traffic, JSON {dir, kind, body, status, stamp}, for the GCS. A
                   numbered report's items carry `vseq`, its receipts `receipt: true` too.
@@ -43,7 +48,8 @@ from crusader_msgs.msg import Attitude, FcuStatus, LatLonHead, RoboCommandReport
 
 from crusader_groundstation.ocs_link import (DEFAULT_DISCOVERY_PORT, DEFAULT_FALLBACK_HOSTS,
                                              TASK_NONE, MissionTicks, OcsLink, coerce_task,
-                                             fake_report, json_safe, rfc3339, vehicle_state)
+                                             fake_report, json_safe, rfc3339, tiers_frame,
+                                             vehicle_state)
 
 PARAMS = {
     "ocs_host": "auto",                 # or a fixed OCS IP on the TEAM subnet, never a
@@ -96,6 +102,7 @@ class OcsClient(Node):
         self._receipts = deque(maxlen=200)  # ocs_receipts
         self._cmd_pub = self.create_publisher(String, "/crsd/ocs_command", 10)
         self._traffic_pub = self.create_publisher(String, "/crsd/ocs_traffic", 50)
+        self.create_subscription(String, "/crsd/ocs_tiers", self._on_tiers, 10)
         self.create_subscription(RoboCommandReport, "/crsd/robocommand/report",
                                  self._on_report,
                                  QoSProfile(depth=20, reliability=ReliabilityPolicy.RELIABLE))
@@ -163,6 +170,20 @@ class OcsClient(Node):
         self.get_logger().info(f"report {msg.kind} seq {seq} queued for the OCS")
         self._echo("tx", msg.kind, body, "queued" if self.link.connected else
                    "queued: no OCS link yet", vseq=seq)
+
+    def _on_tiers(self, msg):
+        """The operator's tier declaration for the OCS. Checked here as well as in the GCS
+        so a bad request from any publisher is refused with a reason, never half-sent."""
+        frame, error = tiers_frame(msg.data, self.p["vehicle_id"])
+        if error:
+            self.get_logger().error("ocs_tiers refused: " + error)
+            self._echo("tx", "ocs_tiers", msg.data, "refused: " + error)
+            return
+        if self.link.send_control(frame):
+            self.get_logger().info("ocs_tiers queued for the OCS: %s" % frame["ocs_tiers"]["tiers"])
+        else:
+            self.get_logger().warning("ocs_tiers NOT sent: OCS link down")
+            self._echo("tx", "ocs_tiers", frame["ocs_tiers"], "not sent: OCS link down")
 
     def _on_task(self, msg):
         """Accept a task token only if RoboCommand's RxTask enum has it: ParseDict rejects

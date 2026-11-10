@@ -61,6 +61,43 @@ int main()
     chk("... and counts for the old wait too", l.counts(100.0, 0.0));
   }
 
+  std::printf("\n4. the OCS clears the latch\n");
+  {
+    auto dir = [](const std::string & action) {
+        return parseDirective("{\"ocs_directive\": {\"action\": \"" + action +
+               "\", \"declaration_seq\": 7, \"run_id\": 3}}");
+      };
+    chk("standby_auto is a new declaration", dir("standby_auto") == Directive::StandbyAuto);
+    chk("run_end is the end of the run", dir("run_end") == Directive::RunEnd);
+    chk("any other action leaves the latch alone", dir("hold_position") == Directive::None);
+    chk("a longer action is not run_end", dir("run_end_soon") == Directive::None);
+    chk("whitespace around the colon",
+      parseDirective("{\"ocs_directive\":{\"action\" :  \"run_end\"}}") == Directive::RunEnd);
+    chk("an action with no directive key is nothing",
+      parseDirective("{\"action\": \"run_end\"}") == Directive::None);
+    chk("the relayed RunStart is no directive",
+      parseDirective("{\"run_start\": {\"run_id\": 3}}") == Directive::None);
+    chk("an ocs_run snapshot is no directive",
+      parseDirective("{\"ocs_run\": {\"state\": \"RUNNING\", \"run_id\": 3}}") == Directive::None);
+    chk("a directive with no action is nothing", parseDirective("{\"ocs_directive\": {}}") == Directive::None);
+
+    Latch l;
+    l.set(50.0, 3);
+    l.clear();
+    chk("clear() forgets the RunStart", !l.counts(100.0, 3600.0) && !l.have && l.id == -1);
+    l.set(60.0, 4);
+    chk("a RunStart after the clear counts", l.counts(100.0, 3600.0) && l.id == 4);
+  }
+
+  std::printf("\n5. run_start_max_age_s as the runner applies it: counts(now, max_age)\n");
+  {
+    Latch l;
+    l.set(1000.0, 5);
+    chk("an hour-old RunStart counts at max_age 3600", l.counts(4600.0, 3600.0));
+    chk("... one second older does not", !l.counts(4601.0, 3600.0));
+    chk("a RunStart long before START counts while inside the age", l.counts(2800.0, 3600.0));
+  }
+
   std::printf("\n%d checks, %d failed\n", g_checks, g_fails);
   std::printf("%s\n", g_fails == 0 ? "PASS" : "FAIL");
   return g_fails == 0 ? 0 : 1;

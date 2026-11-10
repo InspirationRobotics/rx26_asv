@@ -162,7 +162,7 @@ def main(argv=None):
     stop = install_stop()                   # after rclpy.init(): see goal_client.install_stop
     run = run_goal(op.client, goal, lambda t: rclpy.spin_once(op, timeout_sec=t), stop,
                    say=lambda line: print(line, flush=True),
-                   names=outcome_names(RunMission.Result))
+                   names=outcome_names(RunMission.Result), on_accepted=op.release_run_start)
     if run.status != "result":
         return 1
     r = run.result

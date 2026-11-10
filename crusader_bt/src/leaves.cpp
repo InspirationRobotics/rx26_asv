@@ -412,7 +412,9 @@ private:
 /// Holds station until RoboCommand's RunStart has reached the boat (handbook 3.4.10: position-hold
 /// after switching to autonomous, begin once the run has started). A RunStart that arrived up to
 /// `max_age_s` before this node started still counts, so one that beat the START button is not
-/// lost. FAILURE only after `timeout_s` > 0.
+/// lost. FAILURE only after `timeout_s` > 0. The runner now holds EVERY goal at its own RunStart
+/// gate before the first tick (bt_runner_node execute()), so new missions leave this leaf out;
+/// it stays for saved ones, and SUCCEEDS at once when the gate has opened (ctx run_released).
 class WaitForRunStart : public CrusaderAction
 {
 public:
@@ -455,11 +457,17 @@ private:
   BT::NodeStatus poll()
   {
     double now_s;
+    bool released;
     runstart::Latch latch;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       now_s = ctx_->now_s;
       latch = ctx_->run_start;
+      released = ctx_->run_released;
+    }
+    if (released) {
+      RCLCPP_INFO(log(), "WaitForRunStart: the runner's RunStart gate already opened");
+      return BT::NodeStatus::SUCCESS;
     }
     if (latch.counts(since_s_, maxAgeS())) {
       (void)setOutput("run_id", latch.id);

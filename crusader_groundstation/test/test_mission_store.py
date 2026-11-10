@@ -155,7 +155,7 @@ class Subtrees(Tmp):
     def test_the_catalogue_adds_builtins_and_the_users_missions(self):
         write(os.path.join(self.mine, "mine.xml"), "<root/>")
         cat = mission_store.catalogue(self.trees, self.nodes, self.store)
-        self.assertEqual(sorted(cat), ["builtins", "nodes", "subtrees", "user"])
+        self.assertEqual(sorted(cat), ["builtins", "nodes", "subtrees", "templates", "user"])
         self.assertEqual(cat["builtins"], ["other", "task1_advanced"])
         self.assertEqual([(u["name"], u["bytes"]) for u in cat["user"]], [("mine", 7)])
         self.assertIsInstance(cat["user"][0]["mtime"], float)
@@ -253,6 +253,54 @@ class Files(Tmp):
         self.assertFalse(os.path.exists(self.store.path("mine")))
         self.assertEqual(read(archived), "<root>keep me</root>")
         self.assertRegex(os.path.basename(archived), r"^mine\.\d{8}-\d{6}\.xml$")
+
+
+TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
+<!-- MISSION: A square sweep of the Task 1 course, dragged onto the real gates. -->
+<root BTCPP_format="4" main_tree_to_execute="Main" declare_task1="core" declare_task2="none"
+      declare_task3="none" declare_task4="none">
+  <BehaviorTree ID="Main"><ReactiveSequence><IsAutonomous/><Sequence name="mission">
+    <TaskAttempt token="TASK_SAFE_PASSAGE"><NavigateTo target="fix" lat="1.28" lon="103.85"/>
+    </TaskAttempt></Sequence></ReactiveSequence></BehaviorTree>
+</root>
+"""
+
+
+class Templates(Tmp):
+
+    def test_no_templates_directory_is_an_empty_list(self):
+        self.assertEqual(mission_store.catalogue(self.trees, self.nodes_(), self.store)["templates"], [])
+
+    def nodes_(self):
+        return mission_store.parse_models(MODELS)
+
+    def test_templates_are_listed_with_description_and_declaration(self):
+        write(os.path.join(self.trees, "templates", "square.xml"), TEMPLATE)
+        got = mission_store.catalogue(self.trees, self.nodes_(), self.store)["templates"]
+        self.assertEqual(got, [{
+            "name": "square", "declare": {"task1": "core", "task2": "none", "task3": "none",
+                                          "task4": "none"},
+            "description": "A square sweep of the Task 1 course, dragged onto the real gates."}])
+
+    def test_a_template_is_never_runnable_or_a_builtin(self):
+        write(os.path.join(self.trees, "templates", "square.xml"), TEMPLATE)
+        self.assertNotIn("square", self.store.builtins())
+        self.assertNotIn("square", self.store.runnable())
+        with self.assertRaises(KeyError):
+            self.store.read("square")
+
+    def test_one_template_can_be_read_and_a_path_cannot(self):
+        write(os.path.join(self.trees, "templates", "square.xml"), TEMPLATE)
+        self.assertEqual(mission_store.read_template(self.trees, "square"), TEMPLATE)
+        for bad in ("nope", "../task1_advanced", "templates/square"):
+            with self.assertRaises(KeyError):
+                mission_store.read_template(self.trees, bad)
+
+    def test_a_template_that_is_not_xml_is_listed_with_the_reason(self):
+        write(os.path.join(self.trees, "templates", "broken.xml"), "<root")
+        got = mission_store.templates(self.trees)
+        self.assertEqual((got[0]["name"], got[0]["declare"]), ("broken", None))
+        self.assertIn("unreadable", got[0]["description"])
 
 
 if __name__ == "__main__":

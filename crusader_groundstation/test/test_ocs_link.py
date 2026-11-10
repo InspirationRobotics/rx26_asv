@@ -732,5 +732,137 @@ class MissionRunning(unittest.TestCase):
         self.assertEqual(ours["autonomous_modes"], theirs["autonomous_modes"])
 
 
+TIERS = {"task1": "TIER_ADVANCED", "task2": "TIER_NONE", "task3": "TIER_CORE", "task4": "TIER_NONE"}
+
+
+class TierDeclaration(unittest.TestCase):
+    """The four tier words the OCS accepts, checked before anything is sent."""
+
+    def test_four_valid_tiers_pass_and_are_normalised(self):
+        got, err = ol.check_tiers(dict(TIERS, task2=" tier_core "))
+        self.assertIsNone(err)
+        self.assertEqual(got["task2"], "TIER_CORE")
+
+    def test_every_bad_shape_is_refused_with_a_reason(self):
+        for bad, needle in ((None, "object"), ({"task1": "TIER_CORE"}, "missing task2"),
+                            (dict(TIERS, task3="TIER_UNKNOWN"), "task3"),
+                            (dict(TIERS, task4="core"), "task4"), (dict(TIERS, task1=None), "task1")):
+            with self.subTest(bad=bad):
+                got, err = ol.check_tiers(bad)
+                self.assertIsNone(got)
+                self.assertIn(needle, err)
+
+    def test_the_frame_has_exactly_the_wire_shape(self):
+        frame, err = ol.tiers_frame(json.dumps({"tiers": TIERS, "mission": "survey_all_core"}), "USV1")
+        self.assertIsNone(err)
+        self.assertEqual(list(frame), ["ocs_tiers"])                # not a report: no envelope, no seq
+        body = frame["ocs_tiers"]
+        self.assertEqual((body["vehicle_id"], body["tiers"], body["mission"]),
+                         ("USV1", TIERS, "survey_all_core"))
+        self.assertRegex(body["sent_at"], r"^\d{4}-\d\d-\d\dT[\d:.]+Z$")
+
+    def test_a_blank_mission_is_allowed_and_junk_is_refused(self):
+        self.assertEqual(ol.tiers_frame(json.dumps({"tiers": TIERS}), "USV1")[0]["ocs_tiers"]["mission"], "")
+        for junk in ("not json", "[1]", json.dumps({"tiers": dict(TIERS, task1="x")})):
+            with self.subTest(junk=junk):
+                frame, err = ol.tiers_frame(junk, "USV1")
+                self.assertIsNone(frame)
+                self.assertTrue(err)
+
+    def test_the_node_listens_on_the_topic_the_bridge_publishes(self):
+        with open(NODE, encoding="utf-8") as f:
+            node_src = f.read()
+        with open(os.path.join(os.path.dirname(NODE), "gcs_bridge.py"), encoding="utf-8") as f:
+            bridge_src = f.read()
+        self.assertIn('"/crsd/ocs_tiers", self._on_tiers', node_src)
+        self.assertIn('String, "/crsd/ocs_tiers"', bridge_src)
+        self.assertIn('"/crsd/ocs_command", self._on_ocs_command', bridge_src)
+
+
+class ControlFrames(unittest.TestCase):
+    """send_control: a non-report frame, latest wins, never queued through a drop."""
+
+    def setUp(self):
+        self.srv = Acceptor()
+        self.addCleanup(self.srv.close)
+        self.sent, self.commands = [], []
+        self.link = ol.OcsLink("127.0.0.1", self.srv.port, log=lambda m: None, retry_s=0.05,
+                               on_sent=self.sent.append, on_command=self.commands.append)
+        self.addCleanup(self.link.stop)
+
+    def frame(self, n):
+        return {"ocs_tiers": {"vehicle_id": "USV1", "tiers": TIERS, "mission": "m%d" % n}}
+
+    def test_with_no_link_it_is_refused_and_nothing_is_held(self):
+        self.assertFalse(self.link.send_control(self.frame(1)))
+        self.link.start()
+        self.assertTrue(wait_until(lambda: self.link.connected))
+        time.sleep(0.3)
+        self.assertEqual(self.sent, [])                         # it did not appear on connect
+
+    def test_it_goes_out_once_with_no_seq_and_is_not_a_report(self):
+        self.link.start()
+        self.assertTrue(wait_until(lambda: self.link.connected))
+        self.assertTrue(self.link.send_control(self.frame(1)))
+        self.assertTrue(wait_until(lambda: len(self.sent) == 1))
+        self.assertEqual(self.sent[0], self.frame(1))
+        self.assertEqual(self.link.unreceipted, 0)              # no receipt will come for it
+        conn = self.srv.conns[0]
+        conn.settimeout(2.0)
+        got = ol.FrameReader().feed(conn.recv(4096))
+        self.assertEqual([json.loads(f) for f in got], [self.frame(1)])
+
+    def test_a_newer_one_replaces_one_not_yet_sent(self):
+        self.link._sock = mock.Mock()                              # connected, pump not running
+        self.assertTrue(self.link.send_control(self.frame(1)))
+        self.assertTrue(self.link.send_control(self.frame(2)))
+        self.assertEqual(self.link._control, self.frame(2))
+
+    def test_a_dropped_link_forgets_an_unsent_one(self):
+        self.link._sock = mock.Mock()
+        self.link.send_control(self.frame(1))
+        self.link._close()
+        self.assertIsNone(self.link._control)
+
+    def test_ocs_run_and_ocs_directive_reach_the_node_unchanged(self):
+        """on_command is what the node republishes on /crsd/ocs_command and echoes in the traffic."""
+        self.link.start()
+        self.assertTrue(wait_until(lambda: len(self.srv.conns) == 1))
+        run = {"ocs_run": {"state": "COURSE_RX", "tiers": TIERS, "reply": {"ok": True, "reason": "x"}}}
+        end = {"ocs_directive": {"action": "run_end", "declaration_seq": 7, "run_id": 3,
+                                 "vehicles": ["USV1"]}}
+        for frame in (run, end):
+            self.srv.conns[0].sendall(ol.encode(json.dumps(frame).encode()))
+        self.assertTrue(wait_until(lambda: len(self.commands) == 2))
+        self.assertEqual(self.commands, [run, end])
+
+
+class OcsRunView(unittest.TestCase):
+
+    RUN = {"state": "DECLARED", "tiers": TIERS}
+
+    def test_nothing_heard_is_none_not_a_default(self):
+        self.assertIsNone(ol.ocs_run_view(None, None, 50.0))
+
+    def test_the_snapshot_carries_its_age(self):
+        view = ol.ocs_run_view((self.RUN, 40.0), None, 50.04)
+        self.assertEqual((view["state"], view["age"]), ("DECLARED", 10.0))
+        self.assertNotIn("reply", view)
+
+    def test_the_last_reply_stays_with_its_own_age_after_later_snapshots(self):
+        reply = {"ok": False, "reason": "a run is DECLARED"}
+        view = ol.ocs_run_view((self.RUN, 48.0), (reply, 41.0), 50.0)
+        self.assertEqual((view["reply"], view["reply_age"], view["age"]), (reply, 9.0, 2.0))
+
+    def test_a_snapshot_with_its_own_reply_uses_that(self):
+        body = dict(self.RUN, reply={"ok": True, "reason": "set"})
+        view = ol.ocs_run_view((body, 49.0), (body["reply"], 49.0), 50.0)
+        self.assertEqual((view["reply"]["ok"], view["reply_age"]), (True, 1.0))
+
+    def test_the_snapshot_is_not_mutated(self):
+        ol.ocs_run_view((self.RUN, 1.0), None, 2.0)
+        self.assertNotIn("age", self.RUN)
+
+
 if __name__ == "__main__":
     unittest.main()

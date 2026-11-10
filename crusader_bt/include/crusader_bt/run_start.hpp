@@ -3,9 +3,11 @@
 // ocs_client relays RoboCommand's commands on /crsd/ocs_command as JSON; the run
 // start is `{"run_start": {"run_id": 3, ...}}` (`runStart` / `runId` also accepted).
 // The runner calls parse() on every message and latch.set() on a hit, with the
-// receive time on the clock the leaves read (Context::now_s). WaitForRunStart asks
-// counts(). The latch is NOT reset per goal: a RunStart that beat the START button
-// must still count.
+// receive time on the clock the leaves read (Context::now_s). The runner's RunStart gate (and
+// WaitForRunStart, for old saved missions) ask counts(). The latch is NOT reset per goal: a
+// RunStart that beat the START button must still count. The OCS clears it: a new declaration
+// (`standby_auto`) or the end of the run (`run_end`) means an older RunStart belonged to a run
+// that is over (parseDirective, Latch::clear).
 #ifndef CRUSADER_BT__RUN_START_HPP_
 #define CRUSADER_BT__RUN_START_HPP_
 
@@ -62,6 +64,27 @@ inline bool parse(const std::string & json, int * id)
   return true;
 }
 
+/// What an `ocs_directive` frame asks of the latch. Any other action is None: the OCS may add
+/// directives that have nothing to do with RunStart, and they must leave it alone.
+enum class Directive {None, StandbyAuto, RunEnd};
+
+/// The directive `json` carries: the quoted `"action"` value after the `"ocs_directive"` key.
+inline Directive parseDirective(const std::string & json)
+{
+  const std::size_t d = detail::findQuoted(json, "ocs_directive");
+  if (d == std::string::npos) {return Directive::None;}
+  const std::size_t a = json.find("\"action\"", d);
+  if (a == std::string::npos) {return Directive::None;}
+  std::size_t i = a + 8;
+  while (i < json.size() && (json[i] == ' ' || json[i] == '	')) {++i;}
+  if (i >= json.size() || json[i] != ':') {return Directive::None;}
+  ++i;
+  while (i < json.size() && (json[i] == ' ' || json[i] == '	')) {++i;}
+  if (json.compare(i, 14, "\"standby_auto\"") == 0) {return Directive::StandbyAuto;}
+  if (json.compare(i, 9, "\"run_end\"") == 0) {return Directive::RunEnd;}
+  return Directive::None;
+}
+
 /// The newest RunStart seen. `t_s` is on the clock of Context::now_s.
 struct Latch
 {
@@ -74,6 +97,13 @@ struct Latch
     have = true;
     t_s = now_s;
     id = run_id;
+  }
+
+  /// A new declaration or the end of the run: the RunStart belonged to the one before.
+  void clear()
+  {
+    have = false;
+    id = -1;
   }
 
   /// Received no earlier than `max_age_s` before `since_s` (when the waiting began), so a

@@ -18,7 +18,14 @@ sys.path.insert(0, os.path.join(HERE, "..", "crusader_groundstation", "laptop"))
 import gcs_app  # noqa: E402
 import gcs_wire  # noqa: E402
 import mission_xml  # noqa: E402
-from test_mission_xml import CATALOGUE, TASK1_ADVANCED_XML  # noqa: E402
+from test_mission_xml import CATALOGUE, TASK1_ADVANCED_XML, sub  # noqa: E402
+
+# a survey template as the boat ships it: declared on the root, a TaskAttempt around the waypoints
+TEMPLATE_XML = TASK1_ADVANCED_XML.split("<root")[0] + (
+    '<root BTCPP_format="4" main_tree_to_execute="Main" declare_task1="core" declare_task2="none" '
+    'declare_task3="none" declare_task4="none"><BehaviorTree ID="Main"><ReactiveSequence>'
+    '<IsAutonomous/><Sequence name="mission"><NavigateTo target="fix" lat="1.2806" lon="103.856"/>'
+    "</Sequence></ReactiveSequence></BehaviorTree></root>")
 
 BUILTIN = "task1_advanced"          # a built-in as the boat ships it: includes, its own guard, one task block
 
@@ -77,6 +84,9 @@ class FakeBoat:
                 for i, chunk in enumerate((b"abc", b"def", b"")):
                     send({"t": "file", "id": rid, "seq": i, "last": i == 2}, chunk)
                 send({"t": "result", "id": rid, "ok": True, "msg": "sent"})
+            elif op in ("ocs_tiers", "run_release"):       # the ops the page sends and the bridge serves
+                send({"t": "result", "id": rid, "op": op, "ok": True, "msg": "got " + op,
+                      "data": None})
             elif op.startswith("mission_"):
                 send(dict(self.mission_answer(op, h), t="result", id=rid, op=op))
             elif op == "slow":
@@ -94,6 +104,9 @@ class FakeBoat:
             return ({"ok": True, "msg": "", "data": {"name": name, "xml": xml,
                                                      "builtin": name not in self.user}}
                     if xml else {"ok": False, "msg": f"no mission {name!r}", "data": None})
+        if op == "mission_template":
+            return ({"ok": True, "msg": "", "data": {"name": name, "xml": TEMPLATE_XML}}
+                    if name == "sweep" else {"ok": False, "msg": f"no template {name!r}", "data": None})
         if op == "mission_upload":
             self.user[name] = req["xml"]
             return {"ok": True, "msg": f"{name} saved", "data": None}
@@ -361,6 +374,35 @@ class Missions(unittest.TestCase):
         self.assertEqual(again["data"]["blocks"], [gps()])
         r = self.post("mission_catalogue")
         self.assertEqual([u["name"] for u in r["data"]["user"]], ["tour"])
+
+    def test_the_declaration_rides_the_build_and_the_open(self):
+        declare = {"task1": "advanced", "task2": "none", "task3": "core", "task4": "none"}
+        data = self.built([gps()], name="tour", declare=declare)
+        self.assertIn('declare_task3="core"', data["xml"])
+        self.assertEqual(data["problems"], [])
+        self.post("mission_upload", name="tour", xml=data["xml"])
+        self.assertEqual(self.post("mission_open", name="tour")["data"]["declare"], declare)
+        # a built-in without attributes: derived from its task block
+        self.assertEqual(self.post("mission_open", name=BUILTIN)["data"]["declare"]["task1"],
+                         "advanced")
+
+    def test_a_declaration_that_disagrees_warns_but_the_upload_goes_through(self):
+        data = self.built([sub("Task1Advanced")], name="tour", declare={"task1": "core"})
+        self.assertEqual([p.get("level") for p in data["problems"]], ["warn"])
+        self.assertTrue(self.post("mission_upload", name="tour", xml=data["xml"])["ok"])
+
+    def test_a_template_opens_as_blocks_with_its_declaration(self):
+        r = self.post("mission_template", name="sweep")
+        self.assertTrue(r["ok"], r["msg"])
+        self.assertEqual([b["id"] for b in r["data"]["blocks"]], ["NavigateTo"])
+        self.assertEqual(r["data"]["declare"]["task1"], "core")
+        self.assertFalse(self.post("mission_template", name="nope")["ok"])
+
+    def test_the_ocs_ops_reach_the_boat_untouched(self):
+        for op in ("ocs_tiers", "run_release"):
+            r = self.post(op, tiers={"task1": "TIER_CORE"}, mission="m")
+            self.assertEqual((r["ok"], r["msg"]), (True, "got " + op))
+            self.assertEqual(self.asked(op)[-1].get("mission"), "m")
 
     def test_a_refused_mission_never_reaches_the_boat(self):
         good = self.built([gps()])["xml"]

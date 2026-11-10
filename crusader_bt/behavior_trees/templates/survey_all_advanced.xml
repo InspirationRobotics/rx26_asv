@@ -1,0 +1,56 @@
+<?xml version="1.0"?>
+<!-- MISSION: Survey pattern declaring Tasks 1-4 all at Advanced. -->
+<!--
+  survey_all_advanced.xml - a SURVEY TEMPLATE: declares tiers and drives a six-waypoint lawnmower
+  (about 40 x 30 m) around the venue reference point, one TaskAttempt per declared task, so
+  the heartbeat's current_task names each declared task during part of the pattern (handbook
+  5.3 item 8.3). Declared: T1 advanced, T2 advanced, T3 advanced, T4 advanced.
+
+  NOT RUNNABLE BY NAME: it lives in behavior_trees/templates/, which the runner does not
+  search. Open it from the Mission tab's templates list, drag the waypoints onto the real
+  course, and save it under a name of your own; that copy is the mission.
+
+  There is no WaitForRunStart: bt_runner_node holds every goal at its own RunStart gate. The
+  declare_task1..4 attributes on the root are read by the ground station (none | core |
+  advanced | disruptive); BT.CPP ignores them.
+-->
+<root BTCPP_format="4" main_tree_to_execute="Main" declare_task1="advanced" declare_task2="advanced" declare_task3="advanced" declare_task4="advanced">
+  <BehaviorTree ID="Main">
+    <ReactiveSequence name="guard_band">
+
+      <IsAutonomous/>
+
+      <Sequence name="mission">
+        <TaskAttempt token="TASK_SAFE_PASSAGE">
+          <Sequence name="task1_legs">
+            <NavigateTo target="fix" lat="1.2804643" lon="103.8558203" tolerance="3.0"
+                        resend_m="1.5" avoid="true" exempt="" blocked_timeout_s="15.0"/>
+            <NavigateTo target="fix" lat="1.2804643" lon="103.8561797" tolerance="3.0"
+                        resend_m="1.5" avoid="true" exempt="" blocked_timeout_s="15.0"/>
+          </Sequence>
+        </TaskAttempt>
+        <TaskAttempt token="TASK_INFRA_SURVEY_REPAIR">
+          <Sequence name="task2_legs">
+            <NavigateTo target="fix" lat="1.2806000" lon="103.8561797" tolerance="3.0"
+                        resend_m="1.5" avoid="true" exempt="" blocked_timeout_s="15.0"/>
+            <NavigateTo target="fix" lat="1.2806000" lon="103.8558203" tolerance="3.0"
+                        resend_m="1.5" avoid="true" exempt="" blocked_timeout_s="15.0"/>
+          </Sequence>
+        </TaskAttempt>
+        <TaskAttempt token="TASK_COORDINATED_LOGISTICS">
+          <Sequence name="task3_legs">
+            <NavigateTo target="fix" lat="1.2807357" lon="103.8558203" tolerance="3.0"
+                        resend_m="1.5" avoid="true" exempt="" blocked_timeout_s="15.0"/>
+          </Sequence>
+        </TaskAttempt>
+        <TaskAttempt token="TASK_DYNAMIC_INCIDENT">
+          <Sequence name="task4_legs">
+            <NavigateTo target="fix" lat="1.2807357" lon="103.8561797" tolerance="3.0"
+                        resend_m="1.5" avoid="true" exempt="" blocked_timeout_s="15.0"/>
+          </Sequence>
+        </TaskAttempt>
+      </Sequence>
+
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

@@ -301,6 +301,20 @@ static void waitForRunStartTests()
     chk("... unless max_age_s allows it, and an unbound run_id is no error", r.tick() == OK);
   }
   {
+    // The runner's RunStart gate already took this run's RunStart (or the bench release): an old
+    // saved mission that still has the leaf must not wait for it again.
+    Rig r;
+    r.withPose();
+    r.ctx->now_s = 500.0;
+    r.ctx->run_released = true;
+    r.load("<WaitForRunStart run_id=\"{rid}\"/>");
+    chk("run_released: SUCCESS at once with no RunStart latched", r.tick() == OK);
+    chk("... without holding station", r.setpoints == 0);
+    r.ctx->run_released = false;
+    r.tree.haltTree();
+    chk("run_released false again (next goal): waits as before", r.tick() == RUN);
+  }
+  {
     Rig r;
     r.ctx->now_s = 10.0;
     r.load("<WaitForRunStart timeout_s=\"5.0\"/>");

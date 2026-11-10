@@ -100,6 +100,13 @@ class RunGoal(unittest.TestCase):
         self.assertEqual((out.status, out.cancelled, h.cancels), ("result", False, 0))
         self.assertIn("[result] outcome SUCCESS  ok  (61 s)", lines)
 
+    def test_on_accepted_runs_once_after_acceptance(self):
+        h = Handle()
+        calls = []
+        out, _, _ = self.run_it(h, on_accepted=lambda: calls.append(1),
+                                on_spin=lambda c, n, s: n == 4 and h.res.resolve(result_msg(0)))
+        self.assertEqual((out.status, calls), ("result", [1]))
+
     def test_a_stop_cancels_once_and_waits_for_the_trees_answer(self):
         h = Handle()
         out, _, lines = self.run_it(h, on_spin=lambda c, n, s: n == 3 and s.set())

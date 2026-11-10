@@ -118,6 +118,60 @@ def coerce_task(token):
         "it is set" % (name, sorted(RX_TASKS), TASK_NONE))
 
 
+# ---- tier declaration, as RoboCommand spells it -------------------------------
+#: The four tier words the OCS accepts in an `ocs_tiers` frame. TIER_UNKNOWN is never legal.
+TIER_WORDS = ("TIER_NONE", "TIER_CORE", "TIER_ADVANCED", "TIER_DISRUPTIVE")
+TASK_KEYS = ("task1", "task2", "task3", "task4")
+
+
+def check_tiers(tiers):
+    """(clean {task1..task4: TIER_*}, error_or_None). All four keys must be present and
+    every value one of TIER_WORDS: the OCS refuses a partial declaration, and a made-up
+    default here would set a tier nobody chose."""
+    if not isinstance(tiers, dict):
+        return None, "tiers must be an object with task1..task4"
+    missing = [k for k in TASK_KEYS if k not in tiers]
+    if missing:
+        return None, "tiers missing %s" % ", ".join(missing)
+    clean = {k: str(tiers[k]).strip().upper() for k in TASK_KEYS}
+    bad = {k: v for k, v in clean.items() if v not in TIER_WORDS}
+    if bad:
+        return None, "not a tier word (%s): %s" % (
+            "/".join(TIER_WORDS), ", ".join("%s=%r" % kv for kv in sorted(bad.items())))
+    return clean, None
+
+
+def tiers_frame(request_json, vehicle_id):
+    """(`ocs_tiers` frame or None, error or None) for the {"tiers", "mission"} JSON gcs_bridge
+    publishes on /crsd/ocs_tiers. Exactly the wire shape (no team_id or seq: it is not a report)."""
+    try:
+        req = json.loads(request_json)
+        tiers, error = check_tiers(req.get("tiers"))
+        mission = str(req.get("mission") or "")
+    except (ValueError, AttributeError) as e:
+        return None, "request is not a JSON object (%s)" % e
+    if error:
+        return None, error
+    return {"ocs_tiers": {"vehicle_id": vehicle_id, "tiers": tiers, "mission": mission,
+                          "sent_at": rfc3339()}}, None
+
+
+def ocs_run_view(latest, reply, now):
+    """What the GCS status frame carries as `ocs_run`. `latest` and `reply` are (body, time heard)
+    or None, `now` on the same clock. The newest snapshot with its age in s; the OCS puts `reply`
+    only in the direct answer to an `ocs_tiers`, so the newest one is attached with `reply_age`
+    when the newest snapshot has none. None when no snapshot has been heard: never a default."""
+    if latest is None:
+        return None
+    body, heard = latest
+    view = dict(body, age=round(now - heard, 1))
+    if reply is not None and not isinstance(body.get("reply"), dict):
+        view["reply"] = reply[0]
+    if isinstance(view.get("reply"), dict) and reply is not None:
+        view["reply_age"] = round(now - reply[1], 1)
+    return view
+
+
 # ---- framing (mirror of OCS/rx_bridge/framing.py) ---------------------------
 
 def encode(payload: bytes) -> bytes:
@@ -480,6 +534,7 @@ class OcsLink:
         self._peer: str | None = None          # "host:port" while connected
         self._reader = FrameReader()
         self._pending: dict | None = None      # the latest-wins heartbeat slot
+        self._control: dict | None = None      # the latest-wins control-frame slot
         self._reports: deque = deque(maxlen=REPORT_QUEUE)
         self._unreceipted: dict = {}           # own seq -> report, until a final receipt
         self._next_seq = _first_seq()
@@ -499,6 +554,17 @@ class OcsLink:
         docstring on why this must not be a queue."""
         with self._tx_lock:
             self._pending = report
+
+    def send_control(self, frame: dict) -> bool:
+        """Send one non-report frame (an `ocs_tiers`): no seq, no receipt, never retried,
+        and a newer one replaces one not yet sent. Refused (False) while the link is down:
+        a request the operator made minutes ago must not arrive after they changed their
+        mind, so there is no queue to hold it through a drop."""
+        with self._tx_lock:
+            if self._sock is None:
+                return False
+            self._control = frame
+        return True
 
     def send_report(self, report: dict) -> int:
         """Queue one task report; reports go out in order, none replaced. It goes out
@@ -684,6 +750,9 @@ class OcsLink:
             frames = list(self._reports)
             self._reports.clear()
             heartbeat, self._pending = self._pending, None
+            control, self._control = self._control, None
+        if control is not None:
+            frames.append(control)
         if heartbeat is not None:
             frames.append(heartbeat)
         for i, report in enumerate(frames):
@@ -699,7 +768,7 @@ class OcsLink:
                 self.log("OCS link: send failed -- %s" % exc)
                 with self._tx_lock:      # unsent task reports wait for the next link
                     self._reports.extendleft(reversed(
-                        [r for r in frames[i:] if r is not heartbeat]))
+                        [r for r in frames[i:] if r is not heartbeat and r is not control]))
                 return False
             self._sent += 1
             if self.on_sent is not None:
@@ -746,6 +815,8 @@ class OcsLink:
 
     def _close(self) -> None:
         self._peer = None
+        with self._tx_lock:
+            self._control = None        # send_control's promise: never held through a drop
         sock, self._sock = self._sock, None
         if sock is None:
             return

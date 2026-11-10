@@ -95,7 +95,11 @@ button { cursor: pointer; padding: 4px 10px; border-radius: 4px; border: 1px sol
          background: var(--btn); color: var(--fg); }
 button.primary { background: var(--primary-bg); color: var(--primary-fg); border-color: var(--primary-bg); }
 button.danger { background: var(--danger-bg); color: var(--danger-fg); border-color: var(--danger-bg); }
+button.orange { background: #d9730d; color: #fff; border-color: #d9730d; font-weight: 600; }
 button:disabled { opacity: 0.45; cursor: default; }
+#run-gate { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 6px 10px;
+            background: var(--card); border-bottom: 3px solid #d9730d; }
+#run-gate[hidden] { display: none; }
 input, select, textarea { background: var(--field); color: var(--fg); border: 1px solid var(--line);
                           border-radius: 4px; padding: 3px 5px; }
 input.num { width: 7em; }
@@ -175,6 +179,12 @@ body.ed-dragging { cursor: grabbing; user-select: none; }
   <button id="theme"></button>
   <div id="strip"></div>
 </header>
+<div id="run-gate" hidden>
+  <b id="gate-text"></b>
+  <button class="orange" id="gate-release"
+    title="Bench or lake only: starts the held mission without RoboCommand's RunStart">Release without RoboCommand (bench)</button>
+  <span id="gate-answer" class="small"></span>
+</div>
 <nav id="tabs"></nav>
 <main>
 <section id="t-map">
@@ -243,7 +253,19 @@ body.ed-dragging { cursor: grabbing; user-select: none; }
             <button id="ed-open-go">Open</button>
             <button id="ed-insert" title="inline it as a group of blocks, where the next block would go">Insert</button>
             <button class="danger" id="ed-delete">Delete</button>
+            <span class="ed-sep"></span>
+            <span id="ed-tpl-wrap" hidden>
+              <select id="ed-tpl" aria-label="survey templates"></select>
+              <button id="ed-tpl-go" title="a pattern of waypoints inside the declared tasks, placed on the boat: then drag the waypoints onto the course and save it under a name">New from template</button>
+              <span id="ed-tpl-desc" class="small muted"></span>
+            </span>
           </div>
+          <div class="ed-bar" id="ed-decl">
+            <b title="Which tier of each task this run is declared at. Saved with the mission; the OCS declares it to RoboCommand.">Declaration</b>
+            <span id="ed-decl-sel"></span>
+            <button id="ed-tiers-send" title="hand these four tiers to the OCS, through the boat's link to it">Send tiers to OCS</button>
+          </div>
+          <div id="ed-ocs" class="small" style="margin-bottom: 8px"></div>
           <div class="ed-bar">
             <button id="ed-wp">Add waypoints on map</button>
             <button id="ed-undo">Undo</button><button id="ed-redo">Redo</button>
@@ -255,8 +277,6 @@ body.ed-dragging { cursor: grabbing; user-select: none; }
               spellcheck="false"><div id="ed-pal-list"></div></div>
             <div>
               <div id="ed-problems"></div>
-              <div id="ed-hint" class="small muted" hidden>A competition run usually begins with WaitForRunStart,
-                which holds the mission until the operators send GO. <button id="ed-hint-add">Start with it</button></div>
               <div id="ed-work"><div id="ed-root" class="blist"></div></div>
               <details><summary class="muted small">the XML the boat would get</summary>
                 <pre id="ed-xml" class="mono"></pre></details>
@@ -449,7 +469,7 @@ function setLink(f) { G.link = f; G.linkAt = performance.now(); strip(); }
 const handlers = {
   link: setLink,
   hello(f) { G.hello = f; },
-  state(f) { G.state = f; G.stateAt = performance.now(); CrsdMap.update("state", f); strip(); system(); },
+  state(f) { G.state = f; G.stateAt = performance.now(); CrsdMap.update("state", f); strip(); system(); CrsdEditor.status(); },
   targets(f) { CrsdMap.update("targets", f); },
   plan(f) { G.plan = f; CrsdMap.update("plan", f); planInfo(); },
   path(f) { CrsdMap.update("path", f); },
@@ -610,6 +630,8 @@ function posTile(b) {
 }
 function missionTile(m) {
   if (!m) return null;
+  if (m.state === "WAITING_RUN_START")
+    return ["warn", m.name, "holding for RunStart", m.warning || "waiting for RoboCommand's RunStart via the OCS"];
   return m.state === "RUNNING" ? [m.warning ? "warn" : "ok", m.name, m.running_node || "", m.warning || "bt_runner is running a mission"]
                                : ["info", "idle", m.last ? `${m.last.name} ${m.last.outcome}` : "", "bt_runner"];
 }
@@ -636,6 +658,7 @@ function strip() {
   const age = stateAge(), L = G.link, s = G.state || {};
   linkTile(age);
   ocsTile();
+  gate(age);
   const live = !!(L && L.up && age != null && age <= AGE_BAD_S);
   const why = !L ? "no link yet" : !L.up ? "link down" : age == null ? "no state yet" : `state ${age.toFixed(0)} s old`;
   for (const [id, label, build] of TILES) {
@@ -759,7 +782,29 @@ async function loadMissions(pick) {             // pick: the name to select; els
   $("m-name").innerHTML = '<option value="">choose a mission</option>' + r.data.names.map(n => `<option>${esc(n)}</option>`).join("");
   $("m-name").value = r.data.names.includes(keep) ? keep : "";
 }
-CrsdEditor.init({ask, toast, esc, stored: name => loadMissions(name)});
+CrsdEditor.init({ask, toast, esc, stored: name => loadMissions(name),
+                 boat: () => (G.state || {}).boat, ocsRun: () => (G.state || {}).ocs_run,
+                 ocsLinkUp: () => (G.ocsLink && sinceS(G.ocsLinkAt) <= OCS_LINK_STALE_S ? G.ocsLink.connected : null)});
+// Every RunMission goal is held by bt_runner_node until RoboCommand's RunStart reaches the boat
+// through the OCS, so this banner is on every tab: a mission started from anywhere waits here.
+function gate(age) {
+  const m = (G.state || {}).mission, live = age != null && age <= AGE_BAD_S;
+  const waiting = !!m && m.state === "WAITING_RUN_START";
+  $("run-gate").hidden = !waiting;
+  if (!waiting) return;
+  $("gate-text").textContent = `${m.name || "mission"} holding — waiting for RoboCommand's RunStart via the OCS ` +
+    (m.waiting_s == null ? "" : `(${Math.round(m.waiting_s)} s)`) + (live ? "" : ` [boat state ${age == null ? "unknown" : age.toFixed(0) + " s old"}]`);
+}
+$("gate-release").onclick = async () => {
+  const m = (G.state || {}).mission || {};
+  if (!confirm(`Release ${m.name || "the held mission"} WITHOUT RoboCommand's RunStart?
+
+` +
+               "For the bench or the lake only. It starts the mission now; the boat logs that it was released by hand.")) return;
+  const r = await req("run_release");
+  $("gate-answer").textContent = `${r.ok ? "released" : "not released"}: ${r.msg || ""}`;
+  $("gate-answer").className = "small " + (r.ok ? "ok" : "bad");
+};
 $("m-start").onclick = () => {
   const name = $("m-name").value;
   if (!name) return toast("choose a mission to run first", false);
@@ -770,6 +815,14 @@ $("m-start").onclick = () => {
     if (e) return toast("approach: " + e, false);
     args.approach = [+la, +lo];
   }
+  const diff = CrsdEditor.tierMismatch();      // null while the OCS's tiers are unknown
+  if (!confirm(`Start ${name}?
+
+The boat will hold position until RoboCommand's RunStart arrives through the OCS.` +
+               (diff ? `
+
+WARNING: ${diff}` : "")))
+    return;
   req("run_mission", args);
 };
 // Task 3: the dock heading, on bt_runner_node (dock_heading_deg; < 0 = not set)
@@ -808,7 +861,9 @@ function tree() {
   const t = G.tree || {};
   const last = t.last ? `last: <b>${esc(t.last.name)}</b> ${esc(t.last.outcome)} — ${esc(t.last.detail)} (${fmt(t.last.elapsed_s, 0)} s)` : "";
   $("m-state").innerHTML = !t.ok ? '<span class="warn">no /crsd/bt_status: is bt_runner_node up?</span>' :
-    t.state === "RUNNING"
+    t.state === "WAITING_RUN_START"
+      ? `<b>HOLDING ${esc(t.name)}</b> for RoboCommand's RunStart ${fmt(t.waiting_s, 0)} s`
+      : t.state === "RUNNING"
       ? `<b>RUNNING ${esc(t.name)}</b> ${fmt(t.elapsed_s, 0)} s · node <b>${esc(t.running_node)}</b> · task ${esc(t.current_task)}` +
         (t.warning ? `<br><b class="warn">${esc(t.warning)}</b>` : "")
       : `idle. ${last}`;

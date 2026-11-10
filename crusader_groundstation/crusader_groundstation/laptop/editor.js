@@ -4,6 +4,10 @@
 // (mission_build) and the reasons it is refused come back from mission_xml, drawn on the block
 // they are about. Save sends the checked XML to the boat (mission_upload).
 // The GPS waypoints of the draft are shown on the map (CrsdMap.setDraft), numbered in run order.
+// The DECLARATION row is the tier chosen for each task for this run: it is saved on the mission
+// (mission_build's `declare`), sent to the OCS on request (op ocs_tiers) and compared with what the
+// OCS says it will declare (status.ocs_run). Until the operator touches it, it follows the draft's
+// task blocks; a mission that is opened or a template brings its own and keeps it.
 "use strict";
 const CrsdEditor = (() => {
   const $ = id => document.getElementById(id);
@@ -12,13 +16,18 @@ const CrsdEditor = (() => {
   const TASKS = {1: "Task 1 Safe Passage", 2: "Task 2 Survey and Repair", 3: "Task 3 Logistics",
                  4: "Task 4 Incident Response"};
   const TIERS = ["core", "advanced", "disruptive"];
+  const DECL_TIERS = ["none"].concat(TIERS);        // what a task can be declared at
+  const TASK_KEYS = ["task1", "task2", "task3", "task4"];
+  const HIDDEN_BLOCKS = ["WaitForRunStart"];        // the runner always gates now; old missions still load and run
+  const POSE_FRESH_S = 5, OCS_OLD_S = 120;
   const GROUPS = [["control", "Controls"], ["decorator", "Decorators"], ["action", "Actions"],
                   ["condition", "Conditions"]];
   const DRAG_PX = 4, VALIDATE_MS = 350, UNDO_MAX = 60, SCROLL_PX = 28;
 
   // blocks: {uid, id, name, subtree, ports: {name: text}, children}; uid is this page's own handle
+  const noTiers = () => ({task1: "none", task2: "none", task3: "none", task4: "none"});
   const E = {blocks: [], sel: null, name: "", cat: null, why: "", problems: [], xml: "", dirty: false,
-             undo: [], redo: [], rev: 0, gps: new Map()};
+             undo: [], redo: [], rev: 0, gps: new Map(), declare: noTiers(), declTouched: false};
   const byUid = new Map();                          // uid -> block, rebuilt by every render
   let deps = null, nextUid = 1, timer = null, drag = null, pre = null;
 
@@ -75,14 +84,24 @@ const CrsdEditor = (() => {
   }
 
   // ---- changes --------------------------------------------------------------
-  const snapshot = () => JSON.stringify({name: E.name, blocks: E.blocks.map(plain)});
+  const snapshot = () => JSON.stringify({name: E.name, blocks: E.blocks.map(plain), declare: E.declare,
+                                         touched: E.declTouched});
   function remember(before) {
     E.undo.push(before || snapshot());
     if (E.undo.length > UNDO_MAX) E.undo.shift();
     E.redo = [];
   }
+  function blockTiers() {                           // the tier of each task's block in the draft, else none
+    const out = noTiers();
+    for (const {block} of walk(E.blocks)) {
+      const spec = block.subtree && specOf(block);
+      if (isTask(spec) && out["task" + spec.task] !== undefined) out["task" + spec.task] = spec.tier;
+    }
+    return out;
+  }
   function changed(structural) {                    // after any edit; structural ones redraw the blocks
     E.dirty = true; E.rev++;
+    if (!E.declTouched) E.declare = blockTiers();
     syncDraft();
     if (structural) render(); else paintHeads();
     clearTimeout(timer);
@@ -93,15 +112,17 @@ const CrsdEditor = (() => {
   function restore(json) {
     const s = JSON.parse(json);
     E.blocks = s.blocks.map(adopt); E.sel = null;
+    E.declare = s.declare || noTiers(); E.declTouched = !!s.touched;
     setName(s.name);
     changed(true);
   }
   function undo() { if (E.undo.length) { E.redo.push(snapshot()); restore(E.undo.pop()); } }
   function redo() { if (E.redo.length) { E.undo.push(snapshot()); restore(E.redo.pop()); } }
   function setName(name) { E.name = name; $("ed-name").value = name; }
-  function load(blocks, name) {                     // the draft becomes these blocks: undoable, and nothing unsaved
+  function load(blocks, name, declare) {            // the draft becomes these blocks: undoable, and nothing unsaved
     remember();
     E.blocks = blocks; E.sel = null;
+    E.declare = declare ? Object.assign(noTiers(), declare) : noTiers(); E.declTouched = !!declare;
     setName(name);
     changed(true);
     E.dirty = false;
@@ -215,8 +236,7 @@ const CrsdEditor = (() => {
     byUid.clear();
     for (const w of walk(E.blocks)) byUid.set(w.block.uid, w.block);
     $("ed-root").innerHTML = E.blocks.map(blockHtml).join("");
-    paintProblems(); paintTiers();
-    $("ed-hint").hidden = !!E.blocks.length || !(E.cat && E.cat.nodes.has("WaitForRunStart"));    // a suggestion only
+    paintProblems(); paintTiers(); paintDecl();
     paintHistory();
   }
   function paintHeads() {                           // the titles and summaries, without touching the fields
@@ -225,7 +245,7 @@ const CrsdEditor = (() => {
       el.querySelector(":scope > .bh .bt").textContent = title(b);
       el.querySelector(":scope > .bh .bsum").textContent = summary(b);
     }
-    paintTiers();
+    paintTiers(); paintDecl();
     paintHistory();
   }
   function paintProblems() {                        // each reason on its block; the rest above the blocks
@@ -236,16 +256,18 @@ const CrsdEditor = (() => {
     const general = [];
     for (const p of E.problems) {
       const b = p.path && atPath(p.path), el = b && $("ed-root").querySelector(`.blk[data-uid="${b.uid}"]`);
-      if (!el) { general.push(p.msg); continue; }
-      el.classList.add("bad");
+      if (!el) { general.push(p); continue; }
+      if (!isWarn(p)) el.classList.add("bad");
       const line = document.createElement("div");
       line.textContent = p.msg.replace(/^.*?: /, "");             // "mission > a[1] > b[2]: " is the block itself
+      if (isWarn(p)) line.className = "warn";
       el.querySelector(":scope > .bp").appendChild(line);
     }
-    $("ed-problems").innerHTML = general.map(m => `<div class="bad">${esc(m)}</div>`).join("");
-    const n = E.problems.length, st = $("ed-status");
-    st.className = "small " + (n ? "bad" : "muted");
-    st.textContent = E.why ? E.why : n ? `${n} problem${n > 1 ? "s" : ""}` : E.blocks.length ? "no problems" : "";
+    $("ed-problems").innerHTML = general.map(p => `<div class="${isWarn(p) ? "warn" : "bad"}">${esc(p.msg)}</div>`).join("");
+    const n = errors(E.problems).length, w = E.problems.length - n, st = $("ed-status");
+    const said = [n ? `${n} problem${n > 1 ? "s" : ""}` : "", w ? `${w} warning${w > 1 ? "s" : ""}` : ""].filter(Boolean).join(", ");
+    st.className = "small " + (n ? "bad" : w ? "warn" : "muted");
+    st.textContent = E.why ? E.why : said || (E.blocks.length ? "no problems" : "");
   }
   function paintTiers() {                           // a task's other tiers go grey once one is used
     const used = new Map();
@@ -277,7 +299,7 @@ const CrsdEditor = (() => {
         .map(s => item("task", `task:${s.id}`, s.tier, `${s.id}: ${portNames(s)}`,
                        ` data-task="${esc(s.task)}" data-tier="${esc(s.tier)}"`, `${TASKS[task] || "Task " + task}, ${s.tier}`)));
     for (const [kind, name] of GROUPS)
-      h += group(name, d.nodes.filter(n => n.kind === kind).sort((a, b) => a.id.localeCompare(b.id))
+      h += group(name, d.nodes.filter(n => n.kind === kind && !HIDDEN_BLOCKS.includes(n.id)).sort((a, b) => a.id.localeCompare(b.id))
         .map(n => item(kind, `node:${n.id}`, n.id, `${kind}: ${portNames(n)}`)));
     return h || '<span class="muted small">nothing matches</span>';
   }
@@ -289,6 +311,104 @@ const CrsdEditor = (() => {
     $("ed-open").innerHTML = html;
     if (keep) $("ed-open").value = keep;
   }
+  const templates = () => (E.cat && E.cat.data.templates) || [];
+  function templateOptions() {
+    const keep = $("ed-tpl").value;
+    $("ed-tpl").innerHTML = templates().map(t => `<option value="${esc(t.name)}">${esc(t.name)}</option>`).join("");
+    if (templates().some(t => t.name === keep)) $("ed-tpl").value = keep;
+    $("ed-tpl-wrap").hidden = !templates().length;
+    paintTemplateNote();
+  }
+  function paintTemplateNote() {
+    const t = templates().find(x => x.name === $("ed-tpl").value);
+    $("ed-tpl-desc").textContent = t ? t.description : "";
+  }
+  // Shifts every GPS waypoint by one offset so the pattern's centroid lands on the boat, keeping its shape.
+  function centreOn(blocks, lat, lon) {
+    const pts = [];
+    for (const {block} of walk(blocks)) { const p = gpsPoint(block); if (p) pts.push([block, p]); }
+    if (!pts.length) return 0;
+    const c = pts.reduce((a, [, p]) => [a[0] + p.lat / pts.length, a[1] + p.lon / pts.length], [0, 0]);
+    for (const [block, p] of pts) {
+      block.ports.lat = (p.lat + lat - c[0]).toFixed(7);
+      block.ports.lon = (p.lon + lon - c[1]).toFixed(7);
+    }
+    return pts.length;
+  }
+  async function fromTemplate() {                   // an unsaved draft: the operator drags the waypoints, then names and saves it
+    const name = $("ed-tpl").value;
+    if (!name) return deps.toast("no survey template to start from", false);
+    if (E.dirty && E.blocks.length && !confirm("Replace the blocks being edited?")) return;
+    const r = await deps.ask("mission_template", {name});
+    if (!r.ok) return deps.toast(`${name}: ${r.msg}`, false);
+    const blocks = r.data.blocks.map(adopt), boat = deps.boat() || {};
+    const fresh = Number.isFinite(boat.lat) && Number.isFinite(boat.lon) && boat.age != null && boat.age <= POSE_FRESH_S;
+    const moved = fresh ? centreOn(blocks, boat.lat, boat.lon) : 0;
+    load(blocks, "", r.data.declare);
+    E.dirty = true;                                 // a draft nobody has saved
+    deps.toast(fresh ? `${name}: ${moved} waypoint(s) centred on the boat; drag them onto the course, then name and save it`
+                     : `${name}: the boat's position is not fresh, so the waypoints stay where the template put them (near the venue); drag them onto the course, then name and save it`,
+               fresh);
+  }
+
+  // ---- the declaration ------------------------------------------------------
+  const tierWord = w => String(w == null ? "" : w).replace(/^TIER_/, "").toLowerCase();     // TIER_CORE -> core
+  const byTask = f => Object.fromEntries(TASK_KEYS.map(k => [k, f(k)]));
+  const wireTiers = () => byTask(k => "TIER_" + E.declare[k].toUpperCase());
+  const words = wire => byTask(k => tierWord(wire[k]));            // the OCS's {task1: TIER_X} as {task1: x}
+  function buildDecl() {
+    $("ed-decl-sel").innerHTML = TASK_KEYS.map((k, i) =>
+      ` <label>Task ${i + 1} <select data-decl="${k}">${DECL_TIERS.map(t => `<option>${t}</option>`).join("")}</select></label>`).join("");
+  }
+  function paintDecl() {
+    for (const el of $("ed-decl-sel").querySelectorAll("select")) el.value = E.declare[el.dataset.decl];
+    paintOcs();
+  }
+  function setDecl(task, tier) {
+    remember();
+    E.declare[task] = tier; E.declTouched = true;
+    changed(false);
+  }
+  // The OCS's own word (status.ocs_run) beside the row. It speaks on changes, not on a timer, so its age is
+  // shown and an old one is called old; with no ocs_run, or the OCS link down, nothing is claimed.
+  function ocsTiers() {
+    const r = deps.ocsRun && deps.ocsRun();
+    return r && r.tiers ? words(r.tiers) : null;
+  }
+  const label = tiers => TASK_KEYS.map((k, i) => `T${i + 1} ${tiers[k] || "?"}`).join(", ");
+  function tierDiffs(theirs) {
+    return TASK_KEYS.map((k, i) => theirs[k] !== E.declare[k] ? `Task ${i + 1}: OCS ${theirs[k] || "?"}, row ${E.declare[k]}` : "").filter(Boolean);
+  }
+  function mismatch() {                             // for the Start dialog: null while the OCS's tiers are unknown
+    const theirs = ocsTiers(), up = deps.ocsLinkUp ? deps.ocsLinkUp() : null;
+    if (!theirs || up === false) return null;
+    const d = tierDiffs(theirs);
+    return d.length ? `the OCS will declare different tiers than the Declaration row (${d.join("; ")}). The OCS's are what RoboCommand gets: send the row first if it is the one you want.` : null;
+  }
+  function paintOcs() {
+    const box = $("ed-ocs"), r = deps.ocsRun && deps.ocsRun(), up = deps.ocsLinkUp ? deps.ocsLinkUp() : null;
+    const age = r && r.age != null ? Math.round(r.age) : null;
+    if (!r || up === false) {
+      box.className = "small warn";
+      box.textContent = !r ? "OCS not heard: no run state received yet, so nothing is known about what it will declare."
+                           : `OCS not heard: the boat's link to it is down (its last word was ${age} s ago: ${r.state}).`;
+      return;
+    }
+    const theirs = ocsTiers(), diffs = theirs ? tierDiffs(theirs) : ["no tiers in its message"];
+    const old = age != null && age > OCS_OLD_S;
+    const reply = r.reply ? ` · reply to our last request${r.reply_age != null ? ` (${Math.round(r.reply_age)} s ago)` : ""}: ` +
+      `<b class="${r.reply.ok ? "ok" : "bad"}">${r.reply.ok ? "accepted" : "refused"}</b> ${esc(r.reply.reason || "")}` : "";
+    const cur = r.declared_tiers ? ` · last declaration: ${esc(label(words(r.declared_tiers)))}` : "";
+    box.className = "small";
+    box.innerHTML = `OCS <b>${esc(r.state)}</b> (heard ${age} s ago${old ? " — it only speaks on changes, so this may be old" : ""})` +
+      (theirs ? ` · will declare ${esc(label(theirs))}${r.tiers_source ? ` (from ${esc(r.tiers_source)})` : ""}` : "") + cur + reply +
+      ` · ${diffs.length ? `<b class="bad">&#10007; differs from the row: ${esc(diffs.join("; "))}</b>` : '<b class="ok">&#10003; matches the row</b>'}`;
+  }
+  async function sendTiers() {
+    const r = await deps.ask("ocs_tiers", {tiers: wireTiers(), mission: E.name.trim()});
+    deps.toast(`ocs_tiers: ${r.msg || (r.ok ? "sent" : "failed")}`, !!r.ok);
+  }
+
   async function loadCatalogue() {
     const r = await deps.ask("mission_catalogue");
     const d = r.ok && r.data;
@@ -300,6 +420,7 @@ const CrsdEditor = (() => {
     if (!d) return;
     $("ed-pal-list").innerHTML = paletteHtml();
     missionOptions($("ed-open").value);
+    templateOptions();
     syncDraft(); render(); validate();
   }
 
@@ -308,7 +429,7 @@ const CrsdEditor = (() => {
     if (!E.cat) return null;
     const rev = E.rev;
     if (!force && !E.blocks.length) { E.problems = []; E.xml = ""; E.why = ""; $("ed-xml").textContent = ""; paintProblems(); return null; }
-    const r = await deps.ask("mission_build", {blocks: E.blocks.map(plain), name: E.name.trim() || undefined});
+    const r = await deps.ask("mission_build", {blocks: E.blocks.map(plain), name: E.name.trim() || undefined, declare: E.declare});
     if (rev !== E.rev) return null;                 // edited meanwhile: its own check is on the way
     E.why = r.ok ? "" : r.msg || "no answer";
     E.problems = r.ok ? r.data.problems : [];
@@ -317,6 +438,8 @@ const CrsdEditor = (() => {
     paintProblems();
     return r;
   }
+  const isWarn = p => p.level === "warn";          // a warning never stops a save
+  const errors = list => list.filter(p => !isWarn(p));
   const stored = () => ((E.cat && E.cat.data.user) || []).map(u => u.name);
   const said = (name, r, ok) => deps.toast(`${name}: ${r.msg || (r.ok ? ok : "failed")}`, !!r.ok);
   async function restocked(pick) { await loadCatalogue(); deps.stored(pick); }     // the stored missions changed
@@ -326,7 +449,8 @@ const CrsdEditor = (() => {
     const r = await validate(true);
     if (!r) return deps.toast("the mission changed while it was being checked: save again", false);
     if (!r.ok) return deps.toast(r.msg, false);
-    if (r.data.problems.length) return deps.toast(`not saved: ${r.data.problems.length} problem(s), shown on the blocks`, false);
+    const bad = errors(r.data.problems).length;
+    if (bad) return deps.toast(`not saved: ${bad} problem(s), shown on the blocks`, false);
     if (stored().includes(name) && !confirm(`Replace the saved mission ${name}?`)) return;
     const up = await deps.ask("mission_upload", {name, xml: r.data.xml});
     said(name, up, "saved");
@@ -345,7 +469,7 @@ const CrsdEditor = (() => {
     if (!r.ok) return deps.toast(`${name}: ${r.msg}`, false);
     const blocks = r.data.blocks.map(adopt);
     if (insert) edit(() => { const [list, at] = target(); list.splice(at, 0, ...blocks); E.sel = blocks[0] && blocks[0].uid; });
-    else load(blocks, r.data.builtin ? `${name}_copy` : name);      // a built-in cannot be overwritten
+    else load(blocks, r.data.builtin ? `${name}_copy` : name, r.data.declare);      // a built-in cannot be overwritten
     if (r.data.notes.length) deps.toast(`${name}: ${r.data.notes.join("; ")}`);
   }
   async function erase() {
@@ -365,7 +489,7 @@ const CrsdEditor = (() => {
   // ---- the draft in this browser: a convenience, the editor works without it
   function persist() {
     try {
-      if (E.blocks.length || E.name) localStorage.setItem(KEY, JSON.stringify({name: E.name, blocks: E.blocks.map(plain)}));
+      if (E.blocks.length || E.name) localStorage.setItem(KEY, JSON.stringify({name: E.name, blocks: E.blocks.map(plain), declare: E.declare, touched: E.declTouched}));
       else localStorage.removeItem(KEY);
     } catch (e) { /* private window or blocked storage */ }
   }
@@ -375,6 +499,7 @@ const CrsdEditor = (() => {
       if (!d || !Array.isArray(d.blocks)) return;
       const blocks = d.blocks.map(adopt);           // before assigning: a bad draft changes nothing
       E.blocks = blocks; setName(String(d.name || "")); E.dirty = blocks.length > 0;
+      if (d.declare) { E.declare = Object.assign(noTiers(), d.declare); E.declTouched = !!d.touched; }
     } catch (e) { /* unreadable draft: start empty */ }
   }
 
@@ -491,7 +616,10 @@ const CrsdEditor = (() => {
     $("ed-delete").onclick = erase;
     $("ed-undo").onclick = undo; $("ed-redo").onclick = redo; $("ed-clear").onclick = clear;
     $("ed-retry").onclick = loadCatalogue;
-    $("ed-hint-add").onclick = () => place("node:WaitForRunStart", E.blocks, 0);
+    $("ed-tpl-go").onclick = fromTemplate;
+    $("ed-tpl").onchange = paintTemplateNote;
+    $("ed-tiers-send").onclick = sendTiers;
+    $("ed-decl-sel").addEventListener("change", e => { if (e.target.dataset.decl) setDecl(e.target.dataset.decl, e.target.value); });
     $("ed-wp").onclick = () => {
       if (CrsdMap.clickMode() === "waypoints") return CrsdMap.setClickMode("off");
       if (!CrsdMap.hasOrigin()) return deps.toast("the map has no position yet: type the first waypoint's lat/lon, then click", false);
@@ -514,6 +642,7 @@ const CrsdEditor = (() => {
   // deps: {ask(op, fields) -> result, toast(msg, ok), esc(text), stored(name?) once the stored missions changed}
   function init(d) {
     deps = d;
+    buildDecl();
     wire();
     restoreDraft();
     render();
@@ -522,5 +651,5 @@ const CrsdEditor = (() => {
   function leave() {
     if (["pick", "waypoints"].includes(CrsdMap.clickMode())) CrsdMap.setClickMode("off");
   }
-  return {init, enter, leave};
+  return {init, enter, leave, status: paintOcs, tierMismatch: mismatch};
 })();

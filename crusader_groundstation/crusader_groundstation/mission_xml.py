@@ -27,6 +27,15 @@ ReactiveSequence re-ticks its finished children, so blocks side by side under it
 again. There is no <include>: a task block is <SubTree ID="Task1Advanced" _autoremap="true" .../>
 and the boat supplies the tree. `read_blocks` goes the other way, and also opens the boat's
 built-in missions (which carry includes and their own guard) by leaving those out.
+
+THE DECLARATION. Which tier of each task the run is entered at is chosen per run, so a mission
+may carry it on the root element: `declare_task1` .. `declare_task4`, each none | core | advanced
+| disruptive (BT.CPP ignores unknown root attributes). `build(..., declare)` writes the ones it is
+given and `read_declaration` returns all four: the root's, else the tier of that task's block in
+the tree, else none. A bad tier word is an error. Disagreements are WARNINGS (`problems` entries
+with "level": "warn", which never refuse a save or an upload): a task block whose tier is not the
+declared one, and a TaskAttempt for a task declared none, whose course elements would then stay
+off. `problems()` and `validate()` still list errors only; `warnings()` lists the rest.
 """
 import copy
 import re
@@ -51,6 +60,14 @@ _NUMBER = re.compile(r"[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?")
 _INT_TYPE = re.compile(r"(unsigned )?(int|long|short)|u?int\d+_t|size_t")
 _BOOLS = ("true", "false", "1", "0")
 _NO_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+TIERS = ("none", "core", "advanced", "disruptive")
+TASKS = ("task1", "task2", "task3", "task4")
+DECLARE_ATTRS = tuple("declare_" + t for t in TASKS)
+#: RoboCommand's RxTask token -> the task number it runs, for the declaration warnings.
+TASK_TOKENS = {"TASK_SAFE_PASSAGE": 1, "TASK_INFRA_SURVEY_REPAIR": 2,
+               "TASK_COORDINATED_LOGISTICS": 3, "TASK_DYNAMIC_INCIDENT": 4}
+_BLOCK_ID = re.compile(r"Task(\d)(None|Core|Advanced|Disruptive)")
 
 
 class BlockError(ValueError):
@@ -146,7 +163,19 @@ def check_name(name, builtins=()):
 
 # ----------------------------------------------------------------------------- blocks -> XML
 
-def build_xml(blocks, catalogue):
+def _declare_attrs(declare):
+    """{declare_taskN: word} for the tasks `declare` ({task1: "core", ...}) names. A word is
+    written as given (lower-cased): a wrong one is for `problems` to report, not a crash."""
+    if declare is None:
+        return {}
+    if not isinstance(declare, dict) or set(declare) - set(TASKS):
+        raise BlockError("the declaration must be an object with keys task1..task4")
+    if not all(isinstance(v, str) for v in declare.values()):
+        raise BlockError("the declaration's tiers must be words")
+    return {"declare_" + t: declare[t].strip().lower() for t in TASKS if t in declare}
+
+
+def build_xml(blocks, catalogue, declare=None):
     """The guard-wrapped mission XML for a list of blocks. BlockError for blocks that are not
     blocks; whether the mission is acceptable is `validate`'s question, not this one's."""
     cat = _index(catalogue)
@@ -154,7 +183,8 @@ def build_xml(blocks, catalogue):
         raise BlockError("the mission's blocks must be a list")
     body, count = ET.Element("Sequence", name=BODY), [0]
     body.extend([_element(b, cat, 1, count) for b in blocks])
-    root = ET.Element("root", BTCPP_format="4", main_tree_to_execute=MAIN)
+    root = ET.Element("root", BTCPP_format="4", main_tree_to_execute=MAIN,
+                      **_declare_attrs(declare))
     guard = ET.SubElement(ET.SubElement(root, "BehaviorTree", ID=MAIN), GUARD)
     ET.SubElement(guard, AUTONOMOUS)
     guard.append(body)
@@ -285,6 +315,32 @@ def read_blocks(xml, group=None):
     return blocks, notes
 
 
+def _block_tier(sid, cat):
+    """(task number, tier word) of a task block id, from the catalogue else from its name."""
+    spec = cat.subtrees.get(sid) if cat is not None else None
+    if spec and spec.get("task") is not None and spec.get("tier"):
+        return int(spec["task"]), spec["tier"]
+    m = _BLOCK_ID.fullmatch(sid or "")
+    return (int(m.group(1)), m.group(2).lower()) if m else (None, None)
+
+
+def read_declaration(xml, catalogue=None):
+    """{task1..task4: tier word} of a mission: each task's root attribute when it is a tier,
+    else the tier of that task's block in the main tree, else none. ValueError if not a tree."""
+    root = _parse(xml)
+    cat = None if catalogue is None else _index(catalogue)
+    derived = {}
+    for el in root.iter("SubTree"):
+        n, tier = _block_tier(el.get("ID"), cat)
+        if n in (1, 2, 3, 4):
+            derived.setdefault(n, tier)
+    out = {}
+    for n, task in enumerate(TASKS, 1):
+        word = (root.get("declare_" + task) or "").strip().lower()
+        out[task] = word if word in TIERS else derived.get(n, "none")
+    return out
+
+
 # ----------------------------------------------------------------------------------- validate
 
 class _Check:
@@ -293,15 +349,32 @@ class _Check:
     def __init__(self, cat):
         self.cat = cat
         self.found = []
+        self.warned = []        # the same shape: disagreements that never refuse a mission
         self.tiers = {}         # task -> {tier: {task block ids}}
+        self.declared = {}      # task number -> the tier the root declares (valid words only)
 
     def add(self, path, text):
         self.found.append((path, text))
 
+    def warn(self, path, text):
+        self.warned.append((path, text))
+
+    def declaration(self, root):
+        """Reads the root's declare_taskN attributes: a bad tier word is an error."""
+        for n, attr in enumerate(DECLARE_ATTRS, 1):
+            word = root.get(attr)
+            if word is None:
+                continue
+            if word in TIERS:
+                self.declared[n] = word
+            else:
+                self.add(None, f'{attr}="{word}" is not a tier: use {", ".join(TIERS)}')
+
     def top(self, root):
         """The body elements of a mission whose top level is exactly the guard, else None and why."""
         trees = [c for c in root if c.tag != "include"]       # an include is reported once, by issues()
-        if root.tag != "root" or root.attrib != {"BTCPP_format": "4", "main_tree_to_execute": MAIN}:
+        plain = {k: v for k, v in root.attrib.items() if k not in DECLARE_ATTRS}
+        if root.tag != "root" or plain != {"BTCPP_format": "4", "main_tree_to_execute": MAIN}:
             why = 'the root must be <root BTCPP_format="4" main_tree_to_execute="Main">'
         elif len(trees) != 1 or trees[0].tag != "BehaviorTree" or trees[0].attrib != {"ID": MAIN}:
             why = 'the root must hold just <BehaviorTree ID="Main"> (no TreeNodesModel, no other tree)'
@@ -313,7 +386,7 @@ class _Check:
         else:
             return list(trees[0][0])[1:]
         self.add(None, f"the top level is not the autonomy guard the boat runs missions under: "
-                       f"{why}. It is always {EXPECTED}")
+                       f"{why}. It is always {EXPECTED} (plus declare_task1..4 when it declares tiers)")
         return None
 
     def body(self, body):
@@ -339,6 +412,8 @@ class _Check:
             self.subtree(el, here, path)
         else:
             nid = _node_id(el)
+            if nid == "TaskAttempt":
+                self.attempt(el, path, here)
             spec = self.cat.nodes.get(nid)
             if spec is None:
                 self.add(path, f"{here}: unknown block '{nid}' (not in the boat's catalogue)")
@@ -347,6 +422,20 @@ class _Check:
                 self.arity(nid, spec.get("kind"), len(el), here, path)
         for i, kid in enumerate(el):
             self.node(kid, path + (i,), here, depth + 1)
+
+    def attempt(self, el, path, here):
+        n = TASK_TOKENS.get(el.get("token", ""))
+        if n and self.declared.get(n) == "none":
+            self.warn(path, f"{here}: Task {n} is declared none, so its course elements stay off "
+                            "while this attempt runs")
+
+    def declared_vs_blocks(self):
+        for task, tiers in sorted(self.tiers.items()):
+            want = self.declared.get(task)
+            for tier in sorted(tiers):
+                if want is not None and tier != want:
+                    self.warn(None, f"Task {task} is declared {want} but the mission uses its "
+                                    f"{tier} block ({', '.join(sorted(tiers[tier]))})")
 
     def arity(self, nid, kind, n, here, path):
         if nid in _ARITY:
@@ -445,20 +534,19 @@ def _bad_value(port, val, subtree):
     return ""
 
 
-def issues(xml, catalogue, name=None):
-    """Every reason this mission cannot be accepted, as (path, text). The path indexes into the
-    body (the first number picks BODY's block, then children), or is None for the whole mission."""
+def _check(xml, catalogue, name=None):
+    """The _Check of one validate run (errors in .found, warnings in .warned)."""
     check = _Check(_index(catalogue))
     if name is not None:
         for why in check_name(name, check.cat.builtins):
             check.add(None, why)
     if not isinstance(xml, str):
         check.add(None, "the mission is not text")
-        return check.found
+        return check
     size = len(xml.encode("utf-8", "replace"))
     if size > MAX_BYTES:
         check.add(None, f"the mission is {size // 1024} KiB: more than {MAX_BYTES // 1024} KiB")
-        return check.found
+        return check
     if "<include" in xml:
         check.add(None, "<include> is not allowed: a mission is one file, and a task block is a "
                         "<SubTree> the boat supplies")
@@ -466,12 +554,20 @@ def issues(xml, catalogue, name=None):
         root = _parse(xml)
     except ValueError as e:
         check.add(None, str(e))
-        return check.found
+        return check
+    check.declaration(root)
     body = check.top(root)
     if body is not None:
         check.body(body)
     check.one_tier_per_task()
-    return check.found
+    check.declared_vs_blocks()
+    return check
+
+
+def issues(xml, catalogue, name=None):
+    """Every reason this mission cannot be accepted, as (path, text). The path indexes into the
+    body (the first number picks BODY's block, then children), or is None for the whole mission."""
+    return _check(xml, catalogue, name).found
 
 
 def validate(xml, catalogue, name=None):
@@ -480,14 +576,26 @@ def validate(xml, catalogue, name=None):
     return [text for _path, text in issues(xml, catalogue, name)]
 
 
+def _as_problems(found, **extra):
+    return [{"path": list(path[1:]) if path and len(path) > 1 else None, "msg": text, **extra}
+            for path, text in found]
+
+
 def problems(xml, catalogue, name=None):
     """`issues` as the Mission tab shows them: {"path": [block indexes into the editor's blocks]
-    or None for the mission as a whole, "msg": text}."""
-    return [{"path": list(path[1:]) if path and len(path) > 1 else None, "msg": text}
-            for path, text in issues(xml, catalogue, name)]
+    or None for the mission as a whole, "msg": text}. Errors only: a refusal is made of these."""
+    return _as_problems(issues(xml, catalogue, name))
 
 
-def build(blocks, catalogue, name=None):
-    """(xml, problems) for the blocks the Mission tab holds."""
-    xml = build_xml(blocks, catalogue)
-    return xml, problems(xml, catalogue, name)
+def warnings(xml, catalogue):
+    """The same shape as `problems`, each marked "level": "warn": things worth a look that do not
+    refuse the mission (the declaration disagreeing with the blocks)."""
+    return _as_problems(_check(xml, catalogue).warned, level="warn")
+
+
+def build(blocks, catalogue, name=None, declare=None):
+    """(xml, problems) for the blocks the Mission tab holds, and the declaration it carries
+    ({task1: "core", ...}). The problems are the errors then the warnings ("level": "warn")."""
+    xml = build_xml(blocks, catalogue, declare)
+    check = _check(xml, catalogue, name)
+    return xml, _as_problems(check.found) + _as_problems(check.warned, level="warn")

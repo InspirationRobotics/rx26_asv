@@ -272,7 +272,8 @@ class MissionOps:
         self._lock = threading.Lock()
         self._cat = None            # (the link it came over, its Catalogue): good while that link is up
         self._local = {"mission_catalogue": self._catalogue, "mission_build": self._build,
-                       "mission_open": self._open, "mission_upload": self._upload}
+                       "mission_open": self._open, "mission_upload": self._upload,
+                       "mission_template": self._template}
 
     def handle(self, op, req):
         """(ok, msg, data) for a mission op; None for any other op, which the boat is asked as it is."""
@@ -318,22 +319,31 @@ class MissionOps:
         if cat is None:
             return failed
         try:
-            xml, problems = mission_xml.build(req.get("blocks"), cat, req.get("name"))
+            xml, problems = mission_xml.build(req.get("blocks"), cat, req.get("name"),
+                                              req.get("declare"))
         except mission_xml.BlockError as e:
             return False, f"the blocks cannot be built: {e}", None
         return True, "", {"xml": xml, "problems": problems}
 
-    def _open(self, req):
-        """A stored mission as blocks; with `group`, as one group of that name to insert elsewhere."""
-        ok, msg, data = self._boat("mission_get", {"name": req.get("name")})
+    def _open(self, req, boat_op="mission_get"):
+        """A stored mission as blocks and the tiers it declares; with `group`, as one group of that
+        name to insert elsewhere. `boat_op` is where the XML comes from (mission_template for a
+        survey template, which opens the same way)."""
+        ok, msg, data = self._boat(boat_op, {"name": req.get("name")})
         if not ok:
             return ok, msg, data
+        cat = self._known()[0]          # None is fine: the declaration then comes from block names
         try:
             blocks, notes = mission_xml.read_blocks(data["xml"], req.get("group"))
+            declare = mission_xml.read_declaration(data["xml"], cat)
         except (ValueError, KeyError, TypeError) as e:
             return False, f"{req.get('name')} cannot be opened as blocks: {e}", None
         return True, "", {"name": data.get("name"), "builtin": bool(data.get("builtin")),
-                          "blocks": blocks, "notes": notes}
+                          "blocks": blocks, "notes": notes, "declare": declare}
+
+    def _template(self, req):
+        """A survey template as an unsaved draft: the same answer as mission_open."""
+        return self._open(req, "mission_template")
 
     def _upload(self, req):
         cat, failed = self._known()

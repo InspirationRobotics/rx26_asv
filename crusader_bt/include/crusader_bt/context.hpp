@@ -97,6 +97,10 @@ struct Context
   /// RoboCommand's newest RunStart, on `now_s`'s clock. NOT reset per goal: a RunStart that
   /// arrives before the operator presses START must still count (WaitForRunStart).
   runstart::Latch run_start;
+  /// The runner's RunStart gate opened for this goal (set under mu by execute(), reset at every
+  /// goal start). WaitForRunStart then succeeds at once: an old saved mission that still
+  /// carries the leaf must not wait a second time for a RunStart the gate already took.
+  bool run_released = false;
   dock::DockBook dock;                        ///< the bays, world-anchored
   dock::Mount cam_mount;                      ///< camera_link in base_link
   /// Face centre above the camera, m: places sightings from a PITCHED camera
@@ -617,6 +621,16 @@ inline bool ingestRunStart(Context & c, double now_s, const std::string & json, 
   if (!runstart::parse(json, run_id)) {return false;}
   c.run_start.set(now_s, *run_id);
   return true;
+}
+
+/// The same message as an `ocs_directive`: `standby_auto` (a new declaration) or `run_end`
+/// clears the latch, because a RunStart older than either belonged to a run that is over.
+/// Returns what it did (Directive::None = left the latch alone). CALL UNDER ctx.mu.
+inline runstart::Directive ingestRunDirective(Context & c, const std::string & json)
+{
+  const runstart::Directive d = runstart::parseDirective(json);
+  if (d != runstart::Directive::None) {c.run_start.clear();}
+  return d;
 }
 
 /// Announce current_task (handbook 3.4.11) and log it. TASK_NONE is stamped, so TaskAttempt can

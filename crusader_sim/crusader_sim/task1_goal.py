@@ -21,11 +21,13 @@ import argparse
 import math
 import os
 import sys
+import time
 
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from std_msgs.msg import String
+from std_srvs.srv import Trigger
 
 from nav_msgs.msg import Odometry
 
@@ -66,9 +68,29 @@ class Operator(Node):
         super().__init__("sim_operator")
         self.mode_pub = self.create_publisher(String, "/crsd/set_mode", 10)
         self.client = ActionClient(self, RunMission, "/crsd/run_mission")
+        self.release_client = self.create_client(Trigger, "/crsd/bt_runner/release_run_start")
         if judge is not None:
             self.create_subscription(Odometry, "/sim/crusader/odometry",
                                      lambda m: _feed_judge(judge, m), 10)
+
+
+    def release_run_start(self, wait_s=20.0):
+        """Sim release of bt_runner's RunStart gate (no RoboCommand here). The service answers
+        success only once the goal is held at the gate, which comes after the tree has loaded,
+        so ask until it does."""
+        if not self.release_client.wait_for_service(timeout_sec=5.0):
+            print("[operator] no release_run_start service: the goal will wait for RunStart", flush=True)
+            return False
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < wait_s:
+            fut = self.release_client.call_async(Trigger.Request())
+            rclpy.spin_until_future_complete(self, fut, timeout_sec=2.0)
+            if fut.done() and fut.result().success:
+                print("[operator] sim release of the RunStart gate (no RoboCommand)", flush=True)
+                return True
+            time.sleep(0.5)
+        print("[operator] the RunStart gate never took the sim release", flush=True)
+        return False
 
 
 def _feed_judge(judge, m):
@@ -116,7 +138,7 @@ def main():
 
     stop = install_stop()                   # after rclpy.init(): see goal_client.install_stop
     run = run_goal(op.client, goal, lambda t: rclpy.spin_once(op, timeout_sec=t), stop,
-                   names=outcome_names(RunMission.Result))
+                   names=outcome_names(RunMission.Result), on_accepted=op.release_run_start)
     if run.status != "result":
         return 1
     r = run.result
