@@ -8,6 +8,10 @@
 // clockwise); ctx.global_passage.phase says which is being driven. A plan is KEPT while good
 // and re-made from the boat when:
 //   * there is none, or the aircraft's field changed (a re-task);
+//   * (Core tier, no aircraft) the boat's own camera/LiDAR field changed IN A WAY THAT MATTERS: a
+//     red/green would now be passed on the wrong side, or the ENTRY/EXIT moved before its orbit.
+//     Settled for sensor_settle_s, at most one per sensor_replan_min_s; a change that does not
+//     matter is ABSORBED (the plan stays), so the boat does not lurch at every tracker flicker;
 //   * the boat is not near the start of what is left of the leg it is about to drive;
 //   * a hazard now sits closer to what is left than the plan allowed (fusion moved a buoy,
 //     or a LiDAR/camera track appeared on it).
@@ -68,28 +72,79 @@ std::vector<Vec2> legLeft(const Context & c, Phase phase)
   return gp::slice(leg, g.transit_s, gp::arcLengths(leg).back());
 }
 
-/// The aircraft's latest report, as a plan records it. CALL UNDER ctx.mu.
+/// No aircraft report: the boat's own tracker is the only source of buoys (Core tier). The same
+/// test bt_runner_node's refuseLocked() uses. CALL UNDER ctx.mu.
+bool coreMode(const Context & c) {return c.plan.empty();}
+
+/// The latest report, as a plan records it: the aircraft's, or in Core tier the tracker's
+/// confirmed RED and GREEN buoys (id, position, colour) and the ENTRY/EXIT it chose.
+/// CALL UNDER ctx.mu.
 gp::FieldSig currentField(const Context & c)
 {
-  return gp::fieldSig(c.plan, c.entry, c.exitp);
+  if (!coreMode(c)) {return gp::fieldSig(c.plan, c.entry, c.exitp);}
+  std::vector<nav::PlanBuoy> seen;
+  for (const nav::Buoy & b : c.buoys) {
+    if (nav::isSideConstrained(b.state) && std::isfinite(b.p.x) && std::isfinite(b.p.y)) {
+      seen.push_back({b.id, b.p, b.state});
+    }
+  }
+  return gp::fieldSig(std::move(seen), c.entry, c.exitp);
 }
 
-/// What changed in the aircraft's field since the plan was made ("" = nothing): colours,
-/// buoys, or a move beyond retask_move_m (gp::fieldChange). CALL UNDER ctx.mu.
+/// What changed in the field since the plan was made ("" = nothing): colours, buoys, or a move
+/// beyond retask_move_m (the aircraft's scatter) / sensor_move_m (the tracker's). RAW: in Core
+/// tier it says nothing about whether the plan still serves (sensorNeedsReplan). CALL UNDER ctx.mu.
 std::string retasked(const Context & c)
 {
   const Context::GlobalPassage & g = c.global_passage;
   if (!g.plan.ok) {return "";}
-  return gp::fieldChange(g.field, currentField(c), g.params.retask_move_m);
+  const double move = coreMode(c) ? g.params.sensor_move_m : g.params.retask_move_m;
+  return gp::fieldChange(g.field, currentField(c), move);
 }
 
-/// "" when the plan in hand can still drive `phase`; otherwise why not. CALL UNDER ctx.mu.
-std::string planUnusable(const Context & c, Phase phase)
+/// The path the plan is judged on: the transit leg before the transit starts; the track driven
+/// plus what is left of the leg during it. CALL UNDER ctx.mu.
+std::vector<Vec2> judgedPath(const Context & c, Phase phase)
+{
+  const Context::GlobalPassage & g = c.global_passage;
+  if (phase <= Phase::EntryOrbit) {return g.plan.legs[static_cast<int>(Phase::Transit)];}
+  if (phase != Phase::Transit) {return {};}
+  std::vector<Vec2> judged = g.traj;
+  judged.push_back(c.boat);
+  const std::vector<Vec2> left = legLeft(c, Phase::Transit);
+  judged.insert(judged.end(), left.begin(), left.end());
+  return judged;
+}
+
+/// Core tier: "" when the raw change in the boat's own field does not matter for the plan in
+/// hand, in which case it is ABSORBED (g.field := now, so it stops reporting) and logged once;
+/// otherwise why it does matter (gp::sensorChangeMatters). CALL UNDER ctx.mu.
+std::string sensorNeedsReplan(
+  Context & c, Phase phase, const rclcpp::Logger & lg, const std::string & raw)
+{
+  Context::GlobalPassage & g = c.global_passage;
+  const std::vector<Vec2> & ring = g.plan.entry_ring.empty() ? g.entry_ring : g.plan.entry_ring;
+  const std::string why = gp::sensorChangeMatters(g.plan, phase, c.buoys, c.entry, c.exitp, ring,
+      judgedPath(c, phase), g.params.sensor_move_m);
+  if (!why.empty()) {return why;}
+  g.field = currentField(c);
+  RCLCPP_INFO(lg, "the boat's own field changed (%s); the plan in hand still serves: kept",
+    raw.c_str());
+  return "";
+}
+
+/// "" when the plan in hand can still drive `phase`; otherwise why not. Core tier replans for a
+/// field change only when it matters (and absorbs it otherwise). CALL UNDER ctx.mu.
+std::string planUnusable(Context & c, Phase phase, const rclcpp::Logger & lg)
 {
   const Context::GlobalPassage & g = c.global_passage;
   if (!g.plan.ok) {return "no plan yet";}
   const std::string change = retasked(c);
-  if (!change.empty()) {return "the aircraft's field changed: " + change;}
+  if (!change.empty()) {
+    if (!coreMode(c)) {return "the aircraft's field changed: " + change;}
+    const std::string why = sensorNeedsReplan(c, phase, lg, change);
+    if (!why.empty()) {return "the boat's own field: " + why;}
+  }
   const std::vector<Vec2> left = legLeft(c, phase);
   if (left.empty()) {return "the plan has no " + std::string(gp::phaseName(phase)) + " leg";}
   // near the start of what is left (a pass-through hand-over ends ~2 m short of it)
@@ -249,10 +304,14 @@ public:
       BT::InputPort<double>("w_clear", 4.0, "a metre at nav_hard_m costs 1 + w_clear metres"),
       BT::InputPort<double>("relax1_m", 0.7,
         "clearance tried when nothing fits at nav_hard_m (= nav_hard_m: never relax)"),
-      BT::InputPort<double>("relax2_m", 0.6, "... and then this"),
+      BT::InputPort<double>("relax2_m", 0.5,
+        "... and then this (0.5 threads the 1.48 m gate of the real Singapore field)"),
       BT::InputPort<double>("res_m", 0.1, "planning grid, metres"),
       BT::InputPort<double>("retask_move_m", 2.0,
         "a re-reported buoy that moved less than this is the aircraft's scatter, not a re-task"),
+      BT::InputPort<double>("anchor_snap_m", 1.5,
+        "a blue buoy this close to the ENTRY/EXIT point anchors its orbit (neighbours are 1.9-3.5 m "
+        "apart on the real field: a 3 m snap can reach the wrong one)"),
       BT::InputPort<double>("retry_s", 1.0, "between tries while no plan fits"),
       BT::InputPort<double>("timeout_s", 60.0, "FAILURE after this long without a plan")};
   }
@@ -273,9 +332,10 @@ public:
     p.soft_m = getInput<double>("soft_m").value_or(2.0);
     p.w_clear = getInput<double>("w_clear").value_or(4.0);
     p.relax1_m = getInput<double>("relax1_m").value_or(0.7);
-    p.relax2_m = getInput<double>("relax2_m").value_or(0.6);
+    p.relax2_m = getInput<double>("relax2_m").value_or(0.5);
     p.res_m = getInput<double>("res_m").value_or(0.1);
     p.retask_move_m = getInput<double>("retask_move_m").value_or(2.0);
+    p.anchor_snap_m = getInput<double>("anchor_snap_m").value_or(1.5);
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       ctx_->global_passage.params = p;
@@ -295,7 +355,7 @@ public:
       phase = ctx_->global_passage.phase;
       if (phase == Phase::Done) {return BT::NodeStatus::SUCCESS;}
       if (!fieldKnown(*ctx_)) {return BT::NodeStatus::RUNNING;}
-      why = planUnusable(*ctx_, phase);
+      why = planUnusable(*ctx_, phase, log());
     }
     if (why.empty()) {return BT::NodeStatus::SUCCESS;}
     const auto now = std::chrono::steady_clock::now();
@@ -349,7 +409,11 @@ public:
       BT::InputPort<double>("blocked_timeout_s", 15.0, "FAILURE after being blocked this long"),
       BT::InputPort<double>("lookahead_m", 1.5, "pure pursuit lookahead along the path"),
       BT::InputPort<double>("resend_m", 0.3, "re-send the setpoint once it has moved this far"),
-      BT::InputPort<double>("end_tol_m", 0.8, "arrival radius at a stop")};
+      BT::InputPort<double>("end_tol_m", 0.8, "arrival radius at a stop"),
+      BT::InputPort<double>("sensor_settle_s", 1.0,
+        "Core tier: a change in the boat's own field must persist this long before it is acted on"),
+      BT::InputPort<double>("sensor_replan_min_s", 3.0,
+        "Core tier: least time between two sensor-triggered replans")};
   }
 
   BT::NodeStatus onStart() override
@@ -376,6 +440,9 @@ public:
     degraded_ = false;
     last_replan_ = -kInf;
     last_log_ = -kInf;
+    raw_since_ = -1.0;
+    last_sensor_replan_ = -kInf;
+    sensor_failed_ = false;
     follower_.reset({});
     rest_.clear();
     if (!startLeg(true)) {
@@ -425,8 +492,13 @@ public:
       follower_.reset({});
     }
 
-    // 1. The aircraft re-tasked: re-plan the approach or the transit from here, now.
-    if (replannable && now - last_replan_ >= 1.0) {
+    // 1. The field changed: re-plan the approach or the transit from here. The aircraft's
+    //    re-task acts at once (1 Hz); in Core tier the boat's own field is debounced, checked for
+    //    whether it matters, and rate-limited (sensorStep).
+    const bool core = replannable && inCoreMode();
+    if (core) {
+      sensorStep(now);
+    } else if (replannable && now - last_replan_ >= 1.0) {
       const std::string change = fieldChanged();
       if (!change.empty()) {replanHere(now, "the aircraft's field changed: " + change);}
     }
@@ -439,7 +511,8 @@ public:
     gp::FollowOut o;
     if (!follower_.empty()) {o = follower_.step(boat, hz);}
     const char * stuck = follower_.empty() ? "no plan for this leg" :
-      (replannable && !fieldChanged().empty()) ? "no plan fits the changed field" :
+      (core ? sensor_failed_ : (replannable && !fieldChanged().empty())) ?
+      "no plan fits the changed field" :
       o.blocked ? "a hazard is on the path ahead" : nullptr;
 
     // 3. Stuck: hold, re-plan every second, FAILURE at blocked_timeout_s.
@@ -509,7 +582,7 @@ private:
     std::string why;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
-      why = planUnusable(*ctx_, phase_);
+      why = planUnusable(*ctx_, phase_, log());
     }
     if (!why.empty()) {
       if (!allow_replan || !replan(*ctx_, phase_, log(), why)) {return false;}
@@ -578,7 +651,49 @@ private:
   bool replanHere(double now, const std::string & why)
   {
     last_replan_ = now;
-    return replan(*ctx_, phase_, log(), why) && startLeg(false);
+    const bool ok = replan(*ctx_, phase_, log(), why) && startLeg(false);
+    if (ok) {sensor_failed_ = false;}
+    return ok;
+  }
+
+  /// Core tier, once per tick: a raw change in the boat's own field must persist
+  /// sensor_settle_s (colour votes flicker, a flashing light has an off-phase); then it is
+  /// absorbed if it does not matter for the plan in hand, else the plan is remade from the boat,
+  /// no sooner than sensor_replan_min_s after the last sensor replan. A FAILED replan sets
+  /// sensor_failed_, which holds the boat and hands the retries to the blocked path (step 3).
+  void sensorStep(double now)
+  {
+    std::string raw, why;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      raw = retasked(*ctx_);
+      if (raw.empty()) {
+        raw_since_ = -1.0;
+        sensor_failed_ = false;
+        return;
+      }
+      if (raw_since_ < 0.0) {raw_since_ = now;}
+      if (now - raw_since_ < getInput<double>("sensor_settle_s").value_or(1.0)) {return;}
+      why = sensorNeedsReplan(*ctx_, phase_, log(), raw);
+    }
+    if (why.empty()) {raw_since_ = -1.0; return;}       // absorbed
+    if (sensor_failed_ ||
+      now - last_sensor_replan_ < getInput<double>("sensor_replan_min_s").value_or(3.0))
+    {
+      return;
+    }
+    last_sensor_replan_ = now;
+    if (replanHere(now, "the boat's own field: " + why)) {
+      raw_since_ = -1.0;
+    } else {
+      sensor_failed_ = true;
+    }
+  }
+
+  bool inCoreMode()
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    return coreMode(*ctx_);
   }
 
   bool timedOut()
@@ -676,6 +791,10 @@ private:
   bool blocked_ = false, degraded_ = false;
   double blocked_s_ = 0.0, clear_since_ = -1.0;
   double last_now_ = 0.0, last_replan_ = -kInf, last_log_ = -kInf;
+  // Core tier's sensor replans (sensorStep)
+  double raw_since_ = -1.0;                   ///< when the current raw change was first seen
+  double last_sensor_replan_ = -kInf;
+  bool sensor_failed_ = false;                ///< a needed sensor replan found no plan
 };
 
 }  // namespace

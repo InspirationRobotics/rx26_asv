@@ -431,6 +431,8 @@ private:
       b.p = nav::toLocal({t.latitude, t.longitude}, ctx_->origin);
       b.state = nav::beaconFromLabel(t.label);
       b.consumed = consumed_.count(b.id) > 0;
+      b.hits = static_cast<int>(t.hits);
+      b.conf = t.confidence;
       next.push_back(b);
     }
     tracked_.swap(next);          // RAW. ctx_->buoys is the FUSION; see below.
@@ -507,12 +509,30 @@ private:
       return;
     }
     // Core tier: no aircraft, so the boat's own eyes are all there is.
-    const nav::Buoy * e = nav::findBeacon(ctx_->buoys, nav::Beacon::FlashingBlue);
-    const nav::Buoy * x = nav::findBeacon(ctx_->buoys, nav::Beacon::SteadyBlue);
+    // By EVIDENCE and sticky (nav::bestBeacon), not the first in the list: labels flicker, and
+    // on the real course unlit buoys were often called blue.
+    const nav::Buoy * e = chooseBeacon("ENTRY", nav::Beacon::FlashingBlue, entry_track_id_,
+        exit_track_id_);
+    const nav::Buoy * x = chooseBeacon("EXIT", nav::Beacon::SteadyBlue, exit_track_id_,
+        entry_track_id_);
     ctx_->have_entry = e != nullptr;
     if (e) {ctx_->entry = e->p;}
     ctx_->have_exit = x != nullptr;
     if (x) {ctx_->exitp = x->p;}
+  }
+
+  /// The tracked buoy that is the Core tier's ENTRY or EXIT: bestBeacon over ctx_->buoys, never
+  /// the track the other one holds. `remembered` is updated, and a change of choice logged once
+  /// (old -> new, position, hits). CALL WITH ctx_->mu HELD.
+  const nav::Buoy * chooseBeacon(const char * name, nav::Beacon want, int & remembered, int other)
+  {
+    const nav::Buoy * b = nav::bestBeacon(ctx_->buoys, want, remembered, other);
+    if (b != nullptr && b->id != remembered) {
+      RCLCPP_INFO(get_logger(), "%s track %d -> %d at (%.1f, %.1f) m, %d hits, conf %.2f", name,
+        remembered, b->id, b->p.x, b->p.y, b->hits, b->conf);
+      remembered = b->id;
+    }
+    return b;
   }
 
   // ---------------------------------------------------------------- outputs
@@ -1447,6 +1467,8 @@ private:
   rclcpp::Time plan_t_{0, 0, RCL_ROS_TIME};      ///< when plan_raw_ was received
   /// RAW inputs. ctx_->buoys is the FUSION of these two; see refuseLocked().
   std::vector<nav::Buoy> tracked_;
+  /// Core tier: the tracks chosen as ENTRY and EXIT (-1 = none yet), kept while still candidates.
+  int entry_track_id_ = -1, exit_track_id_ = -1;
   crusader_msgs::msg::PassagePlan::SharedPtr plan_raw_;
   /// For /crsd/bt_status and feedback: the running goal's name, the current task token, and
   /// how the last goal ended (JSON). Guarded by status_mu_.

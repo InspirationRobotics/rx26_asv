@@ -99,6 +99,21 @@ ocs_client:
   ros__parameters:
     ocs_host: "$OCS_HOST"
 EOF
+# SIM_TRACKER_LIDAR=1: the tracker fuses LiDAR clusters (use_lidar), as on OPEN water, instead of
+# the boat's checked-in camera-only setting. Camera-only puts every buoy at its stereo range
+# (~6 % off, noise ~ z^2): on the 2026-11-10 field that split each buoy into 2-4 tracks
+# 1-1.6 m apart, closing gaps that are 1.5-2.5 m wide. r_max 25 = crusader_params' open-water hint.
+if [ "${SIM_TRACKER_LIDAR:-0}" = 1 ]; then
+  cat >> "$SIM_PARAMS" <<EOF
+target_tracker:
+  ros__parameters:
+    use_lidar: true
+lidar_node:
+  ros__parameters:
+    r_max: 25.0
+EOF
+  echo "  target_tracker: use_lidar true (SIM_TRACKER_LIDAR=1), lidar_node r_max 25"
+fi
 BOAT_PARAMS=(--params-file "$CFG" --params-file "$SIM_PARAMS")
 
 bash "$SRC/crusader_sim/scripts/gz_rig_down.sh" >/dev/null 2>&1

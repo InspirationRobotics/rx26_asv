@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- MISSION: Task 1 Safe Passage, Core: look at the field from two vantage points, then plan and drive it from the boat's own map. -->
+<!--
+  Core tier: no aircraft. The boat must find the ENTRY (flashing blue) and EXIT (solid blue)
+  itself, and the reds and greens it passes (handbook 3.3.2; Core scoring: reporting both blues
+  and every red/green is 100 of the 325 points). The side beacons light only once the boat
+  REPORTS the attempt, so the survey runs INSIDE the one TaskAttempt: a second, nested
+  TaskAttempt (Task1Advanced's) would put TASK_NONE on the heartbeat between the survey and the
+  passage, and a course that sees NONE may switch the lights off.
+
+    1. SURVEY. Drive to a vantage point and HoldHeading facing the field for duration_s, twice:
+       the camera looks forward only, so a square driven round the field would keep the buoys
+       abeam and out of view. Holding still gives the flash tracker (flashing vs solid) a full
+       window on every buoy at once, and the second vantage sees past the buoys the first one
+       hides behind each other (the field is two columns ~3 m apart).
+    2. PLAN AND DRIVE: lib/common/task1_plan_drive.xml, the Advanced body. In Core the runner
+       takes ENTRY/EXIT from the boat's own tracks (bt_runner_node refuseLocked), so
+       WaitForField returns as soon as both blues are known, usually during the survey.
+
+  THE VANTAGE POINTS ARE THE 2026-11-10 SINGAPORE FIELD (LiDAR map; crusader_sim course
+  task1_sg*): south (-5.5, 4.0) facing north, east (4.0, 15.5) facing west, in the map frame
+  at 1.2805 N 103.8557 E. For another field, move them so the whole field is inside the
+  camera's 82 deg (within ~41 deg of the heading) and 6-15 m away, with a clear line to them.
+
+  orbit_min_m 1.5: the end buoys have neighbours 3.4-3.5 m away, so a nav_orbit_clear_m
+  orbit cannot be larger than ~1.7 m.
+-->
+<root BTCPP_format="4" main_tree_to_execute="Main" declare_task1="core" declare_task2="none" declare_task3="none" declare_task4="none">
+  <include path="lib/common/task1_plan_drive.xml"/>
+
+  <BehaviorTree ID="Main">
+    <ReactiveSequence name="guard_band">
+      <IsAutonomous/>
+      <TaskAttempt token="TASK_SAFE_PASSAGE">
+        <ReactiveSequence name="task1_guard">
+          <ResolveBuoyStates/>
+          <ReportSafePassage min_period_s="1.0"/>
+          <Sequence name="core">
+            <Sequence name="survey">
+              <NavigateTo target="fix" lat="1.28053593" lon="103.85565058" tolerance="1.5"
+                          resend_m="1.5" avoid="true" exempt="" blocked_timeout_s="20.0"/>
+              <HoldHeading heading_deg="0.0" duration_s="10.0" radius_m="1.5"/>
+              <NavigateTo target="fix" lat="1.28063924" lon="103.85573594" tolerance="1.5"
+                          resend_m="1.5" avoid="true" exempt="" blocked_timeout_s="20.0"/>
+              <HoldHeading heading_deg="270.0" duration_s="10.0" radius_m="1.5"/>
+            </Sequence>
+            <SubTree ID="Task1PlanDrive" _autoremap="true"
+                     orbit_radius_m=""
+                     orbit_min_m="1.5"
+                     overshoot_deg="45.0"
+                     lookahead_m="2.5"
+                     blocked_timeout_s="15.0"
+                     plan_attempts="4"/>
+          </Sequence>
+        </ReactiveSequence>
+      </TaskAttempt>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

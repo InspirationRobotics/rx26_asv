@@ -179,6 +179,8 @@ struct Buoy
   Vec2 p;
   Beacon state = Beacon::Unknown;
   bool consumed = false;
+  int hits = 0;            ///< sightings behind this track (TrackedTarget.hits); 0 = not a track
+  double conf = 0.0;       ///< detector confidence of its latest sighting [0..1]
 };
 
 /// Where to steer so `buoy` ends up on the side the handbook demands.
@@ -624,6 +626,35 @@ inline const Buoy * findBeacon(const std::vector<Buoy> & buoys, Beacon want)
     if (b.state == want) {return &b;}
   }
   return nullptr;
+}
+
+/// Core tier's ENTRY/EXIT: the beacon `want` with the most EVIDENCE (hits, then confidence), not
+/// the first in the list. Labels flicker and unlit buoys are sometimes called blue, so a
+/// one-frame rival must not steal an orbit already chosen: `current_id` is kept while it is
+/// still a candidate unless a rival has clearly more evidence (hits >= rival_ratio x current and
+/// >= current + rival_margin). `exclude_id` (the other beacon's pick) is never returned.
+/// nullptr when there is no candidate.
+inline const Buoy * bestBeacon(
+  const std::vector<Buoy> & buoys, Beacon want, int current_id = -1, int exclude_id = -1,
+  double rival_ratio = 2.0, int rival_margin = 10)
+{
+  const Buoy * best = nullptr;
+  const Buoy * cur = nullptr;
+  for (const Buoy & b : buoys) {
+    if (b.state != want || b.id == exclude_id || !std::isfinite(b.p.x) || !std::isfinite(b.p.y)) {
+      continue;
+    }
+    if (b.id == current_id) {cur = &b;}
+    if (best == nullptr || b.hits > best->hits || (b.hits == best->hits && b.conf > best->conf)) {
+      best = &b;
+    }
+  }
+  if (cur != nullptr && best != cur &&
+    !(best->hits >= rival_ratio * cur->hits && best->hits >= cur->hits + rival_margin))
+  {
+    return cur;
+  }
+  return best;
 }
 
 }  // namespace nav

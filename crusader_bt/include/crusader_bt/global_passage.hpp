@@ -102,7 +102,10 @@ struct Params
   double soft_m = 2.0;          ///< beyond this, more water buys nothing (nav_soft_m)
   double w_clear = 4.0;         ///< a metre driven AT hard_m costs 1 + w_clear metres
   /// Tried in turn, only when nothing fits at hard_m. A plan made with one says relaxed = true.
-  double relax1_m = 0.7, relax2_m = 0.6;
+  /// relax2_m 0.5: the 2026-11-10 Singapore field (LiDAR) has a red/green gate 1.86 m centre to
+  /// centre (1.48 m of water); its middle is 0.63 m from a 0.3 m buoy, so nothing fits at 0.6 on
+  /// a 0.1 m grid. 0.5 leaves the 0.6 m-beam hull ~0.3 m from the real buoy, centred.
+  double relax1_m = 0.7, relax2_m = 0.5;
   double res_m = 0.1;           ///< grid; coarsened automatically above max_cells
   double margin_m = 10.0;       ///< grid beyond the field, the boat and the trajectory
   int max_cells = 250000;
@@ -118,7 +121,11 @@ struct Params
   /// the overshoot is grown so the sweep still clears 360 + 20 degrees.
   double follow_early_m = 2.5;
   double along_margin_m = 0.5;  ///< an orbit stays this far short (along the axis) of the passage
-  double anchor_snap_m = 3.0;   ///< a blue buoy this close to the aircraft's ENTRY/EXIT anchors the orbit
+  /// A blue buoy this close to the ENTRY/EXIT point anchors the orbit. Small on purpose: the real
+  /// field (measured 2026-11-10) has neighbours only 1.9-3.5 m apart, so a 3 m snap can reach the
+  /// WRONG buoy. 1.5 m still covers the aircraft's ~1 m fix error, and in Core the point IS the
+  /// buoy (distance 0).
+  double anchor_snap_m = 1.5;
   double buoy_radius_m = 0.3;   ///< when the anchor has no hazard of its own
   // Checkpoints (Disruptive): past each gate the path crosses.
   double cp_after_m = 1.5;      ///< at least this far past the gate line
@@ -128,6 +135,12 @@ struct Params
   /// scatter, not a re-task (fieldChange). Its fix error is < 1 m, so two reports differ by
   /// up to ~1.6 m.
   double retask_move_m = 2.0;
+  /// The same for the boat's OWN camera/LiDAR field in Core tier (no aircraft report): the
+  /// tracker's scatter is ~0.4 m, and whether a move matters is decided by sensorChangeMatters,
+  /// so the trigger can be much tighter than the aircraft's. It is also how far the ENTRY/EXIT
+  /// may move before its orbit is redrawn: on a tight field the ring is only ~1.6 m in radius,
+  /// so a 1 m error leaves the buoy ~0.3 m from the ring (or outside it).
+  double sensor_move_m = 0.75;
 };
 
 // --------------------------------------------------------------------- rays
@@ -227,6 +240,28 @@ std::vector<Ray> buildRays(
     rays.push_back(r);
   }
   return rays;
+}
+
+/// THE planner's choice of which red/green are held to a side: not one whose ray runs into the
+/// line closing the transit behind the ENTRY or beyond the EXIT (it is behind the start or past
+/// the finish, and holding it would send the boat round it), nor one an orbit brushes past (its
+/// side is passed both ways while circling). `entry_ring` / `exit_ring` are the rings the plan
+/// orbits. One function, so planAt() and the Core-tier sensor check (wrongSideNow) agree.
+inline std::vector<Ray> selectRays(
+  const std::vector<nav::Buoy> & buoys, Vec2 axis, Vec2 entry_c, Vec2 exit_c,
+  const std::vector<Vec2> & entry_ring, const std::vector<Vec2> & exit_ring,
+  std::vector<int> * excluded, std::vector<std::string> * notes)
+{
+  const auto brushes = [](const std::vector<Vec2> & ring, Vec2 q) {
+      return std::any_of(ring.begin(), ring.end(), [q](Vec2 v) {return nav::norm(v - q) < 1.3;});
+    };
+  return buildRays(buoys, axis, [&](const Ray & r) -> std::string {
+        if (segmentCrossesRay(r, entry_c - axis * kFar, entry_c)) {return "is behind the ENTRY";}
+        if (segmentCrossesRay(r, exit_c, exit_c + axis * kFar)) {return "is beyond the EXIT";}
+        if (brushes(entry_ring, r.o)) {return "is beside the ENTRY orbit";}
+        if (brushes(exit_ring, r.o)) {return "is beside the EXIT orbit";}
+        return "";
+      }, excluded, notes);
 }
 
 // --------------------------------------------------------------------- grid
@@ -981,6 +1016,64 @@ inline std::vector<int> wrongSide(const std::vector<Vec2> & pl, const std::vecto
   return bad;
 }
 
+/// Which buoys the `judged` path would pass on the WRONG side, given the buoys NOW and the plan's
+/// own frame (axis, anchors, the two rings): the rays are built by selectRays(), the planner's
+/// rule, so a red the plan deliberately left out (beside an orbit, behind the ENTRY) is not
+/// flagged. `not_chased` are the ids the plan dropped for another reason (a buoy recoloured
+/// after the boat had passed it, Plan::excluded): they stay dropped unless the rule itself
+/// excludes them now, so they cannot keep triggering a replan.
+inline std::vector<int> wrongSideNow(
+  const std::vector<nav::Buoy> & buoys, Vec2 axis, Vec2 entry_c, Vec2 exit_c,
+  const std::vector<Vec2> & entry_ring, const std::vector<Vec2> & exit_ring,
+  const std::vector<Vec2> & judged, const std::vector<int> & not_chased)
+{
+  std::vector<int> rule_excluded;
+  const std::vector<Ray> rays =
+    selectRays(buoys, axis, entry_c, exit_c, entry_ring, exit_ring, &rule_excluded, nullptr);
+  std::vector<int> bad = wrongSide(judged, rays);
+  const auto in = [](const std::vector<int> & v, int id) {
+      return std::find(v.begin(), v.end(), id) != v.end();
+    };
+  bad.erase(std::remove_if(bad.begin(), bad.end(), [&](int id) {
+      return in(not_chased, id) && !in(rule_excluded, id);
+    }), bad.end());
+  return bad;
+}
+
+/// Core tier: does a change in the boat's own field matter for the plan in hand? "" = no (the
+/// caller absorbs it); otherwise the reason, for the log. It matters when
+///   * the ENTRY moved more than move_m before the entry orbit started (phase < EntryOrbit), or
+///     the EXIT before the exit orbit did (phase < ExitOrbit): the rings are round the old spot;
+///   * some red/green would now be passed on the wrong side by `judged` (the plan's transit for
+///     the approach and entry orbit; the track driven plus what is left of the leg in the transit).
+/// Hazards crowding the path are not this function's business (shrunk / blocked).
+inline std::string sensorChangeMatters(
+  const Plan & pl, Phase phase, const std::vector<nav::Buoy> & buoys, Vec2 entry, Vec2 exitp,
+  const std::vector<Vec2> & entry_ring, const std::vector<Vec2> & judged, double move_m)
+{
+  const auto moved = [move_m](Vec2 was, Vec2 now) {
+      return path::detail::finite(was) && path::detail::finite(now) && nav::norm(now - was) > move_m;
+    };
+  if (phase < Phase::EntryOrbit && moved(pl.entry_c, entry)) {
+    return "the ENTRY moved " + detail::fmt(nav::norm(entry - pl.entry_c), 1) + " m";
+  }
+  if (phase < Phase::ExitOrbit && moved(pl.exit_c, exitp)) {
+    return "the EXIT moved " + detail::fmt(nav::norm(exitp - pl.exit_c), 1) + " m";
+  }
+  if (phase > Phase::Transit || judged.size() < 2) {return "";}
+  const std::vector<int> bad = wrongSideNow(buoys, pl.axis, pl.entry_c, pl.exit_c, entry_ring,
+      pl.legs[static_cast<int>(Phase::ExitOrbit)], judged, pl.excluded);
+  if (bad.empty()) {return "";}
+  std::string s;
+  for (const int id : bad) {
+    const auto b = std::find_if(buoys.begin(), buoys.end(),
+        [id](const nav::Buoy & x) {return x.id == id;});
+    s += (s.empty() ? "" : ", ") + std::string(b != buoys.end() ? beaconWord(b->state) : "buoy") +
+      " " + std::to_string(id);
+  }
+  return s + (bad.size() == 1 ? " would" : " would each") + " be passed on the wrong side";
+}
+
 namespace detail
 {
 
@@ -1041,21 +1134,10 @@ inline Plan planAt(const Request & rq, const Params & p, const Grid & grid, doub
     out.entry_ring = er.pts;
   }
 
-  // The passage: which red/green are held to a side. Not one whose ray runs into the line
-  // closing the transit behind the ENTRY or beyond the EXIT (it is behind the start or past
-  // the finish, and holding it would send the boat round it), nor one the orbit itself
-  // brushes past (its side is passed both ways while circling).
+  // The passage: which red/green are held to a side (selectRays says which and why not).
   const std::vector<Vec2> & ering = with_entry ? er.pts : rq.entry_ring_done;
-  const auto brushes = [](const std::vector<Vec2> & ring, Vec2 q) {
-      return std::any_of(ring.begin(), ring.end(), [q](Vec2 v) {return nav::norm(v - q) < 1.3;});
-    };
-  out.rays = buildRays(rq.buoys, axis, [&](const Ray & r) -> std::string {
-        if (segmentCrossesRay(r, out.entry_c - axis * kFar, out.entry_c)) {return "is behind the ENTRY";}
-        if (segmentCrossesRay(r, out.exit_c, out.exit_c + axis * kFar)) {return "is beyond the EXIT";}
-        if (brushes(ering, r.o)) {return "is beside the ENTRY orbit";}
-        if (brushes(xr.pts, r.o)) {return "is beside the EXIT orbit";}
-        return "";
-      }, &out.excluded, &out.notes);
+  out.rays = selectRays(rq.buoys, axis, out.entry_c, out.exit_c, ering, xr.pts, &out.excluded,
+      &out.notes);
 
   std::vector<Source> tsrc;
   int approach_goal = -1;

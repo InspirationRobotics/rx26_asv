@@ -185,6 +185,16 @@ class SimCamera(Node):
         self.declare_parameter("yolo_imgsz", 0)
         self.declare_parameter("yolo_conf", 0.0)
         self.declare_parameter("yolo_log", "")          # CSV, one row per truth buoy per frame
+        # The colour errors the real camera made on the 2026-11-10 Singapore field (truth
+        # detector only; all OFF by default so every existing run is unchanged):
+        #   false_blue_buoys  comma-separated buoy names ("*" = every unlit one) whose UNLIT
+        #                     beacon the LED classifier read as BLUE (it saw the pale-blue skirt)
+        #   false_blue_prob   per detection, the chance one of them is labelled solid blue
+        #   flash_resolve_m   beyond this range a FLASHING blue reads SOLID (the flash tracker
+        #                     has too few pixels to see the off-phase); 0 = always resolved
+        self.declare_parameter("false_blue_buoys", "")
+        self.declare_parameter("false_blue_prob", 0.0)
+        self.declare_parameter("flash_resolve_m", 0.0)
         g = lambda n: self.get_parameter(n).value  # noqa: E731
 
         self.source = str(g("position_source")).lower()
@@ -474,12 +484,27 @@ class SimCamera(Node):
             if hpx < min_px:
                 continue
             wpx = self.fx * BUOY_W / x
-            label = C.LABEL_OF[state] if side_on else C.LABEL_OF["off"]
+            label = self._mislabel(name, state if side_on else "off", float(np.linalg.norm(pc)))
             out.append(Cand(name, label, pc,
                             [int(max(0, u - wpx / 2)), int(max(0, v - hpx / 2)),
                              int(min(self.W - 1, u + wpx / 2)),
                              int(min(self.H - 1, v + hpx / 2))], hpx))
         return out
+
+    def _mislabel(self, name, shown, rng_m):
+        """The label a detector gives a buoy SHOWING `shown`, with the colour errors the
+        false_blue_* / flash_resolve_m parameters ask for (none by default)."""
+        g = lambda n: self.get_parameter(n).value  # noqa: E731
+        if shown == "off":
+            names = {n.strip() for n in str(g("false_blue_buoys")).split(",") if n.strip()}
+            if (("*" in names or name in names)
+                    and self.rng.random() < float(g("false_blue_prob"))):
+                return C.LABEL_OF["steady_blue"]
+        elif shown == "flash_blue":
+            far = float(g("flash_resolve_m"))
+            if far > 0.0 and rng_m > far:
+                return C.LABEL_OF["steady_blue"]
+        return C.LABEL_OF[shown]
 
     @staticmethod
     def _det_msg(label, bbox, pos, conf=0.9):

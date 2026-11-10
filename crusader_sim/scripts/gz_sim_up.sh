@@ -11,6 +11,8 @@
 #                 oracle (default) or the team's REAL YOLO detector + LED classifier running on
 #                 the rendered frames. yolo needs `bash crusader_sim/scripts/setup_yolo_venv.sh`
 #                 once; without it the rig says so and runs truth. SIM_CAMERA_ARGS adds ROS args.
+#     SIM_TRACKER_LIDAR=1  target_tracker fuses LiDAR clusters (use_lidar, open water) instead of
+#                 the checked-in camera-only setting (gz_rig_up.sh says why it matters).
 #     RX26_IMAGE  the image a NEW container is made from. Default: crsd-sim:nav2 when
 #                 it exists, else crsd-sim:humble (no Nav2).
 #     --recreate-container
@@ -287,7 +289,8 @@ else
 fi
 # docker exec does not inherit this shell's environment: TREE, NAV_MODE and SIM_* (SIM_TUNING too) cross explicitly
 docker exec -e TREE="${TREE:-}" -e NAV_MODE="${NAV_MODE:-}" -e SIM_DETECTOR="${SIM_DETECTOR:-}" \
-  -e SIM_CAMERA_ARGS="${SIM_CAMERA_ARGS:-}" -e SIM_TUNING="$SIM_TUNING_C" "$CONTAINER" bash -lc \
+  -e SIM_CAMERA_ARGS="${SIM_CAMERA_ARGS:-}" -e SIM_TRACKER_LIDAR="${SIM_TRACKER_LIDAR:-}" \
+  -e SIM_TUNING="$SIM_TUNING_C" "$CONTAINER" bash -lc \
   "bash /root/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_rig_up.sh $COURSE $UAV_ARG$RIG_ARGS" 2>&1 | sed 's/^/  /'
 
 if [ "$GUI" = 1 ]; then

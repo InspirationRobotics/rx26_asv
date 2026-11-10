@@ -1,0 +1,39 @@
+# Task 1 Safe Passage — the REAL Singapore field (Marina Bay, measured 2026-11-10).
+#
+# Buoy positions are the LiDAR map of run 20261110-030810 (Crusader inside the field, MID360,
+# steady scans registered; scratchpad lidar/buoys.csv of the 2026-11-11 session). Repeatable to
+# ~0.12 m against run 025236 once a 3 m GPS offset between the two runs is removed, so the
+# GEOMETRY (gaps, spacing) is trusted; the absolute lat/lon only to a few metres.
+#
+#   11 buoys in two columns ~3 m apart, field ~8 m x 13 m.
+#   centre-to-centre to the nearest neighbour: min 1.86, median 2.35, max 3.48 m
+#   tightest surface gaps: 09-10 1.48 m, 08-10 1.89 m, 05-06 1.90 m, 04-05 2.05 m
+#
+# The LIGHT ASSIGNMENT is ours: the beacons were unlit on 2026-11-10, and the course picks a
+# random one per run (3.3.2). This file is the natural one for a two-column field: ENTRY at the
+# south end (nearest the launch), EXIT at the north end, the channel between the columns, so
+# northbound every RED is on the east column (starboard) and every GREEN on the west (port).
+# task1_sg_rev.yaml drives it the other way; task1_sg_black.yaml turns three lights off.
+#
+# World frame: ENU metres from `origin` (x east, y north) = the LiDAR map's origin, so x/y
+# below are the measured E/N. The boat starts where the 2026-11-10 runs began, heading north.
+
+name: task1_sg
+origin: {lat: 1.28050, lon: 103.85570}
+draft_m: 0.24
+depth_m: 5.0
+boat_start: {x: -1.0, y: -2.0, yaw_deg: 90.0}
+tier: core
+
+elements:
+  - {type: robobuoy, name: b01_entry, x: -4.52, y:  9.02, beacon: flash_blue,  up_beacon: false}
+  - {type: robobuoy, name: b02_grn,   x: -8.62, y:  9.69, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: b03_red,   x: -4.35, y: 12.40, beacon: flash_red,   up_beacon: false}
+  - {type: robobuoy, name: b04_grn,   x: -7.30, y: 12.46, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: b05_grn,   x: -7.36, y: 14.80, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: b06_red,   x: -5.10, y: 14.90, beacon: flash_red,   up_beacon: false}
+  - {type: robobuoy, name: b07_black, x: -0.53, y: 15.26, beacon: "off"}
+  - {type: robobuoy, name: b08_red,   x: -3.20, y: 16.55, beacon: flash_red,   up_beacon: false}
+  - {type: robobuoy, name: b09_grn,   x: -5.78, y: 17.91, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: b10_red,   x: -4.06, y: 18.62, beacon: flash_red,   up_beacon: false}
+  - {type: robobuoy, name: b11_exit,  x: -5.22, y: 21.91, beacon: steady_blue, up_beacon: false}
