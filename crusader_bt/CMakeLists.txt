@@ -112,6 +112,10 @@ if(BUILD_TESTING)
   add_executable(test_run_start test/test_run_start.cpp)
   target_include_directories(test_run_start PRIVATE include)
   add_test(NAME run_start COMMAND test_run_start)
+  # hold_heading: the HoldHeading leaf's decision (hold the heading, drift, return, hysteresis).
+  add_executable(test_hold_heading test/test_hold_heading.cpp)
+  target_include_directories(test_hold_heading PRIVATE include)
+  add_test(NAME hold_heading COMMAND test_hold_heading)
   # mission_nodes: WaitForRunStart, TaskAttempt and PassagePlanFresh ticked against a Context.
   add_executable(test_mission_nodes test/test_mission_nodes.cpp)
   target_include_directories(test_mission_nodes PRIVATE include)

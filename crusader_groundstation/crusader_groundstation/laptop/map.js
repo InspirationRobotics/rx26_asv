@@ -2,7 +2,9 @@
 // (the Map tab and the Mission tab), in metres east/north of the first position heard.
 // The MANUAL field editor works on the same state: what you place is what the boat is sent.
 // Clicking the map and addManual/removeManual/setManual edit one list; onManualChange hears them all.
-// The Mission tab's DRAFT (its GPS waypoints, numbered) is a layer of its own: setDraft draws it.
+// The Mission tab's DRAFT (its GPS waypoints, numbered) is a layer of its own: setDraft draws it;
+// a draft point with a numeric heading_deg (true, 0 = north) also gets a heading arrow.
+// The basemap (OSM vectors from /basemap.json) is drawn under everything, with its attribution.
 // What a click on the map means is one MODE at a time (off, manual, pick, waypoints): turning one
 // on turns the other off, so the two editors never fight over a click. See setClickMode.
 "use strict";
@@ -26,6 +28,15 @@ const CrsdMap = (() => {
     hazard: [["--map-hazard"], "#ff9800"],
     obstacle: [["--map-obstacle"], "#7b1fa2"],
     draft: [["--map-draft"], "#c2185b"],
+    // basemap (OSM vectors); fallback is [light, dark] when the page does not define the variable
+    bWater: [["--map-water"], ["#a9cdea", "#1b3a57"]],
+    bPark: [["--map-park"], ["rgba(120,170,110,0.28)", "rgba(90,140,90,0.22)"]],
+    bBuild: [["--map-building"], ["rgba(110,110,120,0.22)", "rgba(160,170,185,0.14)"]],
+    bBuildLine: [["--map-building-line"], ["rgba(90,90,100,0.45)", "rgba(160,170,185,0.30)"]],
+    bPier: [["--map-pier"], ["#7d6c58", "#b4a48e"]],
+    bRoad: [["--map-road"], ["#9aa8b8", "#3e4a5c"]],
+    bPath: [["--map-footpath"], ["#a9b4c0", "#34404f"]],
+    bLabel: [["--map-label"], ["#33566f", "#8fb4d0"]],
   };
   const OBSTACLE_MIN_PX = 3;                      // radius floor: a small cluster survives zooming out
   const HIT_PX = 10;                              // a click this close to a marker is on it
@@ -49,10 +60,16 @@ const CrsdMap = (() => {
     const k = Math.cos(S.origin[0] * Math.PI / 180);
     return [S.origin[0] + y / M_PER_DEG, S.origin[1] + x / (M_PER_DEG * k)];
   }
+  function isDark() {
+    const t = document.documentElement.getAttribute("data-theme");
+    return t ? t === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  }
   function theme() {
-    const cs = getComputedStyle(document.documentElement), t = {};
-    for (const [key, [names, fallback]] of Object.entries(THEME))
-      t[key] = names.map(n => cs.getPropertyValue(n).trim()).find(Boolean) || fallback;
+    const cs = getComputedStyle(document.documentElement), t = {}, dark = isDark();
+    for (const [key, [names, fallback]] of Object.entries(THEME)) {
+      const fb = Array.isArray(fallback) ? fallback[dark ? 1 : 0] : fallback;
+      t[key] = names.map(n => cs.getPropertyValue(n).trim()).find(Boolean) || fb;
+    }
     return t;
   }
   function labelColour(name) {
@@ -164,6 +181,7 @@ const CrsdMap = (() => {
       return;
     }
     if (v.follow && S.boat) v.centre = xy(S.boat.lat, S.boat.lon);
+    const baseSeen = drawBase(v);                 // under everything, grid included
     grid(v);
     // hazards: what the planner keeps out of
     c.strokeStyle = T.hazard; c.lineWidth = 1;
@@ -219,6 +237,7 @@ const CrsdMap = (() => {
     scaleBar(v);
     readout(v);
     if (v.pickable && MODE_HINT[mode]) label(c, MODE_HINT[mode], 8, 8, "left", "top", T.draft);
+    if (baseSeen) attribution(v);                 // last, so nothing covers it
   }
   // 1-2-5 x 10^n nearest to m: [step, subdivisions of it into nice minor steps]
   function nice(m) {
@@ -238,6 +257,119 @@ const CrsdMap = (() => {
     halo(c, lw);
     if (fill) { c.fillStyle = fill; c.fill(); }
     c.setLineDash(dash || []); c.lineWidth = lw; c.strokeStyle = line; c.stroke(); c.setLineDash([]);
+  }
+  // ---- basemap: OpenStreetMap vectors from /basemap.json (made by tools/scripts/fetch_basemap.py) ----
+  // Each feature keeps its lat/lon bbox for culling and its projection (metres east/north of the
+  // origin) cached until the origin changes. Failing to load it just means no basemap.
+  const BASE_ORDER = ["park", "water", "path", "road", "building", "pier"];   // drawn bottom to top
+  const BASE_MIN_SCALE = {building: 0.5, path: 0.5};                          // px/m below which a layer is skipped
+  const LABEL_MIN_SCALE = 0.3, TINY_PX = 1;
+  let base = null, baseKey = "";
+  function prepareBase(doc) {
+    const layers = {};
+    for (const name of BASE_ORDER) {
+      layers[name] = (doc.layers[name] || []).map(f => {
+        const area = Array.isArray(f[0]), rings = area ? f : [f], b = [90, 180, -90, -180];
+        for (const r of rings) for (let i = 0; i < r.length; i += 2) {
+          b[0] = Math.min(b[0], r[i]); b[2] = Math.max(b[2], r[i]);
+          b[1] = Math.min(b[1], r[i + 1]); b[3] = Math.max(b[3], r[i + 1]);
+        }
+        return {b, rings, area, xy: null};
+      });
+    }
+    return {layers, labels: doc.labels || [], attribution: doc.attribution || "© OpenStreetMap contributors"};
+  }
+  function loadBase() {
+    if (typeof fetch !== "function") return;
+    fetch("/basemap.json").then(r => r.ok ? r.json() : null).then(doc => {
+      if (doc && doc.layers) { base = prepareBase(doc); baseKey = ""; redraw(); }
+    }).catch(() => {});
+  }
+  function projectBase() {                        // drop cached projections when the origin moved
+    const key = S.origin.join(",");
+    if (key === baseKey) return;
+    baseKey = key;
+    for (const list of Object.values(base.layers)) for (const f of list) f.xy = null;
+  }
+  function projected(f) {
+    if (!f.xy) {
+      const k = Math.cos(S.origin[0] * Math.PI / 180) * M_PER_DEG;
+      f.xy = f.rings.map(r => {
+        const a = new Float64Array(r.length);
+        for (let i = 0; i < r.length; i += 2) {
+          a[i] = (r[i + 1] - S.origin[1]) * k; a[i + 1] = (r[i] - S.origin[0]) * M_PER_DEG;
+        }
+        return a;
+      });
+    }
+    return f.xy;
+  }
+  function baseStyle(name, sc) {                  // fill, stroke, line width, dash for one layer
+    const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+    return {
+      park: {fill: T.bPark}, water: {fill: T.bWater},
+      building: {fill: T.bBuild, stroke: T.bBuildLine, lw: 1},
+      pier: {fill: T.bPier, stroke: T.bPier, lw: clamp(3 * sc, 1.5, 6)},
+      road: {stroke: T.bRoad, lw: clamp(5 * sc, 1, 10)},
+      path: {stroke: T.bPath, lw: 1, dash: [4, 3]},
+    }[name];
+  }
+  function drawBase(v) {                          // returns how many features are on screen
+    if (!base || !S.origin) return 0;
+    projectBase();
+    const c = v.ctx, sc = v.scale, hw = v.w / 2, hh = v.h / 2, cx = v.centre[0], cy = v.centre[1];
+    const lo = latlon(cx - hw / sc, cy - hh / sc), hi = latlon(cx + hw / sc, cy + hh / sc);
+    const mLat = M_PER_DEG * sc, mLon = M_PER_DEG * Math.cos(S.origin[0] * Math.PI / 180) * sc;
+    let seen = 0;
+    for (const name of BASE_ORDER) {
+      if (sc < (BASE_MIN_SCALE[name] || 0)) continue;
+      const st = baseStyle(name, sc);
+      let any = false;
+      c.beginPath();
+      for (const f of base.layers[name]) {
+        const b = f.b;
+        if (b[0] > hi[0] || b[2] < lo[0] || b[1] > hi[1] || b[3] < lo[1]) continue;
+        if (f.area && (b[2] - b[0]) * mLat < TINY_PX && (b[3] - b[1]) * mLon < TINY_PX) continue;
+        any = true; seen++;
+        for (const a of projected(f)) {
+          for (let i = 0; i < a.length; i += 2) {
+            const x = hw + (a[i] - cx) * sc, y = hh - (a[i + 1] - cy) * sc;
+            i ? c.lineTo(x, y) : c.moveTo(x, y);
+          }
+          if (f.area) c.closePath();
+        }
+      }
+      if (!any) continue;
+      if (st.fill) { c.fillStyle = st.fill; c.fill("evenodd"); }
+      if (st.stroke) {
+        c.strokeStyle = st.stroke; c.lineWidth = st.lw; c.lineCap = "round";
+        c.setLineDash(st.dash || []); c.stroke(); c.setLineDash([]); c.lineCap = "butt";
+      }
+    }
+    if (sc >= LABEL_MIN_SCALE) seen += baseLabels(v);
+    return seen;
+  }
+  function baseLabels(v) {
+    const c = v.ctx;
+    let n = 0;
+    c.font = "italic 11px system-ui, sans-serif";
+    for (const l of base.labels) {
+      const s = at(v, l.lat, l.lon);
+      if (s[0] < 0 || s[1] < 0 || s[0] > v.w || s[1] > v.h) continue;
+      label(c, l.name, s[0], s[1], "center", "middle", T.bLabel); n++;
+    }
+    c.font = FONT;
+    return n;
+  }
+  function attribution(v) {                       // ODbL / OSM policy: visible whenever basemap data is
+    const c = v.ctx, text = base.attribution;
+    c.font = "11px system-ui, sans-serif";
+    const w = c.measureText(text).width;
+    c.globalAlpha = 0.85; c.fillStyle = T.bg; c.fillRect(v.w - w - 10, v.h - 18, w + 8, 16);
+    c.globalAlpha = 1;
+    c.textAlign = "right"; c.textBaseline = "alphabetic"; c.fillStyle = T.text;
+    c.fillText(text, v.w - 6, v.h - 6);
+    c.font = FONT;
   }
   function grid(v) {
     const c = v.ctx, [major, div] = nice(90 / v.scale), minor = major / div;
@@ -283,8 +415,20 @@ const CrsdMap = (() => {
       const chosen = i === S.draftSel;
       disc(c, p[0], p[1], chosen ? 9 : 6, T.draft, T.text, chosen ? 3 : 1.5);
       label(c, String(i + 1), p[0] + 11, p[1] - 8);
+      if (S.draft[i].heading_deg != null) headingArrow(c, p, S.draft[i].heading_deg);
     });
     c.font = FONT;
+  }
+  function headingArrow(c, p, deg) {              // from p toward deg (true, 0 = north, clockwise)
+    const a = deg * Math.PI / 180, dx = Math.sin(a), dy = -Math.cos(a), len = 28, head = 7;
+    const tip = [p[0] + dx * len, p[1] + dy * len];
+    const wing = s => [tip[0] - (dx * Math.cos(s) - dy * Math.sin(s)) * head,
+                       tip[1] - (dx * Math.sin(s) + dy * Math.cos(s)) * head];
+    const l = wing(0.45), r = wing(-0.45);
+    c.beginPath(); c.moveTo(p[0], p[1]); c.lineTo(tip[0], tip[1]);
+    c.moveTo(l[0], l[1]); c.lineTo(tip[0], tip[1]); c.lineTo(r[0], r[1]);
+    halo(c, 2);
+    c.lineWidth = 2; c.strokeStyle = T.draft; c.stroke();
   }
   function boat(v) {
     if (!S.boat) return;
@@ -431,7 +575,8 @@ const CrsdMap = (() => {
   }
   function setDraft(list, chosen) {               // [{lat, lon}] in run order; chosen: the index to ring
     S.draft = (Array.isArray(list) ? list : []).filter(q => q && validPos(q.lat, q.lon))
-      .map(q => ({lat: q.lat, lon: q.lon}));
+      .map(q => Number.isFinite(q.heading_deg) ? {lat: q.lat, lon: q.lon, heading_deg: q.heading_deg}
+                                               : {lat: q.lat, lon: q.lon});
     S.draftSel = Number.isInteger(chosen) ? chosen : -1;
     if (!S.origin && S.draft.length) S.origin = [S.draft[0].lat, S.draft[0].lon];
     redraw();
@@ -444,6 +589,7 @@ const CrsdMap = (() => {
   });
 
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", redraw);
+  loadBase();
 
   return {
     BEACON, update, attach, redraw, centreOn,

@@ -79,6 +79,32 @@ is waiting and logs a WARN. The sim scripts call it themselves. Nothing else cha
 |---|---|---|---|
 | `WaitForRunStart` | action | `max_age_s` (30), `timeout_s` (0 = forever), `hold` (true), out `run_id` | Legacy: the runner's gate now does this for every goal, and the leaf SUCCEEDS at once once the gate has opened, so an old saved mission that still has it does not wait twice. Without the gate it was RUNNING, holding station like `HoldStation`, until a `run_start` received no earlier than `max_age_s` before this node started (30 s: a RunStart that just beat the START button counts, one from an earlier run does not). FAILURE only after `timeout_s` > 0. |
 | `TaskAttempt` | decorator | `token` (RxTask name) | Sets `current_task` = token on its first tick, `TASK_NONE` when the child finishes or is halted. Returns the child's status. |
+| `HoldHeading` | action | `heading_deg` (required, deg true 0-360), `duration_s` (30, > 0), `radius_m` (2, > 0), `return_speed_mps` (0.3, at most 0.4) | Turns to `heading_deg` and holds it for `duration_s`, at the point where the previous block left the boat; SUCCESS when the time is up, counted from its start. FAILURE without a fresh pose at the start, or after 5 s of a stale one. See below. |
+
+### HoldHeading (Task 3 surveying / data collection)
+
+Place it after a GPS waypoint, normally inside a `TaskAttempt` so the heartbeat keeps reporting
+the task. On its first tick it takes the boat's position as the hold point P. GUIDED's position
+setpoint ignores yaw, so it cannot point the bow; the leaf uses the heading-and-speed command
+(`/crsd/guided_heading_speed`, MAVLink SET_ATTITUDE_TARGET, **GUIDED only**) instead, re-sent
+every tick because the bridge stops the boat 0.5 s after the last one. Speed 0 turns the boat
+to the heading and stops it, but that command does **not** hold position, so wind or current
+will push the boat off P. The leaf therefore watches the distance to P:
+
+* inside `radius_m`: command (`heading_deg`, 0 m/s);
+* beyond `radius_m`: command (bearing to P, min(`return_speed_mps`, 0.3 x distance)), so it
+  turns toward P and creeps back; it keeps returning until it is within `radius_m / 2`, then
+  turns back to `heading_deg` (the hysteresis stops it chattering at the edge). The bridge
+  clamps speed at 0.4 m/s whatever the port says.
+
+Like `NavigateTo` it sends nothing when `publish_setpoints` is false (the log says `[NOT SENT]`).
+Halting stops the commands; the bridge deadman then stops the boat. The map draws an arrow at the
+GPS point the hold belongs to (the nearest GPS waypoint before it in mission order). The
+Mission tab validates the ports: `heading_deg` in [0, 360), `duration_s`, `radius_m`,
+`return_speed_mps` above 0 (errors), and `return_speed_mps` above 0.4 (warning).
+Template: `crusader_bt/behavior_trees/templates/survey_t3_hold.xml`. The decision is
+`include/crusader_bt/hold_heading.hpp`, tested by `test/test_hold_heading.cpp`. Not yet
+verified on the water: how ArduRover answers the held heading.
 
 The runner latches the newest `run_start` (`run_id`, receive time) from `/crsd/ocs_command` and
 **does not reset it per goal**. `tree_file` becomes a live parameter, read when a goal is
@@ -88,11 +114,9 @@ accepted (like the `nav_*` knobs): the GUI sets it, then sends the goal.
 
 A "Mission" tab beside the existing ones (the Task 1 tab stays for testing). Scratch-style:
 
-* **Palette** (left): blocks grouped by colour-coded category: Flow (Sequence, ReactiveSequence,
-  Fallback, Parallel...), Decorators (ForceSuccess, Inverter, Retry, Timeout, Repeat...),
-  RoboCommand (WaitForRunStart, TaskAttempt), Navigation (GPS waypoint, Return home,
-  Orbit a GPS point, Hold position), Tasks (every lib subtree), Conditions, and an "advanced"
-  toggle for the rest of the registered leaves. Every block shows a one-line description.
+* **Palette** (left): "Presets" (GPS waypoint, and Hold heading when the boat has the leaf),
+  one group per task with its tier blocks, then the registered leaves grouped Controls,
+  Decorators, Actions, Conditions. Hovering a block shows its description and ports.
 * **Workspace** (centre): the selected tree as nested blocks; controls and decorators are
   C-shaped and hold children. Drag from the palette or within the workspace to insert or move;
   drop on the bin or press Delete to remove. Tabs switch between `Main` and every subtree in the
@@ -107,15 +131,14 @@ A "Mission" tab beside the existing ones (the Task 1 tab stays for testing). Scr
 
 The editor's storage format **is** BT.CPP XML: load = parse XML into blocks, save = serialise.
 
-### Where the library lives and what each server does
+### Where the library lives and what each side does
 
-`crusader_groundstation/mission_lib.py` (pure Python, no ROS) is the one implementation:
-catalogue, list, load (flattening `<include>`), validate, save. Both servers call it:
-
-| Endpoint (POST, JSON) | Laptop `gcs_laptop.py` | Jetson / sim `gcs_node.py` |
-|---|---|---|
-| `/mission/catalogue`, `/mission/list`, `/mission/load`, `/mission/validate`, `/mission/save` | served locally from the laptop's checkout (`crusader_bt/behavior_trees`, `crusader_bt/missions`) | served from its own workspace |
-| `/mission/start` `{xml, name, timeout_s}`, `/mission/stop` | forwarded to the Jetson | validates, writes the XML to `~/.ros/crusader_missions/`, sets `bt_runner_node.tree_file`, sends the `SafePassage` goal / cancels it |
+`crusader_groundstation/mission_xml.py` (pure Python, no ROS) turns blocks into mission XML and
+back and validates a mission against the boat's catalogue; `mission_store.py` holds the
+catalogue, the built-in/uploaded/template lists and the files. `gcs_bridge` serves them on the
+boat (`mission_catalogue`, `mission_get`, `mission_upload`, `mission_delete`, `mission_template`,
+`run_mission`, `cancel_mission`); the laptop's `laptop/gcs_app.py` answers `mission_build` and
+`mission_open` itself and forwards the rest.
 
 ## Not changed
 

@@ -55,9 +55,10 @@ const CrsdEditor = (() => {
     const spec = specOf(b), max = spec && !b.subtree ? spec.max_children : 0;
     return max == null ? Infinity : Math.max(0, max - b.children.length);
   };
-  const blueprint = key => {                        // "gps", "node:Sequence" or "task:Task1Advanced"
+  const blueprint = key => {                        // "gps", "hold", "node:Sequence" or "task:Task1Advanced"
     const [kind, id] = key.split(":");
     return kind === "gps" ? {id: "NavigateTo", ports: {target: "fix", lat: "", lon: ""}}
+         : kind === "hold" ? {id: "HoldHeading", ports: {heading_deg: "0", duration_s: "30"}}
                           : {id, subtree: kind === "task", ports: {}};
   };
 
@@ -71,16 +72,30 @@ const CrsdEditor = (() => {
     const ok = Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
     return ok && (lat || lon) ? {lat, lon} : null;
   }
+  // HoldHeading: the boat holds where the block before it left it, pointed at heading_deg
+  const isHold = b => !b.subtree && b.id === "HoldHeading";
+  const wrap360 = h => ((h % 360) + 360) % 360;
+  function holdHeading(b) {                         // its heading_deg as a number, null while it is not one
+    const h = num(b.ports.heading_deg);
+    return isHold(b) && Number.isFinite(h) ? h : null;
+  }
+  function holdLabel(b) {                           // "Hold heading 090° for 30 s"
+    const h = holdHeading(b), d = num(b.ports.duration_s);
+    const deg = h == null ? (b.ports.heading_deg || "?") : String(Math.round(wrap360(h))).padStart(3, "0");
+    return `Hold heading ${deg}° for ${Number.isFinite(d) ? d : 30} s`;
+  }
   const kindOf = b => b.subtree ? "task" : isGps(b) ? "gps" : (specOf(b) || {}).kind || "unknown";
   function title(b) {
     const spec = specOf(b);
     if (isGps(b)) return E.gps.has(b.uid) ? `GPS waypoint ${E.gps.get(b.uid)}` : "GPS waypoint";
+    if (isHold(b)) return holdLabel(b);
     if (b.subtree && isTask(spec)) return `${TASKS[spec.task] || "Task " + spec.task}, ${spec.tier}`;
     return b.name ? `${b.id} "${b.name}"` : b.id;
   }
   function summary(b) {
     if (isGps(b)) { const p = gpsPoint(b); return p ? `${p.lat.toFixed(6)}, ${p.lon.toFixed(6)}` : "no position yet"; }
-    return Object.entries(b.ports).filter(([, v]) => v !== "").map(([k, v]) => `${k}=${v}`).join("  ");
+    const shown = isHold(b) ? ["heading_deg", "duration_s"] : [];      // the title already says these
+    return Object.entries(b.ports).filter(([k, v]) => v !== "" && !shown.includes(k)).map(([k, v]) => `${k}=${v}`).join("  ");
   }
 
   // ---- changes --------------------------------------------------------------
@@ -187,6 +202,8 @@ const CrsdEditor = (() => {
     let ring = -1;
     E.gps.clear();
     for (const {block} of walk(E.blocks)) {
+      const hold = holdHeading(block);
+      if (hold != null && points.length) points[points.length - 1].heading_deg = wrap360(hold);
       const p = gpsPoint(block);
       if (!p) continue;
       points.push(p);
@@ -291,7 +308,9 @@ const CrsdEditor = (() => {
     const group = (name, items) => items.some(Boolean) ? `<details open><summary>${esc(name)}</summary>${items.join("")}</details>` : "";
     const portNames = e => e.ports.length ? "ports: " + e.ports.map(p => p.name).join(", ") : "no ports";
     let h = E.cat.nodes.has("NavigateTo")
-      ? group("Presets", [item("gps", "gps", "GPS waypoint", "dead reckoning: NavigateTo a lat/lon")]) : "";
+      ? group("Presets", [item("gps", "gps", "GPS waypoint", "dead reckoning: NavigateTo a lat/lon"),
+          E.cat.nodes.has("HoldHeading")
+            ? item("action", "hold", "Hold heading", "turn to a heading and stay there, where the last block left the boat (GUIDED)") : ""]) : "";
     const byTask = new Map();
     for (const s of (d.subtrees || []).filter(isTask)) byTask.set(s.task, (byTask.get(s.task) || []).concat(s));
     for (const [task, list] of [...byTask].sort((a, b) => a[0] - b[0]))

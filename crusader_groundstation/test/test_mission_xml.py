@@ -42,6 +42,8 @@ CATALOGUE = {
         node("Sleep", "action", port("msec", "int")),
         node("IsAutonomous", "condition"),
         node("HoldStation", "action"),
+        node("HoldHeading", "action", port("heading_deg", "double"), port("duration_s", "double", "30.0"),
+             port("radius_m", "double", "2.0"), port("return_speed_mps", "double", "0.3")),
         node("StopBoat", "action"),
         node("WaitForRunStart", "action", port("timeout_s", "double", "0"),
              port("run_id", "std::string", None, "out")),
@@ -377,6 +379,36 @@ class Refusals(Mission):
         for block, needle in cases:
             with self.subTest(needle=needle, block=block["ports"]):
                 self.refused(self.built([block]), needle)
+
+    def test_hold_heading_ports(self):
+        hold = lambda **ports: self.built([gps(), leaf("HoldHeading", **ports)])    # noqa: E731
+        self.assertEqual(self.reasons(hold(heading_deg="90", duration_s="30")), [])
+        self.assertEqual(self.reasons(hold(heading_deg="0", radius_m="2.5", return_speed_mps="0.4")), [])
+        self.assertEqual(self.reasons(hold(heading_deg="359.9")), [])
+        cases = [
+            (dict(), "required port 'heading_deg' is empty"),
+            (dict(heading_deg="360"), "heading_deg 360 must be from 0 up to 360"),
+            (dict(heading_deg="-5"), "heading_deg -5 must be"),
+            (dict(heading_deg="north"), "not 'north'"),
+            (dict(heading_deg="90", duration_s="0"), "duration_s 0 must be more than 0"),
+            (dict(heading_deg="90", duration_s="-3"), "duration_s -3 must be more than 0"),
+            (dict(heading_deg="90", radius_m="0"), "radius_m 0 must be more than 0"),
+            (dict(heading_deg="90", return_speed_mps="0"), "return_speed_mps 0 must be more than 0"),
+        ]
+        for ports, needle in cases:
+            with self.subTest(ports=ports):
+                self.refused(hold(**ports), needle)
+
+    def test_hold_heading_from_the_blackboard_is_not_judged(self):
+        xml = self.built([gps(), leaf("HoldHeading", heading_deg="{h}", duration_s="{t}")])
+        self.assertEqual(self.reasons(xml), [])
+
+    def test_a_fast_hold_heading_return_warns_without_refusing(self):
+        xml = self.built([gps(), leaf("HoldHeading", heading_deg="90", return_speed_mps="0.8")])
+        self.assertEqual(self.reasons(xml), [])
+        warns = mission_xml.warnings(xml, CATALOGUE)
+        self.assertEqual(len(warns), 1)
+        self.assertIn("above 0.4", warns[0]["msg"])
 
     def test_a_waypoint_on_the_equator_or_the_meridian_is_a_place(self):
         for block in (gps(lat="0", lon="103.8"), gps(lat="1.3", lon="0")):

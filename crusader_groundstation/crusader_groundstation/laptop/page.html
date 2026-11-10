@@ -403,6 +403,14 @@ body.ed-dragging { cursor: grabbing; user-select: none; }
     <div>also record these topics in a bag (<button id="rec-topics">load topics</button>):</div>
     <div id="rec-topic-list" class="scroll" style="max-height: 30vh"></div>
   </div>
+  <div class="box">
+    <h3>Auto-record</h3>
+    <label><input type="checkbox" id="rec-auto"> Auto-record Mission-tab runs</label>
+    <label title="camera frames in the auto recording"><input type="checkbox" id="rec-cam" checked> camera</label>
+    <button id="rec-save">Save as auto-record settings</button>
+    <div class="small muted" id="rec-saved"></div>
+    <div class="small muted">Starts when a mission sent from the Mission tab begins moving (not while it waits for RunStart) and stops when it ends. Uses the fps box and topic selection above. A recording you start yourself is never touched.</div>
+  </div>
   <h3>Sessions</h3><table id="rec-sessions"></table>
 </section>
 </main>
@@ -458,7 +466,7 @@ function show(id) {
   if (id === "sensors") { camLoop(); lidarLoop(); loadCamera(); }
   if (id === "mission" && !$("m-name").options.length) loadMissions();
   if (id === "params") paramNodes();
-  if (id === "record") recordList();
+  if (id === "record") { recordList(); if (!recSaved.loaded) recLoadSettings(); }
   if (id === "logs") logs();
   if (id === "reports") ocs();
   if (id === "radio") radio();
@@ -650,7 +658,7 @@ const TILES = [
   ["msg", "MSG", (s, h) => h && h.text
     ? [h.sev <= 3 ? "bad" : h.sev <= 4 ? "warn" : "info", h.text, SEVERITY[h.sev] || "", `${h.text}\nthe last STATUSTEXT; its age is not reported`] : null],
   ["mission", "MISSION", s => missionTile(s.mission)],
-  ["rec", "REC", s => s.record ? ["bad", "● " + s.record.name, fmt(s.record.elapsed_s, 0, " s"), "a recording session is running on the boat"]
+  ["rec", "REC", s => s.record ? ["bad", "● " + s.record.name, (s.record.auto ? "auto: " + s.record.auto + " " : "") + fmt(s.record.elapsed_s, 0, " s"), s.record.auto ? "started automatically by the " + s.record.auto + " mission" : "a recording session is running on the boat"]
                                : ["info", "off", "", "no recording session"]],
   ["cpu", "JETSON", s => s.sys && (num(s.sys.cpu) || num(s.sys.temp)) ? ["info", fmt(s.sys.cpu, 0, "% CPU"), fmt(s.sys.temp, 0, " °C"), "Jetson CPU load and temperature"] : null],
 ];
@@ -1146,7 +1154,7 @@ async function recordList() {
   const r = await req("record_list", {}, true);
   if (!r.ok) return;
   const d = r.data, live = d.live, bag = d.bag || {};
-  $("rec-live").innerHTML = (live ? `<b class="bad">● recording ${esc(live.name)}</b> ${fmt(live.elapsed_s, 0)} s, ${fmt(live.size_mb, 1)} MB, frames ${esc(JSON.stringify(live.frames))}` +
+  $("rec-live").innerHTML = (live ? `<b class="bad">● recording ${esc(live.name)}</b>${(G.state || {}).record && G.state.record.auto ? ` <b>auto: ${esc(G.state.record.auto)}</b>` : ""} ${fmt(live.elapsed_s, 0)} s, ${fmt(live.size_mb, 1)} MB, frames ${esc(JSON.stringify(live.frames))}` +
       (live.error ? ` <b class="warn">${esc(live.error)}</b>` : "") : "not recording") +
     (bag.recording ? `<br>bag: ${bag.topics.length} topics, ${fmt(bag.size_mb, 1)} MB, ${fmt(bag.rate_mb_s, 2)} MB/s, ${fmt(bag.hours_left, 1)} h left` : "") +
     `<br><span class="${d.persist.persists ? "muted" : "bad"}">${esc(d.dir)} ${d.persist.persists ? "persists (" + esc(d.persist.source) + ")" : "is NOT on a bind mount: lost with the container"}</span>`;
@@ -1156,16 +1164,42 @@ async function recordList() {
   if (G.tab === "record") setTimeout(recordList, 2000);
 }
 $("rec-sessions").onclick = async e => { const n = e.target.dataset.del; if (n && confirm(`Delete ${n}?`)) { await req("record_delete", {name: n}); } };
+let recSaved = {topics: []};                    // the auto-record settings as last saved on the boat
+const recTopics = () => [...document.querySelectorAll("#rec-topic-list input:checked")].map(i => i.value);
+function recShowSaved(s) {
+  recSaved = Object.assign({loaded: true}, s);
+  $("rec-auto").checked = s.auto; $("rec-cam").checked = s.camera;
+  $("rec-saved").textContent = `saved: auto ${s.auto ? "ON" : "off"}, ${s.camera ? "camera at " + s.frame_hz + " fps" : "no camera"}, ` +
+    (s.topics.length ? "bag of " + s.topics.join(", ") : "no bag") + (s.warning ? " (" + s.warning + ")" : "");
+}
+// the topic list: saved topics are listed (and ticked) even when the boat does not publish them now
+function recTopicList(topics) {
+  const names = new Set(topics.map(t => t.name)), want = new Set(recSaved.topics);
+  const all = topics.concat([...want].filter(n => !names.has(n)).map(n => ({name: n, type: "(not published now)"})));
+  $("rec-topic-list").innerHTML = all.map(t =>
+    `<label style="display:block"><input type="checkbox" value="${esc(t.name)}"${want.has(t.name) ? " checked" : ""}> ${esc(t.name)} <span class="muted">${esc(t.type)}</span></label>`).join("");
+}
+async function recLoadSettings() {
+  const r = await req("record_settings", {action: "get"}, true);
+  if (!r.ok) return;
+  recShowSaved(r.data);
+  $("rec-hz").value = r.data.frame_hz;
+  recTopicList([]);
+}
 $("rec-topics").onclick = async () => {
   const r = await req("record_topics", {}, true);
-  if (r.ok) $("rec-topic-list").innerHTML = r.data.topics.map(t =>
-    `<label style="display:block"><input type="checkbox" value="${esc(t.name)}"> ${esc(t.name)} <span class="muted">${esc(t.type)}</span></label>`).join("");
+  if (r.ok) recTopicList(r.data.topics);
 };
-$("rec-start").onclick = () => req("record", {kind: "session", action: "start", frame_hz: +$("rec-hz").value,
-  topics: [...document.querySelectorAll("#rec-topic-list input:checked")].map(i => i.value)});
+$("rec-save").onclick = async () => {
+  const r = await req("record_settings", {action: "set", settings: {
+    auto: $("rec-auto").checked, camera: $("rec-cam").checked, frame_hz: +$("rec-hz").value, topics: recTopics()}});
+  if (r.ok) recShowSaved(r.data);
+};
+$("rec-start").onclick = () => req("record", {kind: "session", action: "start", frame_hz: +$("rec-hz").value, topics: recTopics()});
 $("rec-stop").onclick = () => req("record", {kind: "session", action: "stop"});
 $("rec-bag-stop").onclick = () => req("record", {kind: "bag", action: "stop"});
 
+recLoadSettings();
 show("map");
 </script>
 </body>

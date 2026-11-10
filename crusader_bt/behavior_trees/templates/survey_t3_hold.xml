@@ -1,0 +1,45 @@
+<?xml version="1.0"?>
+<!-- MISSION: Survey pattern declaring Task 3 at Core, three stations that hold a heading for 30 s each. -->
+<!--
+  survey_t3_hold.xml - a SURVEY TEMPLATE and the usage example for HoldHeading: declares Task 3
+  at Core (T1, T2, T4 none) and runs three fix legs, each followed by a HoldHeading that turns
+  the boat to a set heading and keeps it there for 30 s (data collection). All of it sits in
+  one TaskAttempt, so the heartbeat's current_task reads TASK_COORDINATED_LOGISTICS throughout.
+
+  HoldHeading holds where the previous block left the boat. It points the bow at heading_deg
+  (degrees true) and, because heading-and-speed control does not hold position, sends the boat
+  back to that point whenever it drifts past radius_m (default 2 m). GUIDED only.
+
+  NOT RUNNABLE BY NAME: it lives in behavior_trees/templates/, which the runner does not
+  search. Open it from the Mission tab's templates list, drag the waypoints onto the real
+  course, and save it under a name of your own; that copy is the mission.
+
+  There is no WaitForRunStart: bt_runner_node holds every goal at its own RunStart gate. The
+  declare_task1..4 attributes on the root are read by the ground station (none | core |
+  advanced | disruptive); BT.CPP ignores them.
+-->
+<root BTCPP_format="4" main_tree_to_execute="Main" declare_task1="none" declare_task2="none" declare_task3="core" declare_task4="none">
+  <BehaviorTree ID="Main">
+    <ReactiveSequence name="guard_band">
+
+      <IsAutonomous/>
+
+      <Sequence name="mission">
+        <TaskAttempt token="TASK_COORDINATED_LOGISTICS">
+          <Sequence name="task3_stations">
+            <NavigateTo target="fix" lat="1.2805000" lon="103.8558500" tolerance="3.0"
+                        resend_m="1.5" avoid="true" exempt="" blocked_timeout_s="15.0"/>
+            <HoldHeading heading_deg="90" duration_s="30"/>
+            <NavigateTo target="fix" lat="1.2805000" lon="103.8561500" tolerance="3.0"
+                        resend_m="1.5" avoid="true" exempt="" blocked_timeout_s="15.0"/>
+            <HoldHeading heading_deg="180" duration_s="30"/>
+            <NavigateTo target="fix" lat="1.2807000" lon="103.8561500" tolerance="3.0"
+                        resend_m="1.5" avoid="true" exempt="" blocked_timeout_s="15.0"/>
+            <HoldHeading heading_deg="270" duration_s="30"/>
+          </Sequence>
+        </TaskAttempt>
+      </Sequence>
+
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

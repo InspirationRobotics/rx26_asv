@@ -142,6 +142,10 @@ def annotate(raw):
     return out
 
 
+#: The fastest HoldHeading's return may go: telemetry_bridge's hs_max_speed_mps.
+HOLD_MAX_SPEED_MPS = 0.4
+
+
 def _number(text):
     """The finite float `text` spells, else None (float() alone also takes nan, inf and 1_0)."""
     return float(text) if _NUMBER.fullmatch(text.strip()) else None
@@ -500,6 +504,23 @@ class _Check:
                 self.add(path, f"{here}: lat and lon are both 0: that is the default, not a place")
         if _node_id(el) == "NavigateTo" and el.get("target") == "port" and not el.get("goal"):
             self.add(path, f'{here}: target="port" needs goal="{{name}}" naming the point to drive to')
+        if _node_id(el) == "HoldHeading":
+            self.hold_heading(el, here, path)
+
+    def hold_heading(self, el, here, path):
+        """HoldHeading's ports. A blank or {blackboard} one is left to the port check; a value
+        that is not a number is already reported there."""
+        for key, ok, want in (("heading_deg", lambda v: 0 <= v < 360, "from 0 up to 360"),
+                              ("duration_s", lambda v: v > 0, "more than 0"),
+                              ("radius_m", lambda v: v > 0, "more than 0"),
+                              ("return_speed_mps", lambda v: v > 0, "more than 0")):
+            raw = (el.get(key) or "").strip()
+            value = None if not raw or _BLACKBOARD.fullmatch(raw) else _number(raw)
+            if value is not None and not ok(value):
+                self.add(path, f"{here}: {key} {raw} must be {want}")
+            elif key == "return_speed_mps" and value is not None and value > HOLD_MAX_SPEED_MPS:
+                self.warn(path, f"{here}: return_speed_mps {raw} is above {HOLD_MAX_SPEED_MPS:g} m/s: "
+                                f"the boat clamps it to {HOLD_MAX_SPEED_MPS:g}")
 
     def one_tier_per_task(self):
         for task, tiers in self.tiers.items():

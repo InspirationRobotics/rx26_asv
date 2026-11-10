@@ -47,7 +47,8 @@ from crusader_msgs.msg import (Attitude, Cluster3DArray, FcuHealth, FcuStatus, H
 
 from crusader_groundstation import (bag_recorder, camera_profiles, gcs_wire, mission_store,
                                     mission_xml, ocs_link, operator_settings, param_client,
-                                    planner_profiles, power_client, proc_scan, system_info)
+                                    planner_profiles, power_client, proc_scan, record_settings,
+                                    system_info)
 from crusader_groundstation import node_registry as reg
 from crusader_groundstation.log_buffer import LogBuffer
 from crusader_groundstation.process_manager import ProcessManager
@@ -76,6 +77,7 @@ PARAMS = {
     "record_telemetry_hz": 2.0,
     "record_frame_hz": 1.0,             # default per session; the Record tab overrides it
     "record_min_free_gb": 2.0,
+    "record_settings_file": "",         # "" = record_settings.json beside record_dir (a bind mount)
     "planner_profiles_dir": "/root/robotx_ws/src/rx26_asv/crusader_sim/config/tuning_profiles",
     "planner_profiles_save_dir": "~/.cache/crusader/planner_profiles",
     "operator_settings_file": "~/.cache/crusader/operator_settings.json",   # dock heading, search side
@@ -341,6 +343,13 @@ class GcsBridge(Node):
                                  logger=self.get_logger().warn)
         self.bags = bag_recorder.BagRecorder(logger=self.get_logger().info)
         self._persist = self._check_persistence(p["record_dir"])
+        self.rec_settings = record_settings.Store(
+            p["record_settings_file"] or os.path.join(
+                os.path.dirname(os.path.normpath(p["record_dir"])), "record_settings.json"))
+        if self.rec_settings.warning:
+            self.get_logger().warn(self.rec_settings.warning)
+        self.auto_rec = record_settings.AutoRecorder()
+        self._auto_lock = threading.Lock()      # ops (pool threads) and the timer both drive it
 
         # Freshness caches, all written by ROS callbacks.
         self._pose = StreamCache(p["pose_timeout_s"])
@@ -666,7 +675,8 @@ class GcsBridge(Node):
                     "uptime": system_info.format_uptime(sysinfo["uptime_s"])},
             "record": None if session is None else {
                 "name": session.name, "elapsed_s": round(time.time() - session.started, 1),
-                "frames": session.frame_stats()[0], "bag": self.bags.recording},
+                "frames": session.frame_stats()[0], "bag": self.bags.recording,
+                "auto": self.auto_rec.active},
             "power": self._power_state(),
         }
 
@@ -1027,6 +1037,8 @@ class GcsBridge(Node):
         self._goal = handle
         handle.get_result_async().add_done_callback(self._on_result)
         self.get_logger().info(f"mission {goal.name} started from the GCS")
+        with self._auto_lock:       # only this op: the Task 1 / Task 3 panels never auto-record
+            self.auto_rec.mission_started(goal.name, time.monotonic())
         return True, f"{goal.name} accepted", None
 
     def _on_result(self, future):
@@ -1285,31 +1297,83 @@ class GcsBridge(Node):
     def _op_record(self, conn, req):
         kind, action = req.get("kind"), req.get("action")
         if action == "stop":
-            msg = ""
-            if self.bags.recording:
-                _ok, msg = self.bags.stop()       # the bag first, or meta.json is short
             if kind == "bag":
+                _ok, msg = self.bags.stop() if self.bags.recording else (False, "")
                 return bool(msg), msg or "no bag recording", None
-            ok, smsg = self.recorder.stop()
-            return ok, smsg + (f"; {msg}" if msg else ""), None
+            ok, msg = self._stop_recording()
+            return ok, msg, None
         if action != "start" or kind not in ("session", "bag"):
             return False, "record needs kind session|bag and action start|stop", None
         topics = req.get("topics") or []
         if not isinstance(topics, list) or not all(isinstance(t, str) for t in topics):
             return False, "topics must be a list of names", None
+        with self._auto_lock:
+            self.auto_rec.manual_start()    # pressing Start takes over any auto recording
+        ok, msg = self._start_recording(req.get("frame_hz"), topics, True)
+        return ok, msg, None
+
+    def _start_recording(self, frame_hz, topics, camera):
+        """The one start path, manual and automatic. Returns (ok, message)."""
         msg = ""
         if not self.recorder.recording:
-            sources = ["camera"] if self.count_publishers(RAW_TOPIC) else []
-            rates, notes = frame_rates(req.get("frame_hz"), sources, self.p["record_frame_hz"],
+            sources = ["camera"] if camera and self.count_publishers(RAW_TOPIC) else []
+            rates, notes = frame_rates(frame_hz, sources, self.p["record_frame_hz"],
                                        *RECORD_FRAME_HZ_RANGE)
             ok, msg = self.recorder.start(sources, rates)
             if not ok:
-                return False, msg, None
+                return False, msg
             msg += f" ({'; '.join(notes)})" if notes else ""
         if topics:
             ok, bag_msg = self.bags.start(os.path.join(self.recorder.session.dir, "bag"), topics)
             msg += f"; {bag_msg}"         # a failed bag does not fail the session, but says so
-        return True, msg.lstrip("; "), None
+        return True, msg.lstrip("; ")
+
+    def _stop_recording(self):
+        """The bag first, or its meta.json is short; then the session. Returns (ok, message)."""
+        msg = ""
+        if self.bags.recording:
+            _ok, msg = self.bags.stop()
+        ok, smsg = self.recorder.stop()
+        return ok, smsg + (f"; {msg}" if msg else "")
+
+    def _op_record_settings(self, conn, req):
+        """{action: get} -> the auto-record settings; {action: set, settings} saves them."""
+        action = req.get("action")
+        if action == "get":
+            return True, "", self.rec_settings.get() | {"warning": self.rec_settings.warning}
+        if action != "set":
+            return False, "record_settings needs action get|set", None
+        try:
+            settings, err = self.rec_settings.set(req.get("settings"))
+        except OSError as e:
+            return False, f"could not save {self.rec_settings.path}: {e}", None
+        if settings is None:
+            return False, err, None
+        self.get_logger().info(f"auto-record settings saved: {settings}")
+        return True, "auto-record settings saved", settings
+
+    def _auto_record(self):
+        """Starts and stops the Mission tab's recording from bt_status (the 2 Hz timer)."""
+        now = time.monotonic()
+        bt = self._bt.get(now) or {}
+        live = self.recorder.session if self.recorder.recording else None
+        s = self.rec_settings.get()
+        with self._auto_lock:
+            actions = self.auto_rec.update(now, bt.get("state"), bt.get("name"),
+                                           live.name if live else None, s["auto"])
+            for action, mission in actions:
+                if action == "stop":
+                    _ok, msg = self._stop_recording()
+                    self.get_logger().info(f"auto-record stop for mission {mission}: {msg}")
+                    continue
+                ok, msg = self._start_recording(s["frame_hz"], s["topics"], s["camera"])
+                if ok:
+                    name = self.recorder.session.name
+                    self.auto_rec.started(name, mission)
+                    self.get_logger().info(f"auto-record start {name} for mission {mission}: {msg}")
+                else:
+                    self.auto_rec.start_failed()
+                    self.get_logger().error(f"auto-record for mission {mission} NOT started: {msg}")
 
     def _op_record_list(self, conn, req):
         live = self.recorder.session
@@ -1342,6 +1406,7 @@ class GcsBridge(Node):
         return True, f"{writer.mb:.1f} MB sent", {"name": req.get("name")}
 
     def _record_sample(self):
+        self._auto_record()
         self.recorder.tick()
         self.bags.tick()
         if self.bags.recording and not self.recorder.recording:

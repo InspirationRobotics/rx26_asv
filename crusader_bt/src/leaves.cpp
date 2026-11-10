@@ -20,6 +20,7 @@
 #include "behaviortree_cpp/bt_factory.h"
 
 #include "crusader_bt/context.hpp"
+#include "crusader_bt/hold_heading.hpp"
 #include "crusader_bt/nav_math.hpp"
 #include "crusader_bt/path_math.hpp"
 #include "crusader_bt/planned_leg.hpp"
@@ -835,6 +836,120 @@ public:
   BT::NodeStatus onRunning() override {return BT::NodeStatus::RUNNING;}
 };
 
+/// Turns the boat to heading_deg and keeps it there for duration_s, near where it started.
+///
+/// The GUIDED position setpoint ignores yaw, so this uses the heading+speed command
+/// (speed 0 = stop and point), re-sent every tick for the bridge's deadman. That command does
+/// not hold position, so a boat that drifts past radius_m is sent back to the start point
+/// (holdheading::decide, tested off the boat). GUIDED only. Like NavigateTo it sends nothing
+/// when publish_setpoints is false. Put it inside a TaskAttempt so the heartbeat keeps
+/// reporting the task. Halting just stops commanding; the bridge deadman then ends it.
+class HoldHeading : public CrusaderAction
+{
+public:
+  HoldHeading(const std::string & n, const BT::NodeConfig & c)
+  : CrusaderAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<double>("heading_deg", "heading to hold, degrees true 0-360 (required)"),
+      BT::InputPort<double>("duration_s", 30.0, "SUCCESS after this long, from the start; > 0"),
+      BT::InputPort<double>("radius_m", 2.0, "drift from the start point that triggers a return; > 0"),
+      BT::InputPort<double>("return_speed_mps", 0.3, "return speed, never above 0.4")};
+  }
+
+  BT::NodeStatus onStart() override
+  {
+    const auto heading = getInput<double>("heading_deg");
+    duration_s_ = getInput<double>("duration_s").value_or(30.0);
+    prm_.radius_m = getInput<double>("radius_m").value_or(2.0);
+    prm_.return_speed_mps = getInput<double>("return_speed_mps").value_or(0.3);
+    if (!heading || !std::isfinite(*heading) || !(duration_s_ > 0.0) || !(prm_.radius_m > 0.0) ||
+      !(prm_.return_speed_mps > 0.0))
+    {
+      RCLCPP_ERROR(
+        log(), "HoldHeading: needs a numeric heading_deg and duration_s, radius_m, "
+        "return_speed_mps all > 0");
+      return BT::NodeStatus::FAILURE;
+    }
+    prm_.heading_deg = holdheading::wrap360(*heading);
+    prm_.return_speed_mps = std::min(prm_.return_speed_mps, holdheading::kMaxReturnSpeedMps);
+    nav::LatLon ll;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      if (!ctx_->pose_fresh || !ctx_->origin_set) {
+        RCLCPP_ERROR(log(), "HoldHeading: no fresh pose, cannot take the hold point");
+        return BT::NodeStatus::FAILURE;
+      }
+      anchor_ = ctx_->boat;
+      start_s_ = ctx_->now_s;
+      ll = nav::toLatLon(anchor_, ctx_->origin);
+    }
+    returning_ = false;
+    stale_ = false;
+    RCLCPP_INFO(
+      log(), "HoldHeading: hold heading %03.0f deg for %.0f s at %.7f, %.7f%s", prm_.heading_deg,
+      duration_s_, ll.lat, ll.lon,
+      ctx_->publish_setpoints ? "" : "  [NOT SENT: publish_setpoints is false]");
+    return step();
+  }
+
+  BT::NodeStatus onRunning() override {return step();}
+
+private:
+  /// One tick: done after duration_s, else the decided command. A pose that has gone stale
+  /// sends nothing (the boat's own deadman stops it); after 5 s of that the hold FAILS.
+  BT::NodeStatus step()
+  {
+    nav::Vec2 boat;
+    double now_s;
+    bool fresh;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      boat = ctx_->boat;
+      now_s = ctx_->now_s;
+      fresh = ctx_->pose_fresh;
+    }
+    if (now_s - start_s_ >= duration_s_) {
+      RCLCPP_INFO(log(), "HoldHeading: done, %.0f s at heading %03.0f deg", duration_s_, prm_.heading_deg);
+      return BT::NodeStatus::SUCCESS;
+    }
+    if (!fresh) {
+      if (!stale_) {
+        stale_ = true;
+        stale_s_ = now_s;
+        RCLCPP_WARN(log(), "HoldHeading: pose stale, not commanding");
+      }
+      if (now_s - stale_s_ > kStaleFailS) {
+        RCLCPP_ERROR(log(), "HoldHeading: pose stale for %.0f s, giving up", kStaleFailS);
+        return BT::NodeStatus::FAILURE;
+      }
+      return BT::NodeStatus::RUNNING;
+    }
+    stale_ = false;
+    const holdheading::Command cmd = holdheading::decide(boat, anchor_, returning_, prm_);
+    if (cmd.returning && !returning_) {
+      RCLCPP_INFO(log(), "HoldHeading: %.1f m off the hold point, returning", nav::norm(anchor_ - boat));
+    } else if (!cmd.returning && returning_) {
+      RCLCPP_INFO(log(), "HoldHeading: back on the hold point (%.1f m)", nav::norm(anchor_ - boat));
+    }
+    returning_ = cmd.returning;
+    if (ctx_->publish_setpoints && ctx_->heading_speed) {
+      ctx_->heading_speed(cmd.heading_deg, cmd.speed_mps);
+    }
+    return BT::NodeStatus::RUNNING;
+  }
+
+  static constexpr double kStaleFailS = 5.0;
+  holdheading::Params prm_;
+  nav::Vec2 anchor_;
+  double duration_s_ = 30.0;
+  double start_s_ = 0.0;
+  double stale_s_ = 0.0;
+  bool returning_ = false;
+  bool stale_ = false;
+};
+
 /// The next place to steer during the transit; the decision is nav::nextWaypoint(),
 /// tested off the boat.
 ///
@@ -891,6 +1006,7 @@ void registerCrusaderNodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<NavigateTo>("NavigateTo");
   factory.registerNodeType<CircleBuoy>("CircleBuoy");
   factory.registerNodeType<HoldStation>("HoldStation");
+  factory.registerNodeType<HoldHeading>("HoldHeading");
   factory.registerNodeType<NextWaypoint>("NextWaypoint");
   // Task 3, in their own file (src/task3_leaves.cpp).
   registerTask3Nodes(factory);

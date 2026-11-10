@@ -30,3 +30,22 @@ with its own age). A declaration that disagrees with the blocks is a warning, ne
 Survey templates live in `crusader_bt/behavior_trees/templates/` (never runnable by name, listed in
 the catalogue as `templates`); **New from template** opens one as an unsaved draft centred on the
 boat.
+
+## Auto-record
+
+A mission sent from the **Mission tab** (`run_mission`) records itself. Set it up on the Record
+tab: the fps box and topic ticks plus the camera and **Auto-record Mission-tab runs** boxes,
+then **Save as auto-record settings** (saves, starts nothing). Defaults: on, camera at 1 Hz, no
+bag. The file is `record_settings.json` beside `record_dir` (on the bind mount; override with
+the `record_settings_file` param). Ops: `record_settings` `{action: get}` / `{action: set,
+settings: {auto, frame_hz, camera, topics}}`. The REC tile shows `auto: <mission>`.
+
+- Starts when `bt_status` goes RUNNING for that mission, not while it is WAITING_RUN_START, and
+  only if nothing is recording. Task 1 / Task 3 panel missions never auto-record.
+- Stops when that mission leaves RUNNING for any reason (done, cancel, abort, bt_runner gone),
+  and only while the running session is still the auto one.
+- A recording you start by hand is never started over or stopped by a mission. If you stop the
+  auto recording by hand it is not restarted for that mission; pressing Start while it runs
+  makes it yours. A new Mission-tab run arriving while the old auto recording is still open
+  stops it, then starts a fresh one.
+- Logic and tests: `record_settings.py`, `test/test_record_settings.py`.

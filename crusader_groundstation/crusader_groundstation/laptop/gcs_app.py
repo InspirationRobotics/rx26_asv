@@ -51,6 +51,7 @@ CAM_STREAMS = ("annotated", "raw")  # /cam.jpg?stream=: the boat's _op_cam says 
 STATIC = {"/": ("page.html", "text/html; charset=utf-8"),
           "/map.js": ("map.js", "text/javascript; charset=utf-8"),
           "/editor.js": ("editor.js", "text/javascript; charset=utf-8")}
+BASEMAP = ("basemap.json", "application/json")      # optional: absent = the map has no basemap (404)
 UNSUPPORTED = "the boat does not support mission upload yet"
 MISSION_BOAT_OPS = ("mission_get", "mission_delete")        # the boat answers these as they are
 ANSWER = ("ok", "msg", "data")                              # what the page is told of any op
@@ -485,10 +486,13 @@ def make_handler(link, hub, allowed_hosts, missions=None):
                 return
             url = urlparse(self.path)
             args = {k: v[-1] for k, v in parse_qs(url.query).items()}
-            if url.path in STATIC:
-                name, ctype = STATIC[url.path]
-                with open(os.path.join(HERE, name), "rb") as f:
-                    self._send(200, f.read(), ctype)
+            if url.path in STATIC or url.path == "/basemap.json":
+                name, ctype = STATIC.get(url.path) or BASEMAP
+                try:
+                    with open(os.path.join(HERE, name), "rb") as f:
+                        self._send(200, f.read(), ctype)
+                except FileNotFoundError:
+                    self._send(404, b"not found", "text/plain")
             elif url.path == "/events":
                 self._events()
             elif url.path == "/cam.jpg":
