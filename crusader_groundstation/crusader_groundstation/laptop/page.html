@@ -1180,7 +1180,8 @@ function recTopicList(topics) {
     `<label style="display:block"><input type="checkbox" value="${esc(t.name)}"${want.has(t.name) ? " checked" : ""}> ${esc(t.name)} <span class="muted">${esc(t.type)}</span></label>`).join("");
 }
 async function recLoadSettings() {
-  const r = await req("record_settings", {action: "get"}, true);
+  // Background fill, retried when the Record tab opens: no toast while the boat is away.
+  const r = await ask("record_settings", {action: "get"});
   if (!r.ok) return;
   recShowSaved(r.data);
   $("rec-hz").value = r.data.frame_hz;

@@ -87,6 +87,9 @@ const CrsdMap = (() => {
       S.boat = b.lat == null ? (S.boat ? Object.assign({}, S.boat, {stale: true}) : null)
                              : {lat: b.lat, lon: b.lon, hdg: b.hdg, stale: false};
       if (b.lat != null) {
+        // An origin borrowed from the street map gives way to the first real position, so the
+        // flat projection is centred where the boat actually is (a home site is far from it).
+        if (S.originFromBase) { S.origin = null; S.originFromBase = false; }
         const p = xy(b.lat, b.lon), last = S.trail[S.trail.length - 1];
         if (!last || Math.hypot(p[0] - last[0], p[1] - last[1]) > 0.5) {
           S.trail.push(p);
@@ -282,7 +285,17 @@ const CrsdMap = (() => {
   function loadBase() {
     if (typeof fetch !== "function") return;
     fetch("/basemap.json").then(r => r.ok ? r.json() : null).then(doc => {
-      if (doc && doc.layers) { base = prepareBase(doc); baseKey = ""; redraw(); }
+      if (doc && doc.layers) {
+        base = prepareBase(doc); baseKey = "";
+        // No boat and no draft yet: centre on the street map, so missions can be planned with
+        // the boat away. The first real position replaces this origin (update()).
+        const bb = doc.bbox;
+        if (!S.origin && Array.isArray(bb) && bb.length === 4) {
+          S.origin = [(bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2];
+          S.originFromBase = true;
+        }
+        redraw();
+      }
     }).catch(() => {});
   }
   function projectBase() {                        // drop cached projections when the origin moved
