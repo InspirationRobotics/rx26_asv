@@ -155,6 +155,9 @@ struct Context
     std::vector<dock::WindowSighting> windows;  ///< from its newest frame that had windows
     double windows_t = -1.0;
   } green;
+  /// CommitFirstGreen colour="any" (task3_first_dock): `green` is then the bay committed
+  /// to, whatever its indicator reads, not the GREEN one (pickGreen).
+  bool target_any = false;
   /// The centring spot (the GREEN indicator, else its face), kept on the map by a Kalman
   /// filter from every frame that showed it: one memory for ApproachBay and StrafeKeep, so
   /// the hand-over does not start the hold blind, and a few lost frames are ridden through.
@@ -177,7 +180,7 @@ struct Context
   /// The mode this run switched to itself (RequestMode), "" = none: the goal's mode
   /// changing to it is planned, not the pilot taking over. Cleared at goal start.
   std::string handed_mode;
-  /// /crsd/autonomy_drop (latched): the drop latch (ch9) has cut autonomy.
+  /// /crsd/autonomy_drop (latched): the drop latch (SC down, ch8) has cut autonomy.
   /// Unknown counts as tripped: no message is not permission.
   bool drop_tripped = true;
   fire::WallFilter wall;                      ///< /crsd/wall_range, filtered
@@ -662,19 +665,41 @@ inline const dock::FrameBay * pickGreen(const Context & c)
     };
   const dock::FrameBay * best = nullptr;
   for (const auto & b : c.dock.frame_bays) {
-    if (b.indicator == dock::Colour::Green && (best == nullptr || across(b) < across(*best))) {
+    if (!c.target_any && b.indicator == dock::Colour::Green &&
+      (best == nullptr || across(b) < across(*best)))
+    {
       best = &b;
     }
   }
   if (best != nullptr || !had) {return best;}
-  double best_m = kSameBayM;
+  double best_m = kSameBayM;          // target_any: our bay, whatever it reads
   for (const auto & b : c.dock.frame_bays) {
-    if (b.indicator != dock::Colour::Red && across(b) < best_m) {
+    if ((c.target_any || b.indicator != dock::Colour::Red) && across(b) < best_m) {
       best = &b;
       best_m = across(b);
     }
   }
   return best;
+}
+
+/// Make `g` (a bay of the frame stamped t) our bay's newest sighting, and feed its centring
+/// point (the indicator, else the face unless it is cut off) to ctx.centre. CALL UNDER ctx.mu.
+inline void adoptBay(Context & c, const dock::FrameBay & g, double t)
+{
+  c.green.t = t;
+  c.green.bay = g;
+  if (!g.windows.empty()) {
+    c.green.windows = g.windows;
+    c.green.windows_t = t;
+  }
+  const bool face = !g.truncated && std::isfinite(g.left_m);
+  const bool ind = std::isfinite(g.ind_left_m);
+  c.centre.sight(
+    face ? dock::bodyToWorld(c.boat, c.heading_deg, g.ahead_m, g.left_m) : nav::Vec2{}, face,
+    ind ? dock::bodyToWorld(c.boat, c.heading_deg, g.ind_ahead_m, g.ind_left_m) :
+    nav::Vec2{}, ind,
+    ind ? std::hypot(g.ind_ahead_m, g.ind_left_m) : std::hypot(g.ahead_m, g.left_m),
+    t, c.now_s);
 }
 
 /// Fold one DockObservation into the context. CALL UNDER ctx.mu.
@@ -690,24 +715,7 @@ inline void ingestDockObservation(Context & c, const dock::Frame & f)
   if (c.origin_set && c.pose_fresh && std::isfinite(c.heading_deg)) {
     c.dock.prm.face_dz = c.dock_face_dz;
     c.dock.ingest(f, c.boat, c.heading_deg, c.cam_mount);
-    if (const dock::FrameBay * g = pickGreen(c)) {
-      c.green.t = f.t;
-      c.green.bay = *g;
-      if (!g->windows.empty()) {
-        c.green.windows = g->windows;
-        c.green.windows_t = f.t;
-      }
-      // Its centring point: the indicator, else the face unless it is cut off.
-      const bool face = !g->truncated && std::isfinite(g->left_m);
-      const bool ind = std::isfinite(g->ind_left_m);
-      c.centre.sight(
-        face ? dock::bodyToWorld(c.boat, c.heading_deg, g->ahead_m, g->left_m) :
-        nav::Vec2{}, face,
-        ind ? dock::bodyToWorld(c.boat, c.heading_deg, g->ind_ahead_m, g->ind_left_m) :
-        nav::Vec2{}, ind,
-        ind ? std::hypot(g->ind_ahead_m, g->ind_left_m) : std::hypot(g->ahead_m, g->left_m),
-        f.t, c.now_s);
-    }
+    if (const dock::FrameBay * g = pickGreen(c)) {adoptBay(c, *g, f.t);}
   }
   ++c.dock_seq;
   c.dock_t = f.t;
@@ -794,6 +802,7 @@ inline void resetTask3(Context & c)
   c.docking_report_s = -1.0;
   c.fires_out = 0;
   c.green = Context::GreenBay{};
+  c.target_any = false;
   c.centre = fire::CentreTarget{};
 }
 

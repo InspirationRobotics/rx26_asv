@@ -435,12 +435,16 @@ public:
       BT::InputPort<int>("min_obs", 5, "sightings before a track is a bay"),
       BT::InputPort<double>("max_turn_deg", 0.0,
         "> 0: not while the bow is further than this off the dock heading (still turning)"),
+      BT::InputPort<std::string>("colour", "green",
+        "green: the first bay read GREEN. any: the first bay seen, whatever its indicator "
+        "(nearest the bow's line); the approach and the cannon then follow it"),
       BT::OutputPort<int>("bay", "the committed bay's number, 1-based left to right")};
   }
 
   BT::NodeStatus tick() override
   {
     dock::VoteParams v;
+    const bool any = getInput<std::string>("colour").value_or("green") == "any";
     const int min_obs = getInput<int>("min_obs").value_or(5);
     const double max_turn = getInput<double>("max_turn_deg").value_or(0.0);
     int bay = 0, seen = 0, red = 0, green = 0, id = -1;
@@ -458,15 +462,34 @@ public:
         return BT::NodeStatus::FAILURE;
       }
       const dock::BayTrack * best = nullptr;
+      auto off_bow = [](const dock::BayTrack & t) {
+          return std::isfinite(t.live_left_m) ? std::fabs(t.live_left_m) : 1e9;
+        };
       for (const auto & t : ctx_->dock.tracks) {
-        if (t.n < min_obs || dock::verdict(t, v) != dock::Verdict::Green ||
-          !inView(*ctx_, t))
+        if (t.n < min_obs || !inView(*ctx_, t) ||
+          (!any && dock::verdict(t, v) != dock::Verdict::Green))
         {
-          continue;                 // only a GREEN bay the camera sees NOW
+          continue;                 // only a (GREEN) bay the camera sees NOW
         }
-        if (best == nullptr || t.n > best->n) {best = &t;}
+        if (best == nullptr || (any ? off_bow(t) < off_bow(*best) : t.n > best->n)) {best = &t;}
       }
       if (best == nullptr) {return BT::NodeStatus::FAILURE;}
+      if (any) {
+        // what the approach and the cannon follow (ctx.green) becomes this bay: this
+        // frame's sighting of it, across the dock heading as pickGreen measures
+        const double square = std::isfinite(dock_h) ? dock_h : ctx_->heading_deg;
+        const dock::FrameBay * fb = nullptr;
+        double fb_m = kSameBayM;
+        for (const auto & b : ctx_->dock.frame_bays) {
+          const double d = std::fabs(fire::toDockFrame(b.p - best->p, square).left);
+          if (d < fb_m) {fb = &b; fb_m = d;}
+        }
+        if (fb == nullptr) {return BT::NodeStatus::FAILURE;}   // not in this frame: next tick
+        ctx_->green = Context::GreenBay{};
+        ctx_->centre = fire::CentreTarget{};
+        ctx_->target_any = true;
+        adoptBay(*ctx_, *fb, ctx_->dock_t);
+      }
       const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs);
       bay = L.ok ? L.numberOf(best->id) : 0;
       if (bay <= 0) {             // its place among the bays seen so far, left to right
@@ -493,11 +516,12 @@ public:
       green = best->green;
     }
     setOutput("bay", bay);
+    const char * what = any ? "first bay" : "GREEN bay";
     if (guess) {
-      RCLCPP_INFO(log(), "GREEN bay found: track %d (R%d/G%d), bay %d (guess: %d of %d bays seen)",
-        id, red, green, bay, bay, seen);
+      RCLCPP_INFO(log(), "%s found: track %d (R%d/G%d), bay %d (guess: %d of %d bays seen)",
+        what, id, red, green, bay, bay, seen);
     } else {
-      RCLCPP_INFO(log(), "GREEN bay found: track %d (R%d/G%d), bay %d", id, red, green, bay);
+      RCLCPP_INFO(log(), "%s found: track %d (R%d/G%d), bay %d", what, id, red, green, bay);
     }
     return BT::NodeStatus::SUCCESS;
   }
