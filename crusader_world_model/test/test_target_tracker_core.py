@@ -305,5 +305,37 @@ class WiringTest(unittest.TestCase):
                                  getattr(defaults, name), name)
 
 
+class ForgetColoursTest(unittest.TestCase):
+    """bt_runner_node asks for this at every mission start: the reds and greens are re-dealt."""
+
+    def test_a_red_buoy_forgets_its_colour_and_keeps_its_place(self):
+        f = Feeder(make_tracker())
+        before = f.see("red_buoy", 40)[0]
+        tid, x, y, hits = before.id, before.x, before.y, before.hits
+        self.assertEqual(f.tracker.forget_colours(), 1)
+        t = f.tracker.tracks[0]
+        self.assertEqual((t.id, t.x, t.y, t.hits), (tid, x, y, hits))
+        self.assertEqual(t.label, "unknown_buoy")
+
+    def test_this_run_s_colour_is_not_outvoted_by_the_last_run_s(self):
+        f = Feeder(make_tracker())
+        f.see("red_buoy", 40)
+        f.tracker.forget_colours()
+        self.assertEqual(one_label(f.see("green_buoy", 5)), "green_buoy")
+
+    def test_a_shape_family_keeps_its_family(self):
+        f = Feeder(make_tracker())
+        f.see("flash_red_diamond", 20)
+        f.tracker.forget_colours()
+        self.assertEqual(f.tracker.tracks[0].label_votes, {"diamond": 1})
+        self.assertEqual(one_label(f.see("green_diamond", 5)), "green_diamond")
+
+    def test_a_track_outside_the_colour_family_keeps_its_label(self):
+        f = Feeder(make_tracker())
+        f.see("dock_sign", 10)
+        self.assertEqual(f.tracker.forget_colours(), 0)
+        self.assertEqual(f.tracker.tracks[0].label_votes, {"dock_sign": 10})
+
+
 if __name__ == "__main__":
     unittest.main()

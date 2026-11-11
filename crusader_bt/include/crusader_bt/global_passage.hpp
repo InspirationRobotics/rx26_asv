@@ -891,17 +891,26 @@ namespace detail
 {
 
 /// The fused blue buoy nearest the aircraft's point (within snap_m) anchors the orbit: the
-/// tracker's fix is better than a fix from 60 m up. None: the aircraft's point, id -1.
+/// tracker's fix is better than a fix from 60 m up. Failing a blue, the nearest buoy of NO known
+/// colour within snap_m does: in Core tier a MANUAL or remembered point is near a buoy whose
+/// colour target_tracker forgot at the mission start, and an orbit drawn round the point
+/// instead of the buoy would pass close to it. Never a red, a green, a black or the other blue.
+/// None: the point itself, id -1.
 inline std::pair<Vec2, int> anchorOf(
   const std::vector<nav::Buoy> & buoys, Vec2 point, nav::Beacon want, double snap_m)
 {
-  const nav::Buoy * best = nullptr;
-  double bd = snap_m;
-  for (const nav::Buoy & b : buoys) {
-    if (b.state != want || !std::isfinite(b.p.x) || !std::isfinite(b.p.y)) {continue;}
-    const double d = nav::norm(b.p - point);
-    if (d <= bd) {bd = d; best = &b;}
-  }
+  const auto nearest = [&](nav::Beacon state) {
+      const nav::Buoy * best = nullptr;
+      double bd = snap_m;
+      for (const nav::Buoy & b : buoys) {
+        if (b.state != state || !std::isfinite(b.p.x) || !std::isfinite(b.p.y)) {continue;}
+        const double d = nav::norm(b.p - point);
+        if (d <= bd) {bd = d; best = &b;}
+      }
+      return best;
+    };
+  const nav::Buoy * best = nearest(want);
+  if (best == nullptr) {best = nearest(nav::Beacon::Unknown);}
   return best ? std::make_pair(best->p, best->id) : std::make_pair(point, -1);
 }
 
@@ -1049,16 +1058,22 @@ inline std::vector<int> wrongSideNow(
 /// Hazards crowding the path are not this function's business (shrunk / blocked).
 inline std::string sensorChangeMatters(
   const Plan & pl, Phase phase, const std::vector<nav::Buoy> & buoys, Vec2 entry, Vec2 exitp,
-  const std::vector<Vec2> & entry_ring, const std::vector<Vec2> & judged, double move_m)
+  const std::vector<Vec2> & entry_ring, const std::vector<Vec2> & judged, double move_m,
+  double snap_m)
 {
   const auto moved = [move_m](Vec2 was, Vec2 now) {
       return path::detail::finite(was) && path::detail::finite(now) && nav::norm(now - was) > move_m;
     };
-  if (phase < Phase::EntryOrbit && moved(pl.entry_c, entry)) {
-    return "the ENTRY moved " + detail::fmt(nav::norm(entry - pl.entry_c), 1) + " m";
+  // Compared as the planner anchors them (detail::anchorOf), not as raw points: a MANUAL or
+  // remembered point sits up to snap_m off the buoy the plan's orbit is round, and that offset
+  // is not a move.
+  const Vec2 entry_c = detail::anchorOf(buoys, entry, nav::Beacon::FlashingBlue, snap_m).first;
+  const Vec2 exit_c = detail::anchorOf(buoys, exitp, nav::Beacon::SteadyBlue, snap_m).first;
+  if (phase < Phase::EntryOrbit && moved(pl.entry_c, entry_c)) {
+    return "the ENTRY moved " + detail::fmt(nav::norm(entry_c - pl.entry_c), 1) + " m";
   }
-  if (phase < Phase::ExitOrbit && moved(pl.exit_c, exitp)) {
-    return "the EXIT moved " + detail::fmt(nav::norm(exitp - pl.exit_c), 1) + " m";
+  if (phase < Phase::ExitOrbit && moved(pl.exit_c, exit_c)) {
+    return "the EXIT moved " + detail::fmt(nav::norm(exit_c - pl.exit_c), 1) + " m";
   }
   if (phase > Phase::Transit || judged.size() < 2) {return "";}
   const std::vector<int> bad = wrongSideNow(buoys, pl.axis, pl.entry_c, pl.exit_c, entry_ring,

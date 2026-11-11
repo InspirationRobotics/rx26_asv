@@ -179,6 +179,9 @@ class TargetTrackerNode(Node):
         self.create_subscription(Cluster3DArray, CLUSTERS_TOPIC, self._on_clusters, 10)
         self.create_subscription(LatLonHead, "/crsd/pose", self._on_pose, 10)
         self.create_subscription(Attitude, "/crsd/attitude", self._on_att, 10)
+        # bt_runner_node, at every mission start: the colours are re-dealt between runs.
+        self.create_subscription(String, "/crsd/world_model/forget_colours",
+                                 self._on_forget_colours, 10)
 
         self.pub = self.create_publisher(TrackedTargetArray, "/crsd/world_targets", 10)
         self.health_pub = self.create_publisher(String, "/crsd/world_model_health", 10)
@@ -205,6 +208,11 @@ class TargetTrackerNode(Node):
             self.p[name] = value
 
     # ---------- inputs ----------
+
+    def _on_forget_colours(self, msg: String):
+        n = self.tracker.forget_colours()
+        self.get_logger().info(
+            f"forgot the colour of {n} buoy track(s), positions kept ({msg.data or 'no reason'})")
 
     def _on_pose(self, msg: LatLonHead):
         """Cache position + heading, anchoring the world frame on the first fix.

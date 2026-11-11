@@ -66,7 +66,7 @@ static gp::Plan planOf(const std::vector<Buoy> & bs, Vec2 boat)
 static std::string matters(const gp::Plan & pl, Phase ph, const std::vector<Buoy> & now,
   Vec2 entry, Vec2 exitp, const std::vector<Vec2> & judged)
 {
-  return gp::sensorChangeMatters(pl, ph, now, entry, exitp, pl.entry_ring, judged, 2.0);
+  return gp::sensorChangeMatters(pl, ph, now, entry, exitp, pl.entry_ring, judged, 2.0, 1.5);
 }
 
 static void testSensorCheck()

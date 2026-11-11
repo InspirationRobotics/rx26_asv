@@ -125,7 +125,7 @@ std::string sensorNeedsReplan(
   Context::GlobalPassage & g = c.global_passage;
   const std::vector<Vec2> & ring = g.plan.entry_ring.empty() ? g.entry_ring : g.plan.entry_ring;
   const std::string why = gp::sensorChangeMatters(g.plan, phase, c.buoys, c.entry, c.exitp, ring,
-      judgedPath(c, phase), g.params.sensor_move_m);
+      judgedPath(c, phase), g.params.sensor_move_m, g.params.anchor_snap_m);
   if (!why.empty()) {return why;}
   g.field = currentField(c);
   RCLCPP_INFO(lg, "the boat's own field changed (%s); the plan in hand still serves: kept",

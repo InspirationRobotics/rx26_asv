@@ -45,7 +45,7 @@ const CrsdMap = (() => {
                      waypoints: "click the map to add waypoints   (Esc: done)"};
   const S = {
     origin: null, boat: null, trail: [], targets: [], plan: null, path: null, hazards: [],
-    obstacles: [], manual: [], draft: [], draftSel: -1, beacon: 2,
+    obstacles: [], manual: [], draft: [], draftSel: -1, beacon: 2, task1: null,
   };
   const views = [], listeners = [], modeListeners = [], draftListeners = [], pointListeners = [];
   let T = null;                                   // the colours of the draw in progress
@@ -101,6 +101,7 @@ const CrsdMap = (() => {
     else if (kind === "path") S.path = f.ok ? f : null;
     else if (kind === "hazards") S.hazards = f.items || [];
     else if (kind === "obstacles") S.obstacles = f.items || [];   // the LiDAR clusters; [] clears
+    else if (kind === "task1") S.task1 = f;                         // bt_status "task1", or null
     redraw();
   }
 
@@ -225,6 +226,11 @@ const CrsdMap = (() => {
       for (const b of S.plan.buoys) buoy(v, b, S.plan.source === "manual" ? 0.6 : 1.0);
       if (S.plan.entry) mark(v, S.plan.entry, "ENTRY", BEACON[4][1]);
       if (S.plan.exit) mark(v, S.plan.exit, "EXIT", BEACON[5][1]);
+    }
+    // the Task 1 ENTRY/EXIT bt_runner_node remembers between runs
+    if (S.task1) {
+      if (S.task1.mem_entry) mark(v, [S.task1.mem_entry.lat, S.task1.mem_entry.lon], "ENTRY (mem)", BEACON[4][1]);
+      if (S.task1.mem_exit) mark(v, [S.task1.mem_exit.lat, S.task1.mem_exit.lon], "EXIT (mem)", BEACON[5][1]);
     }
     // the field being edited, each buoy numbered by its list index
     S.manual.forEach((b, i) => buoy(v, b, 1.0, i));

@@ -473,6 +473,14 @@ def _unknown_label(key: str, p: TrackerParams) -> str:
     return p.colour_unknown_label if key == _LIST else "unknown_" + key
 
 
+def _placeholder(key: str, p: TrackerParams):
+    """One UNLIT vote of family `key`: keeps a track in its family with no colour (so it still
+    takes any family colour, _label_ok), or None when the configuration has no such label."""
+    if key == _LIST:
+        return next((lb for lb in p.colour_unlit_labels if lb in p.colour_family_labels), None)
+    return key
+
+
 def resolve_label(votes: dict, p: TrackerParams) -> str:
     """The label a track reports, from its complete vote tally.
 
@@ -583,6 +591,24 @@ class TargetTracker:
             or t.label.startswith("unknown_"))
         self.stats = stats
         return tracks
+
+    def forget_colours(self) -> int:
+        """A new run: the competition re-deals red and green between runs, and votes from the
+        last run would outvote this run's for a long time (resolve_label counts a track's
+        whole life). Every colour-family track keeps its id, position and hits and loses its
+        colour: its votes become one unlit vote of its family, so it reports unknown until
+        the camera reads its light again. Other tracks (dock signs, boats, LiDAR-only) keep
+        theirs. Returns how many tracks lost a colour."""
+        n = 0
+        for t in self.tracks:
+            key = _family_of(t.label_votes, self.p)
+            ph = None if key is None else _placeholder(key, self.p)
+            if ph is None:
+                continue
+            t.label_votes = {ph: 1}
+            t.label = resolve_label(t.label_votes, self.p)
+            n += 1
+        return n
 
     def snapshot(self, boat: BoatState):
         """Tracks with range/bearing and label refreshed, nearest first.

@@ -91,6 +91,7 @@ CLUSTERS_TOPIC = "/crsd/lidar_clusters"
 CAM_STREAMS = {"annotated": "image", "raw": "raw"}      # _op_cam's stream -> its lease key
 MISSION_ACTION = "/crsd/run_mission"
 RELEASE_SERVICE = "/crsd/bt_runner/release_run_start"    # the bench release (bt_runner_node)
+FORGET_ENTRY_EXIT_SERVICE = "/crsd/bt_runner/forget_entry_exit"   # Task 1 memory (bt_runner_node)
 CHECK_TIMEOUT_S = 30.0                  # bt_tree_check loads the whole library: ~1 s, more on a busy Jetson
 STATE_PERIOD_S = 0.5
 EVENT_PERIOD_S = 0.25
@@ -411,6 +412,7 @@ class GcsBridge(Node):
         self._cancel = self.create_client(CancelGoal, MISSION_ACTION + "/_action/cancel_goal")
         self._radio_test = self.create_client(Trigger, "/crsd/radio/send_test")
         self._run_release = self.create_client(Trigger, RELEASE_SERVICE)
+        self._task1_forget = self.create_client(Trigger, FORGET_ENTRY_EXIT_SERVICE)
         self._goal = None
         self._missions_lock = threading.Lock()      # one change to the mission files at a time
         self._nodes_cache = None                    # (bt_tree_check's stamp, its parsed --models)
@@ -1469,6 +1471,13 @@ class GcsBridge(Node):
         RoboCommand. bt_runner_node refuses when nothing is waiting, and logs the release."""
         self.get_logger().warn("run_release requested from the ground station")
         return self._call_trigger(self._run_release, RELEASE_SERVICE, "bt_runner_node", 3.0)
+
+    def _op_task1_forget(self, conn, req):
+        """Forget the Task 1 ENTRY/EXIT bt_runner_node remembers between runs (the Map tab
+        shows them from /crsd/bt_status's "task1")."""
+        self.get_logger().warn("forget the remembered Task 1 ENTRY/EXIT, from the ground station")
+        return self._call_trigger(self._task1_forget, FORGET_ENTRY_EXIT_SERVICE, "bt_runner_node",
+                                  3.0)
 
     def _op_ocs_tiers(self, conn, req):
         """The operator's tier declaration, sent to the OCS through ocs_client's link. The OCS

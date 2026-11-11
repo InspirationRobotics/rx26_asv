@@ -204,7 +204,8 @@ body.ed-dragging { cursor: grabbing; user-select: none; }
         <h3>MANUAL field</h3>
         <p class="muted">For when Ekko cannot fly: place the buoys yourself. The first flashing
           blue is the ENTRY, the first steady blue the EXIT. Sent, it replaces Ekko's plan
-          on the boat and is resent every second until cleared.</p>
+          on the boat and is resent every second until cleared. Only an ENTRY and an EXIT (no
+          red or green): the boat finds the reds and greens itself and replans as it sees them.</p>
         <label><input type="checkbox" id="edit-on"> edit on the map (click: place, click a
           buoy: remove)</label><br>
         <select id="edit-beacon"></select>
@@ -213,6 +214,13 @@ body.ed-dragging { cursor: grabbing; user-select: none; }
         <button id="field-clear-boat">Clear on boat</button><br>
         <button id="field-load">Copy current plan</button>
         <button id="field-clear">Clear editor</button>
+        <h3>Remembered ENTRY/EXIT</h3>
+        <p class="muted small">What the boat was sure of on an earlier run, kept across runs and
+          restarts. It uses, in order: this MANUAL field's, the ones it sees now, these. Every
+          mission start makes it forget the buoys' colours (not where they are).</p>
+        <div id="task1-mem" class="mono small">bt_runner_node not reporting</div>
+        <button id="task1-forget">Forget remembered</button>
+        <button id="task1-copy">Copy to editor</button>
       </div>
       <div class="box">
         <h3>Place by lat/lon</h3>
@@ -483,7 +491,7 @@ const handlers = {
   path(f) { CrsdMap.update("path", f); },
   hazards(f) { CrsdMap.update("hazards", f); },
   nodes(f) { G.nodes = f; nodes(); },
-  tree(f) { G.tree = f; tree(); },
+  tree(f) { G.tree = f; tree(); CrsdMap.update("task1", f.task1 || null); task1Info(); },
   log(f) { if (f.replay) G.logs = []; G.logs.push(...f.items); G.logs = G.logs.slice(-2000); logs(); },
   radio(f) { if (f.replay) G.radio = []; G.radio.push(...f.items); G.radio = G.radio.slice(-500);
              G.radioSummary = f; radio(); },
@@ -702,6 +710,26 @@ $("field-send").onclick = () => {
 };
 $("field-clear-boat").onclick = () => confirm("Clear the MANUAL field on the boat? bt_runner will have no plan.") && req("manual_field", {clear: true});
 $("field-load").onclick = () => CrsdMap.loadPlan();
+// the Task 1 ENTRY/EXIT bt_runner_node remembers between runs, from bt_status's "task1"
+function task1Info() {
+  const t = G.tree && G.tree.ok ? G.tree.task1 : null;
+  if (!t) { $("task1-mem").textContent = "bt_runner_node not reporting"; return; }
+  const one = (name, k) => {
+    const m = t["mem_" + k];
+    return `${name}: in use ${t[k + "_src"] || "none"}; remembered ` +
+      (m ? `${m.lat.toFixed(7)}, ${m.lon.toFixed(7)} (${m.hits} hits, ${m.saved})` : "none");
+  };
+  $("task1-mem").textContent = one("ENTRY", "entry") + "\n" + one("EXIT", "exit");
+}
+$("task1-forget").onclick = () => confirm("Forget the ENTRY/EXIT the boat remembers between runs?") &&
+  req("task1_forget", {});
+$("task1-copy").onclick = () => {                 // into the editor, replacing any ENTRY/EXIT there
+  const t = G.tree && G.tree.task1, add = [];
+  if (t && t.mem_entry) add.push({lat: t.mem_entry.lat, lon: t.mem_entry.lon, beacon: 4});
+  if (t && t.mem_exit) add.push({lat: t.mem_exit.lat, lon: t.mem_exit.lon, beacon: 5});
+  if (!add.length) return toast("nothing remembered", false);
+  CrsdMap.setManual(manualList().filter(b => b.beacon !== 4 && b.beacon !== 5).concat(add));
+};
 $("field-clear").onclick = () => CrsdMap.clearManual();
 $("trail-clear").onclick = () => CrsdMap.clearTrail();
 

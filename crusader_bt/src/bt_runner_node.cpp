@@ -24,7 +24,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <algorithm>
@@ -64,6 +66,7 @@
 
 #include "crusader_bt/context.hpp"
 #include "crusader_bt/dock_math.hpp"
+#include "crusader_bt/task1_memory.hpp"
 #include "crusader_bt/nav_math.hpp"
 #include "crusader_bt/mission_loader.hpp"
 #include "crusader_bt/nav_params.hpp"
@@ -283,6 +286,30 @@ public:
           res->message = "no mission is waiting for RunStart";
         }
       });
+    // Task 1 Core between runs (task1_memory.hpp): every mission start makes target_tracker
+    // forget the buoys' COLOURS (the competition re-deals red and green), and the ENTRY/EXIT
+    // the boat was sure of are kept in a file, used when it cannot see them on a later run.
+    memory_file_ = declare_parameter<std::string>(
+      "task1_memory_file", "/root/robotx_ws/state/task1_entry_exit.txt");
+    const int64_t min_hits = declare_parameter<int64_t>("task1_remember_min_hits", 30);
+    remember_min_hits_ = static_cast<int>(min_hits);
+    forget_colours_pub_ =
+      create_publisher<std_msgs::msg::String>("/crsd/world_model/forget_colours", 10);
+    forget_memory_srv_ = create_service<std_srvs::srv::Trigger>(
+      "/crsd/bt_runner/forget_entry_exit",
+      [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+      std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
+        std::lock_guard<std::mutex> lk(ctx_->mu);
+        mem_entry_ = mem_exit_ = t1mem::Remembered{};
+        std::error_code ec;
+        std::filesystem::remove(memory_file_, ec);
+        refuseLocked();
+        res->success = true;
+        res->message = "forgot the remembered ENTRY/EXIT";
+        RCLCPP_WARN(get_logger(), "remembered ENTRY/EXIT forgotten (%s removed)",
+          memory_file_.c_str());
+      });
+    loadMemory();
     idle_timer_ = create_wall_timer(1s, [this] {if (!busy_) {publishIdle();}});
 
     RCLCPP_INFO(
@@ -477,6 +504,10 @@ private:
         plan.push_back(b);
       }
     }
+    // A plan with NO red or green (the ground station's MANUAL field holding only ENTRY/EXIT,
+    // or a cleared one) is CORE TIER too: it gives at most the anchors, and the reds and greens
+    // are the boat's own, with the sensor replans (global_leaves coreMode: plan empty).
+    if (!t1mem::hasSides(plan)) {plan.clear();}
     ctx_->plan = plan;
 
     // NO PLAN MEANS CORE TIER, and the tracker is the only source. fusePassage()
@@ -496,29 +527,136 @@ private:
     // un-consumed and the boat would steer to it again.
     applyConsumed(ctx_->buoys);
 
-    if (plan_raw_) {
+    // The plan's ENTRY/EXIT, where it has them: (0, 0) is a cleared plan's "no point".
+    const bool plan_e = plan_raw_ &&
+      t1mem::validLatLon(plan_raw_->entry_latitude, plan_raw_->entry_longitude);
+    const bool plan_x = plan_raw_ &&
+      t1mem::validLatLon(plan_raw_->exit_latitude, plan_raw_->exit_longitude);
+    const nav::Vec2 pe = plan_e ?
+      nav::toLocal({plan_raw_->entry_latitude, plan_raw_->entry_longitude}, ctx_->origin) :
+      nav::Vec2{};
+    const nav::Vec2 px = plan_x ?
+      nav::toLocal({plan_raw_->exit_latitude, plan_raw_->exit_longitude}, ctx_->origin) :
+      nav::Vec2{};
+    if (!plan.empty()) {
       // ENTRY and EXIT come from the PLAN above Core tier. Not from findBeacon
       // over what the boat can see: the EXIT sits ~92 m out in a full field,
       // far past the camera, and a transit that waits to SEE it never starts.
-      ctx_->entry = nav::toLocal(
-        {plan_raw_->entry_latitude, plan_raw_->entry_longitude}, ctx_->origin);
-      ctx_->exitp = nav::toLocal(
-        {plan_raw_->exit_latitude, plan_raw_->exit_longitude}, ctx_->origin);
-      ctx_->have_entry = true;
-      ctx_->have_exit = true;
+      useAnchor("ENTRY", t1mem::pick(plan_e, pe, nullptr, {}, ctx_->origin), ctx_->entry,
+        ctx_->have_entry, entry_src_);
+      useAnchor("EXIT", t1mem::pick(plan_x, px, nullptr, {}, ctx_->origin), ctx_->exitp,
+        ctx_->have_exit, exit_src_);
       return;
     }
-    // Core tier: no aircraft, so the boat's own eyes are all there is.
+    // Core tier: the MANUAL field's points first, then the boat's own eyes, then what it
+    // remembered from an earlier run (t1mem::pick says the order).
     // By EVIDENCE and sticky (nav::bestBeacon), not the first in the list: labels flicker, and
     // on the real course unlit buoys were often called blue.
     const nav::Buoy * e = chooseBeacon("ENTRY", nav::Beacon::FlashingBlue, entry_track_id_,
         exit_track_id_);
     const nav::Buoy * x = chooseBeacon("EXIT", nav::Beacon::SteadyBlue, exit_track_id_,
         entry_track_id_);
-    ctx_->have_entry = e != nullptr;
-    if (e) {ctx_->entry = e->p;}
-    ctx_->have_exit = x != nullptr;
-    if (x) {ctx_->exitp = x->p;}
+    remember("ENTRY", e, mem_entry_);
+    remember("EXIT", x, mem_exit_);
+    useAnchor("ENTRY", t1mem::pick(plan_e, pe, e, mem_entry_, ctx_->origin), ctx_->entry,
+      ctx_->have_entry, entry_src_);
+    useAnchor("EXIT", t1mem::pick(plan_x, px, x, mem_exit_, ctx_->origin), ctx_->exitp,
+      ctx_->have_exit, exit_src_);
+  }
+
+  /// Set one of the context's ENTRY/EXIT and log where it now comes from, once per change.
+  /// CALL WITH ctx_->mu HELD.
+  void useAnchor(const char * name, const t1mem::Anchor & a, nav::Vec2 & p, bool & have,
+    t1mem::Source & src)
+  {
+    have = a.have;
+    if (a.have) {p = a.p;}
+    if (a.src != src) {
+      RCLCPP_INFO(get_logger(), "%s from %s (was %s)%s", name, t1mem::sourceName(a.src),
+        t1mem::sourceName(src), a.have ? "" : ": none known yet");
+      src = a.src;
+    }
+  }
+
+  /// Keep a confident sighting of the ENTRY or EXIT for later runs: in memory and in
+  /// task1_memory_file. A refinement is written at most every 5 s. CALL WITH ctx_->mu HELD.
+  void remember(const char * name, const nav::Buoy * seen, t1mem::Remembered & mem)
+  {
+    if (!t1mem::shouldRemember(seen, mem, ctx_->origin, remember_min_hits_, 0.5)) {return;}
+    const double t = nowS();
+    if (mem.have && t - last_mem_write_ < 5.0) {return;}
+    const bool first = !mem.have;
+    char stamp[32] = "-";
+    const std::time_t wall = std::time(nullptr);
+    std::strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%S", std::localtime(&wall));
+    mem = t1mem::Remembered{true, nav::toLatLon(seen->p, ctx_->origin), seen->hits, stamp};
+    last_mem_write_ = t;
+    saveMemory();
+    RCLCPP_INFO(get_logger(), "%s %s at %.8f, %.8f (track %d, %d hits)", name,
+      first ? "remembered" : "remembered position refined", mem.ll.lat, mem.ll.lon, seen->id,
+      seen->hits);
+  }
+
+  /// task1_memory_file, written whole through a temporary so a crash never leaves half of it.
+  void saveMemory()
+  {
+    std::error_code ec;
+    const std::filesystem::path f(memory_file_);
+    if (f.has_parent_path()) {std::filesystem::create_directories(f.parent_path(), ec);}
+    const std::string tmp = memory_file_ + ".tmp";
+    {
+      std::ofstream out(tmp, std::ios::trunc);
+      out << t1mem::serialize(mem_entry_, mem_exit_);
+      if (!out) {
+        RCLCPP_WARN(get_logger(), "could not write %s: the ENTRY/EXIT is remembered only "
+          "until bt_runner_node restarts", tmp.c_str());
+        return;
+      }
+    }
+    std::filesystem::rename(tmp, memory_file_, ec);
+    if (ec) {
+      RCLCPP_WARN(get_logger(), "could not save %s: %s", memory_file_.c_str(),
+        ec.message().c_str());
+    }
+  }
+
+  void loadMemory()
+  {
+    std::ifstream in(memory_file_);
+    if (!in) {
+      RCLCPP_INFO(get_logger(), "no remembered Task 1 ENTRY/EXIT (%s)", memory_file_.c_str());
+      return;
+    }
+    std::stringstream text;
+    text << in.rdbuf();
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    t1mem::parse(text.str(), mem_entry_, mem_exit_);
+    RCLCPP_INFO(get_logger(), "remembered from %s: ENTRY %s, EXIT %s", memory_file_.c_str(),
+      mem_entry_.have ? mem_entry_.saved.c_str() : "none",
+      mem_exit_.have ? mem_exit_.saved.c_str() : "none");
+  }
+
+  /// A new run: the competition re-deals red and green, so target_tracker forgets every buoy's
+  /// colour (it keeps where they are), and this run's ENTRY/EXIT choice starts afresh.
+  void forgetColours(const std::string & mission)
+  {
+    std_msgs::msg::String m;
+    m.data = "mission start: " + mission;
+    forget_colours_pub_->publish(m);
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    entry_track_id_ = exit_track_id_ = -1;
+    RCLCPP_INFO(get_logger(), "mission %s: asked target_tracker to forget the buoy colours",
+      mission.c_str());
+  }
+
+  /// The Core tier's ENTRY/EXIT for /crsd/bt_status: where each comes from now and what is
+  /// remembered between runs (the ground station's Map tab shows both). Takes ctx_->mu.
+  std::string task1Json()
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    return std::string("{\"entry_src\":\"") + t1mem::sourceName(entry_src_) +
+      "\",\"exit_src\":\"" + t1mem::sourceName(exit_src_) + "\",\"mem_entry\":" +
+      t1mem::json(mem_entry_) + ",\"mem_exit\":" + t1mem::json(mem_exit_) + "}";
   }
 
   /// The tracked buoy that is the Core tier's ENTRY or EXIT: bestBeacon over ctx_->buoys, never
@@ -1078,6 +1216,7 @@ private:
     }
 
     consumed_.clear();
+    forgetColours(goal->name);
     // The planner knobs as they are NOW: a change made since the last goal applies to this one.
     reloadNavParams();
     // Before pose_fresh is read below, or have_home holds what the last mission left.
@@ -1356,7 +1495,8 @@ private:
     std_msgs::msg::String m;
     m.data = "{\"state\":\"WAITING_RUN_START\",\"name\":" + jsonQuote(name) +
       ",\"waiting_s\":" + jsonNum(waiting, 1) + ",\"running_node\":\"\",\"current_task\":" +
-      jsonQuote(kTaskNone) + ",\"warning\":" + jsonQuote(warning) + "}";
+      jsonQuote(kTaskNone) + ",\"warning\":" + jsonQuote(warning) + ",\"task1\":" +
+      task1Json() + "}";
     bt_status_pub_->publish(m);
   }
 
@@ -1412,7 +1552,7 @@ private:
     m.data = "{\"state\":\"RUNNING\",\"name\":" + jsonQuote(name) +
       ",\"elapsed_s\":" + jsonNum(elapsed, 1) + ",\"running_node\":" + jsonQuote(fb->running_node) +
       ",\"current_task\":" + jsonQuote(fb->current_task) + ",\"warning\":" + jsonQuote(warning) +
-      ",\"nodes\":" + view.nodesJson() + "}";
+      ",\"nodes\":" + view.nodesJson() + ",\"task1\":" + task1Json() + "}";
     bt_status_pub_->publish(m);
   }
 
@@ -1420,9 +1560,11 @@ private:
   void publishIdle()
   {
     std_msgs::msg::String m;
+    const std::string task1 = task1Json();     // takes ctx_->mu: never inside status_mu_
     {
       std::lock_guard<std::mutex> lk(status_mu_);
-      m.data = "{\"state\":\"IDLE\",\"last\":" + (last_.empty() ? std::string("null") : last_) + "}";
+      m.data = "{\"state\":\"IDLE\",\"last\":" + (last_.empty() ? std::string("null") : last_) +
+        ",\"task1\":" + task1 + "}";
     }
     bt_status_pub_->publish(m);
   }
@@ -1469,6 +1611,15 @@ private:
   std::vector<nav::Buoy> tracked_;
   /// Core tier: the tracks chosen as ENTRY and EXIT (-1 = none yet), kept while still candidates.
   int entry_track_id_ = -1, exit_track_id_ = -1;
+  /// Task 1 between runs (task1_memory.hpp), under ctx_->mu: what is remembered, where the
+  /// context's ENTRY/EXIT come from now, and the file.
+  t1mem::Remembered mem_entry_, mem_exit_;
+  t1mem::Source entry_src_ = t1mem::Source::None, exit_src_ = t1mem::Source::None;
+  double last_mem_write_ = -1e9;
+  std::string memory_file_;
+  int remember_min_hits_ = 30;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr forget_colours_pub_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr forget_memory_srv_;
   crusader_msgs::msg::PassagePlan::SharedPtr plan_raw_;
   /// For /crsd/bt_status and feedback: the running goal's name, the current task token, and
   /// how the last goal ended (JSON). Guarded by status_mu_.
