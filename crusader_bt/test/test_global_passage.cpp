@@ -388,13 +388,14 @@ static void testRecolourAtCheckpoint()
 
 static void testRelaxAndBoxedIn()
 {
-  // courses/task1_boxed_in: four blacks 1.3 m round the boat. The only ways out are 4 cm
-  // wide even at the lowest relaxed clearance: no plan, and the reason names the boat.
+  // courses/task1_boxed_in: four blacks 1.1 m round the boat. The diagonal midpoints are
+  // 0.48 m from both buoys' edges, under even the lowest relaxed clearance (0.5): no plan, and
+  // the reason names the boat. (At 1.3 m they were 0.62 m: shut at the old 0.6 floor, open now.)
   path::NavParams np;
   Field f = field("boxed_in", {
     {12.0, 3.0, "flash_blue"}, {22.0, -3.0, "flash_red"}, {22.0, 3.0, "flash_green"},
     {32.0, -1.0, "flash_red"}, {32.0, 5.0, "flash_green"}, {42.0, 0.0, "steady_blue"},
-    {1.3, 0.0, "off"}, {-1.3, 0.0, "off"}, {0.0, 1.3, "off"}, {0.0, -1.3, "off"}});
+    {1.1, 0.0, "off"}, {-1.1, 0.0, "off"}, {0.0, 1.1, "off"}, {0.0, -1.1, "off"}});
   const auto hz = hazardsOf(f, np);
   const gp::Plan pl = gp::plan(request(f, hz), params(np));
   CHECK(!pl.ok && pl.why.find("boat") != std::string::npos, "boxed_in: %s", pl.why.c_str());
