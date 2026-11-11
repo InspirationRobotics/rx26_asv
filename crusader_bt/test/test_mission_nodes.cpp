@@ -1,6 +1,6 @@
 // test_mission_nodes — WaitForRunStart, TaskAttempt and PassagePlanFresh, ticked against a Context;
 // FailureTrace on the Task 3 guards; SetCameraModel; the cannon beside the docking and the
-// centring on the GREEN indicator.
+// centring on the GREEN indicator; the bay number the docking report gives RoboCommand.
 //
 // Links the leaves, so it needs ROS: build with colcon, run from the build directory
 //
@@ -499,14 +499,15 @@ static void failureTraceTests()
 /// A Rig whose camera_node answers through `up`: false = no parameter service.
 struct CameraRig : Rig
 {
-  std::vector<std::string> asks;
+  std::vector<std::string> asks;      ///< "model|indicator" per ask ("" off the dock model)
   bool up = true;
 
   CameraRig()
   {
-    ctx->set_camera_model = [this](const std::string & m, std::string & why) {
+    ctx->set_camera_model = [this](const std::string & m, const std::string & i,
+        std::string & why) {
         if (!up) {why = "/camera_node has no parameter service"; return false;}
-        asks.push_back(m);
+        asks.push_back(m + "|" + i);
         return true;
       };
   }
@@ -527,19 +528,53 @@ static void setCameraModelTests()
     CameraRig r;
     r.observation();
     r.load(dock);
-    chk("dock observations already arriving: SUCCESS, camera_node not asked",
-      r.tick() == OK && r.asks.empty());
+    chk("dock frames already arriving: asks anyway (they may be the other indicator's)",
+      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|yolo");
+    r.ctx->camera_model_ack = 1;
+    chk("accepted: RUNNING until two frames since the answer", r.tick() == RUN);
+    r.observation();
+    chk("... one: still RUNNING (it may have been in flight at the switch)", r.tick() == RUN);
+    r.observation();
+    chk("... two: SUCCESS, asked once", r.tick() == OK && r.asks.size() == 1);
   }
   {
     CameraRig r;                                        // dock_obs_age_s: never (1e9)
     r.load(dock);
-    chk("on buoy: asks camera_node for dock, RUNNING", r.tick() == RUN && r.asks.size() == 1 &&
-      r.asks[0] == "dock");
+    chk("on buoy: asks camera_node for dock, indicator yolo (the default), RUNNING",
+      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|yolo");
     r.ctx->camera_model_ack = 1;
     r.ctx->now_s = 2.0;
     chk("accepted, no observation yet: still RUNNING", r.tick() == RUN);
     r.observation();
-    chk("the first observation: SUCCESS, asked once", r.tick() == OK && r.asks.size() == 1);
+    r.observation();
+    chk("two observations since: SUCCESS, asked once", r.tick() == OK && r.asks.size() == 1);
+  }
+  {
+    CameraRig r;
+    r.load("<SetCameraModel model=\"dock\" indicator=\"cv\" timeout_s=\"15\"/>");
+    chk("indicator cv: asks for the dock model reading the indicator by cv",
+      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|cv");
+    r.ctx->camera_model_ack = 1;
+    r.tick();
+    r.observation();
+    r.observation();
+    chk("... two frames after the answer: SUCCESS", r.tick() == OK);
+  }
+  {
+    CameraRig r;
+    r.load("<SetCameraModel model=\"dock\" indicator=\"cv\"/>");
+    r.tick();
+    r.ctx->camera_model_ack = -1;
+    r.ctx->camera_model_why = "camera_node has no dock_indicator parameter (an older build)";
+    chk("a camera_node that cannot read by cv: FAILURE, saying so", r.tick() == BAD &&
+      r.ctx->camera_model_why.find("camera_node refused the dock model (indicator by cv): "
+      "camera_node has no dock_indicator") == 0);
+  }
+  {
+    CameraRig r;
+    r.load("<SetCameraModel model=\"dock\" indicator=\"hsv\"/>");
+    chk("indicator neither yolo nor cv: FAILURE, camera_node not asked", r.tick() == BAD &&
+      r.asks.empty() && r.ctx->camera_model_why.find("indicator must be yolo or cv") == 0);
   }
   {
     CameraRig r;
@@ -564,7 +599,8 @@ static void setCameraModelTests()
     r.ctx->camera_model_ack = -1;
     r.ctx->camera_model_why = "model must be one of none, buoy, dock";
     chk("camera_node refuses: FAILURE, its reason kept for the GCS", r.tick() == BAD &&
-      r.ctx->camera_model_why.find("camera_node refused the dock model: model must be") == 0);
+      r.ctx->camera_model_why.find("camera_node refused the dock model (indicator by yolo): "
+      "model must be") == 0);
   }
   {
     CameraRig r;
@@ -580,8 +616,9 @@ static void setCameraModelTests()
   {
     CameraRig r;
     r.observation();                                    // dock frames do not mean buoy
-    r.load("<SetCameraModel model=\"buoy\"/>");
-    chk("buoy: asks, even with dock frames arriving", r.tick() == RUN && r.asks.size() == 1);
+    r.load("<SetCameraModel model=\"buoy\" indicator=\"cv\"/>");
+    chk("buoy: asks, even with dock frames arriving, and no indicator", r.tick() == RUN &&
+      r.asks.size() == 1 && r.asks[0] == "buoy|");
     r.ctx->camera_model_ack = 1;
     chk("buoy accepted: SUCCESS", r.tick() == OK);
   }
@@ -592,6 +629,7 @@ static void setCameraModelTests()
 struct FireRig : Rig
 {
   std::vector<std::string> reports;
+  std::vector<std::string> bodies;               ///< each report's body_json, in step
   int cannon_calls = 0;
   bool cannon_on = false;
   double cannon_x = 0.0, cannon_y = 0.0;
@@ -599,7 +637,10 @@ struct FireRig : Rig
 
   FireRig()
   {
-    ctx->report = [this](const std::string & kind, const std::string &) {reports.push_back(kind);};
+    ctx->report = [this](const std::string & kind, const std::string & body) {
+        reports.push_back(kind);
+        bodies.push_back(body);
+      };
     ctx->cannon = [this](bool on, double x, double y, double) {
         ++cannon_calls; cannon_on = on; cannon_x = x; cannon_y = y;
       };
@@ -674,6 +715,222 @@ struct FireRig : Rig
     ctx->centre.fix.sight({-left, ahead}, ahead, ctx->now_s, ctx->now_s);
   }
 };
+
+/// task3_first_dock: no window of ours reads RED after docking -> spray one anyway.
+static void firstDockNoRedTests()
+{
+  using crusader_bt::dock::Colour;
+  const std::string await = "<AwaitFireTarget target=\"{target}\" min_red_s=\"0.2\" "
+    "timeout_s=\"1000\" no_red_s=\"30\"/>";
+  auto docked = [](FireRig & r, double report_s, double now_s) {
+      r.ctx->docking_report_s = report_s;
+      r.ctx->readiness_confirmed = true;                 // no re-sends in these
+      r.ctx->now_s = now_s;
+    };
+  auto target = [](FireRig & r) {int t = -1; return r.bb->get("target", t) ? t : -1;};
+  {
+    FireRig r;
+    r.frame(10.0, {FireRig::win(0, Colour::Off), FireRig::win(1, Colour::Off)});
+    r.load(await);
+    r.ctx->now_s = 100.0;
+    chk("no_red_s, not docked yet: waits however long", r.tick() == RUN);
+    r.ctx->now_s = 200.0;
+    chk("... 100 s on, still", r.tick() == RUN);
+    docked(r, 200.0, 200.0);
+    r.tick();
+    r.ctx->now_s = 229.0;
+    chk("docked 29 s, no RED: still waiting", r.tick() == RUN);
+    r.ctx->now_s = 230.5;
+    chk("docked 30 s, no RED: FAILURE (the tree sprays one anyway)", r.tick() == BAD);
+  }
+  {
+    FireRig r;
+    docked(r, 50.0, 100.0);                              // docked before this wait began
+    r.frame(10.0, {FireRig::win(0, Colour::Off)});
+    r.load(await);
+    chk("a retry, docked long ago: waits no_red_s from its own start", r.tick() == RUN);
+    r.ctx->now_s = 129.0;
+    chk("... 29 s in, still", r.tick() == RUN);
+    r.ctx->now_s = 130.0;
+    chk("... 30 s in, FAILURE", r.tick() == BAD);
+  }
+  {
+    FireRig r;
+    r.ctx->fires_out = 1;                                // a fire is out already
+    docked(r, 50.0, 100.0);
+    r.frame(10.0, {FireRig::win(0, Colour::Off)});
+    r.load(await);
+    r.tick();
+    r.ctx->now_s = 500.0;
+    chk("a fire already out: no_red_s never gives up", r.tick() == RUN);
+  }
+  {
+    FireRig r;
+    docked(r, 50.0, 100.0);
+    r.frame(10.0, {FireRig::win(0, Colour::Off)});
+    r.load(await);
+    r.tick();
+    r.ctx->now_s = 129.0;
+    r.frame(10.1, {FireRig::win(0, Colour::Red)});
+    r.tick();
+    r.ctx->now_s = 129.5;
+    r.frame(10.35, {FireRig::win(0, Colour::Red)});
+    chk("RED just inside no_red_s: the fire, as before", r.tick() == OK && target(r) == 0);
+  }
+  {
+    FireRig r;
+    r.frame(10.0, {FireRig::win(0, Colour::Off), FireRig::win(1, Colour::Off)});
+    r.load("<PickAnyWindow target=\"{target}\"/>");
+    chk("PickAnyWindow: a window of our bay", r.tick() == OK && target(r) == 0);
+    chk("... the other one on the next try", r.tick() == OK && target(r) == 1);
+    chk("... then back", r.tick() == OK && target(r) == 0);
+    FireRig q;
+    q.frame(10.0, {});
+    q.load("<PickAnyWindow target=\"{target}\"/>");
+    chk("PickAnyWindow, no window seen: FAILURE", q.tick() == BAD);
+  }
+  {
+    FireRig r;
+    r.load("<SprayUntilHit target=\"0\" window=\"{window}\" timeout_s=\"100\" "
+      "green_is_hit=\"true\"/>");
+    r.frame(10.0, {FireRig::win(0, Colour::Off), FireRig::win(1, Colour::Off)});
+    chk("green_is_hit: a window that never read RED is sprayed", r.tick() == RUN && r.cannon_on);
+    r.frame(10.1, {FireRig::win(0, Colour::Green), FireRig::win(1, Colour::Off)});
+    r.tick();
+    r.frame(10.6, {FireRig::win(0, Colour::Green), FireRig::win(1, Colour::Off)});
+    int window = -1;
+    chk("... GREEN 0.5 s with no RED before it: the hit, cannon off", r.tick() == OK &&
+      !r.cannon_on && r.bb->get("window", window) && window == 0);
+    FireRig q;
+    q.load("<SprayUntilHit target=\"0\" window=\"{window}\" timeout_s=\"100\"/>");
+    q.frame(10.0, {FireRig::win(0, Colour::Off)});
+    q.tick();
+    q.frame(10.1, {FireRig::win(0, Colour::Green)});
+    q.tick();
+    q.frame(10.6, {FireRig::win(0, Colour::Green)});
+    chk("without it, GREEN with no RED first is still not a hit", q.tick() == RUN);
+  }
+  {
+    // the no-RED shot backs off by setting hold_m: StrafeKeep reads it every tick
+    FireRig r;
+    r.load("<Sequence><Script code=\"hold_m := 2.0\"/>"
+      "<StrafeKeep fire_range_m=\"{hold_m}\" use_lidar=\"false\"/></Sequence>");
+    r.spot(0.0, 1.7 + r.ctx->cam_mount.x);                 // docked: the camera 1.7 m off
+    r.tick();
+    chk("hold_m 2.0 with the camera 1.7 m off the face: backing off", r.fwd < 0.0);
+    FireRig q;
+    q.load("<Sequence><Script code=\"hold_m := 1.7\"/>"
+      "<StrafeKeep fire_range_m=\"{hold_m}\" use_lidar=\"false\"/></Sequence>");
+    q.spot(0.0, 1.7 + q.ctx->cam_mount.x);
+    q.tick();
+    chk("hold_m 1.7 there: on the spot, no push", q.fwd == 0.0);
+  }
+  {
+    // the fire branch of task3_first_dock.xml: its red-else-any-window core
+    FireRig r;
+    docked(r, 0.0, 1.0);
+    r.frame(10.0, {FireRig::win(0, Colour::Off), FireRig::win(1, Colour::Off)});
+    r.load("<Fallback><Sequence>" + await +
+      "<SprayUntilHit target=\"{target}\" window=\"{window}\" timeout_s=\"1000\"/></Sequence>"
+      "<Sequence><PickAnyWindow target=\"{target}\"/>"
+      "<SprayUntilHit target=\"{target}\" window=\"{window}\" timeout_s=\"15\" "
+      "keep_after_docking=\"true\" green_is_hit=\"true\"/></Sequence></Fallback>");
+    chk("fire branch: docked, no RED yet: waiting, water off", r.tick() == RUN && !r.cannon_on);
+    r.ctx->now_s = 31.5;
+    chk("... docked 30 s: spraying window 0 anyway", r.tick() == RUN && r.cannon_on &&
+      target(r) == 0);
+    r.frame(10.1, {FireRig::win(0, Colour::Green), FireRig::win(1, Colour::Off)});
+    r.tick();
+    r.frame(10.6, {FireRig::win(0, Colour::Green), FireRig::win(1, Colour::Off)});
+    int window = -1;
+    chk("... it reads GREEN: put out (the reports follow), water off", r.tick() == OK &&
+      !r.cannon_on && r.bb->get("window", window) && window == 0 && r.ctx->fires_out == 1);
+  }
+}
+
+/// The bay number the docking report names: RoboCommand lights a window in THAT bay
+/// (rx_reports.proto), bays 1-3 left to right facing them. The boat at the origin heading
+/// north, the dock 4 m ahead facing it.
+static void bayNumberTests()
+{
+  using crusader_bt::dock::Colour;
+  std::printf("\n9. Task 3: the bay number RoboCommand lights a window in\n");
+  // six sightings of a bay 4 m ahead, `left` m left of the bow's line, from t on
+  auto seen = [](FireRig & r, double t, double left, Colour ind) {
+      for (int i = 0; i < 6; ++i) {r.place(t + 0.1 * i, 4.0, left, ind);}
+    };
+  // CommitFirstGreen as task3_scan_fire(_cv) has it: the number committed to, -1 for none
+  auto commit = [](FireRig & r) {
+      r.load("<CommitFirstGreen bay=\"{bay}\" min_votes=\"4\" min_share=\"0.5\" "
+        "min_obs=\"4\" max_turn_deg=\"15\"/>");
+      int b = -1;
+      return r.tick() == OK && r.bb->get("bay", b) ? b : -1;
+    };
+  {
+    FireRig r;
+    r.ctx->search_dir = -1;
+    seen(r, 1.0, 0.0, Colour::Green);
+    chk("a lone GREEN bay sliding left (from the dock's right end): bay 3", commit(r) == 3);
+    FireRig q;
+    q.ctx->search_dir = 1;
+    seen(q, 1.0, 0.0, Colour::Green);
+    chk("... sliding right (from the left end): bay 1", commit(q) == 1);
+  }
+  {
+    FireRig r;                                              // StrafeSearch not run yet
+    seen(r, 1.0, 0.0, Colour::Green);
+    chk("no slide yet, the GCS's slide-first unset (left): bay 3", commit(r) == 3);
+    FireRig q;
+    q.ctx->search_first = "right";
+    seen(q, 1.0, 0.0, Colour::Green);
+    chk("... set to right: bay 1", commit(q) == 1);
+  }
+  {
+    FireRig r;
+    r.ctx->search_dir = -1;
+    seen(r, 1.0, -2.0, Colour::Red);                        // slid past a RED bay on its right
+    seen(r, 2.0, 0.0, Colour::Green);
+    chk("sliding left, one bay seen right of ours: bay 2", commit(r) == 2);
+    FireRig q;
+    q.ctx->search_dir = 1;
+    seen(q, 1.0, 2.0, Colour::Red);                         // sliding right: on its left
+    seen(q, 2.0, 0.0, Colour::Green);
+    chk("sliding right, one bay seen left of ours: bay 2", commit(q) == 2);
+  }
+  {
+    FireRig r;
+    r.ctx->search_dir = 1;
+    seen(r, 1.0, -2.0, Colour::Red);
+    seen(r, 2.0, -4.0, Colour::Red);
+    seen(r, 3.0, 0.0, Colour::Green);
+    chk("all three bays known: the layout's number (ours leftmost: 1)", commit(r) == 1);
+  }
+  {
+    // committed on a guess; every bay known by the docking report: the report, and its
+    // re-sends, name the layout's bay, not the tree's {bay}
+    FireRig r;
+    r.ctx->search_dir = -1;
+    seen(r, 1.0, 0.0, Colour::Green);
+    chk("committed alone sliding left: bay 3, a guess", commit(r) == 3);
+    seen(r, 2.0, -2.0, Colour::Red);                        // closing in: two bays on its RIGHT
+    seen(r, 3.0, -4.0, Colour::Red);
+    r.load("<ReportDocking bay=\"{bay}\"/>");
+    chk("the docking report names bay 1, the layout's, and keeps it", r.tick() == OK &&
+      r.bodies.size() == 1 && r.bodies[0] == "{\"bay_id\":1}" && r.ctx->chosen_bay == 1);
+    r.load("<AwaitFireTarget bay=\"{bay}\" target=\"{target}\" resend_s=\"10\" "
+      "timeout_s=\"1000\"/>");
+    r.ctx->now_s += 10.5;                                   // no confirmation from RoboCommand
+    chk("... its re-send names bay 1 too ({bay} still says 3)", r.tick() == RUN &&
+      r.bodies.size() == 2 && r.bodies[1] == "{\"bay_id\":1}");
+    FireRig q;
+    q.ctx->search_dir = -1;
+    seen(q, 1.0, 0.0, Colour::Green);
+    commit(q);
+    q.load("<ReportDocking bay=\"{bay}\"/>");
+    chk("still alone at the docking report: the guess goes out", q.tick() == OK &&
+      q.bodies.size() == 1 && q.bodies[0] == "{\"bay_id\":3}");
+  }
+}
 
 static void fireBesideDockingTests()
 {
@@ -891,6 +1148,7 @@ static void fireBesideDockingTests()
     chk("range from the camera's lens, not the body origin",
       std::fabs(r.ctx->strafe_in.range_m - 1.5) < 1e-9);
   }
+  firstDockNoRedTests();
 }
 
 int main()
@@ -904,6 +1162,7 @@ int main()
   failureTraceTests();
   setCameraModelTests();
   fireBesideDockingTests();
+  bayNumberTests();
   rclcpp::shutdown();
   std::printf("\n%d checks, %d failed\n", g_checks, g_fails);
   std::printf("%s\n", g_fails == 0 ? "PASS" : "FAIL");

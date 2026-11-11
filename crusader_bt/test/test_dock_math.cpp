@@ -346,6 +346,24 @@ int main()
     chk("two tracks 1 m apart are refused", !layout(dup, 5).ok);
   }
 
+  std::printf("numbering a bay before every bay is known\n");
+  {
+    // RoboCommand lights a window in the bay the DockingReport names
+    chk("alone, sliding left (from the right end): bay 3", guessBayNumber(0, 0, -1) == 3);
+    chk("alone, no slide yet: as left, bay 3", guessBayNumber(0, 0, 0) == 3);
+    chk("alone, sliding right (from the left end): bay 1", guessBayNumber(0, 0, 1) == 1);
+    chk("sliding left, one seen right of it: bay 2", guessBayNumber(0, 1, -1) == 2);
+    chk("sliding left, two seen right of it: bay 1", guessBayNumber(0, 2, -1) == 1);
+    chk("sliding left, one seen left of it only: still bay 3", guessBayNumber(1, 0, -1) == 3);
+    chk("sliding right, one seen left of it: bay 2", guessBayNumber(1, 0, 1) == 2);
+    chk("sliding right, two seen left of it: bay 3", guessBayNumber(2, 0, 1) == 3);
+    chk("all three seen: the left count, either way", guessBayNumber(1, 1, -1) == 2 &&
+      guessBayNumber(1, 1, 1) == 2 && guessBayNumber(2, 0, -1) == 3 &&
+      guessBayNumber(0, 2, 1) == 1);
+    chk("more seen than there are bays: clamped to 1..3", guessBayNumber(3, 0, 1) == 3 &&
+      guessBayNumber(0, 3, -1) == 1);
+  }
+
   std::printf("merging one bay seen twice\n");
   {
     // A biased early sighting lands 1.0 m from the bay: outside the 0.7 m gate, so
@@ -574,6 +592,16 @@ int main()
     chk("0.3 s of GREEN: not yet", !w.hit);
     w.update(Colour::Green, 1.45, 0.4);
     chk("0.45 s of GREEN after RED, across an abstention: hit", w.hit);
+
+    HitWatch any;                                  // need_red = false: no RED was ever seen
+    any.update(Colour::Off, 0.0, 0.4, false);
+    any.update(Colour::Green, 0.1, 0.4, false);
+    any.update(Colour::Off, 0.2, 0.4, false);      // a dark frame resets the GREEN run
+    any.update(Colour::Green, 0.3, 0.4, false);
+    chk("need_red=false: 0.1 s of GREEN, broken by OFF, then 0 s: not yet", !any.hit);
+    any.update(Colour::Green, 0.75, 0.4, false);
+    chk("need_red=false: GREEN held 0.45 s with no RED before it is a hit", any.hit);
+    chk("... and `armed` still means read RED", !any.armed);
   }
 
   std::printf("reports\n");
@@ -727,6 +755,22 @@ int main()
     two.update({win(0, Colour::Red), win(1, Colour::Red)}, 0.0);
     two.update({win(1, Colour::Red)}, 0.3);
     chk("two RED: the longer run wins", two.lit(0.3, 0.0) == 1);
+  }
+
+  std::printf("\na window to spray with no RED (pickAnyWindow)\n");
+  {
+    auto win = [](int i, double y, bool pos = true) {
+        WindowSighting w; w.index = i; w.y = y; w.has_position = pos; return w;
+      };
+    const std::vector<WindowSighting> two = {win(0, 0.35), win(1, -0.20)};
+    chk("none picked yet: the one nearest the camera's axis", pickAnyWindow(two, {}) == 1);
+    chk("then the other one", pickAnyWindow(two, {1}) == 0);
+    chk("then back to the nearer", pickAnyWindow(two, {1, 0}) == 1);
+    chk("only the windows with an aim point",
+      pickAnyWindow({win(0, 0.35), win(1, -0.20, false)}, {}) == 0);
+    chk("one window, picked before: still it", pickAnyWindow({win(0, 0.35)}, {0, 0}) == 0);
+    chk("no window with an aim point: -1",
+      pickAnyWindow({win(1, 0.0, false)}, {}) == -1 && pickAnyWindow({}, {}) == -1);
   }
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fails);

@@ -204,6 +204,9 @@ class TelemetryBridge(Node):
         self._rx_thread.start()
         self.create_timer(1.0 / PUB_RATE_HZ, self._publish_tick)
         self._publish_drop_state()
+        if self.latch.off:
+            self.get_logger().info("autonomy-drop latch OFF (drop_channel 0): the mode switch "
+                                   "and the RC e-stop take the boat back")
         self.get_logger().info(
             f"autopilot sysid {self.fcu_sysid} on {endpoint}; autonomous modes "
             f"{sorted(self.autonomous_modes)}; pump "
@@ -266,7 +269,7 @@ class TelemetryBridge(Node):
                 was = self.latch.allowed
                 if self.latch.rc_sample(rc, t):
                     self._handle_trip()
-                elif self.latch.allowed != was:     # cleared (SD back to safe): say so, it is latched
+                elif self.latch.allowed != was:     # cleared (switch back to safe): say so, it is latched
                     self.get_logger().warn(f"drop cleared: ch{self.latch.channel} back to safe")
                     self._publish_drop_state()
             elif mtype == "SERVO_OUTPUT_RAW":
@@ -595,7 +598,7 @@ class TelemetryBridge(Node):
 
     def _handle_trip(self):
         """The drop latch tripped (called with _lock held): release the sticks, stop our motion,
-        and out of an autonomous mode into MANUAL, so SD alone hands the boat back."""
+        and out of an autonomous mode into MANUAL, so the drop switch alone hands the boat back."""
         self.get_logger().error(f"AUTONOMY DROP: {self.latch.trip_reason}: releasing RC overrides")
         status = self._status.get(time.monotonic())
         if status is not None and str(status[0]).upper() in self.autonomous_modes:

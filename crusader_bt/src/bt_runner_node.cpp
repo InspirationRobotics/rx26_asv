@@ -732,8 +732,9 @@ private:
         m.data = mode;
         set_mode_pub_->publish(m);
       };
-    ctx_->set_camera_model = [this](const std::string & model, std::string & why) {
-        return askCameraModel(model, why);
+    ctx_->set_camera_model = [this](const std::string & model, const std::string & indicator,
+        std::string & why) {
+        return askCameraModel(model, indicator, why);
       };
     ctx_->release_sticks = [this]() {
         crusader_msgs::msg::RcChannels m;
@@ -743,43 +744,77 @@ private:
       };
   }
 
-  /// SetCameraModel's ask. camera_node's `model` is read first: a set reloads the model even
-  /// to the value in force, seconds with no detections. The answer lands in
-  /// ctx_->camera_model_ack, and only the newest ask's does.
-  bool askCameraModel(const std::string & model, std::string & why)
+  /// SetCameraModel's ask: camera_node's `model`, and its `dock_indicator` when `indicator`
+  /// is not "". Both are read first and only what differs is set: a `model` set reloads the
+  /// model even to the value in force, seconds with no detections (`dock_indicator` never
+  /// reloads). The answer lands in ctx_->camera_model_ack, and only the newest ask's does.
+  bool askCameraModel(const std::string & model, const std::string & indicator, std::string & why)
   {
     if (!camera_params_->service_is_ready()) {
       why = camera_node_ + " has no parameter service: is it running?";
       return false;
     }
     const int ask = ++camera_ask_;
-    auto answer = [this, ask](int ack, const std::string & reason) {
+    askCamera(model, indicator, [this, ask](int ack, const std::string & reason) {
         std::lock_guard<std::mutex> lk(ctx_->mu);
         if (ask != camera_ask_) {return;}
         ctx_->camera_model_ack = ack;
         ctx_->camera_model_why = reason;
-      };
+      });
+    return true;
+  }
+
+  /// askCameraModel's read, then set. rclpy answers a read that names an undeclared
+  /// parameter with no values: a camera_node from before dock_indicator, which reads the
+  /// indicator the yolo way and no other, so for yolo it is asked again for the model alone.
+  void askCamera(
+    const std::string & model, const std::string & indicator,
+    std::function<void(int, const std::string &)> answer)
+  {
     using Params = std::shared_future<std::vector<rclcpp::Parameter>>;
     using Results = std::shared_future<std::vector<rcl_interfaces::msg::SetParametersResult>>;
-    camera_params_->get_parameters({"model"}, [this, model, answer](Params f) {
+    std::vector<std::string> names{"model"};
+    if (!indicator.empty()) {names.push_back("dock_indicator");}
+    camera_params_->get_parameters(names, [this, model, indicator, names, answer](Params f) {
         try {
           const auto now = f.get();
-          if (!now.empty() && now[0].get_type() == rclcpp::ParameterType::PARAMETER_STRING &&
-          now[0].as_string() == model)
+          auto holds = [&now](std::size_t i, const std::string & want) {
+              return i < now.size() &&
+                     now[i].get_type() == rclcpp::ParameterType::PARAMETER_STRING &&
+                     now[i].as_string() == want;
+            };
+          if (!indicator.empty() && (now.size() < names.size() ||
+            now[1].get_type() != rclcpp::ParameterType::PARAMETER_STRING))
           {
+            if (indicator == "yolo") {
+              askCamera(model, "", answer);
+              return;
+            }
+            answer(-1, "camera_node has no dock_indicator parameter (an older build): it "
+              "cannot read the indicator by " + indicator);
+            return;
+          }
+          std::vector<rclcpp::Parameter> set;
+          if (!holds(0, model)) {set.emplace_back("model", model);}
+          if (!indicator.empty() && !holds(1, indicator)) {
+            set.emplace_back("dock_indicator", indicator);
+          }
+          if (set.empty()) {
             answer(1, "");
             return;
           }
-          camera_params_->set_parameters({rclcpp::Parameter("model", model)}, [answer](Results r) {
+          camera_params_->set_parameters(set, [answer](Results r) {
               try {
                 const auto res = r.get();
                 if (res.empty()) {answer(-1, "an empty reply"); return;}
-                answer(res[0].successful ? 1 : -1, res[0].reason);
+                for (const auto & one : res) {
+                  if (!one.successful) {answer(-1, one.reason); return;}
+                }
+                answer(1, "");
               } catch (const std::exception & e) {answer(-1, e.what());}
             });
         } catch (const std::exception & e) {answer(-1, e.what());}
       });
-    return true;
   }
 
   /// Motion was commanded last tick and not this one: say STOP, once. A leaf
@@ -1511,8 +1546,8 @@ private:
     const std::string mode = ctx_->mode.empty() ? std::string("unknown") : ctx_->mode;
     std::string why;
     if (type == "NotDropped") {
-      why = "the autonomy-drop latch is set (SD in the drop position, or RC lost): "
-        "SD back to safe, then Start";
+      why = "the autonomy-drop latch is set (SC down in MANUAL, or RC lost): "
+        "SC up, then Start";
     } else if (type == "IsAutonomous") {
       why = "flight mode " + mode + " is not autonomous";
       if (mode == "MANUAL") {

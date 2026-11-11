@@ -13,6 +13,12 @@ Per frame, the chain the CV team runs offline (ffcv/demo/run_demo.py @ e1173c5):
   5. dock_sequence_core: steady / flash / code timing per window
   6. dock_obs_core: the face plane from depth, the windows' x, y, z, the message
 
+THE INDICATOR, two ways (`dock_indicator`, live: the tree's SetCameraModel sets it):
+  yolo  the detector's dock_indicator box, its colour by colour_core (step 4). The default.
+  cv    colour thresholds at the base of each face (indicator_cv_core): no indicator box
+        needed, for when the detector finds the faces but not the indicators. The windows
+        are read as before. The picture shows the search box and the red / green shares.
+
 THE MODEL IS INTERIM: its card says it was trained on the incorrectly built mock-up bay.
 
 dock_ffcv_dir holds best.pt, colour_core.py, geometry_core.py, dock_sequence_core.py,
@@ -26,12 +32,30 @@ import time
 import numpy as np
 
 from crusader_msgs.msg import DockBay, DockObservation, DockWindow
-from crusader_perception import dock_obs_core
+from crusader_perception import dock_obs_core, indicator_cv_core, indicator_cv_settings
 
+INDICATOR_MODES = ("yolo", "cv")
 PARAMS = {
     "dock_ffcv_dir": "/root/robotx_ws/models/ffcv",
     "dock_conf": 0.0,                   # detector confidence; 0 = ffcv.yaml's eval.conf
+    "dock_indicator": "yolo",           # yolo | cv: how the indicator's colour is read (above)
+    # cv's settings, dock_cv_<name> (indicator_cv_settings.DEFAULTS). A call into a pure-Python
+    # module: check_config imports it to read these without ROS or numpy
+    **indicator_cv_settings.as_params(),
 }
+# Changed on the running model, between two frames (camera_node's DYNAMIC has them)
+LIVE = ("dock_indicator", *indicator_cv_settings.as_params())
+
+
+def live_settings(p):
+    """(mode, cv settings) from camera_node's parameters `p`. ValueError, saying what is
+    wrong, for a value that cannot work, so a bad `ros2 param set` is refused whole."""
+    mode = str(p.get("dock_indicator", "yolo")).strip().lower()
+    if mode not in INDICATOR_MODES:
+        raise ValueError(f"dock_indicator must be one of {', '.join(INDICATOR_MODES)}, "
+                         f"not {mode!r}")
+    return mode, indicator_cv_settings.from_params(p)
+
 
 DET_W, DET_H = 640, 400
 FRAME_ID = "camera_link"
@@ -65,9 +89,11 @@ def load_ffcv(d):
     return cc, gc, DockSequence, cfg, ccfg, template, thr
 
 
-def observe(rgb, dets, cfg, ccfg, template, cc, gc):
+def observe(rgb, dets, cfg, ccfg, template, cc, gc, indicator="yolo", cv=None):
     """run_demo.observe on a numpy RGB frame: dets {class: [(box, conf)]} in full-res
-    pixels -> bay dicts, left to right, and the number of reflections dropped."""
+    pixels -> bay dicts, left to right, and the number of reflections dropped.
+    indicator "cv": each bay's indicator read by indicator_cv_core with the settings `cv`
+    instead (its read also kept, as the bay's "cv", for the picture)."""
     H, W = rgb.shape[:2]
     cam = cfg["camera"]
     s = W / float(cam["full_width"])
@@ -100,15 +126,22 @@ def observe(rgb, dets, cfg, ccfg, template, cc, gc):
                              lit_score=st.get("lit_score", st.get("excess", 0.0))))
         wout.sort(key=lambda w: (w["index"] is None, w["index"] or 0))
         lit = cc.lit_window([dict(state=w["state"], confidence=w["state_conf"]) for w in wout])
-        ic = None
-        if ind:
+        ic, cvr = None, None
+        if indicator == "cv":
+            # the completed face: its base is where the indicator is, even when the image
+            # edge cut the detector's box
+            cvr = indicator_cv_core.read_indicator(rgb, full, [w["box"] for w in wout], cv)
+            if cvr["present"]:
+                ic = dict(box=cvr["box"], conf=cvr["confidence"], colour=cvr["colour"],
+                          colour_conf=cvr["confidence"])
+        elif ind:
             d = cc.indicator_colour(rgb, ind[0], fbox, [w["box"] for w in wout], ccfg)
             ic = dict(box=ind[0], conf=ind[1], colour=d["colour"], colour_conf=d["confidence"])
         hs = [w["box"][3] - w["box"][1] for w in wout if w["box"][1] > 1 and w["box"][3] < H - 1]
         rng = gc.range_from_size(float(np.median(hs)), cfg["geometry"]["window_size_m"], fy) if hs else None
         bays.append(dict(face=fbox, face_conf=fconf, truncated=trunc, indicator=ic,
                          windows=wout, lit=wout[lit]["index"] if lit is not None else None,
-                         range_m=rng,
+                         range_m=rng, cv=cvr,
                          bearing_deg=gc.bearing_deg((fbox[0] + fbox[2]) / 2, fx, cx)))
     return bays, len(rej)
 
@@ -164,7 +197,19 @@ class DockModel:
         self.det_ms = 0.0
         self.bays, self.counts, self.reflections = [], {}, 0
         self.frames, self.fps, self._rate_t, self._rate_n = 0, 0.0, time.monotonic(), 0
+        self.indicator, self.cv = None, None
+        self.set_params(p)
         log.info("dock model ready (INTERIM: trained on the mock-up bay)")
+
+    def set_params(self, p):
+        """The live settings (LIVE) from camera_node's parameters `p`. camera_node calls it
+        between two frames (under its run lock) and has checked the values already."""
+        mode, cv = live_settings(p)
+        if mode != self.indicator:
+            self.log.info(f"dock indicator read by {mode}" + (
+                " (colour thresholds at the base of each face)" if mode == "cv" else
+                " (the detector's dock_indicator box, colour_core)"))
+        self.indicator, self.cv = mode, cv
 
     def close(self):
         pass
@@ -189,7 +234,7 @@ class DockModel:
                 ([float(v) * scale for v in b], float(p)))
         rgb = np.ascontiguousarray(bgr[:, :, ::-1])
         bays, self.reflections = observe(rgb, dets, self.cfg, self.ccfg, self.template,
-                                         self.cc, self.gc)
+                                         self.cc, self.gc, self.indicator, self.cv)
         for i, bay in enumerate(bays):
             sq = self.seqs.setdefault(i, self.DockSequence(self.cfg["sequence"]))
             bay["events"] = sq.update(t, {w["index"]: w["state"] for w in bay["windows"]
@@ -224,7 +269,7 @@ class DockModel:
             f = [int(v) for v in bay["face"]]
             cv2.rectangle(img, (f[0], f[1]), (f[2], f[3]), FACE, 4)
             ind = bay["indicator"]
-            txt = f"bay {i}  ind={ind['colour'] if ind else '-'}"
+            txt = f"bay {i}  ind{'(cv)' if bay.get('cv') else ''}={ind['colour'] if ind else '-'}"
             if bay["range_m"]:
                 txt += f"  ~{bay['range_m']:.1f} m (size)"
             txt += f"  {bay['bearing_deg']:+.0f} deg"
@@ -233,6 +278,13 @@ class DockModel:
             if ind:
                 b = [int(v) for v in ind["box"]]
                 cv2.rectangle(img, (b[0], b[1]), (b[2], b[3]), COL.get(ind["colour"], IND_NONE), 4)
+            cvr = bay.get("cv")
+            if cvr and cvr["roi"]:              # where cv looked, and what it counted there
+                x0, y0, x1, y1 = cvr["roi"]
+                cv2.rectangle(img, (x0, y0), (x1, y1), (255, 255, 255), 2)
+                cv2.putText(img, f"cv R {100 * cvr['red']:.1f}% G {100 * cvr['green']:.1f}%",
+                            (x0, min(img.shape[0] - 10, y1 + 34)), cv2.FONT_HERSHEY_SIMPLEX, fs,
+                            (255, 255, 255), th)
             for w in bay["windows"]:
                 c = COL.get(w["state"], (255, 255, 255))
                 b = [int(v) for v in w["box"]]
@@ -248,14 +300,16 @@ class DockModel:
                 cv2.putText(img, "pattern " + bay["patterns"],
                             (f[0], min(img.shape[0] - 10, f[3] + 80)),
                             cv2.FONT_HERSHEY_SIMPLEX, fs, (255, 255, 255), th)
-        return (f"dock INTERIM model  det {self.det_ms:.0f} ms  boxes: "
-                + (", ".join(f"{k} {v}" for k, v in self.counts.items()) or "none")
+        return (f"dock INTERIM model  indicator by {self.indicator}  det {self.det_ms:.0f} ms  "
+                "boxes: " + (", ".join(f"{k} {v}" for k, v in self.counts.items()) or "none")
                 + (f"  reflections dropped {self.reflections}" if self.reflections else ""))
 
     def health(self):
         return dict(det_ms=round(self.det_ms, 1), boxes=self.counts,
-                    reflections=self.reflections,
+                    reflections=self.reflections, indicator_by=self.indicator,
                     bays=[dict(indicator=b["indicator"] and b["indicator"]["colour"],
+                               cv=b["cv"] and dict(red=round(b["cv"]["red"], 4),
+                                                   green=round(b["cv"]["green"], 4)),
                                windows=[(w["index"], w["state"]) for w in b["windows"]],
                                lit=b["lit"], patterns=b.get("patterns", ""))
                           for b in self.bays])

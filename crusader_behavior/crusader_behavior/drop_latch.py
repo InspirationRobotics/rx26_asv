@@ -3,6 +3,9 @@
 Blocked until a fresh RC sample shows the switch SAFE. The switch in the drop position, the
 channel reading 0 (RC lost) or RC older than stale_timeout trips it; only an explicit reset
 with fresh, safe RC clears it.
+
+channel 0 is NO latch (the boat's setting since 2026-11-11: RoboCommand starts the runs):
+always allowed, nothing trips it. The mode switch and the RC e-stop still take the boat back.
 """
 from enum import Enum
 
@@ -15,16 +18,16 @@ class DropState(Enum):
 
 class DropLatch:
     def __init__(self, channel: int, threshold: int, invert: bool, stale_timeout: float):
-        """channel is 1-indexed (RC convention). threshold in us.
+        """channel is 1-indexed (RC convention), 0 = no latch. threshold in us.
         invert=False: value >= threshold trips. invert=True: value <= threshold trips.
         """
-        if not 1 <= channel <= 18:
-            raise ValueError("channel must be 1..18")
+        if not 0 <= channel <= 18:
+            raise ValueError("channel must be 0 (no latch) or 1..18")
         self.channel = channel
         self.threshold = threshold
         self.invert = invert
         self.stale_timeout = stale_timeout
-        self.state = DropState.STARTUP
+        self.state = DropState.ACTIVE if self.off else DropState.STARTUP
         self.trip_reason = None
         self._last_sample_t = None
         self._last_value = None
@@ -34,6 +37,8 @@ class DropLatch:
     def rc_sample(self, channels, t: float) -> bool:
         """Feed one RC_CHANNELS reading (list of us values, index 0 = channel 1).
         Returns True if this sample newly tripped the latch."""
+        if self.off:
+            return False
         value = channels[self.channel - 1] if len(channels) >= self.channel else 0
         self._last_sample_t = t
         self._last_value = value
@@ -55,7 +60,7 @@ class DropLatch:
 
     def tick(self, t: float) -> bool:
         """Call periodically. Returns True if staleness newly tripped the latch."""
-        if self.state != DropState.ACTIVE:
+        if self.off or self.state != DropState.ACTIVE:
             return False
         if self._last_sample_t is None or t - self._last_sample_t > self.stale_timeout:
             return self._trip("RC data stale — cannot verify pilot control path")
@@ -76,6 +81,11 @@ class DropLatch:
         return True, "reset — overrides re-enabled"
 
     # ---- queries ----
+
+    @property
+    def off(self) -> bool:
+        """No latch (channel 0): always allowed, nothing trips it."""
+        return self.channel == 0
 
     @property
     def allowed(self) -> bool:

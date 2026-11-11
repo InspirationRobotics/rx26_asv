@@ -1,4 +1,4 @@
-"""camera_node with source topic and a stand-in model: no depthai, no ultralytics, no camera.
+"""camera_node with source topic and stand-in models: no depthai, no ultralytics, no camera.
 Needs rclpy, a built crusader_msgs and cv2; skips itself without them."""
 import json
 import time
@@ -12,7 +12,7 @@ try:
     from rclpy.parameter import Parameter
     from builtin_interfaces.msg import Time
     from sensor_msgs.msg import Image
-    from crusader_msgs.msg import Detection3D, Detection3DArray
+    from crusader_msgs.msg import Detection3D, Detection3DArray, DockObservation
     from crusader_perception import camera_node as cn
     HAVE_ROS = True
 except Exception:                                   # no ROS, msgs not built, or no cv2
@@ -63,6 +63,28 @@ class FakeBuoy:
         self.closed = True
 
 
+class FakeDock(FakeBuoy):
+    """The dock model's live settings: what camera_node pushes onto it, and when."""
+    name = "dock"
+    topic = "/dock/observations"
+    msg_type = None                     # DockObservation, set once ROS has imported
+    loads = 0
+
+    def __init__(self, p, log):
+        FakeDock.loads += 1
+        self.closed = False
+        self.seen = []
+        self.live = []                  # every set_params: (dock_indicator, dock_cv_sat_min)
+        self.set_params(p)
+
+    def set_params(self, p):
+        self.live.append((p["dock_indicator"], p["dock_cv_sat_min"]))
+
+    def run(self, frame):
+        self.seen.append(frame)
+        return DockObservation()
+
+
 def image(w, h, sec, encoding="bgr8"):
     m = Image()
     m.header.stamp = Time(sec=sec)
@@ -94,7 +116,9 @@ class CameraNodeTopicSource(unittest.TestCase):
                          "-p", "image_max_hz:=30.0"])
         cls.models = dict(cn.MODELS)
         FakeBuoy.msg_type = Detection3DArray
+        FakeDock.msg_type = DockObservation
         cn.MODELS["buoy"] = FakeBuoy
+        cn.MODELS["dock"] = FakeDock
 
     @classmethod
     def tearDownClass(cls):
@@ -107,6 +131,7 @@ class CameraNodeTopicSource(unittest.TestCase):
         self.view, self.raw, self.det = _Rec(), _Rec(0), _Rec()
         self.node.view_pub, self.node.raw_pub = self.view, self.raw
         self.node.pubs["buoy"] = self.det
+        self.node.pubs["dock"] = _Rec()
 
     def tearDown(self):
         self.node.destroy_node()
@@ -161,6 +186,39 @@ class CameraNodeTopicSource(unittest.TestCase):
         self.assertFalse(self.setp("awb_mode", Parameter.Type.STRING, "sunny").successful)
         self.assertEqual(self.node.p["awb_mode"], "auto")
         self.assertFalse(self.setp("fps", Parameter.Type.DOUBLE, 30.0).successful)  # read-only
+
+    def test_dock_indicator_is_live(self):
+        """dock_indicator and the dock_cv_* settings reach the running dock model between
+        two frames, with no reload; a bad one is refused whole; a later load starts on them."""
+        self.assertTrue(self.setp("model", Parameter.Type.STRING, "dock").successful)
+        self.assertTrue(wait(lambda: self.node.model_state == "dock ready"))
+        model, loads = self.node._model, FakeDock.loads
+        self.assertEqual(model.live[-1], ("yolo", 0.40))            # the defaults, at load
+        self.assertTrue(self.setp("dock_indicator", Parameter.Type.STRING, "cv").successful)
+        self.assertEqual(model.live[-1], ("cv", 0.40))
+        self.assertTrue(self.setp("dock_cv_sat_min", Parameter.Type.DOUBLE, 0.3).successful)
+        self.assertEqual(model.live[-1], ("cv", 0.3))
+        self.assertIs(self.node._model, model)                       # the same model: no reload
+        self.assertEqual(FakeDock.loads, loads)
+        self.feed()
+        self.assertTrue(wait(lambda: len(model.seen) == 1))          # and it still runs
+        n = len(model.live)
+        for name, kind, value in (
+                ("dock_indicator", Parameter.Type.STRING, "hsv"),
+                ("dock_cv_sat_min", Parameter.Type.DOUBLE, 1.5),
+                ("dock_cv_ratio", Parameter.Type.DOUBLE, 0.5),
+                ("dock_cv_roi", Parameter.Type.DOUBLE_ARRAY, [0.1, 0.9, 0.5]),
+                ("dock_cv_red_hue", Parameter.Type.DOUBLE_ARRAY, [340.0, 400.0])):
+            self.assertFalse(self.setp(name, kind, value).successful, name)
+        self.assertEqual(len(model.live), n)                         # nothing pushed
+        self.assertEqual((self.node.p["dock_indicator"], self.node.p["dock_cv_sat_min"]),
+                         ("cv", 0.3))
+        self.assertTrue(self.setp("model", Parameter.Type.STRING, "none").successful)
+        self.assertTrue(wait(lambda: model.closed and self.node._model is None))
+        self.assertTrue(self.setp("dock_indicator", Parameter.Type.STRING, "yolo").successful)
+        self.assertTrue(self.setp("model", Parameter.Type.STRING, "dock").successful)
+        self.assertTrue(wait(lambda: self.node.model_state == "dock ready"))
+        self.assertEqual(self.node._model.live[-1], ("yolo", 0.3))   # the settings at load
 
     def test_health(self):
         rec = _Rec()
