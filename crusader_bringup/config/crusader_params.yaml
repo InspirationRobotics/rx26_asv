@@ -40,12 +40,13 @@ telemetry_bridge:
   ros__parameters:
     mav_endpoint: "udp:127.0.0.1:14551"    # MAVProxy's rebroadcast, never the serial port
     fcu_sysid: 2                           # the autopilot's SYSID_THISMAV; Ekko is 1
-    # The RC drop latch governs the RC-OVERRIDE path only. NOT ch7: that is the SB
-    # arm/e-stop switch (up ~1995 = arm), so arming would trip it and block every
-    # override. ch9 has no switch yet (SD proposed): it reads ~1500 and NEVER TRIPS, so
-    # today the kills are SC (mode) and SB (e-stop). GUIDED is gated on the MODE.
-    drop_channel: 9
-    drop_threshold: 1700                   # us; crossing trips the latch
+    # The RC drop latch is on SC, the mode switch (ch8): SC DOWN (MANUAL, 994 us) during
+    # a run releases our overrides and ends the tree, so the pilot has the sticks (still
+    # armed: SB ch7 is the e-stop). SC back up (HOLD 1494 / GUIDED 1995) re-arms it by
+    # itself. So a run must START with SC up; the tree switches to MANUAL itself.
+    drop_channel: 8
+    drop_threshold: 1230                   # us; at or below = SC down (MODE1 is <= 1230)
+    drop_invert: true
     # The water pump: /crsd/pump_cmd -> DO_REPEAT_SERVO. 0 (every burst refused) until
     # docs/G7_pump_bench.md is done; then the Pixhawk output with SERVOn_FUNCTION =
     # 50 + pump_rc_channel and SERVOn_TRIM = pump_off_pwm: the autopilot ends each

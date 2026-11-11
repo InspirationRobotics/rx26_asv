@@ -184,7 +184,7 @@ public:
   }
 };
 
-/// The autonomy-drop latch (SD, ch9) is clear. The bridge refuses our sticks while it
+/// The autonomy-drop latch (SC down, ch8) is clear. The bridge refuses our sticks while it
 /// is tripped; knowing it here ends the run instead of commanding into refusals.
 class NotDropped : public CrusaderCondition
 {

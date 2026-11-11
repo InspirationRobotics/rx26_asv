@@ -1351,8 +1351,8 @@ private:
     const std::string mode = ctx_->mode.empty() ? std::string("unknown") : ctx_->mode;
     std::string why;
     if (type == "NotDropped") {
-      why = "the autonomy-drop latch is set (SD in the drop position, or RC lost): "
-        "SD back to safe, then Start";
+      why = "the autonomy-drop latch is set (SC down in MANUAL, or RC lost): "
+        "SC up, then Start";
     } else if (type == "IsAutonomous") {
       why = "flight mode " + mode + " is not autonomous";
       if (mode == "MANUAL") {
