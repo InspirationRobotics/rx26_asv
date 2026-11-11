@@ -213,7 +213,12 @@ class FrameWriter:
         now = time.monotonic() if now is None else now
         if self._failed or now < self._next:
             return
-        self._next = now + self.period
+        # A fixed schedule, not "one period after this frame": counting from the frame adds
+        # the wait for the camera's next frame to every gap, which saved 1 Hz as 0.87 Hz
+        # and 3 Hz as 2.1 Hz. After a stall it restarts from now rather than catching up.
+        self._next += self.period
+        if self._next <= now:
+            self._next = now + self.period
         self.count += 1
         try:
             with open(os.path.join(self.out_dir, f"{self.count:06d}.jpg"), "wb") as f:
