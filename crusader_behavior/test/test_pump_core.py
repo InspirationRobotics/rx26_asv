@@ -73,9 +73,11 @@ class TestRefusals(unittest.TestCase):
     def test_output_already_on(self):
         self.assertIn("already ON", self.refused(output_pwm=1990))
 
-    def test_running_and_gap(self):
+    def test_extend_and_gap(self):
         self.g.start_burst(0.3, 100.0)
-        self.assertIn("still running", self.refused(now=100.1))
+        ok, why = self.g.check_burst(0.3, ok_inputs(now=100.1))
+        self.assertTrue(ok)                       # an ask while ours runs extends it
+        self.assertIn("extends", why)
         self.assertIn("too soon", self.refused(now=100.9))
         self.assertTrue(self.g.check_burst(0.3, ok_inputs(now=101.4))[0])
 
@@ -100,7 +102,7 @@ class TestCommands(unittest.TestCase):
 
     def test_command_ids(self):
         self.assertEqual(pc.MAV_CMD_DO_SET_SERVO, 183)
-        self.assertEqual(pc.MAV_CMD_DO_REPEAT_SERVO, 211)
+        self.assertEqual(pc.MAV_CMD_DO_REPEAT_SERVO, 184)   # 211 is DO_GRIPPER
 
     def test_is_on_either_polarity(self):
         self.assertTrue(P.is_on(1990))

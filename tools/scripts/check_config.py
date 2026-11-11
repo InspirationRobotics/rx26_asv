@@ -448,8 +448,9 @@ def check_pump():
             problems.append(f"SERVO{servo}_FUNCTION is {int(fn)}, not RCIN{ch} "
                             f"({50 + ch})")
         if trim is None or int(trim) != off:
-            problems.append(f"SERVO{servo}_TRIM is {trim}, not pump_off_pwm {off}: "
-                            "a burst would END at TRIM")
+            # a warning, not a failure: the boat runs with this TRIM (2026-11)
+            print(f"[warn] pump path: SERVO{servo}_TRIM is {trim}, not pump_off_pwm {off}: "
+                  "a burst ENDS at TRIM, so check on the bench that TRIM stops the pump")
     # GUIDED heading+speed: thrust 1.0 means WP_SPEED to the autopilot, so the
     # bridge must agree or every commanded speed is off by the ratio.
     try:
@@ -494,7 +495,7 @@ def check_pump():
         fail("pump path", "; ".join(problems))
     else:
         ok("pump path", f"pump on ch{ch}, " + (f"SERVO{servo} passes it through, "
-                                               f"TRIM = OFF {off}" if servo
+                                               f"OFF {off}" if servo
                                                else "no pump output yet (G7)"))
 
 

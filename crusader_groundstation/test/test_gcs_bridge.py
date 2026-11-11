@@ -350,7 +350,7 @@ class Bridge(unittest.TestCase):
     def test_mission_catalogue(self):
         self.need_bt()
         cat = self.catalogue()
-        self.assertEqual(sorted(cat), ["builtins", "nodes", "subtrees", "user"])
+        self.assertEqual(sorted(cat), ["builtins", "nodes", "subtrees", "templates", "user"])
         nodes = {n["id"]: n for n in cat["nodes"]}
         self.assertTrue({"Sequence", "AlwaysSuccess", "IsAutonomous", "NavigateTo"} <= set(nodes))
         goal = next(p for p in nodes["NavigateTo"]["ports"] if p["name"] == "goal")
