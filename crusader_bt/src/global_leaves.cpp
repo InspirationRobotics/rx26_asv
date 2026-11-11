@@ -88,7 +88,13 @@ gp::FieldSig currentField(const Context & c)
       seen.push_back({b.id, b.p, b.state});
     }
   }
-  return gp::fieldSig(std::move(seen), c.entry, c.exitp);
+  // The ENTRY/EXIT as the planner anchors them (gp::detail::anchorOf), not the raw points: a
+  // buoy first seen near a MANUAL or remembered point moves the orbit onto it, and that has to
+  // reach the sensor check even though the buoy has no colour yet.
+  const double snap = c.global_passage.params.anchor_snap_m;
+  return gp::fieldSig(std::move(seen),
+      gp::detail::anchorOf(c.buoys, c.entry, nav::Beacon::FlashingBlue, snap).first,
+      gp::detail::anchorOf(c.buoys, c.exitp, nav::Beacon::SteadyBlue, snap).first);
 }
 
 /// What changed in the field since the plan was made ("" = nothing): colours, buoys, or a move
