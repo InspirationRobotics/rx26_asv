@@ -132,6 +132,40 @@ static void testSensorCheck()
   CHECK(!matters(pl, Phase::Transit, bs, bs[0].p, bs[1].p, driven).empty(), "driven wrong side");
 }
 
+/// The 2026-11-10 Singapore field (crusader_sim/courses/task1_sg.yaml) as dealt that day:
+/// ENTRY and EXIT first (planOf's convention), reds on the east column, greens on the west.
+static std::vector<Buoy> singaporeField()
+{
+  const Beacon R = Beacon::FlashingRed, G = Beacon::FlashingGreen;
+  return {buoy(1, -4.52, 9.02, Beacon::FlashingBlue), buoy(11, -5.22, 21.91, Beacon::SteadyBlue),
+    buoy(2, -8.62, 9.69, G), buoy(3, -4.35, 12.40, R), buoy(4, -7.30, 12.46, G),
+    buoy(5, -7.36, 14.80, G), buoy(6, -5.10, 14.90, R), buoy(7, -0.53, 15.26, Beacon::Off),
+    buoy(8, -3.20, 16.55, R), buoy(9, -5.78, 17.91, G), buoy(10, -4.06, 18.62, R)};
+}
+
+/// Run 2 with the colours wiped at mission start: the first plan is made with every buoy
+/// Unknown (ENTRY/EXIT from memory) and goes up the west side of the field. When the camera reads
+/// the deal again, the greens that transit would leave to starboard must ask for a replan, and a
+/// plan made with the colours must fit (at the 0.5 m relax floor) and ask for nothing more.
+static void testSingaporeRun2()
+{
+  const std::vector<Buoy> dealt = singaporeField();
+  std::vector<Buoy> wiped = dealt;
+  for (Buoy & b : wiped) {b.state = Beacon::Unknown;}
+  const Vec2 boat{-1.0, -2.0};
+  const int transit = static_cast<int>(Phase::Transit);
+  const gp::Plan blind = planOf(wiped, boat);
+  CHECK(blind.ok, "a plan with every colour wiped");
+  const std::string why = matters(blind, Phase::Approach, dealt, dealt[0].p, dealt[1].p,
+      blind.legs[transit]);
+  CHECK(why.find("wrong side") != std::string::npos, "the colours read again: '%s'", why.c_str());
+  const gp::Plan seen = planOf(dealt, boat);
+  CHECK(seen.ok, "a plan with the colours fits the field");
+  const std::string again = matters(seen, Phase::Approach, dealt, dealt[0].p, dealt[1].p,
+      seen.legs[transit]);
+  CHECK(again.empty(), "and asks for nothing more: '%s'", again.c_str());
+}
+
 static void testBestBeacon()
 {
   using nav::bestBeacon;
@@ -162,6 +196,7 @@ static void testBestBeacon()
 int main()
 {
   testSensorCheck();
+  testSingaporeRun2();
   testBestBeacon();
   std::printf("%d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;

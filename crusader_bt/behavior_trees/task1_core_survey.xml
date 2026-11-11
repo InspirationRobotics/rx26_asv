@@ -36,6 +36,8 @@
           <ResolveBuoyStates/>
           <ReportSafePassage min_period_s="1.0"/>
           <Sequence name="core">
+            <!-- the survey looks with the buoy model (Task1PlanDrive asks again: a no-op then) -->
+            <SetCameraModel model="buoy" timeout_s="15.0"/>
             <Sequence name="survey">
               <NavigateTo target="fix" lat="1.28053593" lon="103.85565058" tolerance="1.5"
                           resend_m="1.5" avoid="true" exempt="" blocked_timeout_s="20.0"/>

@@ -15,11 +15,18 @@
   The ports below are read from the calling tree's blackboard through _autoremap (the caller
   declares and documents them); this subtree declares none, so no model default can shadow
   the value the caller wrote.
+
+  THE CAMERA IS PUT ON THE BUOY MODEL FIRST. camera_node keeps whatever model it was last
+  given (a Task 3 run leaves it on dock, and so can the Sensors tab), and on any other model the
+  boat sees no red, green or blue: no colours, no sensor replans, nothing remembered. Already on
+  buoy: SetCameraModel answers at once and nothing reloads. camera_node not running or refusing:
+  FAILURE here, with the reason in the Tree box, rather than a passage driven colour-blind.
 -->
 <root BTCPP_format="4">
 
   <BehaviorTree ID="Task1PlanDrive">
     <Sequence name="passage">
+      <SetCameraModel model="buoy" timeout_s="15.0"/>
       <WaitForField/>
       <RetryUntilSuccessful num_attempts="{plan_attempts}">
         <Sequence>
