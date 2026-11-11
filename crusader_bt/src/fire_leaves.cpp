@@ -752,6 +752,7 @@ public:
     } else {
       dir_ = first == "right" ? 1.0 : -1.0;
     }
+    ctx_->search_dir = dir_ > 0.0 ? 1 : -1;   // what numbers a bay committed early
     RCLCPP_INFO(log(), "StrafeSearch: %s, bow %.0f deg%s, sliding %s first",
       L.ok ? "along the dock" : "no dock layout yet: across the bow", h0_,
       std::isfinite(set_h) ? " (set)" : "", dir_ > 0.0 ? "right" : "left");
@@ -784,6 +785,7 @@ public:
           if (leg_ == 0 || forever) {
             dir_ = -dir_;
             leg_ = 1;
+            ctx_->search_dir = dir_ > 0.0 ? 1 : -1;
           } else {
             fail = true;
             why = toward_ ? "the committed bay never came into view" : "no GREEN bay along the dock";

@@ -6,6 +6,9 @@
           frames, pictures and health keep flowing while it loads.
             buoy -> /crsd/oak/detections  Detection3DArray, every frame (buoy_model)
             dock -> /dock/observations    DockObservation, every frame (dock_model)
+          dock_indicator yolo | cv, live, no reload: how the dock model reads the bays'
+                 indicator colour (dock_model). Task 3 trees set it with SetCameraModel;
+                 its dock_cv_* settings are live too, for tuning on the water.
   out     /crsd/camera/image/compressed  the annotated picture, only while subscribed
           /crsd/camera/raw/compressed    the frame the model saw, full size, only while
                                          subscribed: what a recording wants (frames with
@@ -56,10 +59,12 @@ PARAMS = {
 }
 RANGES = {
     "image_max_width": (160, 1920), "image_quality": (10, 100), "image_max_hz": (0.5, 30.0),
+    "dock_cv_sat_min": (0.0, 1.0), "dock_cv_val_min": (0.0, 1.0),
+    "dock_cv_min_share": (0.00001, 1.0), "dock_cv_ratio": (1.0, 50.0),
     **oak_controls.ranges(),
 }
 DYNAMIC = ("model", "image_max_width", "image_quality", "image_max_hz",
-           *oak_controls.defaults())
+           *dock_model.LIVE, *oak_controls.defaults())
 MODELS = {"buoy": buoy_model.BuoyModel, "dock": dock_model.DockModel}
 
 # How long teardown waits for depthai to let go of the camera: under the ground station's
@@ -283,6 +288,9 @@ class CameraNode(Node):
         device has taken it, so the parameters never show a value in force nowhere."""
         if "model" in changes:
             self._check_model(changes["model"])
+        live = any(k in dock_model.LIVE for k in changes)
+        if live:
+            dock_model.live_settings(dict(self.p, **changes))   # a bad one refuses the set
         error = oak_controls.validate(changes)
         if error:
             raise ValueError(error)
@@ -292,8 +300,16 @@ class CameraNode(Node):
             self.source.send(profile)       # every setting, so the camera is the profile
             self.get_logger().info(f"camera: {oak_controls.summary(profile)}")
         self.p.update(changes)
+        if live:
+            with self._run_lock:            # between two frames, never inside one
+                self._push_live(self._model)
         if "model" in changes:
             self._set_model(changes["model"])
+
+    def _push_live(self, model):
+        """The live settings onto `model`, if it takes them. Under _run_lock."""
+        if model is not None and hasattr(model, "set_params"):
+            model.set_params(dict(self.p))
 
     def _set_model(self, name):
         self._wanted = name
@@ -323,6 +339,7 @@ class CameraNode(Node):
                 model.close()
                 return
             with self._run_lock:
+                self._push_live(model)      # a live setting may have changed while it loaded
                 self._model = model
             self.model_state = f"{name} ready"
 

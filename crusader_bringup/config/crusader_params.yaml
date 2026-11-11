@@ -40,12 +40,14 @@ telemetry_bridge:
   ros__parameters:
     mav_endpoint: "udp:127.0.0.1:14551"    # MAVProxy's rebroadcast, never the serial port
     fcu_sysid: 2                           # the autopilot's SYSID_THISMAV; Ekko is 1
-    # The RC drop latch is on SC, the mode switch (ch8): SC DOWN (MANUAL, 994 us) during
-    # a run releases our overrides and ends the tree, so the pilot has the sticks (still
-    # armed: SB ch7 is the e-stop). SC back up (HOLD 1494 / GUIDED 1995) re-arms it by
-    # itself. So a run must START with SC up; the tree switches to MANUAL itself.
-    drop_channel: 8
-    drop_threshold: 1230                   # us; at or below = SC down (MODE1 is <= 1230)
+    # The RC autonomy-drop latch is OFF (drop_channel 0, 2026-11-11): RoboCommand's
+    # RunStart starts a run, and the transmitter no longer gates our sticks. To take the
+    # boat back mid-run: SC to HOLD (any mode but MANUAL ends a run on the sticks, and the
+    # bridge releases them), then MANUAL; SB (ch7) is the e-stop. SC DOWN alone does NOT
+    # stop a run already in MANUAL. Back on SC: drop_channel 8 (SC down trips it; a run
+    # then has to start with SC up).
+    drop_channel: 0
+    drop_threshold: 1230                   # us; used only when drop_channel > 0
     drop_invert: true
     # The water pump: /crsd/pump_cmd -> DO_REPEAT_SERVO. 0 (every burst refused) until
     # docs/G7_pump_bench.md is done; then the Pixhawk output with SERVOn_FUNCTION =
@@ -69,14 +71,24 @@ telemetry_bridge:
     cannon_pan_channel: 11
     cannon_tilt_channel: 12
     cannon_pump: false                     # G7 for the cannon: false = aims, water DRY
-    cannon_nozzle_xyz: [0.37, 0.279, 0.75] # pivot: level with the camera, 11 in to port
+    cannon_nozzle_xyz: [0.37, 0.279, 0.635] # level with the camera fore/aft, 11 in to port;
+                                           # z = the tip at tilt 0 (2026-11-06; tilt pivot 0.605,
+                                           # 3.6 cm arm; 0.75 before)
     cannon_cam_xyz: [0.37, 0.0, 0.65]      # = target_tracker cam_x/y/z
-    cannon_exit_speed_mps: 4.2             # 0 = from the throw below (4.85). 4.2: 5 shots, 2026-10-09
-                                           # (3.9-4.3); 4.85 landed short on 2026-10-24
+    cannon_exit_speed_mps: 6.27            # 2026-11-06 at 15.6 V: level shot landed 2.26 m out, 45 deg
+                                           # shot 4.57 m (6.28 / 6.27; solving both gives the nozzle
+                                           # 0.637 m up = the tape). The old 4.2 / 4.85 / 5.42 were read
+                                           # through the wrong tilt map (real angles ~13-27 deg lower)
     cannon_throw_range_m: 2.74
     cannon_throw_elev_deg: 30.0
     cannon_throw_drop_m: 0.51
-    cannon_tilt_center_us: 1680.0          # level with the hull, by eye (2026-10-09)
+    # Servo maps measured 2026-11-06 (phone, two 1200-1800 us sweeps per axis, pooled
+    # fit): ~7.4-7.8 us/deg, not the 5.556 (500 us / 90 deg) assumed until then.
+    cannon_pan_center_us: 1505.0           # straight ahead (runs 1500, 1511)
+    cannon_pan_us_per_deg: 7.35            # 95% 7.19-7.51
+    cannon_pan_limits_deg: [-54.0, 54.0]   # all that 1100-1900 us reaches (-55..+54)
+    cannon_tilt_center_us: 1640.0          # level with the hull (runs 1625, 1655); 1680 by eye before
+    cannon_tilt_us_per_deg: 7.80           # 95% 7.50-8.12
     cannon_tilt_sign: -1.0                 # the tilt servo is mounted reversed
 
 # ---- Task 3 fixed nozzle: the calibration tool (tools/squirt_cal) ----

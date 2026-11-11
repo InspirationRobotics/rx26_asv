@@ -129,6 +129,10 @@ struct Context
   /// Which way StrafeSearch slides first: bt_runner_node search_first (the GCS sets it),
   /// read at goal start. "left" | "right", "" = not set.
   std::string search_first;
+  /// Which way StrafeSearch is sliding now (facing the bays): -1 left, +1 right, 0 no search
+  /// this run. The bays it has slid past are the ones it has seen, which is what numbers a
+  /// bay committed before all three are known (dock::guessBayNumber).
+  int search_dir = 0;
 
   std::string task3_phase;                    ///< for feedback and the viewers
   int survey_attempt = 0;                     ///< PickVantage calls, all of them
@@ -304,9 +308,12 @@ struct Context
   std::function<void()> release_sticks;
   /// Ask the autopilot for a flight mode: /crsd/set_mode (RequestMode).
   std::function<void(const std::string &)> request_mode;
-  /// Ask camera_node for a model (its live `model` parameter, SetCameraModel). False, with
-  /// the reason in `why`, when it cannot be asked; the answer lands in camera_model_ack.
-  std::function<bool(const std::string &, std::string & why)> set_camera_model;
+  /// Ask camera_node for a model (its live `model` parameter, SetCameraModel) and, when
+  /// `indicator` is not "", how the dock model reads the indicator (its live
+  /// `dock_indicator`: yolo | cv). False, with the reason in `why`, when it cannot be asked;
+  /// the answer lands in camera_model_ack.
+  std::function<bool(const std::string & model, const std::string & indicator,
+    std::string & why)> set_camera_model;
   int camera_model_ack = 0;                   ///< the last ask: 0 waiting, 1 applied, -1 refused
   std::string camera_model_why;               ///< camera_node's refusal, then the leaf's FAILURE
 };
@@ -795,6 +802,7 @@ inline void resetTask3(Context & c)
   c.task3_phase.clear();
   c.survey_attempt = 0;
   c.survey_looks = 0;
+  c.search_dir = 0;
   c.chosen_track = -1;
   c.chosen_bay = 0;
   c.berth = dock::Berth{};

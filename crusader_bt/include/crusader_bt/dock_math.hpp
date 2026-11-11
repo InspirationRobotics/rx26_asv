@@ -735,6 +735,23 @@ inline DockLayout layout(
   return L;
 }
 
+/// A bay's number (1-based, left to right facing the bays) before layout() knows them all,
+/// from the confirmed bays seen LEFT and RIGHT of it and which way the search slides
+/// (`slide` < 0 or 0: left, > 0: right). The bays a search has slid past are the ones it
+/// has seen. Sliding left - the default, a run started at the dock's RIGHT end - every bay
+/// right of ours has been seen and those left of it maybe not: ours is `bays` less those on
+/// its right. Sliding right, 1 plus those on its left. Seen either side adding up to all
+/// the bays, the left count is exact whichever way. Clamped to 1..bays.
+///
+/// RoboCommand lights a window in the bay the DockingReport names (rx_reports.proto), so a
+/// wrong number means no fire in ours. Counting from the left alone, a run started at the
+/// right end reported its first bay, bay 3, as bay 1.
+inline int guessBayNumber(int n_left, int n_right, int slide, int bays = 3)
+{
+  const int n = (n_left + n_right + 1 >= bays || slide > 0) ? 1 + n_left : bays - n_right;
+  return std::max(1, std::min(bays, n));
+}
+
 // --------------------------------------------------------------- choice
 
 struct VoteParams
@@ -1124,7 +1141,8 @@ struct RequestHold
 /// "Did the fire go out?", independent of the timing layer's one-frame "hit"
 /// (DockObservation.last_event is set on ONE frame; a dropped message loses it):
 /// armed by RED, a hit once the target window has held GREEN `min_green_s`. Either
-/// source ends the spraying.
+/// source ends the spraying. need_red = false (a window sprayed although it never read
+/// RED): GREEN held min_green_s is the hit unarmed too, and `armed` still means "read RED".
 struct HitWatch
 {
   bool armed = false;
@@ -1133,12 +1151,12 @@ struct HitWatch
 
   void reset() {*this = HitWatch{};}
 
-  void update(Colour target_state, double t, double min_green_s)
+  void update(Colour target_state, double t, double min_green_s, bool need_red = true)
   {
     if (target_state == Colour::Red) {
       armed = true;
       green_since = kNaN;
-    } else if (target_state == Colour::Green && armed) {
+    } else if (target_state == Colour::Green && (armed || !need_red)) {
       if (!std::isfinite(green_since)) {green_since = t;}
       if (t - green_since >= min_green_s) {hit = true;}
     } else if (target_state == Colour::Off) {
@@ -1201,6 +1219,27 @@ struct RedWatch
     return kNaN;
   }
 };
+
+/// The window to spray when none of our bay's has read RED: of the windows with an aim
+/// point, the one picked fewest times before (`picked`, every earlier pick), so successive
+/// tries alternate between the two; on a tie the one nearest the camera's axis. -1: none.
+inline int pickAnyWindow(const std::vector<WindowSighting> & ws, const std::vector<int> & picked)
+{
+  int best = -1;
+  long best_n = 0;
+  double best_off = 0.0;
+  for (const auto & w : ws) {
+    if (w.index < 0 || !w.has_position) {continue;}
+    const long n = static_cast<long>(std::count(picked.begin(), picked.end(), w.index));
+    const double off = std::fabs(w.y);
+    if (best < 0 || n < best_n || (n == best_n && off < best_off)) {
+      best = w.index;
+      best_n = n;
+      best_off = off;
+    }
+  }
+  return best;
+}
 
 // --------------------------------------------------------------- reports
 //

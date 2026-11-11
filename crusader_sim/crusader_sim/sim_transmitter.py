@@ -24,7 +24,7 @@ Channel roles (crusader_params.yaml + working_crusader.params):
     1 steer   3 throttle   4 lateral        (override_channels [1, 3, 4])
     7 SB e-stop, RC7_OPTION=165: <1200 e-stop (bridge estop_threshold), mid run
     8 SC mode switch, MODE_CH=8: MODE1 MANUAL, MODE4 HOLD, MODE6 AUTO
-    8 is also the autonomy drop (telemetry_bridge drop_channel=8): <=1230 (MANUAL) trips it
+    no autonomy-drop latch (telemetry_bridge drop_channel 0); with drop_channel 8, <=1230 trips it
 """
 import argparse
 import json

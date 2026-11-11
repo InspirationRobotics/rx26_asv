@@ -204,6 +204,9 @@ class TelemetryBridge(Node):
         self._rx_thread.start()
         self.create_timer(1.0 / PUB_RATE_HZ, self._publish_tick)
         self._publish_drop_state()
+        if self.latch.off:
+            self.get_logger().info("autonomy-drop latch OFF (drop_channel 0): the mode switch "
+                                   "and the RC e-stop take the boat back")
         self.get_logger().info(
             f"autopilot sysid {self.fcu_sysid} on {endpoint}; autonomous modes "
             f"{sorted(self.autonomous_modes)}; pump "
