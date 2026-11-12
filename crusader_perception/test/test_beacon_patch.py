@@ -102,9 +102,54 @@ class Patch(unittest.TestCase):
         self.assertEqual(patch.shape, (64, 64, 3))
         self.assertGreater(patch[0].min(), 0)     # no black bar for "off" to read
 
+    def test_min_beacon_px_gate(self):
+        img = np.zeros((300, 300, 3), np.uint8)
+        # beacon height = 0.32 x body height: 24 px body -> 7.68 px, 25 px -> 8.0 px
+        self.assertIsNone(core.beacon_patch(img, (100, 100, 140, 124), min_beacon_px=8.0))
+        self.assertIsNotNone(core.beacon_patch(img, (100, 100, 140, 125), min_beacon_px=8.0))
+        self.assertEqual(core.beacon_patch(img, (100, 100, 140, 124), min_beacon_px=8.0,
+                                           return_box=True), (None, None))
+        # the default is the training contract: no size gate beyond the 8 px crop floor
+        self.assertIsNotNone(core.beacon_patch(img, (100, 100, 140, 124)))
+        self.assertAlmostEqual(core.beacon_height((0, 10, 5, 35)), 8.0)
+
     def test_no_crop_top_frac_left_behind(self):
         self.assertNotIn("crop_top_frac", core.PARAMS)
         self.assertFalse(hasattr(core, "led_patch"))
+
+
+def state(word, colour):
+    return core.FlashState(word, 0.5, 0.9, 30, 6.0, colour, 1.0)
+
+
+class MustFlash(unittest.TestCase):
+    """rg_must_flash: Task 1 shows red and green only flashing, so a red or green light that
+    is solid, or not yet decided, publishes with no colour."""
+    MF = core.MUST_FLASH
+
+    def test_the_defaults(self):
+        self.assertEqual(self.MF, ("red", "green"))
+        self.assertTrue(core.PARAMS["rg_must_flash"])
+        self.assertEqual(core.PARAMS["cls_min_beacon_px"], 8.0)
+
+    def test_red_and_green_need_a_flash(self):
+        for c in ("red", "green"):
+            self.assertEqual(state("flashing", c).label("diamond", self.MF), f"flash_{c}_diamond")
+            self.assertEqual(state("solid", c).label("diamond", self.MF), "diamond")
+            self.assertEqual(state("unknown", c).label("diamond", self.MF), "diamond")
+            self.assertTrue(state("solid", c).withheld(self.MF))
+            self.assertFalse(state("flashing", c).withheld(self.MF))
+
+    def test_blue_and_off_are_untouched(self):
+        self.assertEqual(state("solid", "blue").label("diamond", self.MF), "blue_diamond")
+        self.assertEqual(state("flashing", "blue").label("diamond", self.MF),
+                         "flash_blue_diamond")
+        self.assertEqual(state("off", "red").label("diamond", self.MF), "off_diamond")
+        self.assertFalse(state("off", "red").withheld(self.MF))
+
+    def test_guard_off_is_the_old_label(self):
+        self.assertEqual(state("solid", "red").label("diamond"), "red_diamond")
+        self.assertEqual(state("unknown", "green").label("diamond", ()), "green_diamond")
 
 
 @unittest.skipUnless(HAVE_CV2 and os.path.exists(BEACON_CROP),

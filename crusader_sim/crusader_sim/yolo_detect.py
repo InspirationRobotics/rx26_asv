@@ -116,6 +116,8 @@ class YoloPipeline:
         self.conf_min = float(conf_min) if conf_min > 0 else float(od["det_conf_min"])
         self.off_index = self.colours.index(OFF_CLASS) if OFF_CLASS in self.colours else None
         self.flash_enable = bool(od["flash_enable"]) and self.off_index is not None
+        self.must_flash = self.core.MUST_FLASH if od["rg_must_flash"] else ()
+        self.min_beacon_px = float(od["cls_min_beacon_px"])
         self.od = od
         self.reset()
         # first predict() pays model fusion and allocator warm-up (seconds): pay it here
@@ -149,7 +151,8 @@ class YoloPipeline:
         """{box index: probability vector}; a box too small to crop has no entry."""
         crops, index = [], []
         for i, box in enumerate(boxes):
-            patch = self.core.beacon_patch(bgr, box, size=self.cls_imgsz)
+            patch = self.core.beacon_patch(bgr, box, size=self.cls_imgsz,
+                                           min_beacon_px=self.min_beacon_px)
             if patch is not None:
                 crops.append(patch)
                 index.append(i)
@@ -171,7 +174,7 @@ class YoloPipeline:
             # the soft lit score, as on the boat (argmax would turn a shrug into a vote)
             state = self.flash.update(track, now, 1.0 - float(probs[self.off_index]),
                                       frame_colour)
-            return state.label(shape), state.colour, state.state
+            return state.label(shape, self.must_flash), state.colour, state.state
         colour, _ = self.voter.update(track, probs)
         return (f"{colour}_{shape}" if colour else shape), colour, None
 

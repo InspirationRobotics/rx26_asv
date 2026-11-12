@@ -33,6 +33,11 @@ PARAMS = {
     "cls_labels": ["blue", "green", "off", "red"],   # IN ENGINE ORDER (training folders)
     "cls_imgsz": 64,                        # MUST match the training notebook's CLS_IMGSZ
     "crop_pad": 0.1,                        # the shape stage's crop (buoy_patch) only
+    "cls_min_beacon_px": 8.0,               # beacon height (BEACON_H_FRAC x body box) below
+                                            # which no colour is called: ~18 m. Thursday
+                                            # 2026-11-12: under 8 px ~9/10 calls were noise
+    "rg_must_flash": True,                  # Task 1 has no solid red or green: until a red or
+                                            # green light is SEEN flashing it has no colour
     "iou_match": 0.25,
     "max_missed": 10,
     "vote_decay": 0.85,
@@ -51,6 +56,11 @@ PARAMS = {
     "range_max_m": 25.0,
     "min_depth_samples": 5,
 }
+
+
+# The colours rg_must_flash holds back until seen flashing (handbook Task 1: flashing RED and
+# GREEN; BLUE flashing at the ENTRY, SOLID at the EXIT).
+MUST_FLASH = ("red", "green")
 
 
 def camera_params(doc):
@@ -124,12 +134,20 @@ def beacon_geom(box, above=BEACON_MARGIN_ABOVE, below=BEACON_MARGIN_BELOW,
     return 0.5 * (x1 + x2), 0.5 * (top + bot), w, bot - top
 
 
-def beacon_patch(image, box, size=64, min_px=BEACON_MIN_PX, return_box=False):
-    """The classifier's input for one BODY box, or None if the crop would be under `min_px`.
+def beacon_height(box):
+    """The beacon's expected height in pixels, from its BODY box."""
+    return BEACON_H_FRAC * (float(box[3]) - float(box[1]))
+
+
+def beacon_patch(image, box, size=64, min_px=BEACON_MIN_PX, min_beacon_px=0.0,
+                 return_box=False):
+    """The classifier's input for one BODY box, or None if the crop would be under `min_px`
+    or the beacon under `min_beacon_px` tall (too far away to have a colour worth calling).
 
     beacon_crop.classifier_patch, the function every training crop was cut with; keep the two
-    identical. return_box=True gives (patch, (x0, y0, x1, y1)) with the crop in FRAME pixels,
-    what the annotated stream draws, so the overlay and the engine's picture come from one line.
+    identical (min_beacon_px=0 is exactly it). return_box=True gives (patch, (x0, y0, x1, y1))
+    with the crop in FRAME pixels, what the annotated stream draws, so the overlay and the
+    engine's picture come from one line.
 
     Out-of-frame pixels REPLICATE THE EDGE (cv2.getRectSubPix) rather than going black: a buoy
     near the top of the frame keeps its geometry, and a black bar would read as "off".
@@ -137,7 +155,7 @@ def beacon_patch(image, box, size=64, min_px=BEACON_MIN_PX, return_box=False):
     import cv2                                   # not needed to import this file
 
     g = beacon_geom(box)
-    if g is None:
+    if g is None or beacon_height(box) < min_beacon_px:
         return (None, None) if return_box else None
     cx, cy, w, h = g
     if w < min_px or h < min_px:
@@ -514,7 +532,12 @@ class FlashState:
         self.colour = colour            # dominant colour of the LIT frames
         self.colour_share = colour_share
 
-    def label(self, shape=None):
+    def withheld(self, must_flash=()):
+        """True when the colour is one that only ever flashes (`must_flash`) and this light has
+        not been seen flashing: a lit colour that is not, or not yet, a flash."""
+        return self.colour in must_flash and self.state not in ("flashing", "off")
+
+    def label(self, shape=None, must_flash=()):
         """The published name. Mission logic branches on these words.
 
             flashing   flash_red_diamond
@@ -530,13 +553,18 @@ class FlashState:
         that time. Downstream that washes out: target_tracker labels by MAJORITY VOTE over every
         sighting, and four seconds of wrong loses against minutes of right.
 
+        EXCEPT A COLOUR IN `must_flash` (rg_must_flash: Task 1's red and green, which the
+        handbook only ever flashes): solid or undecided, it publishes with NO colour. A steady
+        "red" or "green" is a classifier reading something that is not a beacon (a dark crop,
+        a painted drum), so the colour waits for the flash to be seen.
+
         So do not branch on a track younger than flash_min_span_s. For certainty now,
         crsd/oak_detector_health carries the state, basis and sample count per track, where
         `unknown` is unambiguous.
         """
         if self.state == "off":
             parts = ["off"]
-        elif not self.colour:
+        elif not self.colour or self.withheld(must_flash):
             parts = []                      # nothing to say but the shape
         elif self.state == "flashing":
             parts = ["flash", self.colour]
