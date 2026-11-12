@@ -161,9 +161,10 @@ rc_watchdog:
 # oak_controls for camera_node); this lists what is set for this boat. [DYN] = live.
 #
 # camera_node is NOT in core.launch.py: start it from the Nodes tab.
-# THE CROP PARAMS ARE A CONTRACT WITH THE TRAINING EXPORTER: cls_imgsz, crop_pad,
-# crop_top_frac (and ae_compensation, the colour the LED records as) must match what
-# cut the training crops, or the classifier is silently worse everywhere.
+# THE CLASSIFIER'S CROP IS A CONTRACT WITH THE TRAINING NOTEBOOK: cls_imgsz, the beacon crop
+# geometry (oak_detector_core.beacon_patch = vision/tools/beacon_crop.py) and ae_compensation
+# (the colour the LED records as) must match what cut the training crops, or the classifier is
+# silently worse everywhere. crop_pad is only the shape stage's padding.
 camera_node:
   ros__parameters:
     model: "buoy"                          # [DYN] none | buoy | dock
@@ -176,7 +177,6 @@ camera_node:
     cls_labels: ["blue", "green", "off", "red"]   # IN ENGINE ORDER (training folder order)
     cls_imgsz: 64
     crop_pad: 0.1
-    crop_top_frac: 0.25
     dock_ffcv_dir: "/root/robotx_ws/models/ffcv"
     # the camera profile the boat starts on; camera_profiles.yaml holds the others
     ae_compensation: -3                    # [DYN] also a training contract, see above

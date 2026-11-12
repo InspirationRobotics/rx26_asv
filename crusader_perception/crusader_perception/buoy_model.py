@@ -32,15 +32,12 @@ import numpy as np
 
 from crusader_msgs.msg import Detection3D, Detection3DArray
 from crusader_perception.oak_detector_core import (FlashTracker, LabelVoter, ShapeVoter,
-                                                   TrackTable, buoy_patch, led_patch,
+                                                   TrackTable, beacon_patch, buoy_patch,
                                                    marking_shape)
 # The cls_labels entry that means "unlit". Fixed by the dataset's folder names, not chosen
 # at run time.
 OFF_CLASS = "off"
 SHAPE_NAMES = ("circle", "diamond")
-# Padded-crop height below which the LED region is a couple of rows and its colour is
-# whatever the resize invented.
-MIN_CROP_PX = 10
 # Where in the box to sample depth: centred, slightly below the middle, because a buoy's
 # upper half is often against sky where stereo has nothing to match.
 SAMPLE_V_RATIO = 0.55
@@ -177,12 +174,10 @@ class BuoyModel:
                     self.counts["no_shape"] += 1
         self.states = {k: v for k, v in self.states.items() if k in live}
 
-        # stage 4: the LED crop and its colour
+        # stage 4: the beacon crop (above the body box) and its colour
         crops, cropped_index, led_boxes = [], [], {}
         for i, box in enumerate(boxes):
-            patch, cut = led_patch(rgb, box, pad=self.p["crop_pad"],
-                                   top_frac=self.p["crop_top_frac"], size=self.cls_imgsz,
-                                   min_height_px=MIN_CROP_PX, return_box=True)
+            patch, cut = beacon_patch(rgb, box, size=self.cls_imgsz, return_box=True)
             if patch is None:
                 self.counts["no_crop"] += 1
                 continue

@@ -31,9 +31,8 @@ PARAMS = {
     "shape_min_share": 0.6,
     "cls_engine": "/root/robotx_ws/models/led_classifier.engine",
     "cls_labels": ["blue", "green", "off", "red"],   # IN ENGINE ORDER (training folders)
-    "cls_imgsz": 64,                        # these three MUST match the training exporter
-    "crop_pad": 0.1,
-    "crop_top_frac": 0.25,
+    "cls_imgsz": 64,                        # MUST match the training notebook's CLS_IMGSZ
+    "crop_pad": 0.1,                        # the shape stage's crop (buoy_patch) only
     "iou_match": 0.25,
     "max_missed": 10,
     "vote_decay": 0.85,
@@ -58,12 +57,17 @@ def camera_params(doc):
     """The buoy parameters camera_node runs with, from a parsed crusader_params.yaml."""
     return dict(PARAMS, **doc.get("camera_node", {}).get("ros__parameters", {}))
 
-# LED box geometry. MUST match buoylib's LED_APEX / LED_WIDTH, which is what
-# tools/buoy_color/4_export.py cut the training crops with.
-LED_APEX = 0.15     # columns are taken from the top 15% of the buoy only
-LED_WIDTH = 0.62    # ...then narrowed to this centred fraction of that width.
-                    # MUST EQUAL buoylib.LED_WIDTH, i.e. whatever 4_export.py
-                    # cut the training crops with. Change both or neither.
+# Beacon crop geometry: a COPY of Boat/vision/tools/beacon_crop.py, which cut every training
+# crop (crusader_train.ipynb embeds the same code). Change all three together or none:
+# test_beacon_patch.py checks this copy against beacon_crop.py wherever both are present.
+# Fractions of the BODY box height, measured from hand-corrected labels (2026-09-26):
+BEACON_H_FRAC = 0.32
+BEACON_W_FRAC = 0.31
+# Crop margins, as multiples of the estimated beacon size:
+BEACON_MARGIN_ABOVE = 0.30   # the sun hat, plus slack for body-top error
+BEACON_MARGIN_BELOW = 0.15   # a little of the body top, to anchor the beacon
+BEACON_MARGIN_SIDE = 0.40
+BEACON_MIN_PX = 8            # a crop narrower or shorter than this is not classified
 
 # Flash-tracker shaping. NOT parameters: neither decides anything, they only
 # shape a confidence number and pick which word explains an abstention. Every
@@ -78,12 +82,15 @@ MOD_STEADY_MAX = 0.20       # p90-p10 swing below which an abstention is
 
 # ---------------------------------------------------------------- what each stage may look at
 # Two crops, two jobs, NOT interchangeable:
-#   led_patch   the colour classifier's input: a tight box on the LED, resized to the engine's
-#               input size. Must match the training exporter exactly: a full-width top band
-#               once drifted from 4_export.py's led_box, and a classifier measuring 98.6% on
-#               held-out crops silently underperformed on the boat.
-#   buoy_patch  the shape stage's input: the whole buoy at native resolution, because a
-#               resize destroys the outline it measures.
+#   beacon_patch  the colour classifier's input: the band ABOVE the body box, where the beacon
+#                 sits, resized to the engine's input size. Must match the training crop
+#                 exactly. Twice it has not: a full-width top band once drifted from the
+#                 exporter's, and until 2026-11-12 the boat cut led_patch (a bright-pixel hunt
+#                 INSIDE the box) while the detector had been trained since 2026-09-27 to box
+#                 the body alone, so on the Marina Bay course the classifier was shown the
+#                 buoy's white apex and number and never the beacon.
+#   buoy_patch    the shape stage's input: the whole buoy at native resolution, because a
+#                 resize destroys the outline it measures.
 
 
 def iou(a, b):
@@ -98,97 +105,55 @@ def iou(a, b):
     return inter / max(union, 1e-6)
 
 
-def led_patch(image, box, pad=0.10, top_frac=0.25, size=64, min_height_px=10,
-              return_box=False):
-    """The classifier's input for one detection, or None if the box is too small.
+def beacon_geom(box, above=BEACON_MARGIN_ABOVE, below=BEACON_MARGIN_BELOW,
+                side=BEACON_MARGIN_SIDE):
+    """BODY box (x1, y1, x2, y2) -> the beacon crop (cx, cy, w, h), unclipped, or None.
 
-    return_box=True gives (patch, (x0, y0, x1, y1)) with the box in FRAME pixels, what the
-    annotated stream should draw, so the overlay and the engine's picture come from one line.
+    beacon_crop._beacon_geom. The beacon sits ON the body, so the box's top edge is its base;
+    both sizes scale off the body HEIGHT, which a square pyramid keeps whatever its yaw (its
+    width grows to sqrt(2) times seen corner-on).
+    """
+    x1, y1, x2, y2 = (float(v) for v in box)
+    bw, bh = x2 - x1, y2 - y1
+    if bw <= 0 or bh <= 0:
+        return None
+    beacon_h, beacon_w = BEACON_H_FRAC * bh, BEACON_W_FRAC * bh
+    top = y1 - beacon_h * (1.0 + above)
+    bot = y1 + beacon_h * below
+    w = beacon_w * (1.0 + 2.0 * side)
+    return 0.5 * (x1 + x2), 0.5 * (top + bot), w, bot - top
 
-    THIS MUST CUT THE SAME PICTURE THE TRAINING EXPORTER CUT (buoylib.led_box); this reproduces
-    it from a detector box, with no polygon available. A buoy is a truncated pyramid (wide base,
-    narrow flat top, LED on the top face), so a full-width band frames mostly sky and deck (27%
-    buoy vs 69% for the box below, measured on 29 real instances).
 
-    Steps:
-      1. pad the box by `pad` of its size on each side.
-      2. ROWS START AT THE TOP OF THE BRIGHT REGION, not row 0: the pad puts ~10% background
-         above the buoy, which would pull sky into the LED band.
-      3. COLUMNS COME FROM THE APEX ONLY (top 15% of the buoy), then narrow to the centred
-         62%; the widest row would otherwise set the width, and on a trapezoid that is the
-         bottom.
-      4. resize to `size` x `size`.
+def beacon_patch(image, box, size=64, min_px=BEACON_MIN_PX, return_box=False):
+    """The classifier's input for one BODY box, or None if the crop would be under `min_px`.
 
-    `top_frac` means what the exporter's --crop-frac means: fraction of the BUOY kept below the
-    LED (0.25), not of the crop taken off the top. Change the param with the code. The exporter
-    takes rows/columns from a polygon mask and a detector box gives only pixels, so brightness
-    stands in for the outline, leaving a residual gap; closing it needs a maskless mode in
-    4_export.py and a retrain on the boat's own crop.
+    beacon_crop.classifier_patch, the function every training crop was cut with; keep the two
+    identical. return_box=True gives (patch, (x0, y0, x1, y1)) with the crop in FRAME pixels,
+    what the annotated stream draws, so the overlay and the engine's picture come from one line.
 
-    Sampling is bilinear and OUT-OF-IMAGE PIXELS REPLICATE THE EDGE rather than going black: a
-    black bar in the LED rows reads as "off".
+    Out-of-frame pixels REPLICATE THE EDGE (cv2.getRectSubPix) rather than going black: a buoy
+    near the top of the frame keeps its geometry, and a black bar would read as "off".
     """
     import cv2                                   # not needed to import this file
 
-    x1, y1, x2, y2 = (float(v) for v in box)
-    w, h = x2 - x1, y2 - y1
-    if w <= 0.0 or h <= 0.0:
+    g = beacon_geom(box)
+    if g is None:
         return (None, None) if return_box else None
-
-    scale = 1.0 + 2.0 * pad
-    crop_w = max(8, int(round(w * scale)))
-    crop_h = max(8, int(round(h * scale)))
-    if crop_h < min_height_px:
+    cx, cy, w, h = g
+    if w < min_px or h < min_px:
         return (None, None) if return_box else None
-
-    centre = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
-    crop = cv2.getRectSubPix(image, (crop_w, crop_h), centre)
-
-    H, W = crop.shape[:2]
-
-    # -- rows: first row that actually contains buoy --
-    look = crop[:max(8, int(round(H * 0.5)))]
-    grey = cv2.cvtColor(look, cv2.COLOR_BGR2GRAY)
-    bright = grey > np.percentile(grey, 65)
-    rows = np.flatnonzero(bright.sum(1) > 0.15 * W)
-    r0 = int(rows[0]) if rows.size else 0
-
-    # -- columns: from the APEX only, then narrowed to the LED's own width --
-    apex_h = max(6, int(round(H * LED_APEX)))
-    apex = cv2.cvtColor(crop[r0:min(H, r0 + apex_h)], cv2.COLOR_BGR2GRAY)
-    seen = max(apex.shape[0], 1)
-    cols = np.flatnonzero((apex > np.percentile(apex, 65)).sum(0) > 0.35 * seen)
-    cx0, cx1 = (int(cols[0]), int(cols[-1])) if cols.size >= 4 else (0, W - 1)
-
-    mid = (cx0 + cx1) / 2.0
-    half = (cx1 - cx0) * LED_WIDTH / 2.0
-    bx0, bx1 = int(round(mid - half)), int(round(mid + half))
-    by0, by1 = r0, min(H, r0 + max(8, int(round(H * top_frac))))
-
-    # 10% margin, matching the exporter's led_box(pad=0.10)
-    mh = int((bx1 - bx0) * 0.10)
-    mv = int((by1 - by0) * 0.10)
-    bx0, by0 = max(0, bx0 - mh), max(0, by0 - mv)
-    bx1, by1 = min(W, bx1 + mh + 1), min(H, by1 + mv)
-
-    band = crop[by0:by1, bx0:bx1]
-    if band.size == 0:
-        return (None, None) if return_box else None
-    patch = cv2.resize(band, (size, size), interpolation=cv2.INTER_LINEAR)
+    patch = cv2.getRectSubPix(image, (int(round(w)), int(round(h))), (cx, cy))
+    patch = cv2.resize(patch, (size, size), interpolation=cv2.INTER_LINEAR)
     if not return_box:
         return patch
-    # Crop coords -> frame coords. getRectSubPix centres the crop on the box,
-    # so the crop's origin is the box centre minus half the crop.
-    ox = (x1 + x2) / 2.0 - crop_w / 2.0
-    oy = (y1 + y2) / 2.0 - crop_h / 2.0
-    return patch, (int(round(ox + bx0)), int(round(oy + by0)),
-                   int(round(ox + bx1)), int(round(oy + by1)))
+    return patch, (int(round(cx - w / 2.0)), int(round(cy - h / 2.0)),
+                   int(round(cx + w / 2.0)), int(round(cy + h / 2.0)))
 
 
 def buoy_patch(image, box, pad=0.10, min_height_px=24):
     """The WHOLE padded box at native resolution — what the shape stage needs.
 
-    Deliberately not led_patch: the shape stage measures the outline of a marking a few dozen
+    Deliberately not beacon_patch: the shape stage measures the outline of a marking a few dozen
     pixels across, and a resize is what destroys it.
     """
     import cv2                                   # not needed to import this file
