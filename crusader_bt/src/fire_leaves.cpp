@@ -781,7 +781,19 @@ public:
       } else {
         d = nav::dot(ctx_->boat - p0_, right_);           // how far right of the start (+)
         const bool forever = getInput<bool>("forever").value_or(false);
-        if (dir_ * d >= leg_m) {
+        // a bay CommitFirstGreen worked out is ours but cannot see: slide toward it, no leg
+        // limit (search_dir keeps the first way: it numbers a bay committed early)
+        const dock::BayTrack * goal = ctx_->search_target_track >= 0 ?
+          ctx_->dock.find(ctx_->search_target_track) : nullptr;
+        const double goal_d = goal ? nav::dot(goal->p - ctx_->boat, right_) : 0.0;
+        if (goal != nullptr) {
+          if (std::fabs(goal_d) > 0.5 && (goal_d > 0.0 ? 1.0 : -1.0) != dir_) {
+            dir_ = -dir_;
+            RCLCPP_INFO(log(), "StrafeSearch: sliding %s, back toward bay track %d",
+              dir_ > 0.0 ? "right" : "left", goal->id);
+          }
+        } else if (dir_ * d >= leg_m) {
+          ++ctx_->search_leg_ends;
           if (leg_ == 0 || forever) {
             dir_ = -dir_;
             leg_ = 1;

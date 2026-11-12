@@ -46,6 +46,7 @@ const CrsdMap = (() => {
   const S = {
     origin: null, boat: null, trail: [], targets: [], plan: null, path: null, hazards: [],
     obstacles: [], manual: [], draft: [], draftSel: -1, beacon: 2, task1: null,
+    approach: null,                               // the Run panel's approach point, [lat, lon]
   };
   const views = [], listeners = [], modeListeners = [], draftListeners = [], pointListeners = [];
   let T = null;                                   // the colours of the draw in progress
@@ -235,6 +236,7 @@ const CrsdMap = (() => {
     // the field being edited, each buoy numbered by its list index
     S.manual.forEach((b, i) => buoy(v, b, 1.0, i));
     drawDraft(v);
+    drawApproach(v);
     // tracked targets
     for (const t of S.targets) {
       const p = at(v, t.lat, t.lon), col = labelColour(t.label);
@@ -438,6 +440,12 @@ const CrsdMap = (() => {
     });
     c.font = FONT;
   }
+  function drawApproach(v) {                      // the Run panel's approach point (Task 3)
+    if (!S.approach) return;
+    const c = v.ctx, p = at(v, S.approach[0], S.approach[1]);
+    disc(c, p[0], p[1], 7, T.draft, T.text, 2);
+    c.font = FONT_BOLD; label(c, "approach", p[0] + 11, p[1] - 8); c.font = FONT;
+  }
   function headingArrow(c, p, deg) {              // from p toward deg (true, 0 = north, clockwise)
     const a = deg * Math.PI / 180, dx = Math.sin(a), dy = -Math.cos(a), len = 28, head = 7;
     const tip = [p[0] + dx * len, p[1] + dy * len];
@@ -617,6 +625,11 @@ const CrsdMap = (() => {
     setClickMode, clickMode: () => mode, beginPick, hasOrigin: () => !!S.origin,
     onModeChange: listen(modeListeners), onWaypoint: listen(pointListeners),
     onDraftPick: listen(draftListeners), setDraft,
+    setApproach(p) {                              // [lat, lon], or null to clear
+      S.approach = Array.isArray(p) && validPos(+p[0], +p[1]) ? [+p[0], +p[1]] : null;
+      if (!S.origin && S.approach) S.origin = S.approach.slice();
+      redraw();
+    },
     manual, addManual, removeManual, setManual, onManualChange, onEdit: onManualChange,
     manualPlan, loadPlan,
     clearManual() { setManual([]); },

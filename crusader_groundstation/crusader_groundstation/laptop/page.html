@@ -301,7 +301,8 @@ body.ed-dragging { cursor: grabbing; user-select: none; }
         <div style="margin-top: 6px" title="Task 3: where to look for the dock when no bay has been seen yet; empty = none">
           approach <input id="m-alat" class="ll" placeholder="lat" aria-label="approach latitude" inputmode="decimal">
           <input id="m-alon" class="ll" placeholder="lon" aria-label="approach longitude" inputmode="decimal">
-          <button id="m-here">Boat here</button></div>
+          <button id="m-here">Boat here</button>
+          <button id="m-apick" title="the next click on the map below sets the approach point (Esc: cancel)">Pick on map</button></div>
         <div id="m-dockh" style="margin-top: 6px; display: none" title="Task 3: the bow's heading facing the dock, deg true (bt_runner_node dock_heading_deg, read at Start)">
           dock heading <input id="m-dockh-v" class="num" type="number" min="0" max="359.9" step="1"> deg
           <button id="m-dockh-set">Set</button> <span id="m-dockh-now" class="muted"></span>
@@ -392,7 +393,8 @@ body.ed-dragging { cursor: grabbing; user-select: none; }
 <section id="t-params">
   <div class="box">node <select id="p-node"></select> <button id="p-load">Load</button>
     <button class="primary" id="p-set">Set changed</button>
-    <span class="muted">Live only: crusader_params.yaml stays the source of truth.</span></div>
+    <button id="p-save" title="Set the edited values live, then write them into crusader_params.yaml so the node starts with them. Nothing edited: offers to write the live values that differ from the YAML.">Set + save to YAML</button>
+    <span class="muted">Set changed is live only. Set + save also writes crusader_params.yaml (old copy in ~/robotx_ws/backups/params); a (restart) value applies at the node's next start.</span></div>
   <div class="box"><h3>Planner profiles (bt_runner_node)</h3>
     <select id="pp-name"></select> <button id="pp-apply">Apply</button>
     &nbsp; save the drifted planner values as <input id="pp-new" placeholder="name">
@@ -864,7 +866,7 @@ WARNING: ${diff}` : "")))
 // Task 3: the dock heading, on bt_runner_node (dock_heading_deg; < 0 = not set)
 function btNode() { return ((G.nodes || {}).graph || []).find(n => n.endsWith("/bt_runner_node")); }
 async function loadDockHeading() {
-  const show = /^task3_(scan|cannon)_fire$/.test($("m-name").value);
+  const show = /^task3_(scan_fire|first_dock|cannon_fire)/.test($("m-name").value);   // and copies
   $("m-dockh").style.display = show ? "" : "none";
   const node = btNode();
   if (!show || !node) return;
@@ -891,6 +893,22 @@ $("m-here").onclick = () => {
   const b = (G.state || {}).boat || {};
   if (!num(b.lat) || !num(b.lon)) return toast("no boat position yet", false);
   $("m-alat").value = b.lat.toFixed(7); $("m-alon").value = b.lon.toFixed(7);
+  approachMark();
+};
+// the approach point on the map below while the two boxes hold a valid one
+function approachMark() {
+  const la = $("m-alat").value.trim(), lo = $("m-alon").value.trim();
+  CrsdMap.setApproach(la && lo && !llError(+la, +lo) ? [+la, +lo] : null);
+}
+$("m-alat").addEventListener("input", approachMark);
+$("m-alon").addEventListener("input", approachMark);
+$("m-apick").onclick = () => {                 // as the editor's GPS waypoint: the next map click
+  if (!CrsdMap.hasOrigin()) return toast("the map has no position yet: type the lat/lon instead", false);
+  CrsdMap.beginPick(point => {
+    if (!point) return;
+    $("m-alat").value = point[0].toFixed(7); $("m-alon").value = point[1].toFixed(7);
+    approachMark();
+  });
 };
 $("m-stop").onclick = () => req("cancel_mission");
 function tree() {
@@ -1015,27 +1033,40 @@ $("cp-delete").onclick = async () => confirm(`Delete camera profile ${$("cp-name
 $("cp-save").onclick = async () => { await req("cam_profile_save", {name: $("cp-new").value.trim()}); loadCamera(); };
 
 // ---- parameters (shared by Params and Sensors) --------------------------------
-function paramRow(p, prefix) {
+const SCALAR_TYPES = ["bool", "integer", "double", "string"];
+// saveable (the Params tab): a read-only value gets a control too, which only "Set + save" sends
+function paramRow(p, prefix, saveable = false) {
   const id = `${prefix}-${p.name}`, range = p.lo != null ? `${p.lo} … ${p.hi}` : "";
   const yaml = p.in_yaml ? `<span class="${JSON.stringify(p.default) !== JSON.stringify(p.value) ? "drift" : "muted"}">yaml ${esc(JSON.stringify(p.default))}</span>` : '<span class="muted">not in yaml</span>';
+  const ro = saveable && !p.editable && p.read_only && SCALAR_TYPES.includes(p.type);
+  const attrs = `id="${id}" data-name="${esc(p.name)}" data-type="${p.type}" data-orig="${esc(p.value)}"` +
+                (ro ? ` data-ro="1" title="read-only: Set + save writes it into the YAML for the node's next start"` : "");
   let input;
-  if (!p.editable) input = `<span title="${esc(p.reason)}">${esc(JSON.stringify(p.value))}</span>`;
+  if (!p.editable && !ro) input = `<span title="${esc(p.reason)}">${esc(JSON.stringify(p.value))}</span>`;
   else if (p.choices && p.choices.length)
-    input = `<select id="${id}" data-name="${esc(p.name)}" data-type="${p.type}" data-orig="${esc(p.value)}">` +
-            p.choices.map(c => `<option ${c === p.value ? "selected" : ""}>${esc(c)}</option>`).join("") + "</select>";
+    input = `<select ${attrs}>` + p.choices.map(c => `<option ${c === p.value ? "selected" : ""}>${esc(c)}</option>`).join("") + "</select>";
   else if (p.type === "bool")
-    input = `<input type="checkbox" id="${id}" data-name="${esc(p.name)}" data-type="bool" data-orig="${p.value}" ${p.value ? "checked" : ""}>`;
-  else input = `<input id="${id}" class="num" data-name="${esc(p.name)}" data-type="${p.type}" data-orig="${esc(p.value)}" value="${esc(p.value)}">`;
-  return `<tr><td>${esc(p.name)}</td><td>${input}</td><td>${yaml}</td><td class="muted">${range}</td></tr>`;
+    input = `<input type="checkbox" ${attrs} ${p.value ? "checked" : ""}>`;
+  else input = `<input class="num" ${attrs} value="${esc(p.value)}">`;
+  return `<tr><td>${esc(p.name)}${ro ? ' <span class="muted">(restart)</span>' : ""}</td><td>${input}</td><td>${yaml}</td><td class="muted">${range}</td></tr>`;
 }
-function setChanged(node, prefix) {
-  const values = {};
+// {values: the edited controls' values, skipped: edited read-only names left out}
+function changedValues(prefix, withReadOnly) {
+  const values = {}, skipped = [];
   for (const e of document.querySelectorAll(`[id^="${prefix}-"][data-name]`)) {
     const t = e.dataset.type;
     const v = t === "bool" ? e.checked : t === "integer" ? parseInt(e.value, 10) : t === "double" ? parseFloat(e.value) : e.value;
-    if (String(v) !== e.dataset.orig) values[e.dataset.name] = v;
+    if (String(v) === e.dataset.orig) continue;
+    if (e.dataset.ro && !withReadOnly) skipped.push(e.dataset.name);
+    else values[e.dataset.name] = v;
   }
-  if (!Object.keys(values).length) return toast("nothing changed");
+  return {values, skipped};
+}
+function setChanged(node, prefix) {
+  const {values, skipped} = changedValues(prefix, false);
+  if (skipped.length) toast(`${skipped.join(", ")}: read-only, not set live: Set + save to YAML writes it for the next start`, false);
+  else if (!Object.keys(values).length) toast("nothing changed");
+  if (!Object.keys(values).length) return;
   return req("params_set", {node, values}).then(() => (prefix === "cc" ? loadCamera() : loadParams()));
 }
 function paramNodes() {
@@ -1044,15 +1075,33 @@ function paramNodes() {
   if (graph.includes(cur)) sel.value = cur;
   planners();
 }
+let pLoaded = {node: "", rows: []};      // what the table shows: "Set + save" writes to that node
 async function loadParams() {
   const node = $("p-node").value; if (!node) return;
   const r = await req("params_list", {node}, true);
   if (!r.ok) return;
+  pLoaded = {node, rows: r.data.params};
   $("params").innerHTML = "<tr><th>name</th><th>live</th><th>yaml</th><th>range</th></tr>" +
-    r.data.params.map(p => paramRow(p, "pp")).join("");
+    r.data.params.map(p => paramRow(p, "pp", true)).join("");
+}
+async function saveParams() {
+  const node = pLoaded.node;
+  if (!node) return toast("Load a node first", false);
+  let {values} = changedValues("pp", true);
+  if (!Object.keys(values).length) {        // nothing edited: keep the live values the YAML lacks
+    const drift = pLoaded.rows.filter(p => p.in_yaml && SCALAR_TYPES.includes(p.type) &&
+                                           JSON.stringify(p.default) !== JSON.stringify(p.value));
+    if (!drift.length) return toast(`nothing to save: ${node}'s live values match the YAML`);
+    const list = drift.map(p => `  ${p.name}: ${JSON.stringify(p.default)} -> ${JSON.stringify(p.value)}`).join("\n");
+    if (!confirm(`Nothing edited. Write ${node}'s live values into crusader_params.yaml?\n\n${list}`)) return;
+    values = Object.fromEntries(drift.map(p => [p.name, p.value]));
+  }
+  await req("params_save", {node, values});
+  if ($("p-node").value === node) loadParams();
 }
 $("p-load").onclick = loadParams;
 $("p-set").onclick = () => setChanged($("p-node").value, "pp");
+$("p-save").onclick = saveParams;
 async function planners() {
   const r = await req("planner_profiles_list", {}, true);
   if (!r.ok) return;

@@ -455,6 +455,19 @@ int main()
       t->green_ema *= 0.85;
       chk("one more red: no longer safe", !stillSafe(*t, 0.3));
     }
+    {
+      // the course, 2026-11-12: the lit GREEN indicator read OFF. Nine OFF and one RED is
+      // GREEN with OFF read as GREEN; plain verdict() has one red/green vote, so no call
+      BayTrack t;
+      t.red = 1; t.other = 9; t.off = 9; t.nonred_ema = 0.9;
+      chk("OFF read as GREEN: GREEN", verdictOffIsGreen(t, v) == Verdict::Green);
+      chk("plain verdict: unresolved", verdict(t, v) == Verdict::Unresolved);
+      t.red = 9; t.other = 1; t.off = 1; t.nonred_ema = 0.1;
+      chk("OFF read as GREEN: mostly RED is still RED", verdictOffIsGreen(t, v) == Verdict::Red);
+      t.red = 2; t.other = 2; t.off = 2; t.nonred_ema = 0.5;
+      chk("OFF read as GREEN: too few reads, no call",
+        verdictOffIsGreen(t, v) == Verdict::Unresolved);
+    }
   }
 
   std::printf("where to look from\n");

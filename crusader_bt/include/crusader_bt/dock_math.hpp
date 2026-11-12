@@ -366,9 +366,12 @@ struct BayTrack
   int red = 0;                  ///< indicator frames read RED
   int green = 0;                ///< indicator frames read GREEN
   int other = 0;                ///< present but unknown/off/blue
+  int off = 0;                  ///< of `other`, the frames read OFF (unlit)
   /// Recent-weighted share of GREEN among red/green readings. Close-range
   /// readings arrive last, so an early far misread is overturned here first.
   double green_ema = 0.5;
+  /// The same for not-RED among red/green/off readings: verdictOffIsGreen's.
+  double nonred_ema = 0.5;
   double first_seen = 0.0;
   double last_seen = 0.0;
   std::vector<WindowSighting> windows;   ///< from the latest sighting
@@ -593,6 +596,9 @@ private:
     k.w = w;
     const int vk = k.votes(), vd = d.votes();
     if (vk + vd > 0) {k.green_ema = (k.green_ema * vk + d.green_ema * vd) / (vk + vd);}
+    const int nk = vk + k.off, nd = vd + d.off;
+    if (nk + nd > 0) {k.nonred_ema = (k.nonred_ema * nk + d.nonred_ema * nd) / (nk + nd);}
+    k.off += d.off;
     k.n += d.n;
     k.normal_sum = k.normal_sum + d.normal_sum;
     k.n_normal += d.n_normal;
@@ -645,6 +651,13 @@ private:
         t.green_ema = (1.0 - prm.ema_alpha) * t.green_ema + prm.ema_alpha * (g ? 1.0 : 0.0);
       } else {
         ++t.other;
+        if (s.indicator == Colour::Off) {++t.off;}
+      }
+      if (s.indicator == Colour::Red || s.indicator == Colour::Green ||
+        s.indicator == Colour::Off)
+      {
+        const double nr = s.indicator == Colour::Red ? 0.0 : 1.0;
+        t.nonred_ema = (1.0 - prm.ema_alpha) * t.nonred_ema + prm.ema_alpha * nr;
       }
     }
     if (!s.windows.empty()) {
@@ -763,13 +776,28 @@ struct VoteParams
 
 enum class Verdict {Unresolved, Red, Green};
 
+/// The call verdict() and verdictOffIsGreen() share: `n` votes, `share` of them for GREEN,
+/// `ema` the recent-weighted GREEN share.
+inline Verdict voteVerdict(int n, double share, double ema, const VoteParams & v)
+{
+  if (n < v.min_votes) {return Verdict::Unresolved;}
+  if (share >= v.min_share && ema >= v.min_ema) {return Verdict::Green;}
+  if (1.0 - share >= v.min_share && ema <= 1.0 - v.min_ema) {return Verdict::Red;}
+  return Verdict::Unresolved;
+}
+
 inline Verdict verdict(const BayTrack & t, const VoteParams & v)
 {
-  if (t.votes() < v.min_votes) {return Verdict::Unresolved;}
-  const double g = t.greenShare();
-  if (g >= v.min_share && t.green_ema >= v.min_ema) {return Verdict::Green;}
-  if (1.0 - g >= v.min_share && t.green_ema <= 1.0 - v.min_ema) {return Verdict::Red;}
-  return Verdict::Unresolved;
+  return voteVerdict(t.votes(), t.greenShare(), t.green_ema, v);
+}
+
+/// verdict() with OFF read as GREEN, for a detector that sees the lit GREEN indicator as
+/// unlit (the course, 2026-11-12: RED read well, GREEN read OFF). The votes are
+/// red + green + off.
+inline Verdict verdictOffIsGreen(const BayTrack & t, const VoteParams & v)
+{
+  const int n = t.red + t.green + t.off;
+  return voteVerdict(n, n > 0 ? static_cast<double>(t.green + t.off) / n : 0.0, t.nonred_ema, v);
 }
 
 inline char verdictChar(Verdict v)

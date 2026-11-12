@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -467,6 +468,13 @@ public:
       BT::InputPort<std::string>("colour", "green",
         "green: the first bay read GREEN. any: the first bay seen, whatever its indicator "
         "(nearest the bow's line); the approach and the cannon then follow it"),
+      BT::InputPort<bool>("off_is_green", false,
+        "true: a bay read OFF (unlit) counts as GREEN, for a detector that reads the lit "
+        "GREEN indicator as off; the approach and the cannon then follow the bay itself"),
+      BT::InputPort<int>("bays", 0,
+        "> 0, the dock's bay count: with no bay GREEN, all but one read RED makes the other "
+        "ours (out of view: the search slides back to it), and once the slide has passed "
+        "the dock, the last bay along it not read RED"),
       BT::OutputPort<int>("bay", "the committed bay's number, 1-based left to right")};
   }
 
@@ -474,10 +482,14 @@ public:
   {
     dock::VoteParams v;
     const bool any = getInput<std::string>("colour").value_or("green") == "any";
+    const bool off_green = getInput<bool>("off_is_green").value_or(false);
+    const int n_bays = any ? 0 : getInput<int>("bays").value_or(0);
     const int min_obs = getInput<int>("min_obs").value_or(5);
     const double max_turn = getInput<double>("max_turn_deg").value_or(0.0);
-    int bay = 0, n_left = 0, n_right = 0, slide = 0, red = 0, green = 0, id = -1;
-    bool guess = false;
+    int bay = 0, n_left = 0, n_right = 0, slide = 0, red = 0, green = 0, off = 0, id = -1;
+    bool guess = false, found = false;
+    std::string what = any ? "first bay" : (off_green ? "GREEN/OFF bay" : "GREEN bay");
+    std::string going_back;        // ours worked out but out of view: said once
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       v = ctx_->dock_votes;
@@ -490,71 +502,164 @@ public:
       {
         return BT::NodeStatus::FAILURE;
       }
+      const double square = std::isfinite(dock_h) ? dock_h : ctx_->heading_deg;
+      auto colourOf = [&](const dock::BayTrack & t) {
+          return off_green ? dock::verdictOffIsGreen(t, v) : dock::verdict(t, v);
+        };
       const dock::BayTrack * best = nullptr;
       auto off_bow = [](const dock::BayTrack & t) {
           return std::isfinite(t.live_left_m) ? std::fabs(t.live_left_m) : 1e9;
         };
       for (const auto & t : ctx_->dock.tracks) {
         if (t.n < min_obs || !inView(*ctx_, t) ||
-          (!any && dock::verdict(t, v) != dock::Verdict::Green))
+          (!any && colourOf(t) != dock::Verdict::Green))
         {
           continue;                 // only a (GREEN) bay the camera sees NOW
         }
         if (best == nullptr || (any ? off_bow(t) < off_bow(*best) : t.n > best->n)) {best = &t;}
       }
-      if (best == nullptr) {return BT::NodeStatus::FAILURE;}
-      if (any) {
-        // what the approach and the cannon follow (ctx.green) becomes this bay: this
-        // frame's sighting of it, across the dock heading as pickGreen measures
-        const double square = std::isfinite(dock_h) ? dock_h : ctx_->heading_deg;
-        const dock::FrameBay * fb = nullptr;
-        double fb_m = kSameBayM;
-        for (const auto & b : ctx_->dock.frame_bays) {
-          const double d = std::fabs(fire::toDockFrame(b.p - best->p, square).left);
-          if (d < fb_m) {fb = &b; fb_m = d;}
+      // pickGreen follows a GREEN reading; any other bay of ours is followed as itself
+      bool adopt = any || off_green;
+      if (best == nullptr && n_bays > 0) {
+        std::string why;
+        const dock::BayTrack * ours = deduceBay(*ctx_, colourOf, n_bays, min_obs, v.min_votes,
+          square, why);
+        if (ours != nullptr && !inView(*ctx_, *ours)) {
+          if (ctx_->search_target_track != ours->id) {
+            ctx_->search_target_track = ours->id;
+            going_back = why + ", track " + std::to_string(ours->id);
+          }
+          ours = nullptr;
         }
-        if (fb == nullptr) {return BT::NodeStatus::FAILURE;}   // not in this frame: next tick
-        ctx_->green = Context::GreenBay{};
-        ctx_->centre = fire::CentreTarget{};
-        ctx_->target_any = true;
-        adoptBay(*ctx_, *fb, ctx_->dock_t);
-      }
-      const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs);
-      bay = L.ok ? L.numberOf(best->id) : 0;
-      if (bay <= 0) {             // from the bays seen either side of it
-        guess = true;
-        const nav::Vec2 right = nav::starboardOf(best->outward() * -1.0);
-        std::vector<double> along;   // the other confirmed bays, metres right of ours
-        for (const auto & t : ctx_->dock.tracks) {
-          if (t.n < ctx_->dock_min_obs || t.id == best->id) {continue;}
-          const double d = nav::dot(t.p - best->p, right);
-          bool same = std::fabs(d) < 0.6;
-          for (double o : along) {same = same || std::fabs(o - d) < 0.6;}
-          if (!same) {along.push_back(d);}
+        if (ours != nullptr) {
+          best = ours;
+          adopt = true;
+          what = why;
         }
-        for (double d : along) {(d < 0.0 ? n_left : n_right) += 1;}
-        slide = ctx_->search_dir != 0 ? ctx_->search_dir :
-          (searchFirst(*ctx_, "") == "right" ? 1 : -1);
-        bay = dock::guessBayNumber(n_left, n_right, slide);
       }
-      ctx_->chosen_track = best->id;
-      ctx_->chosen_bay = bay;
-      ctx_->berth = dock::Berth{};
-      ctx_->task3_phase = "DOCKING";
-      id = best->id;
-      red = best->red;
-      green = best->green;
+      if (best != nullptr) {
+        if (adopt) {
+          // what the approach and the cannon follow (ctx.green) becomes this bay: this
+          // frame's sighting of it, across the dock heading as pickGreen measures
+          const dock::FrameBay * fb = nullptr;
+          double fb_m = kSameBayM;
+          for (const auto & b : ctx_->dock.frame_bays) {
+            const double d = std::fabs(fire::toDockFrame(b.p - best->p, square).left);
+            if (d < fb_m) {fb = &b; fb_m = d;}
+          }
+          if (fb == nullptr) {return BT::NodeStatus::FAILURE;}   // not in this frame: next tick
+          ctx_->green = Context::GreenBay{};
+          ctx_->centre = fire::CentreTarget{};
+          ctx_->target_any = true;
+          adoptBay(*ctx_, *fb, ctx_->dock_t);
+        }
+        const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs);
+        bay = L.ok ? L.numberOf(best->id) : 0;
+        if (bay <= 0) {             // from the bays seen either side of it
+          guess = true;
+          const nav::Vec2 right = nav::starboardOf(best->outward() * -1.0);
+          std::vector<double> along;   // the other confirmed bays, metres right of ours
+          for (const auto & t : ctx_->dock.tracks) {
+            if (t.n < ctx_->dock_min_obs || t.id == best->id) {continue;}
+            const double d = nav::dot(t.p - best->p, right);
+            bool same = std::fabs(d) < 0.6;
+            for (double o : along) {same = same || std::fabs(o - d) < 0.6;}
+            if (!same) {along.push_back(d);}
+          }
+          for (double d : along) {(d < 0.0 ? n_left : n_right) += 1;}
+          slide = ctx_->search_dir != 0 ? ctx_->search_dir :
+            (searchFirst(*ctx_, "") == "right" ? 1 : -1);
+          bay = dock::guessBayNumber(n_left, n_right, slide);
+        }
+        ctx_->chosen_track = best->id;
+        ctx_->chosen_bay = bay;
+        ctx_->berth = dock::Berth{};
+        ctx_->task3_phase = "DOCKING";
+        ctx_->search_target_track = -1;
+        id = best->id;
+        red = best->red;
+        green = best->green;
+        off = best->off;
+        found = true;
+      }
     }
+    if (!going_back.empty()) {
+      RCLCPP_INFO(log(), "ours is %s, out of view: sliding back to it", going_back.c_str());
+    }
+    if (!found) {return BT::NodeStatus::FAILURE;}
     setOutput("bay", bay);
-    const char * what = any ? "first bay" : "GREEN bay";
     if (guess) {
-      RCLCPP_INFO(log(), "%s found: track %d (R%d/G%d), bay %d (a guess: %d bay(s) seen left "
-        "of it, %d right, sliding %s)", what, id, red, green, bay, n_left, n_right,
-        slide > 0 ? "right" : "left");
+      RCLCPP_INFO(log(), "%s found: track %d (R%d/G%d/OFF%d), bay %d (a guess: %d bay(s) seen "
+        "left of it, %d right, sliding %s)", what.c_str(), id, red, green, off, bay, n_left,
+        n_right, slide > 0 ? "right" : "left");
     } else {
-      RCLCPP_INFO(log(), "%s found: track %d (R%d/G%d), bay %d", what, id, red, green, bay);
+      RCLCPP_INFO(log(), "%s found: track %d (R%d/G%d/OFF%d), bay %d", what.c_str(), id, red,
+        green, off, bay);
     }
     return BT::NodeStatus::SUCCESS;
+  }
+
+private:
+  /// With no bay read GREEN, the bay the rest of the evidence leaves, else nullptr:
+  ///  - all but one of the dock's `bays` read RED: the other one, in view or not (not seen
+  ///    yet: nullptr, the slide goes on to it);
+  ///  - the slide has passed the dock (all `bays` seen and the end one read min_votes times,
+  ///    or a leg of the slide ran out): the last bay along the slide that has not read RED.
+  /// Bays are one per metre across the dock heading `square` (a bay tracked twice is one
+  /// bay; the pitch is 2 m), the most-seen track standing for each. CALL UNDER ctx.mu.
+  template<class ColourOf>
+  static const dock::BayTrack * deduceBay(const Context & c, ColourOf colourOf, int bays,
+    int min_obs, int min_votes, double square, std::string & why)
+  {
+    struct Seen {const dock::BayTrack * t; double x;};
+    const nav::Vec2 right = nav::starboardOf(nav::headingVec(square));
+    std::vector<Seen> seen;                       // distinct bays, then the slide's far end first
+    for (const auto & t : c.dock.tracks) {
+      if (t.n < min_obs) {continue;}
+      const double x = nav::dot(t.p - c.boat, right);
+      auto same = std::find_if(seen.begin(), seen.end(),
+          [x](const Seen & s) {return std::fabs(s.x - x) < 1.0;});
+      if (same == seen.end()) {
+        seen.push_back({&t, x});
+      } else if (t.n > same->t->n) {
+        *same = {&t, x};
+      }
+    }
+    if (seen.empty()) {return nullptr;}
+    // left to right; a slide to the right ends at the right, so its far end comes first
+    std::sort(seen.begin(), seen.end(), [](const Seen & a, const Seen & b) {return a.x < b.x;});
+    if (searchFirst(c, "") == "right") {std::reverse(seen.begin(), seen.end());}
+    const int n_seen = static_cast<int>(seen.size());
+    int reds = 0;
+    const dock::BayTrack * other = nullptr;       // the most-seen bay not read RED
+    for (const auto & s : seen) {
+      if (colourOf(*s.t) == dock::Verdict::Red) {
+        ++reds;
+      } else if (other == nullptr || s.t->n > other->n) {
+        other = s.t;
+      }
+    }
+    if (reds >= bays - 1 && other != nullptr) {
+      why = "the bay left over (" + std::to_string(reds) + " read RED)";
+      return other;
+    }
+    if (reds >= bays - 1 && n_seen < bays) {
+      return nullptr;                             // ours is further on: keep sliding
+    }
+    const dock::BayTrack * end = seen.front().t;
+    if (!((n_seen >= bays && end->red + end->green + end->off >= min_votes) ||
+      c.search_leg_ends > 0))
+    {
+      return nullptr;
+    }
+    why = "the last bay along the slide not read RED (" + std::to_string(n_seen) +
+      " seen, none GREEN)";
+    const auto ours = std::find_if(seen.begin(), seen.end(),
+        [&](const Seen & s) {return colourOf(*s.t) != dock::Verdict::Red;});
+    if (ours != seen.end()) {return ours->t;}
+    // every bay read RED: with all of them seen, the end one no matter what; with fewer, a
+    // bay not seen yet is ours (the slide turned back at its leg's end, and goes on)
+    return n_seen >= bays ? end : nullptr;
   }
 };
 

@@ -133,6 +133,11 @@ struct Context
   /// this run. The bays it has slid past are the ones it has seen, which is what numbers a
   /// bay committed before all three are known (dock::guessBayNumber).
   int search_dir = 0;
+  /// A bay CommitFirstGreen has worked out is ours (the others RED, or the dock's end) while
+  /// the camera does not see it: StrafeSearch slides toward it. -1 = none.
+  int search_target_track = -1;
+  /// StrafeSearch legs run to their end (it turned back): the slide has passed the dock.
+  int search_leg_ends = 0;
 
   std::string task3_phase;                    ///< for feedback and the viewers
   int survey_attempt = 0;                     ///< PickVantage calls, all of them
@@ -803,6 +808,8 @@ inline void resetTask3(Context & c)
   c.survey_attempt = 0;
   c.survey_looks = 0;
   c.search_dir = 0;
+  c.search_target_track = -1;
+  c.search_leg_ends = 0;
   c.chosen_track = -1;
   c.chosen_bay = 0;
   c.berth = dock::Berth{};

@@ -47,8 +47,8 @@ from crusader_msgs.msg import (Attitude, Cluster3DArray, FcuHealth, FcuStatus, H
 
 from crusader_groundstation import (bag_recorder, camera_profiles, gcs_wire, mission_store,
                                     mission_xml, ocs_link, operator_settings, param_client,
-                                    planner_profiles, power_client, proc_scan, record_settings,
-                                    system_info)
+                                    params_yaml, planner_profiles, power_client, proc_scan,
+                                    record_settings, system_info)
 from crusader_groundstation import node_registry as reg
 from crusader_groundstation.log_buffer import LogBuffer
 from crusader_groundstation.process_manager import ProcessManager
@@ -1220,6 +1220,48 @@ class GcsBridge(Node):
         if not isinstance(values, dict) or not values:
             return False, "no values to set", None
         return self._param_set(req.get("node") or "", values)
+
+    def _op_params_save(self, conn, req):
+        """The Params tab's "Set + save": set the values live, then write the ones the node took
+        into the params YAML, so it starts with them next time. A read-only value cannot be set
+        live: it is checked against its type and range and written for the next start. A value
+        the node refuses is not written."""
+        node, values = req.get("node") or "", req.get("values")
+        if not isinstance(values, dict) or not values:
+            return False, "no values to save", None
+        rows = {r["name"]: r for r in self._param_list(node)}
+        unknown = sorted(set(values) - set(rows))
+        if unknown:
+            return False, f"{node} has no parameter {', '.join(unknown)}: nothing saved", None
+        try:
+            typed = {k: params_yaml.coerce(v, rows[k]["type"]) for k, v in values.items()}
+        except (TypeError, ValueError) as e:
+            return False, f"nothing saved: {e}", None
+        later = {k: v for k, v in typed.items() if rows[k]["read_only"]}
+        out = [f"{k}: {v!r} is outside {rows[k]['lo']} … {rows[k]['hi']}" for k, v in later.items()
+               if rows[k].get("lo") is not None and not rows[k]["lo"] <= v <= rows[k]["hi"]]
+        if out:
+            return False, "nothing saved: " + "; ".join(out), None
+        live = {k: v for k, v in typed.items() if k not in later}
+        ok, msg, data = self._param_set(node, live) if live else (True, "", {"results": []})
+        keep = dict(later, **{r["name"]: live[r["name"]] for r in data["results"] if r["ok"]})
+        if not keep:
+            return False, msg, data
+        try:
+            path, done, backup = params_yaml.save(self.p["params_file"], node, keep,
+                                                  {k: rows[k]["type"] for k in keep})
+        except (OSError, ValueError, yaml.YAMLError) as e:
+            self.get_logger().warn(f"{node} {', '.join(sorted(keep))}: NOT saved to "
+                                   f"{self.p['params_file']}: {e}")
+            return False, "; ".join(filter(None, (msg, f"NOT saved to the YAML: {e}"))), data
+        wrote = ", ".join(f"{n} ({how})" for n, how in done)
+        self.get_logger().info(f"{node}: saved {wrote} to {path}"
+                               + (f"; the old file is {backup}" if backup else ""))
+        tail = f"saved {wrote} to {os.path.basename(path)}"
+        if later:
+            tail += f"; {', '.join(sorted(later))} take effect when {node.lstrip('/')} restarts"
+        return ok, "; ".join(filter(None, (msg, tail))), dict(data, saved=done, path=path,
+                                                              backup=backup)
 
     def _camera_node(self):
         return next((n for n in self._graph_full if n.endswith("/camera_node")), None)
