@@ -102,14 +102,14 @@
                  already and the cannon starts while the boat is still lining up. -->
             <Parallel name="dock_while_firing" success_count="-1" failure_count="1">
               <Sequence name="dock">
-                <ApproachBay fwd_us="60" strafe_us="100" slew_us_s="40" centre_tol_m="0.15"
-                             centred_s="1.0" recentre_m="0.40" kp_lat="100" kd_lat="40"
+                <ApproachBay fwd_us="60" strafe_us="100" slew_us_s="40" centre_tol_m="0.08"
+                             centred_s="1.5" recentre_m="0.25" kp_lat="100" kd_lat="70"
                              handover_m="2.0" use_lidar="{use_lidar}"/>
                 <ReactiveSequence name="docked">
                   <StrafeKeep fire_range_m="{hold_m}" use_lidar="{use_lidar}"
                               deadband_range_m="0.05" deadband_lat_m="0.04" deadband_yaw_deg="3.0"
-                              kp_fwd="90" kd_fwd="60" kp_lat="100" kd_lat="200" kp_yaw="5" kd_yaw="0.5"
-                              ki_fwd="40" ki_lat="10" i_max_us="100"
+                              kp_fwd="90" kd_fwd="60" kp_lat="100" kd_lat="200" kp_yaw="5" kd_yaw="2.0"
+                              ki_fwd="40" ki_lat="20" i_max_us="100"
                               min_us="30" max_us="120" slew_us_s="200"
                               min_range_m="0.6" square_first_deg="10"/>
                   <Sequence name="on_station">
