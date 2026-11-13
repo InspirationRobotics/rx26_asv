@@ -140,6 +140,33 @@ class TrackerParams:
     assoc_min_m: float = 0.9         # the gate never below this
     vote_ambiguity_m: float = 0.0    # 0 = every sighting votes
 
+    # -- MAPPED FIELD PRIOR (stage 2b, between projection and association). OFF
+    # until TargetTracker.set_prior() is given the mapped buoy positions (the node:
+    # the prior_field parameter). A moored field does not move between runs, only
+    # its lights change, and the 2026-11-10 LiDAR map has it to ~0.12 m. With a map:
+    #   1. ALIGN. The map's offset from the boat's GPS frame (3 m between two runs
+    #      on 2026-11-10) is found by a coarse-to-fine grid search, every
+    #      prior_align_period_s, over the last sightings within prior_snap_range_m:
+    #      the shift (up to prior_align_max_m) that puts the most of them on a
+    #      mapped buoy. Until it is found (prior_align_min_obs sightings, half of
+    #      them explained) sightings near the field are DROPPED, never tracked, so
+    #      no stray track is born there before the map is placed.
+    #   2. SNAP. A sighting within prior_snap_m of an aligned mapped buoy, seen from
+    #      within prior_snap_range_m, whose next-nearest mapped buoy is at least
+    #      prior_margin_m farther, is placed EXACTLY on it: one track per buoy, at
+    #      the map's position, every run.
+    #   3. DROP. Any other sighting within prior_zone_m of a mapped buoy is ambiguous
+    #      (which buoy's light is it?) and is dropped.
+    #   4. PASS. A sighting farther than prior_zone_m from every mapped buoy is not
+    #      the field (a boat, a dock, a buoy moved): tracked as before.
+    prior_snap_m: float = 1.0
+    prior_zone_m: float = 2.0
+    prior_margin_m: float = 0.5
+    prior_snap_range_m: float = 15.0
+    prior_align_max_m: float = 4.0
+    prior_align_period_s: float = 2.0
+    prior_align_min_obs: int = 15
+
     # -- colour voting (stage 3). See the module docstring, "ONE BUOY, MANY
     # COLOURS". Tuples, because the node hands in whatever list rclpy gives it
     # and membership is the only thing ever asked of them.
@@ -591,6 +618,109 @@ class TargetTracker:
         self.tracks = []
         self._next_id = 1
         self.stats = {}
+        self.set_prior(())
+
+    # ---- the mapped field prior (TrackerParams, "MAPPED FIELD PRIOR") ----
+
+    def set_prior(self, points):
+        """The mapped buoys as world (x, y); empty = no prior. Resets the alignment, and a
+        map REPLACES what was tracked in the field: every track within prior_zone_m +
+        prior_align_max_m of a mapped buoy is dropped (it was placed without the map, and
+        could stay as a duplicate of the buoy the map now places)."""
+        self.prior = tuple((float(x), float(y)) for x, y in points)
+        if self.prior:
+            reach = self.p.prior_zone_m + self.p.prior_align_max_m
+            self.tracks = [t for t in self.tracks
+                           if min(math.hypot(t.x - px, t.y - py) for px, py in self.prior)
+                           > reach]
+        self.prior_offset = (0.0, 0.0)
+        self.prior_aligned = False
+        self.prior_explained = 0.0
+        self._align_buf = []
+        self._last_align = -math.inf
+
+    def _prior_dists(self, x, y, off):
+        """Sorted distances from (x, y) to every mapped buoy shifted by off, with indexes."""
+        return sorted((math.hypot(x - px - off[0], y - py - off[1]), i)
+                      for i, (px, py) in enumerate(self.prior))
+
+    def _align_score(self, pts, off):
+        """How well a shift explains the sightings: each scores 1 on a mapped buoy, 0 at
+        prior_snap_m or farther."""
+        s = 0.0
+        r = self.p.prior_snap_m
+        for x, y in pts:
+            d = min(math.hypot(x - px - off[0], y - py - off[1]) for px, py in self.prior)
+            if d < r:
+                s += 1.0 - d / r
+        return s
+
+    def _align(self):
+        """Grid search for the map's offset: 0.5 m steps over +-prior_align_max_m, then
+        0.1 m steps round the best. Ties go to the smaller shift."""
+        pts = self._align_buf[-60:]
+        lim = self.p.prior_align_max_m
+        best = None
+        n = int(lim / 0.5)
+        for i in range(-n, n + 1):
+            for j in range(-n, n + 1):
+                off = (0.5 * i, 0.5 * j)
+                key = (self._align_score(pts, off), -math.hypot(*off))
+                if best is None or key > best[0]:
+                    best = (key, off)
+        cx, cy = best[1]
+        for i in range(-5, 6):
+            for j in range(-5, 6):
+                off = (cx + 0.1 * i, cy + 0.1 * j)
+                if math.hypot(*off) > lim:
+                    continue
+                key = (self._align_score(pts, off), -math.hypot(*off))
+                if key > best[0]:
+                    best = (key, off)
+        explained = best[0][0] / len(pts)
+        self.prior_explained = explained
+        if explained >= 0.5:
+            self.prior_offset = best[1]
+            self.prior_aligned = True
+
+    def _apply_prior(self, projected, now, stats):
+        """Stage 2b: align, then snap, drop or pass every projected sighting."""
+        p = self.p
+        for o, wx, wy, _ in projected:
+            if o.range_h <= p.prior_snap_range_m:
+                self._align_buf.append((wx, wy))
+        del self._align_buf[:-200]
+        if (now - self._last_align >= p.prior_align_period_s
+                and len(self._align_buf) >= p.prior_align_min_obs):
+            self._last_align = now
+            self._align()
+        kept, snapped, dropped = [], 0, 0
+        for o, wx, wy, wz in projected:
+            if not self.prior_aligned:
+                # not placed yet: nothing near the field is tracked
+                d0 = self._prior_dists(wx, wy, (0.0, 0.0))[0][0]
+                if d0 <= p.prior_zone_m + p.prior_align_max_m:
+                    dropped += 1
+                    continue
+                kept.append((o, wx, wy, wz))
+                continue
+            ds = self._prior_dists(wx, wy, self.prior_offset)
+            d1, i = ds[0]
+            d2 = ds[1][0] if len(ds) > 1 else math.inf
+            if (d1 <= p.prior_snap_m and d2 - d1 >= p.prior_margin_m
+                    and o.range_h <= p.prior_snap_range_m):
+                px, py = self.prior[i]
+                kept.append((o, px + self.prior_offset[0], py + self.prior_offset[1], wz))
+                snapped += 1
+            elif d1 <= p.prior_zone_m:
+                dropped += 1
+            else:
+                kept.append((o, wx, wy, wz))
+        stats["prior_snapped"] = snapped
+        stats["prior_dropped"] = dropped
+        stats["prior_offset"] = (round(self.prior_offset[0], 2), round(self.prior_offset[1], 2))
+        stats["prior_aligned"] = self.prior_aligned
+        return kept
 
     # ---- the cycle ----
 
@@ -619,6 +749,8 @@ class TargetTracker:
                 o.x, o.y, o.z, boat.roll, boat.pitch, boat.yaw,
                 boat.east, boat.north)
             projected.append((o, wx, wy, wz))
+        if self.prior:
+            projected = self._apply_prior(projected, now, stats)
 
         stats["associated"] = 0
         stats["new_tracks"] = 0

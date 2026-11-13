@@ -1,0 +1,59 @@
+[operator] armed
+[operator] mode GUIDED (confirmed by the autopilot)
+[operator] goal: task1_core_scan, approach 1.2805297 103.8556758
+[tree]    0.0 s  RunStart gate            task TASK_NONE  WARNING waiting for RoboCommand's RunStart via the OCS
+[operator] sim release of the RunStart gate (no RoboCommand)
+[tree]    0.0 s  SetCameraModel           task TASK_SAFE_PASSAGE
+[tree]    0.5 s  DrivePlanPhase           task TASK_SAFE_PASSAGE
+[tree]    4.6 s  DrivePlanPhase           task TASK_SAFE_PASSAGE  WARNING nav BLOCKED a hazard is on the path ahead
+[tree]    5.6 s  DrivePlanPhase           task TASK_SAFE_PASSAGE  WARNING nav BLOCKED clear; holding until it has stayed clear
+[tree]    9.1 s  DrivePlanPhase           task TASK_SAFE_PASSAGE
+[tree]   25.2 s  DrivePlanPhase           task TASK_SAFE_PASSAGE  WARNING nav BLOCKED no plan fits the changed field
+[tree]   26.3 s  DrivePlanPhase           task TASK_SAFE_PASSAGE  WARNING nav BLOCKED clear; holding until it has stayed clear
+[tree]   29.5 s  DrivePlanPhase           task TASK_SAFE_PASSAGE
+[judge] passed b08_red (red) with it to starboard at 8.7 m: correct
+[judge] passed b03_red (red) with it to starboard at 4.4 m: correct
+[judge] passed b10_red (red) with it to starboard at 10.7 m: correct
+[judge] passed b06_red (red) with it to starboard at 6.9 m: correct
+[judge] passed b02_grn (green) with it to port at 2.7 m: correct
+[judge] passed b04_grn (green) with it to port at 3.1 m: correct
+[judge] passed b05_grn (green) with it to port at 5.1 m: correct
+[judge] passed b09_grn (green) with it to port at 7.5 m: correct
+[judge] passed b06_red (red) with it to port at 4.4 m: WRONG SIDE
+[judge] passed b03_red (red) with it to port at 1.9 m: WRONG SIDE
+[judge] passed b10_red (red) with it to port at 8.1 m: WRONG SIDE
+[judge] passed b08_red (red) with it to port at 6.2 m: WRONG SIDE
+[judge] circled b01_entry cw: correct
+[tree]  103.7 s  DrivePlanPhase           task TASK_SAFE_PASSAGE  WARNING nav BLOCKED no plan for this leg
+[judge] passed b02_grn (green) with it to starboard at 2.2 m: WRONG SIDE
+[judge] passed b04_grn (green) with it to starboard at 2.9 m: WRONG SIDE
+[tree]  117.6 s  PlanGlobalPassage        task TASK_SAFE_PASSAGE  WARNING nav BLOCKED no plan for this leg
+[tree]  126.4 s  DrivePlanPhase           task TASK_SAFE_PASSAGE
+[judge] passed b03_red (red) with it to starboard at 1.3 m: correct
+[judge] gate b03_red/b04_grn: correct
+[judge] passed b04_grn (green) with it to port at 1.6 m: correct
+[judge] passed b06_red (red) with it to starboard at 1.1 m: correct
+[judge] gate b06_red/b05_grn: correct
+[judge] passed b08_red (red) with it to starboard at 1.0 m: correct
+[judge] gate b08_red/b09_grn: correct
+[tree]  162.1 s  DrivePlanPhase           task TASK_SAFE_PASSAGE  WARNING nav BLOCKED a hazard is on the path ahead
+[judge] passed b10_red (red) with it to starboard at 1.1 m: correct
+[judge] CONTACT with b08_red
+[judge] passed b08_red (red) with it to port at 0.7 m: WRONG SIDE
+[result] outcome FAILURE  tree task1_core_scan returned FAILURE at DrivePlanPhase in guard_band > task1_guard > Task1CoreScan > core_scan > passage: its own warning, if it gave one, is in the bt_runner_node log  (209 s)
+[judge] VERDICT: FAIL — buoys 6/8 on their side (gates 3/4 crossed), contacts ['b08_red']
+[judge]   buoy b02_grn: WRONG SIDE (green kept to starboard, passed at 2.2 m)
+[judge]   buoy b03_red: correct (red kept to starboard, passed at 1.3 m)
+[judge]   buoy b04_grn: correct (green kept to port, passed at 1.6 m)
+[judge]   buoy b05_grn: correct (green kept to port, passed at 1.1 m)
+[judge]   buoy b06_red: correct (red kept to starboard, passed at 0.8 m)
+[judge]   buoy b08_red: WRONG SIDE (red kept to port, passed at 0.7 m)
+[judge]   buoy b09_grn: correct (green kept to port, passed at 1.9 m)
+[judge]   buoy b10_red: correct (red kept to starboard, passed at 1.1 m)
+[judge]   gate b03_red/b04_grn: correct
+[judge]   gate b06_red/b05_grn: correct
+[judge]   gate b08_red/b09_grn: correct
+[judge]   gate b10_red/b09_grn: not crossed
+[judge]   circle b01_entry: correct
+[judge]   circle b11_exit: not circled (best ccw sweep 32 deg)
+[judge]   min clearance 0.40 m (b08_red), non-gate 0.79 m, hull 0.00 m

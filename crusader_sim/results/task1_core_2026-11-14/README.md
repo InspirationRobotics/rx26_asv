@@ -33,6 +33,8 @@ RX26_WIN_SRC=/mnt/c/<path>/rx26_asv bash crusader_sim/scripts/t1_attempt.sh LABE
 | a02 | same (repeat) | task1_sg | field centre only | **200/325** | FAIL 6/8 sides | report perfect, both circles; all greens correct; b08 and b10 red to port. See below |
 | a03 | same | task1_sg | + LiDAR fusion (`use_lidar` true, r_max 25) | **165/325** | FAIL 4/8, no EXIT circle | worse: 4 false reports (one GREEN 0.88 m from b06 red), tree FAILED at PlanGlobalPassage. Fusion as it stands mixes neighbouring buoys; not pursued |
 | a04 | same | task1_sg | + `assoc_radius_m` 1.5 (default 3.0) | **125/325** | FAIL, no circles | 23 tracks for 11 buoys (9 duplicate reports), as on the water on 13 Nov: far buoys' stereo error > 1.5 m. One fixed radius cannot serve this field (see below) |
+| a05 | same | task1_sg | + range-aware tracking (`range_sigma_k` 0.0036, `vote_ambiguity_m` 1.0) | **150/325** | FAIL, touched b08 | 20 tracks: the stereo-only error model is too optimistic up close (pose/frame timing adds error), its 0.9 m gate split buoys. Kept in the code (off), not used |
+| a06 | baseline repeat | task1_sg | field centre only | **200/325** | FAIL 7/8 | report perfect, both circles, only b03 red to port. **Baseline over a01/a02/a06: 175, 200, 200** |
 
 ### One association radius cannot serve this field (a03, a04)
 

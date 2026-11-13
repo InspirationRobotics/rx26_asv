@@ -34,7 +34,7 @@ RX26_WIN_SRC="$WIN_SRC" TREE="$TREE" bash /tmp/gz_sim_up.sh "$COURSE" --no-uav $
 for kv in "$@"; do
   key="${kv%%=*}"; node=bt_runner_node
   case "$key" in */*) node="${key%%/*}"; key="${key#*/}" ;; esac   # node/param=value
-  docker exec "$CT" bash -c "$ROS && ros2 param set /$node $key ${kv#*=}" 2>&1 \
+  docker exec "$CT" bash -c "$ROS && ros2 param set /$node $key '${kv#*=}'" 2>&1 \
     | grep -v '^Set parameter successful' | sed "s|^|  param $node/$key: |"
 done
 

@@ -13,6 +13,7 @@ colour_min_votes votes AND colour_min_ratio of the LIT votes, dark votes
 excluded), not read back from the code under test.
 """
 import ast
+import math
 import dataclasses
 import os
 import sys
@@ -371,6 +372,119 @@ class RangeAwareTest(unittest.TestCase):
         f.cycle((6.0, 0.95, "red_buoy"))
         red = next(t for t in f.tracker.tracks if t.label == "red_buoy")
         self.assertEqual(red.label_votes["red_buoy"], 7)
+
+
+class PriorFieldTest(unittest.TestCase):
+    """The mapped field prior: sightings near a mapped buoy are placed ON it once the map's
+    offset is found. World frame here: BOAT at the origin facing north, so a world point
+    (east, north) is the body sighting (north, -east)."""
+
+    # a slice of the 2026-11-10 field (two neighbours 1.86 m apart and two more), moved
+    # 10 m south so every buoy is inside prior_snap_range_m of the boat at the origin
+    FIELD = [(-4.06, 8.62), (-5.78, 7.91), (-3.20, 6.55), (-5.10, 4.90)]
+
+    @staticmethod
+    def sight(tracker, world_pts, t, labels=None):
+        cams = [core.CameraDetection(n, -e, 0.0, (labels or {}).get(k, "red_buoy"), 0.9)
+                for k, (e, n) in enumerate(world_pts)]
+        return tracker.update(cams, [], BOAT, t)
+
+    def fed(self, prior, truth, cycles=40, jitter=0.4, labels=None):
+        tr = make_tracker()
+        tr.set_prior(prior)
+        for k in range(cycles):
+            # deterministic +-jitter scatter, different for each buoy and cycle
+            pts = [(e + jitter * math.sin(1.7 * k + i), n + jitter * math.cos(2.3 * k + 2 * i))
+                   for i, (e, n) in enumerate(truth)]
+            self.sight(tr, pts, 0.1 * (k + 1), labels)
+        return tr
+
+    def test_off_without_a_map(self):
+        self.assertEqual(make_tracker().prior, ())
+
+    def test_one_track_per_buoy_exactly_on_the_map(self):
+        tr = self.fed(self.FIELD, self.FIELD)
+        self.assertTrue(tr.prior_aligned)
+        self.assertEqual(len(tr.tracks), 4)
+        for t in tr.tracks:
+            d = min(math.hypot(t.x - e, t.y - n) for e, n in self.FIELD)
+            self.assertLess(d, 0.15)
+
+    def test_the_map_offset_is_found(self):
+        # the map is 2.0 m east and 1.0 m south of where the boat's GPS sees the buoys
+        shifted = [(e + 2.0, n - 1.0) for e, n in self.FIELD]
+        tr = self.fed(shifted, self.FIELD)
+        self.assertTrue(tr.prior_aligned)
+        self.assertAlmostEqual(tr.prior_offset[0], -2.0, delta=0.2)
+        self.assertAlmostEqual(tr.prior_offset[1], 1.0, delta=0.2)
+        for t in tr.tracks:
+            d = min(math.hypot(t.x - e, t.y - n) for e, n in self.FIELD)
+            self.assertLess(d, 0.25)
+
+    def test_neighbours_keep_their_own_colours(self):
+        labels = {0: "red_buoy", 1: "green_buoy", 2: "red_buoy", 3: "red_buoy"}
+        tr = self.fed(self.FIELD, self.FIELD, labels=labels)
+        by_pos = {min(range(4), key=lambda i: math.hypot(t.x - self.FIELD[i][0],
+                                                         t.y - self.FIELD[i][1])): t.label
+                  for t in tr.tracks}
+        self.assertEqual(by_pos, {0: "red_buoy", 1: "green_buoy", 2: "red_buoy", 3: "red_buoy"})
+
+    def test_a_sighting_between_two_mapped_buoys_is_dropped(self):
+        tr = self.fed(self.FIELD, self.FIELD, cycles=30, jitter=0.0)
+        n = len(tr.tracks)
+        mid = ((-4.06 - 5.78) / 2, (8.62 + 7.91) / 2)     # 0.93 m from both
+        self.sight(tr, [mid], 10.0)
+        self.assertEqual(len(tr.tracks), n)
+        self.assertEqual(tr.stats["prior_dropped"], 1)
+
+    def test_far_from_the_field_tracks_as_before(self):
+        tr = self.fed(self.FIELD, self.FIELD, cycles=30, jitter=0.0)
+        self.sight(tr, [(6.0, 2.0)], 10.0)                  # 9 m from every mapped buoy
+        self.assertEqual(len(tr.tracks), 5)
+
+    def test_nothing_near_the_field_is_tracked_before_the_map_is_placed(self):
+        tr = make_tracker()
+        tr.set_prior(self.FIELD)
+        self.sight(tr, [self.FIELD[0], (8.0, 0.0)], 0.1)   # too few sightings to align
+        self.assertFalse(tr.prior_aligned)
+        self.assertEqual(len(tr.tracks), 1)                # only the one far from the field
+
+    def test_a_new_map_replaces_tracks_in_the_field(self):
+        tr = make_tracker()
+        for k in range(5):
+            self.sight(tr, [(-4.5, 8.2), (8.0, 0.0)], 0.1 * (k + 1))
+        self.assertEqual(len(tr.tracks), 2)
+        tr.set_prior(self.FIELD)
+        self.assertEqual(len(tr.tracks), 1)
+
+
+class PriorParseTest(unittest.TestCase):
+    """The node's prior_field string, without ROS: the parser is a plain function."""
+
+    @staticmethod
+    def parse(text):
+        src = open(os.path.join(HERE, "..", "crusader_world_model",
+                                "target_tracker_node.py"), encoding="utf-8").read()
+        tree = ast.parse(src)
+        fn = next(n for n in tree.body
+                  if isinstance(n, ast.FunctionDef) and n.name == "parse_prior_field")
+        ns = {}
+        exec(compile(ast.Module([fn], []), "parse_prior_field", "exec"), ns)
+        return ns["parse_prior_field"](text)
+
+    def test_blank_is_off(self):
+        self.assertEqual(self.parse(""), [])
+        self.assertEqual(self.parse(" ; "), [])
+
+    def test_pairs(self):
+        self.assertEqual(self.parse("1.28,103.85; 1.29,103.86;"),
+                         [(1.28, 103.85), (1.29, 103.86)])
+
+    def test_a_typo_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.parse("1.28,103.85;1.29")
+        with self.assertRaises(ValueError):
+            self.parse("0,0")
 
 
 class WiringTest(unittest.TestCase):
