@@ -163,11 +163,21 @@ struct LatFix
   const char * src = "not seen";
 };
 
-LatFix latFix(const CameraBay & cam)
+/// `offset_m` (a leaf's lat_offset_m, the GCS's t3_lat_offset_m) is where the boat should
+/// sit: that far LEFT of the bay's centre, facing the dock. The face then shows that far
+/// right of the bow's line, so the error is the face's spot plus the offset: 0 on station.
+LatFix latFix(const CameraBay & cam, double offset_m = 0.0)
 {
-  if (cam.held) {return {cam.across_m, cam.source};}
-  if (cam.seen) {return {cam.left_m, "live face"};}
+  if (cam.held) {return {cam.across_m + offset_m, cam.source};}
+  if (cam.seen) {return {cam.left_m + offset_m, "live face"};}
   return {};
+}
+
+/// The port both dock leaves (ApproachBay, StrafeKeep) give latFix's offset_m.
+std::pair<std::string, BT::PortInfo> latOffsetPort()
+{
+  return BT::InputPort<double>("lat_offset_m", 0.0,
+    "where to sit across the bay: m LEFT of its centre (facing the dock); 0 = centred");
 }
 
 // ---------------------------------------------------------------- guards
@@ -275,6 +285,7 @@ public:
       BT::InputPort<double>("ki_fwd", 20.0, "us per m.s (holds against a current)"),
       BT::InputPort<double>("ki_lat", 30.0, "us per m.s"),
       BT::InputPort<double>("i_max_us", 80.0, "integral cap"),
+      latOffsetPort(),
     };
   }
 
@@ -312,7 +323,7 @@ public:
       rf = rangeFix(*ctx_, cam_, lidar);
       si.range_m = rf.range;
       si.range_rate = rf.rate(range_rate_, dt);
-      lf = latFix(cam_);
+      lf = latFix(cam_, in("lat_offset_m", 0.0));
       si.lat_err_m = lf.err;
       si.lat_rate = lat_rate_.update(lf.err, lf.src, dt);
       if (std::isfinite(square) && std::isfinite(ctx_->heading_deg)) {
@@ -473,6 +484,10 @@ public:
       BT::InputPort<double>("kd_yaw", 3.0, "us per deg/s"),
       BT::InputPort<double>("min_us", 30.0, "smallest stick that moves the hull"),
       BT::InputPort<double>("max_yaw_us", 80.0, "yaw stick cap"),
+      latOffsetPort(),
+      BT::InputPort<double>("coast_s", 1.5,
+        "sideways: no stick while the offset would close within this long anyway; 0 = always "
+        "steer (the damping then brakes the slide in)"),
     };
   }
 
@@ -514,7 +529,7 @@ public:
           min_us, in("max_yaw_us", 80.0));
       }
       rf = rangeFix(*ctx_, cam_, getInput<bool>("use_lidar").value_or(true));
-      lf = latFix(cam_);
+      lf = latFix(cam_, in("lat_offset_m", 0.0));
       off = lf.err;
       const double off_rate = off_rate_.update(off, lf.src, dt);
       const double range_rate = rf.rate(range_rate_, dt);
@@ -532,7 +547,7 @@ public:
           "bay out of view: sliding right to it";
       } else {
         lat_us = -fire::axisLaw(off, off_rate, in("kp_lat", 100.0), in("kd_lat", 40.0), 0.05,
-          min_us, strafe_us);
+          min_us, strafe_us, std::max(0.0, in("coast_s", 1.5)));
         if (closing_ && std::fabs(off) > recentre) {closing_ = false;}
         if (!closing_) {
           if (std::fabs(off) > in("centre_tol_m", 0.15)) {

@@ -162,6 +162,19 @@ public:
     declare_parameter<double>("t3_backoff_m", 4.0);        // the docked hold once the fire is out
     declare_parameter<double>("t3_via_lat", 0.0);          // Task 1 -> Task 3 through here; 0, 0 = straight
     declare_parameter<double>("t3_via_lon", 0.0);
+    // Task 3 control (t3_tuning.hpp): the approach's and the hold's gains, the search's slide, the
+    // hold distance and sideways offset. Read at Start like the inputs above; the range is the
+    // descriptor's, so a value outside it is REFUSED by the set (the GCS shows why).
+    for (const t3tune::Knob & k : t3tune::kKnobs) {
+      rcl_interfaces::msg::ParameterDescriptor d;
+      d.description = k.what;
+      rcl_interfaces::msg::FloatingPointRange r;
+      r.from_value = k.lo;
+      r.to_value = k.hi;
+      r.step = 0.0;
+      d.floating_point_range.push_back(r);
+      declare_parameter<double>(k.key, k.def, d);
+    }
     // Task 4 Disruptive (task4_math.hpp): re-read every second, so a change applies at once.
     declare_parameter<bool>("t4_enabled", true);           // false: alerts shown, never acted on
     declare_parameter<double>("t4_margin_m", 3.0);         // kept beyond the object's keep-out
@@ -1096,6 +1109,9 @@ private:
     const double vlon = get_parameter("t3_via_lon").as_double();
     in.via_set = latLonGiven(vlat, vlon);
     in.via_ll = in.via_set ? nav::LatLon{vlat, vlon} : nav::LatLon{0.0, 0.0};
+    for (const t3tune::Knob & k : t3tune::kKnobs) {
+      in.t3[k.key] = t3tune::clampTo(k, get_parameter(k.key).as_double());
+    }
   }
 
   /// Every Run-panel setting the mission reads once per run, as the parameters are now: the dock
@@ -1139,6 +1155,18 @@ private:
     bb->set("t1_approach_lon", in.approach_ll.lon);
     bb->set("t3_via_lat", in.via_ll.lat);              // 0, 0 when unset: FixGiven says no
     bb->set("t3_via_lon", in.via_ll.lon);
+    for (const auto & [key, value] : in.t3) {bb->set(key, value);}   // Task 3 control
+  }
+
+  /// Task 3 control settings that fight each other, one WARN each. Takes ctx_->mu.
+  void warnT3Control()
+  {
+    std::vector<std::string> w;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      w = t3tune::warnings(ctx_->inputs.t3);
+    }
+    for (const std::string & s : w) {RCLCPP_WARN(get_logger(), "Task 3 control: %s", s.c_str());}
   }
 
   /// For the GOAL log line. CALL WITH ctx_->mu HELD.
@@ -1156,7 +1184,8 @@ private:
       "t1_field=%s t1_approach=%s scan_dwell=%.0fs pause_every=%.1fm unknown_range=%.1fm "
       "t3_backoff=%.1fm t3_via=%s",
       f, ap, in.scan_dwell_s, in.pause_every_m, in.unknown_range_m, in.backoff_m, v);
-    return b;
+    // every Task 3 control value, so each run's log says what it ran with (* = not the default)
+    return std::string(b) + " t3ctl[" + t3tune::text(in.t3) + "]";
   }
 
   /// Task 4's settings, re-read every second (a change applies at once, mid-run too).
@@ -1609,6 +1638,7 @@ private:
       RCLCPP_INFO(
         get_logger(), "GOAL %s timeout=%s approach=(%.7f, %.7f) %s", goal->name.c_str(),
         limit.c_str(), goal->approach_latitude, goal->approach_longitude, goal_inputs_.c_str());
+      warnT3Control();
 
       rclcpp::Rate rate(tick_hz_);
       auto fb = std::make_shared<RunMission::Feedback>();
@@ -1628,7 +1658,10 @@ private:
           after = runPanelText();
         }
         putInputsOnBlackboard(bb);
-        if (after != before) {RCLCPP_INFO(get_logger(), "inputs at RunStart: %s", after.c_str());}
+        if (after != before) {
+          RCLCPP_INFO(get_logger(), "inputs at RunStart: %s", after.c_str());
+          warnT3Control();
+        }
       }
 
       while (rclcpp::ok() && !stop_) {

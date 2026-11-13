@@ -36,7 +36,7 @@
   <BehaviorTree ID="Task3ScanFireOnce">
     <Sequence name="scan_fire_once">
       <Script code="use_lidar := false"/>
-      <Script code="hold_m := 1.7"/>
+      <Script code="hold_m := t3_hold_m"/>
 
       <SetCameraModel model="dock" indicator="yolo" timeout_s="15.0"/>
 
@@ -63,25 +63,30 @@
             <ReactiveFallback name="search_until_green">
               <CommitFirstGreen bay="{bay}" min_reads="3" min_conf="0.5" min_obs="4" max_turn_deg="15"
                                 off_is_green="true" bays="3"/>
-              <StrafeSearch leg_m="20.0" lat_us="100" min_out_m="3.5" forever="true"/>
+              <StrafeSearch leg_m="20.0" lat_us="{t3_search_lat_us}" min_out_m="3.5" forever="true"/>
             </ReactiveFallback>
           </Fallback>
 
           <!-- success_count 1: done when the fire side is done (the dock side only holds) -->
           <Parallel name="dock_while_firing" success_count="1" failure_count="1">
             <Sequence name="dock">
-              <ApproachBay fwd_us="60" strafe_us="100" slew_us_s="40" centre_tol_m="0.08"
-                           centred_s="1.5" recentre_m="0.25" kp_lat="100" kd_lat="70"
-                           handover_m="2.0" use_lidar="{use_lidar}"/>
+              <!-- gains, the hold distance and the sideways offset: the GCS Run panel's "Task 3 control"
+                   (bt_runner_node t3_*, t3_tuning.hpp), read at Start -->
+              <ApproachBay fwd_us="{t3_app_fwd_us}" strafe_us="{t3_app_strafe_us}" slew_us_s="40" centre_tol_m="{t3_app_centre_tol_m}"
+                           centred_s="{t3_app_centred_s}" recentre_m="{t3_app_recentre_m}" handover_m="{t3_handover_m}"
+                           kp_lat="{t3_app_kp_lat}" kd_lat="{t3_app_kd_lat}" coast_s="{t3_app_coast_s}" min_us="{t3_app_min_us}"
+                           kp_yaw="{t3_app_kp_yaw}" kd_yaw="{t3_app_kd_yaw}" lat_offset_m="{t3_lat_offset_m}"
+                           use_lidar="{use_lidar}"/>
               <ReactiveSequence name="docked">
                 <StrafeKeep fire_range_m="{hold_m}" use_lidar="{use_lidar}"
                             deadband_range_m="0.05" deadband_lat_m="0.04" deadband_yaw_deg="3.0"
-                            kp_fwd="90" kd_fwd="60" kp_lat="100" kd_lat="200" kp_yaw="5" kd_yaw="2.0"
-                            ki_fwd="40" ki_lat="20" i_max_us="100"
-                            min_us="30" max_us="120" slew_us_s="200"
-                            min_range_m="0.6" square_first_deg="10"/>
+                            kp_fwd="{t3_hold_kp_fwd}" kd_fwd="{t3_hold_kd_fwd}" ki_fwd="{t3_hold_ki_fwd}"
+                            kp_lat="{t3_hold_kp_lat}" kd_lat="{t3_hold_kd_lat}" ki_lat="{t3_hold_ki_lat}"
+                            kp_yaw="{t3_hold_kp_yaw}" kd_yaw="{t3_hold_kd_yaw}" i_max_us="100"
+                            min_us="{t3_hold_min_us}" max_us="{t3_hold_max_us}" slew_us_s="200"
+                            min_range_m="0.6" square_first_deg="10" lat_offset_m="{t3_lat_offset_m}"/>
                 <Sequence name="on_station">
-                  <AwaitStrafeSolution steady="false" fire_range_m="1.7" range_tol_m="0.40" lat_tol_m="0.30"
+                  <AwaitStrafeSolution steady="false" fire_range_m="{t3_hold_m}" range_tol_m="0.40" lat_tol_m="0.30"
                                        yaw_tol_deg="10.0" hold_s="0.0" miss_s="1.0"/>
                   <ReportDocking bay="{bay}"/>
                   <KeepRunningUntilFailure>
@@ -100,7 +105,7 @@
                     <Sequence name="spray_it">
                       <AwaitFireTarget bay="{bay}" target="{target}" min_red_s="0.2"
                                        refire_red_s="1.5" timeout_s="1000000" resend_s="10.0"/>
-                      <Script code="hold_m := 1.7"/>
+                      <Script code="hold_m := t3_hold_m"/>
                       <SprayUntilHit target="{target}" window="{window}" timeout_s="1000000"
                                      min_green_s="0.4" max_aim_age_s="5.0"
                                      keep_after_docking="true"/>

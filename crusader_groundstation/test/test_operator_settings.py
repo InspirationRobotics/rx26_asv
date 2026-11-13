@@ -7,6 +7,7 @@ Needs nothing outside the standard library.
 """
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -125,6 +126,34 @@ class OperatorSettingsTest(unittest.TestCase):
         self.assertEqual(ops.describe("t1_field_lat", 1.28), "field centre lat 1.2800000")
         self.assertEqual(ops.describe("t1_approach_lon", 103.8), "Task 1 approach lon 103.8000000")
         self.assertEqual(ops.describe("t1_unknown_range_m", 12.0), "look at unnamed buoys within 12 m")
+
+    # ---- Task 3 control: one list in three places (t3_tuning.hpp, here, the page's rows)
+
+    def test_task3_control_is_kept_and_comes_back(self):
+        store = ops.Store(self.path)
+        store.remember({"t3_app_kp_lat": 300.0, "t3_lat_offset_m": 0.2})
+        live = dict(ops.T3_CONTROL)
+        self.assertEqual(ops.Store(self.path).to_restore(live),
+                         {"t3_app_kp_lat": 300.0, "t3_lat_offset_m": 0.2})
+        store.remember({"t3_app_kp_lat": ops.T3_CONTROL["t3_app_kp_lat"]})   # back to the default
+        self.assertEqual(ops.Store(self.path).to_restore(live), {"t3_lat_offset_m": 0.2})
+
+    def test_task3_control_matches_bt_runner(self):
+        hpp = os.path.join(os.path.dirname(__file__), "..", "..", "crusader_bt", "include",
+                           "crusader_bt", "t3_tuning.hpp")
+        if not os.path.exists(hpp):
+            self.skipTest("crusader_bt is not beside this package")
+        with open(hpp, encoding="utf-8") as f:
+            knobs = {k: float(v) for k, v in re.findall(r'\{"(t3_\w+)", ([-0-9.]+),', f.read())}
+        self.assertEqual(knobs, ops.T3_CONTROL)
+
+    def test_task3_control_matches_the_page(self):
+        page = os.path.join(os.path.dirname(__file__), "..", "crusader_groundstation", "laptop",
+                            "page.html")
+        with open(page, encoding="utf-8") as f:
+            rows = {k: float(v) for k, v in
+                    re.findall(r't3k\("(t3_\w+)", "\w+", "[^"]*", "[^"]*", ([-0-9.]+),', f.read())}
+        self.assertEqual(rows, ops.T3_CONTROL)
 
 
 if __name__ == "__main__":
