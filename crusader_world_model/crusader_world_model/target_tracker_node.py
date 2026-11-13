@@ -105,6 +105,13 @@ PARAMS = {
     # are dropped while turning (0 = off): mid-turn they land metres off as ghosts
     "turn_smear_max_m": 1.0,
     "turn_skew_s": 0.2,
+    # range-aware tracking (target_tracker_core.TrackerParams says why): OFF at
+    # range_sigma_k 0. Sim calibration 0.0036; a real OAK-D about twice that.
+    "range_sigma_k": 0.0,               # stereo sigma = k * range^2 [m]; 0 = off
+    "range_sigma_floor_m": 0.10,
+    "range_gate_sigmas": 2.5,           # gate = this many sigma, in [assoc_min_m, assoc_radius_m]
+    "assoc_min_m": 0.9,
+    "vote_ambiguity_m": 0.0,            # another track this close = no colour vote; 0 = off
     # colour voting. The label sets define what a RoboBuoy IS, so they are read-only
     "colour_vote_enable": True,
     "colour_family_labels": ["red_buoy", "green_buoy", "black_buoy", "flashing_blue_buoy",
@@ -122,6 +129,8 @@ RANGES = {
     "vel_alpha": (0.01, 1.0), "confirm_hits": (1, 100), "tentative_timeout_s": (0.5, 60.0),
     "track_timeout_s": (0.0, 3600.0), "max_tracks": (1, 1000), "colour_min_votes": (1, 1000),
     "colour_min_ratio": (0.0, 1.0), "turn_smear_max_m": (0.0, 20.0), "turn_skew_s": (0.0, 2.0),
+    "range_sigma_k": (0.0, 0.1), "range_sigma_floor_m": (0.01, 2.0),
+    "range_gate_sigmas": (0.5, 10.0), "assoc_min_m": (0.2, 20.0), "vote_ambiguity_m": (0.0, 5.0),
 }
 DYNAMIC = tuple(RANGES) + ("use_lidar", "colour_vote_enable")
 
@@ -136,7 +145,9 @@ _CORE_PARAMS = (
     "colour_vote_enable", "colour_family_labels", "colour_family_shapes",
     "colour_unlit_labels",
     "colour_unknown_label", "colour_min_votes", "colour_min_ratio",
-    "turn_smear_max_m", "turn_skew_s")
+    "turn_smear_max_m", "turn_skew_s",
+    "range_sigma_k", "range_sigma_floor_m", "range_gate_sigmas", "assoc_min_m",
+    "vote_ambiguity_m")
 
 
 def stamp_key(header):

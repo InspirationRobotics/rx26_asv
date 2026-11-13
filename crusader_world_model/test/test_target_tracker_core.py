@@ -289,6 +289,90 @@ class TurnSmearTest(unittest.TestCase):
         self.assertEqual(len(self.run_at(t, 2.0, 30.0)), 1)
 
 
+class RangeAwareTest(unittest.TestCase):
+    """range_sigma_k > 0: the gate, the position weight and the colour vote follow the
+    stereo error, sigma(r) = k r^2 (0.0036 = the sim's depth model). The field these pin
+    is the 2026-11-10 Singapore one: buoys 1.86 m apart at the tightest."""
+
+    K = 0.0036
+
+    def ranged(self, **kw):
+        return make_tracker(range_sigma_k=self.K, **kw)
+
+    def test_off_by_default(self):
+        self.assertEqual(core.TrackerParams().range_sigma_k, 0.0)
+        self.assertEqual(core.TrackerParams().vote_ambiguity_m, 0.0)
+
+    def test_close_neighbours_stay_apart_and_keep_their_colours(self):
+        # 6 m out: sigma 0.13 m, gate 0.9 m (the floor); the buoys are 1.86 m apart
+        f = Feeder(self.ranged())
+        tracks = f.repeat(10, (6.0, 0.93, "red_buoy"), (6.0, -0.93, "green_buoy"))
+        self.assertEqual(sorted(t.label for t in tracks), ["green_buoy", "red_buoy"])
+
+    def test_the_fixed_three_metre_gate_merges_the_same_pair(self):
+        # the failure this exists for: the default gate holds both in one track
+        f = Feeder(make_tracker())
+        tracks = f.repeat(10, (6.0, 0.93, "red_buoy"), (6.0, -0.93, "green_buoy"))
+        tracks = f.repeat(10, (6.0, 0.93, "red_buoy"))
+        self.assertLessEqual(len(tracks), 2)
+        f2 = Feeder(make_tracker())
+        f2.see("red_buoy", 5, at=(6.0, 0.93))
+        self.assertEqual(len(f2.see("green_buoy", 5, at=(6.0, -0.93))), 1)
+
+    def test_far_scatter_is_one_track_not_duplicates(self):
+        # 20 m out: sigma 1.44 m, gate clamps to assoc_radius_m 3.0; sightings 1.2 m apart
+        f = Feeder(self.ranged())
+        for k in range(12):
+            f.cycle((20.0 + (1.2 if k % 2 else -1.2), 0.0, "red_buoy"))
+        self.assertEqual(len(f.tracker.tracks), 1)
+
+    def test_a_fixed_small_gate_splits_the_same_scatter(self):
+        f = Feeder(make_tracker(assoc_radius_m=1.5))
+        for k in range(12):
+            f.cycle((20.0 + (1.2 if k % 2 else -1.2), 0.0, "red_buoy"))
+        self.assertEqual(len(f.tracker.tracks), 2)
+
+    def test_a_close_sighting_corrects_a_buoy_placed_from_far(self):
+        # placed from 20 m (sigma 1.44, w 0.48), then one sighting from 5 m, 1.0 m away
+        # (sigma 0.10 floor -> 0.09: w 100): gain 100 / 100.48 = 0.995
+        f = Feeder(self.ranged())
+        f.see("red_buoy", 1, at=(20.0, 0.0))
+        t = f.tracker.tracks[0]
+        t.x, t.y = 0.0, 20.0                     # pin the world position for the arithmetic
+        boat = core.BoatState(east=0.0, north=14.0, roll=0.0, pitch=0.0, yaw=0.0)
+        f.tracker.update([core.CameraDetection(5.0, 0.0, 0.0, "red_buoy", 0.9)], [], boat, 1.0)
+        self.assertEqual(len(f.tracker.tracks), 1)    # associated, not a new track
+        self.assertAlmostEqual(t.y, 19.0, delta=0.05)
+
+    def test_a_far_sighting_barely_moves_a_buoy_fixed_from_close(self):
+        f = Feeder(self.ranged())
+        f.see("red_buoy", 20, at=(5.0, 0.0))     # info capped at 4 / 0.1^2 = 400
+        t = f.tracker.tracks[0]
+        y0 = t.y
+        f.cycle((5.0, 0.0, "red_buoy"))
+        # the same buoy seen from 20 m, 1.0 m off along the line of sight
+        boat = core.BoatState(east=0.0, north=-15.0, roll=0.0, pitch=0.0, yaw=0.0)
+        f.tracker.update([core.CameraDetection(21.0, 0.0, 0.0, "red_buoy", 0.9)], [], boat, 9.0)
+        self.assertEqual(len(f.tracker.tracks), 1)    # associated, not a new track
+        self.assertLess(abs(t.y - y0), 0.01)     # w 0.40 vs 400: 0.1 % of 1.0 m
+
+    def test_an_ambiguous_sighting_does_not_vote(self):
+        f = Feeder(self.ranged(vote_ambiguity_m=1.0))
+        f.repeat(6, (6.0, 0.93, "red_buoy"), (6.0, -0.93, "green_buoy"))
+        before = {t.label: dict(t.label_votes) for t in f.tracker.tracks}
+        f.cycle((6.0, 0.2, "green_buoy"))        # 0.73 / 1.13 m from the two: ambiguous
+        after = {t.label: dict(t.label_votes) for t in f.tracker.tracks}
+        self.assertEqual(before, after)
+        self.assertEqual(f.tracker.stats["votes_withheld"], 1)
+
+    def test_a_clear_sighting_still_votes(self):
+        f = Feeder(self.ranged(vote_ambiguity_m=1.0))
+        f.repeat(6, (6.0, 0.93, "red_buoy"), (6.0, -0.93, "green_buoy"))
+        f.cycle((6.0, 0.95, "red_buoy"))
+        red = next(t for t in f.tracker.tracks if t.label == "red_buoy")
+        self.assertEqual(red.label_votes["red_buoy"], 7)
+
+
 class WiringTest(unittest.TestCase):
     """The node cannot be imported without rclpy, so its wiring is checked from the source:
     a name in _CORE_PARAMS that TrackerParams lacks is a TypeError at node start, and a YAML

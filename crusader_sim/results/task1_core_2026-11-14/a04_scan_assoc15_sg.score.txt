@@ -1,0 +1,15 @@
+[score] 125/325  (task1_sg; judge FAIL)
+[score]   heartbeat 25  report ENTRY 10 (off 0.23 m)  report EXIT 10 (off 0.35 m)
+[score]   circle ENTRY cw 0  circle EXIT ccw 0
+[score]   report greens 40 (4/4)  reds 40 (4/4)  false reports 9
+[score]   greens to port 0  reds to starboard 0  bonus 0
+[score]   strikes none (0)
+[score]   false report: FLASHING_RED 0.58 m from b10_red (flash_red)
+[score]   false report: FLASHING_RED 0.5 m from b08_red (flash_red)
+[score]   false report: FLASHING_RED 0.44 m from b06_red (flash_red)
+[score]   false report: FLASHING_GREEN 0.09 m from b05_grn (flash_green)
+[score]   false report: FLASHING_GREEN 0.3 m from b05_grn (flash_green)
+[score]   false report: FLASHING_RED 0.23 m from b03_red (flash_red)
+[score]   false report: FLASHING_GREEN 0.14 m from b04_grn (flash_green)
+[score]   false report: FLASHING_GREEN 0.31 m from b04_grn (flash_green)
+[score]   false report: FLASHING_GREEN 0.3 m from b02_grn (flash_green)

@@ -32,6 +32,20 @@ RX26_WIN_SRC=/mnt/c/<path>/rx26_asv bash crusader_sim/scripts/t1_attempt.sh LABE
 | a01 | task1_core_scan (main 2ae0ce4, as on the boat 13 Nov) | task1_sg | field centre only | **175/325** | FAIL 6/8 sides | report perfect (ENTRY, EXIT, 4/4 G, 4/4 R within 0.33 m); both circles correct; b08 red kept to port, b09 green to starboard at the north end; 13 re-plans |
 | a02 | same (repeat) | task1_sg | field centre only | **200/325** | FAIL 6/8 sides | report perfect, both circles; all greens correct; b08 and b10 red to port. See below |
 | a03 | same | task1_sg | + LiDAR fusion (`use_lidar` true, r_max 25) | **165/325** | FAIL 4/8, no EXIT circle | worse: 4 false reports (one GREEN 0.88 m from b06 red), tree FAILED at PlanGlobalPassage. Fusion as it stands mixes neighbouring buoys; not pursued |
+| a04 | same | task1_sg | + `assoc_radius_m` 1.5 (default 3.0) | **125/325** | FAIL, no circles | 23 tracks for 11 buoys (9 duplicate reports), as on the water on 13 Nov: far buoys' stereo error > 1.5 m. One fixed radius cannot serve this field (see below) |
+
+### One association radius cannot serve this field (a03, a04)
+
+The tracker's own docstring says `assoc_radius_m` must stay below the narrowest gate, or buoys of
+different colours merge. Here buoys are 1.86 m apart, but stereo range error grows with range
+squared (sim: ~0.1 m at 5 m, 0.36 m at 10 m, 0.8 m at 15 m, 1.4 m at 20 m). At 3.0 m (default)
+up-close neighbours merge: positions drag, colours mix, the planner sees the gap wobble. At 1.5 m
+every far buoy splits into duplicates. **Range-aware tracking** (target_tracker, new, OFF by
+default): per sighting sigma(r) = k r^2; the association gate is 2.5 x the combined sighting and
+track sigma (clamped 0.9-3.0 m); positions are fused by inverse variance (a far sighting barely
+moves a buoy fixed from close in; a close one corrects a buoy first placed from far); a sighting
+with another track within 1.0 m of its own casts no colour vote. All live parameters on the GCS
+Params tab: `range_sigma_k` (0 = off; sim 0.0036, a real OAK-D ~2x), `vote_ambiguity_m`.
 
 ### What goes wrong at the north end (a02, from its track and the runner log)
 
