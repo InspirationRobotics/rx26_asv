@@ -548,10 +548,9 @@ class FlashState:
         SOLID IS THE UNMARKED CASE, on purpose: `flash_` carries the meaning, so Task 1's ENTRY
         buoy stays distinguishable from its EXIT buoy (`flash_blue_circle` against `blue_circle`).
 
-        AN UNDECIDED STATE PUBLISHES AS SOLID, a deliberate trade: every track spends its first
-        flash_min_span_s as `unknown` (window not full), so a flashing buoy reads as steady for
-        that time. Downstream that washes out: target_tracker labels by MAJORITY VOTE over every
-        sighting, and four seconds of wrong loses against minutes of right.
+        AN UNDECIDED STATE PUBLISHES NO COLOUR (the bare shape): every track spends its first
+        flash_min_span_s as `unknown` (window not full). It used to publish as SOLID, which
+        made Task 1's flashing-blue ENTRY read as the solid-blue EXIT on every fresh track.
 
         EXCEPT A COLOUR IN `must_flash` (rg_must_flash: Task 1's red and green, which the
         handbook only ever flashes): solid or undecided, it publishes with NO colour. A steady
@@ -568,8 +567,14 @@ class FlashState:
             parts = []                      # nothing to say but the shape
         elif self.state == "flashing":
             parts = ["flash", self.colour]
+        elif self.state == "solid":
+            parts = [self.colour]
         else:
-            parts = [self.colour]           # solid, or not yet decided
+            # NOT YET DECIDED: no colour. Publishing it as solid made every fresh track of
+            # Task 1's FLASHING blue ENTRY read as the SOLID blue EXIT for its first seconds,
+            # and a sector scan (4-6 s per look, the image track restarting at every turn)
+            # never let it out of that window: the ENTRY was not found (sim 2026-11-13).
+            parts = []
         if shape:
             parts.append(shape)
         return "_".join(parts) if parts else "unknown"

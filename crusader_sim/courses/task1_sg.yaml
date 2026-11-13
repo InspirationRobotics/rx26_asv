@@ -32,7 +32,7 @@ elements:
   - {type: robobuoy, name: b04_grn,   x: -7.30, y: 12.46, beacon: flash_green, up_beacon: false}
   - {type: robobuoy, name: b05_grn,   x: -7.36, y: 14.80, beacon: flash_green, up_beacon: false}
   - {type: robobuoy, name: b06_red,   x: -5.10, y: 14.90, beacon: flash_red,   up_beacon: false}
-  - {type: robobuoy, name: b07_black, x: -0.53, y: 15.26, beacon: "off"}
+  - {type: robobuoy, name: b07_red,   x: -0.53, y: 15.26, beacon: flash_red,   up_beacon: false}
   - {type: robobuoy, name: b08_red,   x: -3.20, y: 16.55, beacon: flash_red,   up_beacon: false}
   - {type: robobuoy, name: b09_grn,   x: -5.78, y: 17.91, beacon: flash_green, up_beacon: false}
   - {type: robobuoy, name: b10_red,   x: -4.06, y: 18.62, beacon: flash_red,   up_beacon: false}

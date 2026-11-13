@@ -149,7 +149,9 @@ class MustFlash(unittest.TestCase):
 
     def test_guard_off_is_the_old_label(self):
         self.assertEqual(state("solid", "red").label("diamond"), "red_diamond")
-        self.assertEqual(state("unknown", "green").label("diamond", ()), "green_diamond")
+        # undecided is never a colour: an undecided flashing-blue ENTRY must not read as the EXIT
+        self.assertEqual(state("unknown", "green").label("diamond", ()), "diamond")
+        self.assertEqual(state("unknown", "blue").label("diamond", self.MF), "diamond")
 
 
 @unittest.skipUnless(HAVE_CV2 and os.path.exists(BEACON_CROP),
