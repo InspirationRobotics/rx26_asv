@@ -35,6 +35,7 @@ RX26_WIN_SRC=/mnt/c/<path>/rx26_asv bash crusader_sim/scripts/t1_attempt.sh LABE
 | a04 | same | task1_sg | + `assoc_radius_m` 1.5 (default 3.0) | **125/325** | FAIL, no circles | 23 tracks for 11 buoys (9 duplicate reports), as on the water on 13 Nov: far buoys' stereo error > 1.5 m. One fixed radius cannot serve this field (see below) |
 | a05 | same | task1_sg | + range-aware tracking (`range_sigma_k` 0.0036, `vote_ambiguity_m` 1.0) | **150/325** | FAIL, touched b08 | 20 tracks: the stereo-only error model is too optimistic up close (pose/frame timing adds error), its 0.9 m gate split buoys. Kept in the code (off), not used |
 | a06 | baseline repeat | task1_sg | field centre only | **200/325** | FAIL 7/8 | report perfect, both circles, only b03 red to port. **Baseline over a01/a02/a06: 175, 200, 200** |
+| a07 | same tree | task1_sg | + **mapped field prior** (`target_tracker/prior_field` = the LiDAR map, `prior_field_task1_sg.txt`) | **325/325** | **PASS 8/8** | everything: report, both circles, every side, the b09/b10 gap threaded, bonus. 11 tracks for 11 buoys (no duplicates), 13 plans (baseline 76-120) |
 
 ### One association radius cannot serve this field (a03, a04)
 

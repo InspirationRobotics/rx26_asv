@@ -1,0 +1,6 @@
+[score] 325/325  (task1_sg; judge PASS)
+[score]   heartbeat 25  report ENTRY 10 (off 0.22 m)  report EXIT 10 (off 0.23 m)
+[score]   circle ENTRY cw 25  circle EXIT ccw 25
+[score]   report greens 40 (4/4)  reds 40 (4/4)  false reports 0
+[score]   greens to port 25  reds to starboard 25  bonus 100
+[score]   strikes none (0)
