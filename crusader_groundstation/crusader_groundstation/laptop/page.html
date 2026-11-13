@@ -921,7 +921,7 @@ $("m-dockh-set").onclick = () => {
 $("m-slide-set").onclick = () => setBtParams({search_first: $("m-slide").value});
 // ---- the Run panel's mission inputs: bt_runner_node parameters read at Start (gcs_bridge keeps
 // them across a bt_runner restart: operator_settings.py). Each row says what the boat holds now.
-const T1_SCAN = /^(task1_core_scan|mission_t[0-9])/, T3_FIRE = /^(task3_scan_fire(?!_cv)|mission_t[0-9])/;
+const T1_SCAN = /^(task1_core_scan|task1_sector_scan|mission_t[0-9])/, T3_FIRE = /^(task3_scan_fire(?!_cv)|mission_t[0-9])/;
 const RUN_INPUTS = [
   {key: "t1_approach", ll: true, label: "Task 1 approach", show: T1_SCAN,
    tip: "Task 1: drive here first (GUIDED), then the static scan; Clear = scan where the boat is (bt_runner_node t1_approach_lat/lon, read at Start)"},

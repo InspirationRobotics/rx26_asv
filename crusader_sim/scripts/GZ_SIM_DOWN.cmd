@@ -9,7 +9,9 @@ rem  shared with other work, so the VM is left to idle out by itself
 rem  about a minute later.
 rem ==================================================================
 setlocal
+rem Chase and Chris have Ubuntu-22.04; a plain "Ubuntu" (also 22.04) works too
 set "DISTRO=Ubuntu-22.04"
+wsl.exe -d %DISTRO% -- true >nul 2>&1 || set "DISTRO=Ubuntu"
 title Crusader sim - stopping
 
 set "HEREWIN=%~dp0"

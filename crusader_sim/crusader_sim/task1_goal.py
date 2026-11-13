@@ -111,6 +111,9 @@ def main():
                     help="mission timeout, WALL-CLOCK seconds (bt_runner counts its own now(); the "
                          "sim runs on wall clock, no use_sim_time). default: %(default).0f")
     ap.add_argument("--no-judge", action="store_true", help="no referee")
+    ap.add_argument("--arm-only", action="store_true",
+                    help="arm and GUIDED only (the pilot's SB and mode switch), no goal: the "
+                         "mission is then started from the GCS, as on the water")
     a = ap.parse_args()
 
     course = C.load(a.course)
@@ -128,6 +131,12 @@ def main():
         print("[operator] GUIDED never confirmed on /crsd/fcu_status — is telemetry_bridge up?")
         return 2
     print("[operator] mode GUIDED (confirmed by the autopilot)", flush=True)
+    if a.arm_only:
+        print("[operator] armed + GUIDED: start a mission from the GCS (Mission tab: tree, "
+              "Run panel, Start, then Release without RoboCommand)", flush=True)
+        op.destroy_node()
+        rclpy.shutdown()
+        return 0
 
     if not op.client.wait_for_server(timeout_sec=20.0):
         print("[operator] no /crsd/run_mission server (is bt_runner up?)")

@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- MISSION: Task 1 Core: drive to the field centre (avoiding buoys), survey six 60-degree sectors there, then the core scan sequence. -->
+<!--
+  task1_sector_scan.xml - Task 1 Safe Passage at Core tier, task1_core_scan.xml with a fixed
+  start: the boat DRIVES TO THE FIELD CENTRE the operator set (planned round the buoys it knows),
+  and there turns in place to six headings 60 deg apart, 4 s each, so the tracker places every
+  buoy from the middle of the field. Then the core sequence, unchanged (lib/task1_core_scan.xml
+  says how each step works).
+
+  GCS Run panel (bt_runner_node parameters, read at Start):
+    field centre   t1_field_lat / t1_field_lon: the rough middle of the buoy field (Pick on map).
+                   The boat drives there first. Blank: no drive, the survey is done where the
+                   boat is. It also places the vantage points and the guessed EXIT.
+                   Sim, course task1_sg: 1.2806344, 103.8556542 (the mean of its 11 buoys).
+    approach point t1_approach_lat / t1_approach_lon: drive here before the field centre.
+    scan dwell, pause every, unknown range: as task1_core_scan.xml (not the survey's 4 s).
+
+    0. DRIVE TO THE APPROACH POINT when one is given.
+    1. DRIVE TO THE FIELD CENTRE when one is given: NavigateTo with obstacle avoidance (Nav2,
+       nav_mode on), round every buoy the tracker knows; 2 m arrival, a leg blocked 30 s is given
+       up and the survey runs from where the boat got to.
+    2. SECTOR SURVEY at the centre: the bow as it arrived, then +60, +120, +180, +240, +300 deg,
+       4 s on each heading once settled. All six, every time.
+    3. FIND THE FIELD as task1_core_scan.xml, from step 1b: known already -> on; else up to 6
+       vantage points 12 m round the field centre, each scanned at 0/-45/+45; then up to 60 s
+       more for the field (FAILURE after that).
+    4. PLAN AND DRIVE the passage from where the boat is, as task1_core_scan.xml.
+  Steps 0-2 are skipped once a passage plan exists (a Retry or a Task 4 resume does not go back).
+-->
+<root BTCPP_format="4" main_tree_to_execute="Main" declare_task1="core" declare_task2="none" declare_task3="none" declare_task4="none" t1_guess_exit="true">
+
+  <BehaviorTree ID="Main">
+    <ReactiveSequence name="guard_band">
+      <IsAutonomous/>
+      <TaskAttempt token="TASK_SAFE_PASSAGE">
+        <ReactiveSequence name="task1_guard">
+          <ResolveBuoyStates/>
+          <ReportSafePassage min_period_s="1.0"/>
+          <AvoidInvaders>
+            <SubTree ID="Task1SectorScan" _autoremap="true"/>
+          </AvoidInvaders>
+        </ReactiveSequence>
+      </TaskAttempt>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <BehaviorTree ID="Task1SectorScan">
+    <Sequence name="sector_scan">
+      <SetCameraModel model="buoy" timeout_s="15.0"/>
+
+      <ForceSuccess name="drive_to_approach">
+        <Sequence>
+          <Inverter><PassageStarted/></Inverter>
+          <FixGiven lat="{t1_approach_lat}" lon="{t1_approach_lon}"/>
+          <NavigateTo target="fix" lat="{t1_approach_lat}" lon="{t1_approach_lon}" tolerance="2.0"
+                      blocked_timeout_s="30.0"/>
+        </Sequence>
+      </ForceSuccess>
+
+      <!-- 1. drive to the field centre, planned round every buoy known so far (avoid is
+           NavigateTo's default; the camera adds buoys as they come into view). No centre set:
+           skipped. A leg blocked 30 s is given up and the survey runs from where the boat is -->
+      <ForceSuccess name="drive_to_field_centre">
+        <Sequence>
+          <Inverter><PassageStarted/></Inverter>
+          <FixGiven lat="{t1_field_lat}" lon="{t1_field_lon}"/>
+          <NavigateTo target="fix" lat="{t1_field_lat}" lon="{t1_field_lon}" tolerance="2.0"
+                      blocked_timeout_s="30.0"/>
+        </Sequence>
+      </ForceSuccess>
+
+      <!-- 2. the six sectors at the centre, 4 s each, all of them (until="" never ends early).
+           face="heading": standing on the centre, "toward the centre" has no direction, so the
+           first sector is the bow as it arrived -->
+      <Fallback name="sector_survey">
+        <PassageStarted/>
+        <ForceSuccess>
+          <ScanForBuoys face="heading" offsets_deg="0,60,120,180,240,300" dwell_s="4.0" until=""/>
+        </ForceSuccess>
+      </Fallback>
+
+      <!-- 2. from here on, task1_core_scan.xml's sequence -->
+      <Fallback name="find_the_field">
+        <PassageStarted/>
+        <FieldKnown/>
+        <RetryUntilSuccessful num_attempts="6">
+          <Sequence name="look_from_round_the_field">
+            <PickFieldVantage radius_m="12.0" offsets_deg="0,60,120,180,240,300" goal="{vantage}"/>
+            <NavigateTo target="port" goal="{vantage}" tolerance="2.0" blocked_timeout_s="20.0"/>
+            <ScanForBuoys face="field" offsets_deg="0,-45,45" dwell_s="{t1_scan_dwell_s}"
+                          until="field"/>
+            <FieldKnown/>
+          </Sequence>
+        </RetryUntilSuccessful>
+        <AlwaysSuccess/>
+      </Fallback>
+
+      <Timeout msec="60000">
+        <WaitForField/>
+      </Timeout>
+
+      <!-- 3. plan and drive -->
+      <RetryUntilSuccessful num_attempts="4">
+        <Sequence name="passage">
+          <PlanGlobalPassage orbit_min_m="1.5" overshoot_deg="45.0"/>
+          <DrivePlanPhase phase="approach" lookahead_m="2.5" blocked_timeout_s="15.0"
+                          pause_unknown_m="{t1_unknown_range_m}" pause_s="{t1_scan_dwell_s}"/>
+          <DrivePlanPhase phase="entry_orbit" lookahead_m="2.5" blocked_timeout_s="15.0"
+                          pause_unknown_m="{t1_unknown_range_m}" pause_s="{t1_scan_dwell_s}"/>
+          <DrivePlanPhase phase="transit" lookahead_m="2.5" blocked_timeout_s="15.0"
+                          pause_every_m="{t1_pause_every_m}" pause_unknown_m="{t1_unknown_range_m}"
+                          pause_s="{t1_scan_dwell_s}"/>
+          <Fallback name="exit_seen">
+            <AnchorSeen which="exit"/>
+            <ScanForBuoys face="exit" offsets_deg="0,-50,50" dwell_s="{t1_scan_dwell_s}"
+                          until="exit"/>
+          </Fallback>
+          <DrivePlanPhase phase="exit_orbit" lookahead_m="2.5" blocked_timeout_s="15.0"/>
+        </Sequence>
+      </RetryUntilSuccessful>
+    </Sequence>
+  </BehaviorTree>
+
+</root>

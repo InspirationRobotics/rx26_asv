@@ -1153,6 +1153,8 @@ private:
     bb->set("t1_unknown_range_m", in.unknown_range_m);
     bb->set("t1_approach_lat", in.approach_ll.lat);    // 0, 0 when unset: FixGiven says no
     bb->set("t1_approach_lon", in.approach_ll.lon);
+    bb->set("t1_field_lat", in.field_ll.lat);          // 0, 0 when unset: FixGiven says no
+    bb->set("t1_field_lon", in.field_ll.lon);
     bb->set("t3_via_lat", in.via_ll.lat);              // 0, 0 when unset: FixGiven says no
     bb->set("t3_via_lon", in.via_ll.lon);
     for (const auto & [key, value] : in.t3) {bb->set(key, value);}   // Task 3 control
