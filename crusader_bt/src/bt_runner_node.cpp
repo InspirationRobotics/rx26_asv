@@ -159,6 +159,15 @@ public:
     declare_parameter<double>("t1_approach_lat", 0.0);    // Task 1: drive here, then scan; 0, 0 = scan from where the boat is
     declare_parameter<double>("t1_approach_lon", 0.0);
     declare_parameter<double>("t1_unknown_range_m", 12.0); // stop to look at a buoy with no colour this near ahead; 0 = never
+    // Task 1 Core, the centre scan (task1_core_centre.xml): drive to the field centre, look all round
+    declare_parameter<double>("t1_field_radius_m", 0.0);   // tracks farther than this from the field centre are not field buoys; 0 = keep all
+    declare_parameter<double>("t1_scan_range_m", 15.0);    // each sector waits for the colours of buoys this near the boat
+    declare_parameter<double>("t1_cam_hfov_deg", 82.0);    // the camera's horizontal view: sizes the sectors
+    declare_parameter<double>("t1_sector_overlap_deg", 15.0);  // each sector overlaps the next by this
+    declare_parameter<double>("t1_sector_min_s", 4.0);     // at least this long on each sector
+    declare_parameter<double>("t1_sector_max_s", 15.0);    // at most this long on each sector
+    declare_parameter<double>("t1_colour_wait_s", 6.0);    // a buoy uncoloured after this long in view is waited on no more (black ones never colour); 0 = wait to max
+    declare_parameter<double>("t1_centre_tol_m", 2.5);     // the drive to the field centre stops this near it
     declare_parameter<double>("t3_backoff_m", 4.0);        // the docked hold once the fire is out
     declare_parameter<double>("t3_via_lat", 0.0);          // Task 1 -> Task 3 through here; 0, 0 = straight
     declare_parameter<double>("t3_via_lon", 0.0);
@@ -575,6 +584,7 @@ private:
     if (plan.empty()) {
       ctx_->buoys = tracked_;
       ctx_->obstacles.clear();
+      rejectFarBuoys();
     } else {
       nav::Fused f = nav::fusePassage(plan, tracked_, assoc_radius_m_);
       ctx_->buoys.swap(f.passage);
@@ -623,6 +633,35 @@ private:
     ctx_->exit_seen = ctx_->have_exit;
     guessExit();
   }
+
+  /// Core tier, the operator's t1_field_radius_m (> 0, with a field centre): a track farther than
+  /// that from the field centre is NOT a field buoy - another task's buoy, a boat, a ghost - so it
+  /// is never the ENTRY/EXIT, never a side to keep, never waited on. It is still a thing in the
+  /// water: it moves to ctx_->obstacles, which every leg keeps clear of. CALL WITH ctx_->mu HELD.
+  void rejectFarBuoys()
+  {
+    const double r = ctx_->inputs.field_radius_m;
+    nav::Vec2 c;
+    if (r <= 0.0 || !fieldCentre(*ctx_, &c)) {return;}
+    std::vector<nav::Buoy> keep;
+    keep.reserve(ctx_->buoys.size());
+    std::size_t out = 0;
+    for (const nav::Buoy & b : ctx_->buoys) {
+      if (nav::norm(b.p - c) > r) {
+        ctx_->obstacles.push_back(b);
+        ++out;
+      } else {
+        keep.push_back(b);
+      }
+    }
+    ctx_->buoys.swap(keep);
+    if (out != rejected_far_) {
+      rejected_far_ = out;
+      RCLCPP_INFO(get_logger(), "field radius %.0f m: %zu track(s) beyond it are not field buoys "
+        "(kept clear of as obstacles)", r, out);
+    }
+  }
+  std::size_t rejected_far_ = 0;
 
   /// Core tier, no EXIT known (not seen or given) but the ENTRY and the operator's
   /// field centre are: GUESS it at the far end of the field, the centre mirrored through the
@@ -1104,6 +1143,15 @@ private:
     in.approach_set = latLonGiven(alat, alon);
     in.approach_ll = in.approach_set ? nav::LatLon{alat, alon} : nav::LatLon{0.0, 0.0};
     in.unknown_range_m = std::clamp(get_parameter("t1_unknown_range_m").as_double(), 0.0, 30.0);
+    in.field_radius_m = std::clamp(get_parameter("t1_field_radius_m").as_double(), 0.0, 200.0);
+    in.scan_range_m = std::clamp(get_parameter("t1_scan_range_m").as_double(), 2.0, 50.0);
+    in.cam_hfov_deg = std::clamp(get_parameter("t1_cam_hfov_deg").as_double(), 30.0, 180.0);
+    in.sector_overlap_deg = std::clamp(get_parameter("t1_sector_overlap_deg").as_double(), 0.0,
+        in.cam_hfov_deg - 10.0);
+    in.sector_min_s = std::clamp(get_parameter("t1_sector_min_s").as_double(), 0.5, 30.0);
+    in.sector_max_s = std::clamp(get_parameter("t1_sector_max_s").as_double(), in.sector_min_s, 120.0);
+    in.colour_wait_s = std::clamp(get_parameter("t1_colour_wait_s").as_double(), 0.0, 120.0);
+    in.centre_tol_m = std::clamp(get_parameter("t1_centre_tol_m").as_double(), 1.0, 10.0);
     in.backoff_m = std::clamp(get_parameter("t3_backoff_m").as_double(), 1.0, 8.0);
     const double vlat = get_parameter("t3_via_lat").as_double();
     const double vlon = get_parameter("t3_via_lon").as_double();
@@ -1153,6 +1201,15 @@ private:
     bb->set("t1_unknown_range_m", in.unknown_range_m);
     bb->set("t1_approach_lat", in.approach_ll.lat);    // 0, 0 when unset: FixGiven says no
     bb->set("t1_approach_lon", in.approach_ll.lon);
+    bb->set("t1_field_lat", in.field_set ? in.field_ll.lat : 0.0);   // 0, 0 when unset: FixGiven says no
+    bb->set("t1_field_lon", in.field_set ? in.field_ll.lon : 0.0);
+    bb->set("t1_scan_range_m", in.scan_range_m);
+    bb->set("t1_cam_hfov_deg", in.cam_hfov_deg);
+    bb->set("t1_sector_overlap_deg", in.sector_overlap_deg);
+    bb->set("t1_sector_min_s", in.sector_min_s);
+    bb->set("t1_sector_max_s", in.sector_max_s);
+    bb->set("t1_colour_wait_s", in.colour_wait_s);
+    bb->set("t1_centre_tol_m", in.centre_tol_m);
     bb->set("t3_via_lat", in.via_ll.lat);              // 0, 0 when unset: FixGiven says no
     bb->set("t3_via_lon", in.via_ll.lon);
     for (const auto & [key, value] : in.t3) {bb->set(key, value);}   // Task 3 control
@@ -1173,7 +1230,7 @@ private:
   std::string inputsText() const
   {
     const Context::Inputs & in = ctx_->inputs;
-    char b[360];
+    char b[600];
     char f[40] = "unset", v[40] = "none", ap[40] = "none";
     if (in.field_set) {std::snprintf(f, sizeof(f), "%.7f,%.7f", in.field_ll.lat, in.field_ll.lon);}
     if (in.via_set) {std::snprintf(v, sizeof(v), "%.7f,%.7f", in.via_ll.lat, in.via_ll.lon);}
@@ -1182,8 +1239,11 @@ private:
     }
     std::snprintf(b, sizeof(b),
       "t1_field=%s t1_approach=%s scan_dwell=%.0fs pause_every=%.1fm unknown_range=%.1fm "
-      "t3_backoff=%.1fm t3_via=%s",
-      f, ap, in.scan_dwell_s, in.pause_every_m, in.unknown_range_m, in.backoff_m, v);
+      "field_radius=%.0fm scan_range=%.0fm hfov=%.0f overlap=%.0f sector=%.1f-%.1fs colour_wait=%.0fs "
+      "centre_tol=%.1fm t3_backoff=%.1fm t3_via=%s",
+      f, ap, in.scan_dwell_s, in.pause_every_m, in.unknown_range_m, in.field_radius_m,
+      in.scan_range_m, in.cam_hfov_deg, in.sector_overlap_deg, in.sector_min_s, in.sector_max_s,
+      in.colour_wait_s, in.centre_tol_m, in.backoff_m, v);
     // every Task 3 control value, so each run's log says what it ran with (* = not the default)
     return std::string(b) + " t3ctl[" + t3tune::text(in.t3) + "]";
   }

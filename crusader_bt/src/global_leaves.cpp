@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <set>
 #include <sstream>
 #include <string>
@@ -1197,6 +1198,279 @@ private:
   std::string until_;
 };
 
+/// Core tier, the CENTRE SCAN (task1_core_centre.xml): stand on the spot (the operator's field
+/// centre, or wherever the drive there ended) and turn through the whole circle one camera view
+/// at a time, staying on each SECTOR until every close buoy in view has a colour.
+///
+///   sectors  n = ceil(360 / (hfov_deg - overlap_deg)), evenly spaced (360 / n apart), the first
+///            on the bow's heading when the scan starts, then clockwise round to it again.
+///   a sector is DONE, after at least min_s on its heading, once every buoy within range_m of the
+///            boat and inside the view (+-(hfov_deg / 2 - edge_deg) of the heading) has a colour
+///            (any state but unknown: off/black counts) that has held for stable_s. After max_s on
+///            it the scan moves on anyway, and says which buoys in view still had none.
+///   Buoys beyond range_m wait for nobody: the operator's "close" (t1_scan_range_m).
+///   A buoy still uncoloured after colour_wait_s IN VIEW (summed over the whole scan) is waited on
+///            no more: a black buoy never gets a colour (target_tracker reports a track with only
+///            dark votes as unknown, since a flashing light is dark half the time), so without
+///            this every sector holding one ran to max_s (2026-11-13 sim: scans of 70-120 s).
+/// HoldHeading's rule keeps the spot (back to it when the boat drifts past radius_m), as
+/// ScanForBuoys does; a turn taking longer than turn_timeout_s looks from where it got to.
+/// SUCCESS after the last sector; never FAILURE for what it did not see (the tree decides, with
+/// FieldKnown). FAILURE only on a pose stale for 5 s. GUIDED only; sends nothing when
+/// publish_setpoints is false.
+class SectorScan : public CrusaderAction
+{
+public:
+  SectorScan(const std::string & n, const BT::NodeConfig & c) : CrusaderAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<double>("hfov_deg", 82.0, "the camera's horizontal field of view"),
+      BT::InputPort<double>("overlap_deg", 15.0, "each sector overlaps the next by this"),
+      BT::InputPort<double>("edge_deg", 5.0, "a buoy this near the edge of the view is not waited on"),
+      BT::InputPort<double>("range_m", 15.0, "wait for the colours of buoys within this of the boat"),
+      BT::InputPort<double>("min_s", 4.0, "at least this long on each sector"),
+      BT::InputPort<double>("max_s", 15.0, "at most this long on each sector"),
+      BT::InputPort<double>("stable_s", 1.0, "a colour must hold this long to count"),
+      BT::InputPort<double>("colour_wait_s", 6.0,
+        "stop waiting on a buoy still uncoloured after this long in view (0 = wait to max_s)"),
+      BT::InputPort<double>("settle_deg", 12.0, "on the heading within this"),
+      BT::InputPort<double>("turn_timeout_s", 15.0, "a turn taking longer looks from there"),
+      BT::InputPort<double>("radius_m", 0.8, "drift from the spot that triggers a return"),
+      BT::InputPort<double>("spot_search_m", 1.5,
+        "the spot is the point this near the boat farthest from every known buoy (0 = here)")};
+  }
+
+  /// Distance from p to the nearest known buoy or obstacle (inf: none). CALL UNDER ctx.mu.
+  static double nearestBuoy(const Context & c, Vec2 p)
+  {
+    double d = kInf;
+    for (const nav::Buoy & b : c.buoys) {d = std::min(d, nav::norm(b.p - p));}
+    for (const nav::Buoy & b : c.obstacles) {d = std::min(d, nav::norm(b.p - p));}
+    return d;
+  }
+
+  /// The point within r of `here` (a 0.25 m grid) with the most room to the nearest buoy, a
+  /// tie going to the nearer one: turning on the spot sweeps the hull round, and a buoy 1.5 m
+  /// off is touched by a 1 m boat that drifts. CALL UNDER ctx.mu.
+  static Vec2 clearestSpot(const Context & c, Vec2 here, double r)
+  {
+    Vec2 best = here;
+    double best_d = nearestBuoy(c, here);
+    if (r <= 0.0 || !std::isfinite(best_d)) {return here;}
+    for (double dx = -r; dx <= r + 1e-9; dx += 0.25) {
+      for (double dy = -r; dy <= r + 1e-9; dy += 0.25) {
+        if (dx * dx + dy * dy > r * r) {continue;}
+        const Vec2 q{here.x + dx, here.y + dy};
+        const double d = nearestBuoy(c, q) - 0.05 * std::hypot(dx, dy);   // prefer staying put
+        if (d > best_d + 1e-6) {
+          best_d = d;
+          best = q;
+        }
+      }
+    }
+    return best;
+  }
+
+  BT::NodeStatus onStart() override
+  {
+    const double hfov =std::clamp(getInput<double>("hfov_deg").value_or(82.0), 20.0, 180.0);
+    const double overlap = std::clamp(getInput<double>("overlap_deg").value_or(15.0), 0.0, hfov - 10.0);
+    half_view_deg_ = std::max(5.0, hfov / 2.0 - std::max(0.0, getInput<double>("edge_deg").value_or(5.0)));
+    range_m_ = std::max(1.0, getInput<double>("range_m").value_or(15.0));
+    min_s_ = std::max(0.5, getInput<double>("min_s").value_or(4.0));
+    max_s_ = std::max(min_s_, getInput<double>("max_s").value_or(15.0));
+    stable_s_ = std::max(0.0, getInput<double>("stable_s").value_or(1.0));
+    colour_wait_s_ = std::max(0.0, getInput<double>("colour_wait_s").value_or(6.0));
+    settle_deg_ = getInput<double>("settle_deg").value_or(12.0);
+    turn_timeout_s_ = getInput<double>("turn_timeout_s").value_or(15.0);
+    prm_.radius_m = std::max(0.3, getInput<double>("radius_m").value_or(0.8));
+    prm_.return_speed_mps = 0.3;
+    n_ = std::max(1, static_cast<int>(std::ceil(360.0 / (hfov - overlap) - 1e-9)));
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      if (!ctx_->pose_fresh || !ctx_->origin_set) {
+        RCLCPP_ERROR(log(), "SectorScan: no fresh pose, cannot take the spot");
+        return BT::NodeStatus::FAILURE;
+      }
+      anchor_ = clearestSpot(*ctx_, ctx_->boat, std::max(0.0, getInput<double>("spot_search_m").value_or(1.5)));
+      start_s_ = turn_s_ = ctx_->now_s;
+      base_ = std::isfinite(ctx_->heading_deg) ? ctx_->heading_deg : 0.0;
+      const double moved = nav::norm(anchor_ - ctx_->boat);
+      if (moved > 0.2) {
+        RCLCPP_INFO(log(), "sector scan: the spot moves %.1f m, to %.1f m from the nearest buoy",
+          moved, nearestBuoy(*ctx_, anchor_));
+      }
+    }
+    sector_ = 0;
+    dwelling_since_ = -1.0;
+    returning_ = false;
+    stale_ = false;
+    seen_.clear();
+    waited_.clear();
+    last_tick_s_ = -1.0;
+    RCLCPP_INFO(log(), "sector scan: %d sectors of %.0f deg from %03.0f (camera %.0f deg, overlap "
+      "%.0f), %.0f-%.0f s each, waiting for colours within %.0f m (at most %.0f s in view each)%s",
+      n_, 360.0 / n_, holdheading::wrap360(base_), hfov, overlap, min_s_, max_s_, range_m_,
+      colour_wait_s_, ctx_->publish_setpoints ? "" : "  [NOT SENT: publish_setpoints is false]");
+    return onRunning();
+  }
+
+  BT::NodeStatus onRunning() override
+  {
+    Vec2 boat;
+    double now, hdg_now;
+    bool fresh;
+    std::vector<nav::Buoy> buoys;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      boat = ctx_->boat;
+      now = ctx_->now_s;
+      hdg_now = ctx_->heading_deg;
+      fresh = ctx_->pose_fresh;
+      buoys = ctx_->buoys;
+    }
+    // how long each buoy's colour has held (a change starts it again)
+    for (const nav::Buoy & b : buoys) {
+      auto it = seen_.find(b.id);
+      if (it == seen_.end() || it->second.first != b.state) {seen_[b.id] = {b.state, now};}
+    }
+    if (!fresh) {
+      if (!stale_) {
+        stale_ = true;
+        stale_s_ = now;
+        RCLCPP_WARN(log(), "sector scan: pose stale, not commanding");
+      }
+      if (now - stale_s_ > 5.0) {
+        RCLCPP_ERROR(log(), "sector scan: pose stale for 5 s, giving up");
+        return BT::NodeStatus::FAILURE;
+      }
+      return BT::NodeStatus::RUNNING;
+    }
+    stale_ = false;
+    prm_.heading_deg = holdheading::wrap360(base_ + sector_ * (360.0 / n_));
+    const holdheading::Command cmd = holdheading::decide(boat, anchor_, returning_, prm_);
+    returning_ = cmd.returning;
+    const bool on_heading = !cmd.returning && std::isfinite(hdg_now) &&
+      std::fabs(wrap180(prm_.heading_deg - hdg_now)) <= settle_deg_;
+    if (dwelling_since_ < 0.0 && (on_heading || now - turn_s_ > turn_timeout_s_)) {
+      dwelling_since_ = now;
+      RCLCPP_INFO(log(), "sector scan: sector %d/%d at %03.0f deg%s", sector_ + 1, n_,
+        prm_.heading_deg, on_heading ? "" : " (turn timed out: looking from here)");
+    }
+    int in_view = 0;
+    std::string waiting;
+    const double dt = last_tick_s_ < 0.0 ? 0.0 : std::clamp(now - last_tick_s_, 0.0, 1.0);
+    last_tick_s_ = now;
+    if (dwelling_since_ >= 0.0) {
+      for (const nav::Buoy & b : buoys) {
+        const double d = nav::norm(b.p - boat);
+        if (d > range_m_ || d < 0.3) {continue;}
+        if (std::fabs(wrap180(nav::bearingDeg(boat, b.p) - prm_.heading_deg)) > half_view_deg_) {
+          continue;
+        }
+        ++in_view;
+        const auto & s = seen_[b.id];
+        if (b.state == nav::Beacon::Unknown) {
+          double & w = waited_[b.id];
+          const bool was_waiting = colour_wait_s_ <= 0.0 || w < colour_wait_s_;
+          w += dt;
+          if (colour_wait_s_ > 0.0 && w >= colour_wait_s_) {
+            if (was_waiting) {
+              RCLCPP_INFO(log(), "sector scan: track %d at %.1f m: no colour after %.0f s in view "
+                "(a black buoy, or hidden); not waiting on it", b.id, d, w);
+            }
+            continue;
+          }
+        }
+        if (b.state == nav::Beacon::Unknown || now - s.second < stable_s_) {
+          waiting += (waiting.empty() ? "" : ", ") + std::to_string(b.id) + " at " +
+            gp::detail::fmt(d, 1) + " m";
+        }
+      }
+      const double on = now - dwelling_since_;
+      const bool clear = on >= min_s_ && waiting.empty();
+      if (clear || on >= max_s_) {
+        if (clear) {
+          RCLCPP_INFO(log(), "sector scan: sector %d/%d done after %.1f s: %d buoy(s) within %.0f m "
+            "in view, every one coloured", sector_ + 1, n_, on, in_view, range_m_);
+        } else {
+          RCLCPP_WARN(log(), "sector scan: sector %d/%d: %.0f s up, moving on; still no colour: %s",
+            sector_ + 1, n_, on, waiting.c_str());
+        }
+        if (++sector_ >= n_) {
+          summary(buoys, boat, now);
+          return BT::NodeStatus::SUCCESS;
+        }
+        dwelling_since_ = -1.0;
+        turn_s_ = now;
+        prm_.heading_deg = holdheading::wrap360(base_ + sector_ * (360.0 / n_));
+      }
+    }
+    if (ctx_->publish_setpoints && ctx_->heading_speed) {
+      ctx_->heading_speed(cmd.returning ? cmd.heading_deg : prm_.heading_deg,
+        cmd.returning ? cmd.speed_mps : 0.0);
+    }
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      Context::LegStatus & s = ctx_->leg;
+      s = Context::LegStatus{};
+      s.leaf = "SectorScan";
+      s.name = "sector " + std::to_string(sector_ + 1) + "/" + std::to_string(n_);
+      s.state = dwelling_since_ >= 0.0 ? (waiting.empty() ? "LOOKING" : "WAITING FOR COLOURS") :
+        (returning_ ? "RETURNING" : "TURNING");
+      s.why = "heading " + std::to_string(static_cast<int>(std::lround(prm_.heading_deg))) +
+        (waiting.empty() ? std::string() : "; no colour yet: " + waiting);
+      s.have_goal = true;
+      s.goal = anchor_;
+      ++ctx_->leg_seq;
+    }
+    return BT::NodeStatus::RUNNING;
+  }
+
+  void onHalted() override
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    clearLeg(*ctx_);
+  }
+
+private:
+  /// One line for the whole scan: what is mapped now, within range and beyond.
+  void summary(const std::vector<nav::Buoy> & buoys, Vec2 boat, double now)
+  {
+    int near = 0, near_col = 0, far = 0;
+    for (const nav::Buoy & b : buoys) {
+      if (nav::norm(b.p - boat) <= range_m_) {
+        ++near;
+        if (b.state != nav::Beacon::Unknown) {++near_col;}
+      } else {
+        ++far;
+      }
+    }
+    bool entry, exit_seen, exit_guessed;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      entry = ctx_->entry_seen;
+      exit_seen = ctx_->exit_seen;
+      exit_guessed = ctx_->exit_guessed;
+    }
+    RCLCPP_INFO(log(), "sector scan: done after %.0f s: %d/%d buoys within %.0f m coloured, %d "
+      "beyond; ENTRY %s, EXIT %s", now - start_s_, near_col, near, range_m_, far,
+      entry ? "seen" : "NOT SEEN", exit_seen ? "seen" : (exit_guessed ? "guessed" : "NOT SEEN"));
+  }
+
+  holdheading::Params prm_;
+  Vec2 anchor_;
+  std::map<int, std::pair<nav::Beacon, double>> seen_;   ///< id -> colour, since when
+  std::map<int, double> waited_;   ///< id -> seconds in view with no colour, this scan
+  double base_ = 0.0, half_view_deg_ = 36.0, range_m_ = 15.0, min_s_ = 4.0, max_s_ = 15.0;
+  double stable_s_ = 1.0, colour_wait_s_ = 6.0, settle_deg_ = 12.0, turn_timeout_s_ = 15.0;
+  double last_tick_s_ = -1.0;
+  double start_s_ = 0.0, turn_s_ = 0.0, dwelling_since_ = -1.0, stale_s_ = 0.0;
+  int n_ = 6, sector_ = 0;
+  bool returning_ = false, stale_ = false;
+};
+
 /// The next vantage point round the operator's field centre, for NavigateTo target="port":
 /// radius_m from the centre, the first on the line from the centre to where the boat is when
 /// this first runs, the next ones offsets_deg round from it (in order; then round again).
@@ -1396,6 +1670,7 @@ void registerGlobalPassageNodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<AnchorSeen>("AnchorSeen");
   factory.registerNodeType<PassageStarted>("PassageStarted");
   factory.registerNodeType<ScanForBuoys>("ScanForBuoys");
+  factory.registerNodeType<SectorScan>("SectorScan");
   factory.registerNodeType<PickFieldVantage>("PickFieldVantage");
   factory.registerNodeType<FieldKnown>("FieldKnown");
   factory.registerNodeType<FixGiven>("FixGiven");

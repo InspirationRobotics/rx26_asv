@@ -195,6 +195,26 @@ class SimCamera(Node):
         self.declare_parameter("false_blue_buoys", "")
         self.declare_parameter("false_blue_prob", 0.0)
         self.declare_parameter("flash_resolve_m", 0.0)
+        # ROBUSTNESS knobs, on whatever the detector boxed (truth or yolo), applied as the
+        # detections are published. All 0 / empty = off, so every existing run is unchanged:
+        #   miss_prob        each detection dropped with this chance (a missed box)
+        #   label_flip_prob  each detection's label swapped for another buoy label (a wrong,
+        #                    flickering colour: black, blue, red, green)
+        #   pos_jitter_m     extra Gaussian error on each position, forward and sideways (1 sigma)
+        #   ghost_rate       false positives per frame (Poisson mean): a box anywhere in view,
+        #                    3-18 m off, a random label, never in the same place twice
+        #   phantoms         PERSISTENT false positives at fixed course points, "x,y,state/x,y,state"
+        #                    (state as the course file: flash_red, steady_blue, off ...), each seen
+        #                    with phantom_prob per frame while in view (a reflection, a moored boat,
+        #                    another task's buoy): the tracker WILL confirm these
+        #   noise_seed       the noise's own random stream (the same seed, the same noise)
+        self.declare_parameter("miss_prob", 0.0)
+        self.declare_parameter("label_flip_prob", 0.0)
+        self.declare_parameter("pos_jitter_m", 0.0)
+        self.declare_parameter("ghost_rate", 0.0)
+        self.declare_parameter("phantoms", "")
+        self.declare_parameter("phantom_prob", 0.7)
+        self.declare_parameter("noise_seed", 7)
         g = lambda n: self.get_parameter(n).value  # noqa: E731
 
         self.source = str(g("position_source")).lower()
@@ -229,10 +249,13 @@ class SimCamera(Node):
         self.depth_hfov = float(oak.get("depth_hfov_deg", oak["hfov_deg"]))
         self.fx = focal_px(self.W, self.rgb_hfov)
         self.rng = np.random.default_rng(1)
+        self.nrng = np.random.default_rng(int(g("noise_seed")))
+        self.phantoms = self._parse_phantoms(str(g("phantoms")))
 
         self.pose = None                 # geometry_msgs/Pose, world frame
         self.poses = deque(maxlen=600)   # (sim s, Pose), for the depth stamp
         self.stats = dict(frames=0, dets=0, no_depth=0, occluded=0, no_pose=0, skew_max=0.0,
+                          noise_missed=0, noise_flipped=0, noise_ghosts=0, noise_phantoms=0,
                           no_depth_frame=0)
         self._last_frame_t = None
         self._err_path, self._err_f = "", None
@@ -249,6 +272,15 @@ class SimCamera(Node):
         # exception in depth mode (it IS the detections' input), and so is RGB
         # with detector:=yolo.
         self._frame_subs = {"rgb": None, "depth": None}
+        if self._noise_on():
+            self.get_logger().warn(
+                f"PERCEPTION NOISE ON: miss {g('miss_prob')}, label flip {g('label_flip_prob')}, "
+                f"jitter {g('pos_jitter_m')} m, ghosts {g('ghost_rate')}/frame, "
+                f"{len(self.phantoms)} phantom(s) seen {g('phantom_prob')} of frames, "
+                f"seed {g('noise_seed')}")
+            self.create_timer(30.0, lambda: self.get_logger().info(
+                "noise so far: " + ", ".join(f"{k[6:]} {v}" for k, v in self.stats.items()
+                                             if k.startswith("noise_"))))
         self.create_timer(1.0, self._manage_frame_subs)
         if self.source == "truth":
             self.create_timer(1.0 / float(g("rate_hz")), self._tick)
@@ -361,7 +393,80 @@ class SimCamera(Node):
         self.stats["skew_max"] = max(self.stats["skew_max"], skew)
         return best
 
-    def _publish(self, dets):
+    @staticmethod
+    def _parse_phantoms(text):
+        """[(x, y, label)] from "x,y,state/x,y,state" (course ENU metres, course beacon states)."""
+        out = []
+        for item in (t.strip() for t in text.split("/")):
+            if not item:
+                continue
+            x, y, state = (v.strip() for v in item.split(","))
+            if state not in C.LABEL_OF:
+                raise ValueError(f"phantom {item!r}: state must be one of {sorted(C.LABEL_OF)}")
+            out.append((float(x), float(y), C.LABEL_OF[state]))
+        return out
+
+    def _noise_on(self):
+        g = lambda n: self.get_parameter(n).value  # noqa: E731
+        return (float(g("miss_prob")) > 0 or float(g("label_flip_prob")) > 0
+                or float(g("pos_jitter_m")) > 0 or float(g("ghost_rate")) > 0 or self.phantoms)
+
+    def _fake_det(self, x, y, z, label, conf):
+        """A detection of nothing at camera-frame (x, y, z): its box as a buoy there would be."""
+        u = self.W / 2.0 - self.fx * y / x
+        v = self.H / 2.0 - self.fx * z / x
+        hpx, wpx = self.fx * BUOY_H / x, self.fx * BUOY_W / x
+        box = [int(max(0, u - wpx / 2)), int(max(0, v - hpx / 2)),
+               int(min(self.W - 1, u + wpx / 2)), int(min(self.H - 1, v + hpx / 2))]
+        return self._det_msg(label, box, (x, y, z), conf)
+
+    def _perturb(self, dets, pose):
+        """The robustness knobs (see __init__) applied to one frame's detections."""
+        if not self._noise_on():
+            return dets
+        g = lambda n: self.get_parameter(n).value  # noqa: E731
+        miss, flip = float(g("miss_prob")), float(g("label_flip_prob"))
+        jit = float(g("pos_jitter_m"))
+        labels = sorted(set(C.LABEL_OF.values()))
+        out = []
+        for d in dets:
+            if miss > 0 and self.nrng.random() < miss:
+                self.stats["noise_missed"] += 1
+                continue
+            if flip > 0 and self.nrng.random() < flip:
+                others = [lb for lb in labels if lb != d.label]
+                d.label = others[int(self.nrng.integers(len(others)))]
+                self.stats["noise_flipped"] += 1
+            if jit > 0:
+                d.x += float(self.nrng.normal(0, jit))
+                d.y += float(self.nrng.normal(0, jit))
+            out.append(d)
+        rate = float(g("ghost_rate"))
+        half = math.radians(self.rgb_hfov / 2.0 - 3.0)
+        for _ in range(int(self.nrng.poisson(rate)) if rate > 0 else 0):
+            r = float(self.nrng.uniform(3.0, 18.0))
+            b = float(self.nrng.uniform(-half, half))
+            lab = labels[int(self.nrng.integers(len(labels)))]
+            out.append(self._fake_det(r * math.cos(b), r * math.sin(b), BUOY_ZC - self.cam_pos[2],
+                                      lab, float(self.nrng.uniform(0.3, 0.8))))
+            self.stats["noise_ghosts"] += 1
+        if self.phantoms and pose is not None:
+            R = quat_to_R(pose.orientation)
+            t = np.array([pose.position.x, pose.position.y, pose.position.z])
+            rmax = float(g("max_range_m"))
+            for px, py, lab in self.phantoms:
+                pc = self.R_cam.T @ (R.T @ (np.array([px, py, BUOY_ZC]) - t) - self.cam_pos)
+                x, y, z = (float(v) for v in pc)
+                if x < 0.5 or math.hypot(x, y) > rmax or abs(math.atan2(y, x)) > half:
+                    continue
+                if self.nrng.random() < float(g("phantom_prob")):
+                    k = 1.0 + float(self.nrng.normal(0, 0.02))
+                    out.append(self._fake_det(x * k, y * k, z, lab, 0.7))
+                    self.stats["noise_phantoms"] += 1
+        return out
+
+    def _publish(self, dets, pose=None):
+        dets = self._perturb(dets, pose)
         arr = Detection3DArray()
         arr.header.stamp = self.get_clock().now().to_msg()
         arr.header.frame_id = "camera_link"
@@ -375,7 +480,7 @@ class SimCamera(Node):
         if self.pose is not None:
             dets = [self._det_msg(c.label, c.bbox, self._truth_position(c))
                     for c in self._visible(self.pose)]
-        self._publish(dets)
+        self._publish(dets, self.pose)
 
     def _on_depth_detect(self, depth, t):
         self.stats["frames"] += 1
@@ -392,7 +497,7 @@ class SimCamera(Node):
             pos, sample = measured
             dets.append(self._det_msg(c.label, c.bbox, pos))
             self._log_error(t, c, pos, sample)
-        self._publish(dets)
+        self._publish(dets, pose)
         if self._err_f is not None:
             self._err_f.flush()
 
@@ -441,7 +546,7 @@ class SimCamera(Node):
                 measured = self._measure(depth, d.box)
                 if measured is not None:
                     msgs.append(self._det_msg(d.label, d.box, measured[0], d.conf))
-            self._publish(msgs)
+            self._publish(msgs, self._pose_at(t))
             self._score(t, depth, dets)
 
     def _score(self, t, depth, dets):

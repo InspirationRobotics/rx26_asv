@@ -42,6 +42,9 @@ DEFAULTS = {
     "dock_heading_deg": -1.0, "search_first": "",
     "t1_field_lat": 0.0, "t1_field_lon": 0.0, "t1_scan_dwell_s": 5.0, "t1_pause_every_m": 5.0,
     "t1_approach_lat": 0.0, "t1_approach_lon": 0.0, "t1_unknown_range_m": 12.0,
+    "t1_field_radius_m": 0.0, "t1_scan_range_m": 15.0, "t1_cam_hfov_deg": 82.0,
+    "t1_sector_overlap_deg": 15.0, "t1_sector_min_s": 4.0, "t1_sector_max_s": 15.0,
+    "t1_colour_wait_s": 6.0, "t1_centre_tol_m": 2.5,
     "t3_backoff_m": 4.0, "t3_via_lat": 0.0, "t3_via_lon": 0.0,
     **T3_CONTROL,
 }
@@ -52,6 +55,11 @@ _SAID = {
     "t1_scan_dwell_s": "scan dwell {:g} s", "t1_pause_every_m": "pause every {:g} m",
     "t1_approach_lat": "Task 1 approach lat {:.7f}", "t1_approach_lon": "Task 1 approach lon {:.7f}",
     "t1_unknown_range_m": "look at unnamed buoys within {:g} m",
+    "t1_field_radius_m": "field radius {:g} m", "t1_scan_range_m": "scan range {:g} m",
+    "t1_cam_hfov_deg": "camera view {:g}°", "t1_sector_overlap_deg": "sector overlap {:g}°",
+    "t1_sector_min_s": "sector look at least {:g} s", "t1_sector_max_s": "sector look at most {:g} s",
+    "t1_colour_wait_s": "colour wait per buoy {:g} s",
+    "t1_centre_tol_m": "centre tolerance {:g} m",
     "t3_backoff_m": "back off {:g} m", "t3_via_lat": "via lat {:.7f}", "t3_via_lon": "via lon {:.7f}",
 }
 

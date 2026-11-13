@@ -283,6 +283,15 @@ struct Context
     bool approach_set = false;       ///< t1_approach_lat/lon are set (0, 0 = not)
     nav::LatLon approach_ll;         ///< where Task 1 drives to before it scans for the field
     double unknown_range_m = 12.0;   ///< t1_unknown_range_m: stop to look at a colourless buoy this near (0 = never)
+    // Task 1 Core, the centre scan (task1_core_centre.xml; SectorScan)
+    double field_radius_m = 0.0;     ///< t1_field_radius_m: tracks farther than this from the field centre are not field buoys (0 = keep all)
+    double scan_range_m = 15.0;      ///< t1_scan_range_m: a sector waits for the colours of buoys this near the boat
+    double cam_hfov_deg = 82.0;      ///< t1_cam_hfov_deg: the camera's horizontal view, which sizes the sectors
+    double sector_overlap_deg = 15.0;  ///< t1_sector_overlap_deg: each sector overlaps the next by this
+    double sector_min_s = 4.0;       ///< t1_sector_min_s: at least this long on each sector
+    double sector_max_s = 15.0;      ///< t1_sector_max_s: at most this long on each sector
+    double colour_wait_s = 6.0;      ///< t1_colour_wait_s: a buoy uncoloured after this long in view is waited on no more (0 = wait to max)
+    double centre_tol_m = 2.5;       ///< t1_centre_tol_m: the drive to the field centre stops this near it
     t3tune::Values t3 = t3tune::defaults();   ///< Task 3 control, t3_tuning.hpp's knobs, clamped
   };
   Inputs inputs;

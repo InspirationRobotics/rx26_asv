@@ -13,6 +13,10 @@
 #                 once; without it the rig says so and runs truth. SIM_CAMERA_ARGS adds ROS args.
 #     SIM_TRACKER_LIDAR=1  target_tracker fuses LiDAR clusters (use_lidar, open water) instead of
 #                 the checked-in camera-only setting (gz_rig_up.sh says why it matters).
+#     RX26_GPUS   (environment) e.g. "all": a NEW container gets `--gpus all` (needs the NVIDIA
+#                 Container Toolkit in this distro). Then SIM_DETECTOR=yolo can run on the GPU:
+#                 SIM_CAMERA_ARGS="-p yolo_device:=cuda:0" and a CUDA torch in the venv
+#                 (TORCH_INDEX_URL, setup_yolo_venv.sh). An existing container keeps what it had.
 #     RX26_IMAGE  the image a NEW container is made from. Default: crsd-sim:nav2 when
 #                 it exists, else crsd-sim:humble (no Nav2).
 #     --recreate-container
@@ -160,8 +164,10 @@ ensure_container() {
     fi
   fi
   if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
-    echo "  creating $CONTAINER from $IMAGE (--net=host --ipc=host)"
-    docker run -d --name "$CONTAINER" --net=host --ipc=host \
+    local gpus=()
+    [ -n "${RX26_GPUS:-}" ] && gpus=(--gpus "$RX26_GPUS")
+    echo "  creating $CONTAINER from $IMAGE (--net=host --ipc=host${RX26_GPUS:+ --gpus $RX26_GPUS})"
+    docker run -d --name "$CONTAINER" --net=host --ipc=host "${gpus[@]}" \
       -v "$HOME/robotx_ws:/root/robotx_ws" "$IMAGE" sleep infinity >/dev/null \
       || die "docker run $IMAGE (build it: see crusader_sim/docker/crsd-sim.Dockerfile)"
     if [ "$FULL_BUILD" = 1 ]; then

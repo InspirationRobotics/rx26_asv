@@ -1,0 +1,31 @@
+# task1_dense_s4 — a RANDOM DENSE Task 1 field: gen_dense_course.py --seed 4.
+# Neighbours 2-4 m apart (as on the 2026 Singapore field, task1_sg.yaml); the channel runs
+# north: RED east of it (starboard), GREEN west (port). Regenerate rather than hand-edit.
+# Nearest neighbour per buoy: min 2.15 m, mean 2.78 m, max 3.98 m.
+
+name: task1_dense_s4
+origin: {lat: 1.28060, lon: 103.85570}
+draft_m: 0.24
+depth_m: 5.0
+boat_start: {x: -0.44, y: -11.68, yaw_deg: 90.0}
+field_centre: {x: -0.19, y: 10.08}   # the operator's click: the centroid
+staging: {x: -0.44, y: -7.68}   # 6 m off the ENTRY, outside: task1_goal --staging
+tier: core
+
+elements:
+  - {type: robobuoy, name: entry, x: -0.44, y: -1.68, beacon: flash_blue, up_beacon: false}
+  - {type: robobuoy, name: r1, x: 0.44, y: 2.20, beacon: flash_red, up_beacon: false}
+  - {type: robobuoy, name: g1, x: -2.35, y: 2.13, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: r2, x: 1.85, y: 5.05, beacon: flash_red, up_beacon: false}
+  - {type: robobuoy, name: g2, x: -1.75, y: 5.30, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: r3, x: 0.37, y: 8.18, beacon: flash_red, up_beacon: false}
+  - {type: robobuoy, name: g3, x: -1.84, y: 7.45, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: r4, x: -0.04, y: 10.96, beacon: flash_red, up_beacon: false}
+  - {type: robobuoy, name: g4, x: -2.58, y: 11.21, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: r5, x: 1.42, y: 14.85, beacon: flash_red, up_beacon: false}
+  - {type: robobuoy, name: g5, x: -2.34, y: 14.44, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: r6, x: 0.19, y: 17.17, beacon: flash_red, up_beacon: false}
+  - {type: robobuoy, name: g6, x: -2.31, y: 17.71, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: exit, x: -0.52, y: 20.76, beacon: steady_blue, up_beacon: false}
+  - {type: robobuoy, name: black1, x: 2.81, y: 11.13, beacon: "off"}
+  - {type: robobuoy, name: black2, x: 4.02, y: 14.44, beacon: "off"}

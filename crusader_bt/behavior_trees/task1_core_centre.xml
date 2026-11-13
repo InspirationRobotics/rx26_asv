@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- MISSION: Task 1 Core: drive to the field centre, look all round one camera view at a time until the close buoys have colours, then plan and drive the passage. -->
+<!--
+  task1_core_centre.xml - Task 1 Safe Passage at Core tier, mapping the field from its middle:
+  lib/task1_core_centre.xml (Task1CoreCentre) does the work and says how.
+
+  GCS Run panel (bt_runner_node parameters, read at Start):
+    field centre     t1_field_lat / t1_field_lon: where the boat maps the field from. Put it where
+                     the ENTRY can be seen. Blank: the boat looks all round from where it starts.
+    centre tolerance t1_centre_tol_m, 2.5 m: the drive there stops this near it
+    field radius     t1_field_radius_m, 0 = off: tracks farther than this from the centre are not
+                     field buoys (never ENTRY/EXIT, no side; still kept clear of)
+    scan range       t1_scan_range_m, 15 m: each sector waits for the colours of buoys this near
+    camera view      t1_cam_hfov_deg, 82: sizes the sectors (with the overlap, 6 of 60 deg)
+    sector overlap   t1_sector_overlap_deg, 15
+    sector look      t1_sector_min_s 4 s / t1_sector_max_s 15 s
+    pause every, scan dwell, look at unnamed buoys within: the transit's looks, as task1_core_scan
+  ENTRY/EXIT are what the boat sees this run. This root says t1_guess_exit="true", so an EXIT not
+  seen yet is GUESSED (field centre mirrored through the ENTRY) for planning, never reported.
+  Task 4 (Disruptive, task4_leaves.cpp): AvoidInvaders breaks off to keep out of a RoboCommand
+  moving object's way and resumes.
+-->
+<root BTCPP_format="4" main_tree_to_execute="Main" declare_task1="core" declare_task2="none" declare_task3="none" declare_task4="none" t1_guess_exit="true">
+  <include path="lib/task1_core_centre.xml"/>
+
+  <BehaviorTree ID="Main">
+    <ReactiveSequence name="guard_band">
+      <IsAutonomous/>
+      <TaskAttempt token="TASK_SAFE_PASSAGE">
+        <ReactiveSequence name="task1_guard">
+          <ResolveBuoyStates/>
+          <ReportSafePassage min_period_s="1.0"/>
+          <AvoidInvaders>
+            <SubTree ID="Task1CoreCentre" _autoremap="true"/>
+          </AvoidInvaders>
+        </ReactiveSequence>
+      </TaskAttempt>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

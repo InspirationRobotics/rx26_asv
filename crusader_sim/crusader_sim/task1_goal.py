@@ -64,8 +64,12 @@ class Operator(Node):
     the TRUE path (task1_judge) — the tree's own 'passed correctly' is the tree
     grading itself."""
 
-    def __init__(self, judge=None):
+    def __init__(self, judge=None, track_csv=None):
         super().__init__("sim_operator")
+        self.track = open(track_csv, "w", encoding="utf-8") if track_csv else None
+        if self.track:
+            self.track.write("t,x,y,yaw\n")
+            self.create_subscription(Odometry, "/sim/crusader/odometry", self._log_track, 10)
         self.mode_pub = self.create_publisher(String, "/crsd/set_mode", 10)
         self.client = ActionClient(self, RunMission, "/crsd/run_mission")
         self.release_client = self.create_client(Trigger, "/crsd/bt_runner/release_run_start")
@@ -73,6 +77,17 @@ class Operator(Node):
             self.create_subscription(Odometry, "/sim/crusader/odometry",
                                      lambda m: _feed_judge(judge, m), 10)
 
+
+    def _log_track(self, m):
+        """The TRUE path, every 0.2 s, for plot_run.py."""
+        t = time.monotonic()
+        if t - getattr(self, "_track_t", 0.0) < 0.2:
+            return
+        self._track_t = t
+        p, q = m.pose.pose.position, m.pose.pose.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        self.track.write(f"{t:.2f},{p.x:.3f},{p.y:.3f},{yaw:.3f}\n")
+        self.track.flush()
 
     def release_run_start(self, wait_s=20.0):
         """Sim release of bt_runner's RunStart gate (no RoboCommand here). The service answers
@@ -93,6 +108,59 @@ class Operator(Node):
         return False
 
 
+def run_panel_values(course, sets, field_centre=True, staging=False):
+    """The Run-panel values the operator would type for this run, as bt_runner_node parameters:
+    the course's `field_centre` (x, y in its ENU frame) as t1_field_lat/lon unless field_centre is
+    False, then every --set KEY=VALUE (numbers), which wins."""
+    vals = {}
+    fc = course.get("field_centre")
+    if field_centre and fc is not None:
+        lat, lon = C.enu_to_latlon(float(fc["x"]), float(fc["y"]), course["origin"])
+        vals["t1_field_lat"], vals["t1_field_lon"] = lat, lon
+    # explicit, every run: a value an earlier run set (or gcs_bridge restored) must not leak in
+    vals["t1_approach_lat"] = vals["t1_approach_lon"] = 0.0     # unset unless --staging
+    vals["t1_field_radius_m"] = 0.0                            # off unless --set
+    st = course.get("staging")
+    if staging and st is not None:   # task1_core_centre backs out here after its scan
+        lat, lon = C.enu_to_latlon(float(st["x"]), float(st["y"]), course["origin"])
+        vals["t1_approach_lat"], vals["t1_approach_lon"] = lat, lon
+    for kv in sets or []:
+        k, _, v = kv.partition("=")
+        if not k or not v:
+            raise ValueError(f"--set {kv!r}: want KEY=VALUE")
+        vals[k.strip()] = float(v)
+    return vals
+
+
+def set_runner_params(node, values, wait_s=10.0):
+    """bt_runner_node parameters, as the GCS Run panel sets them (read at goal accept)."""
+    from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
+    from rcl_interfaces.srv import SetParameters
+    if not values:
+        return True
+    cli = node.create_client(SetParameters, "/bt_runner_node/set_parameters")
+    if not cli.wait_for_service(timeout_sec=wait_s):
+        print("[operator] no /bt_runner_node/set_parameters: Run-panel values NOT set", flush=True)
+        return False
+    req = SetParameters.Request()
+    for k, v in values.items():
+        req.parameters.append(Parameter(name=k, value=ParameterValue(
+            type=ParameterType.PARAMETER_DOUBLE, double_value=float(v))))
+    fut = cli.call_async(req)
+    rclpy.spin_until_future_complete(node, fut, timeout_sec=5.0)
+    if not fut.done() or fut.result() is None:
+        print("[operator] Run-panel set timed out", flush=True)
+        return False
+    ok = True
+    for (k, v), r in zip(values.items(), fut.result().results):
+        if r.successful:
+            print(f"[operator] Run panel: {k} = {v:.7g}", flush=True)
+        else:
+            ok = False
+            print(f"[operator] Run panel: {k} REFUSED: {r.reason}", flush=True)
+    return ok
+
+
 def _feed_judge(judge, m):
     """True pose -> referee. The heading lets it test contact against the hull
     rectangle: a bow pressed on a buoy is 0.70 m centre to centre, which a
@@ -111,10 +179,19 @@ def main():
                     help="mission timeout, WALL-CLOCK seconds (bt_runner counts its own now(); the "
                          "sim runs on wall clock, no use_sim_time). default: %(default).0f")
     ap.add_argument("--no-judge", action="store_true", help="no referee")
+    ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                    help="a bt_runner_node Run-panel number for this run, e.g. t1_scan_range_m=12 "
+                         "(repeatable). The course's field_centre is set as t1_field_lat/lon first")
+    ap.add_argument("--no-field-centre", action="store_true",
+                    help="do not set the course's field_centre on the Run panel")
+    ap.add_argument("--staging", action="store_true",
+                    help="set the course's `staging` point as the Run panel's t1_approach_lat/lon")
+    ap.add_argument("--track-csv", default="", help="write the boat's TRUE path here (plot_run.py)")
     a = ap.parse_args()
 
     course = C.load(a.course)
     lat, lon = approach_point(course)
+    panel = run_panel_values(course, a.set, field_centre=not a.no_field_centre, staging=a.staging)
 
     ok, why = arm()
     print(f"[operator] {why}", flush=True)
@@ -123,7 +200,7 @@ def main():
 
     rclpy.init()
     judge = None if a.no_judge else Task1Judge(course)
-    op = Operator(judge)
+    op = Operator(judge, a.track_csv or None)
     if not set_mode(op, op.mode_pub, "GUIDED"):
         print("[operator] GUIDED never confirmed on /crsd/fcu_status — is telemetry_bridge up?")
         return 2
@@ -132,7 +209,9 @@ def main():
     if not op.client.wait_for_server(timeout_sec=20.0):
         print("[operator] no /crsd/run_mission server (is bt_runner up?)")
         return 2
-    goal = RunMission.Goal(name=tree_name(a.tree), approach_latitude=lat, approach_longitude=lon,
+    if not set_runner_params(op, panel):
+        return 2
+    goal =RunMission.Goal(name=tree_name(a.tree), approach_latitude=lat, approach_longitude=lon,
                            timeout_s=float(a.timeout_s))
     print(f"[operator] goal: {goal.name}, approach {lat:.7f} {lon:.7f}", flush=True)
 

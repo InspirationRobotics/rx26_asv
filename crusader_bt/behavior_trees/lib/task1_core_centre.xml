@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Task1CoreCentre: Task 1 Safe Passage at Core tier (no aircraft), mapping the field from its
+  MIDDLE. The body only: no guard band, no task token, no Task 4 guard; task1_core_centre.xml
+  wraps it.
+
+  Why from the middle: from outside a dense field (buoys 2-4 m apart) the near buoys hide the far
+  ones in the camera, and from the middle every buoy is at most about half the field away. The
+  operator puts the FIELD CENTRE on the map so that the ENTRY can be seen from it; the
+  tree trusts that and does not search for it.
+
+  From the caller's blackboard (_autoremap; bt_runner_node puts the GCS Run panel's numbers there
+  at Start):
+    t1_field_lat/lon       the field centre (0, 0 = not set: the boat scans from where it starts)
+    t1_centre_tol_m        the drive to the centre stops this near it (2.5 m)
+    t1_cam_hfov_deg        the camera's horizontal view (82 deg): one sector per view
+    t1_sector_overlap_deg  each sector overlaps the next by this (15 deg: 6 sectors of 60)
+    t1_scan_range_m        a sector waits for the colours of buoys this near the boat (15 m)
+    t1_sector_min_s/max_s  each sector's look, at least / at most (4 / 15 s)
+    t1_pause_every_m, t1_scan_dwell_s, t1_unknown_range_m
+                           the transit's looks, as Task1CoreScan: a buoy the scan could not see
+                           (hidden behind another) gets its look on the way (0 = none)
+  and in bt_runner_node itself, t1_field_radius_m: a track farther than that from the field
+  centre is not a field buoy (never ENTRY/EXIT, no side; kept clear of as an obstacle).
+
+    1. TO THE MIDDLE (skipped once a passage plan exists, so a Retry or a Task 4 resume never
+       drives back): NavigateTo the field centre (Nav2 round the buoys when nav_mode is on),
+       stopping t1_centre_tol_m short; a leg blocked 30 s scans from where it got to.
+    2. LOOK ALL ROUND (SectorScan): on the spot, one camera view at a time, clockwise from the
+       bow; each sector until every buoy within t1_scan_range_m in view has a colour that has
+       held 1 s (at least min_s, at most max_s). Then FieldKnown (the ENTRY seen, the EXIT seen
+       or guessed from the centre); not yet: one more lap, then 30 s of WaitForField, then
+       FAILURE.
+    2b. BACK OUT TO STAGING, when the Run panel's Task 1 approach point (t1_approach_lat/lon) is
+       set: NavigateTo it after the scan, so the passage is planned from OUTSIDE the field (put
+       it a few metres off the ENTRY, away from the field). Blank: plan from the scan spot. In
+       the sim, leaving the middle straight for the ENTRY's orbit cut between the first gate's
+       buoys (r1 passed on the wrong side at 0.8 m, task1_dense_s4, 2026-11-13).
+    3. PLAN AND DRIVE (global_passage.hpp, as Task1CoreScan): from where the boat is, out to the
+       ENTRY, round it clockwise, reds to starboard, greens to port, round the EXIT
+       counter-clockwise; sensor replans when what the boat sees on the way changes the plan.
+       Before the EXIT orbit, an EXIT not seen yet (still the guess) is looked for.
+
+  orbit_min_m 1.5, lookahead 2.5: as Task1CoreScan. The ENTRY/EXIT need ~3.4 m to their
+  neighbours to be circled at all (1.0 touched them in the sim, 2026-11-13).
+-->
+<root BTCPP_format="4">
+
+  <BehaviorTree ID="Task1CoreCentre">
+    <Sequence name="core_centre">
+      <SetCameraModel model="buoy" timeout_s="15.0"/>
+
+      <Fallback name="map_the_field">
+        <PassageStarted/>
+        <Sequence name="from_the_middle">
+          <ForceSuccess name="drive_to_centre">
+            <Sequence>
+              <FixGiven lat="{t1_field_lat}" lon="{t1_field_lon}"/>
+              <NavigateTo target="fix" lat="{t1_field_lat}" lon="{t1_field_lon}"
+                          tolerance="{t1_centre_tol_m}" blocked_timeout_s="30.0"/>
+            </Sequence>
+          </ForceSuccess>
+          <RetryUntilSuccessful num_attempts="2">
+            <Sequence name="look_all_round">
+              <SectorScan hfov_deg="{t1_cam_hfov_deg}" overlap_deg="{t1_sector_overlap_deg}"
+                          range_m="{t1_scan_range_m}" min_s="{t1_sector_min_s}"
+                          max_s="{t1_sector_max_s}" colour_wait_s="{t1_colour_wait_s}"/>
+              <FieldKnown/>
+            </Sequence>
+          </RetryUntilSuccessful>
+          <ForceSuccess name="back_out_to_staging">
+            <Sequence>
+              <FixGiven lat="{t1_approach_lat}" lon="{t1_approach_lon}"/>
+              <NavigateTo target="fix" lat="{t1_approach_lat}" lon="{t1_approach_lon}"
+                          tolerance="2.0" blocked_timeout_s="30.0"/>
+            </Sequence>
+          </ForceSuccess>
+        </Sequence>
+        <AlwaysSuccess/>
+      </Fallback>
+
+      <Timeout msec="30000">
+        <WaitForField/>
+      </Timeout>
+
+      <RetryUntilSuccessful num_attempts="4">
+        <Sequence name="passage">
+          <PlanGlobalPassage orbit_min_m="1.5" overshoot_deg="45.0"/>
+          <DrivePlanPhase phase="approach" lookahead_m="2.5" blocked_timeout_s="15.0"
+                          pause_unknown_m="{t1_unknown_range_m}" pause_s="{t1_scan_dwell_s}"/>
+          <DrivePlanPhase phase="entry_orbit" lookahead_m="2.5" blocked_timeout_s="15.0"
+                          pause_unknown_m="{t1_unknown_range_m}" pause_s="{t1_scan_dwell_s}"/>
+          <DrivePlanPhase phase="transit" lookahead_m="2.5" blocked_timeout_s="15.0"
+                          pause_every_m="{t1_pause_every_m}" pause_unknown_m="{t1_unknown_range_m}"
+                          pause_s="{t1_scan_dwell_s}"/>
+          <Fallback name="exit_seen">
+            <AnchorSeen which="exit"/>
+            <ScanForBuoys face="exit" offsets_deg="0,-50,50" dwell_s="{t1_scan_dwell_s}"
+                          until="exit"/>
+          </Fallback>
+          <DrivePlanPhase phase="exit_orbit" lookahead_m="2.5" blocked_timeout_s="15.0"/>
+        </Sequence>
+      </RetryUntilSuccessful>
+    </Sequence>
+  </BehaviorTree>
+
+</root>

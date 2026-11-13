@@ -54,7 +54,10 @@ if [ "$INSIDE" = 0 ]; then
   mkdir -p "$MODELS_DST_HOST" || die "cannot make $MODELS_DST_HOST"
   for f in crusader_det_yolo26n.pt crusader_led_cls.pt summary.json; do
     src="$MODELS_SRC/$f"
-    [ -f "$src" ] || die "$src is missing (set YOLO_MODELS_SRC to the crusader_vision/runs folder)"
+    if [ ! -f "$src" ]; then
+      [ "$f" = summary.json ] && { echo "  (no summary.json: not needed to run)"; continue; }
+      die "$src is missing (set YOLO_MODELS_SRC to the crusader_vision/runs folder)"
+    fi
     cmp -s "$src" "$MODELS_DST_HOST/$f" || cp "$src" "$MODELS_DST_HOST/$f" || die "copy $f"
   done
   ls -l "$MODELS_DST_HOST" | tail -n +2 | awk '{print "  " $5 "  " $9}'
@@ -92,7 +95,9 @@ fi
 echo "  numpy < 2 and the headless opencv first, so nothing below can replace them"
 PIP "numpy>=1.24,<2" "opencv-python-headless>=4.8,<4.12" || die "numpy / opencv"
 echo "  torch + torchvision (CPU wheels, a few hundred MB)"
-PIP torch torchvision --index-url https://download.pytorch.org/whl/cpu \
+# TORCH_INDEX_URL=https://download.pytorch.org/whl/cu124: the CUDA build instead, for a container
+# made with RX26_GPUS=all (gz_sim_up.sh) and SIM_CAMERA_ARGS="-p yolo_device:=cuda:0"
+PIP torch torchvision --index-url "${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}" \
   || die "torch (cpu wheel index unreachable?)"
 echo "  ultralytics $ULTRALYTICS (--no-deps: its opencv-python requirement would pull numpy 2)"
 # the version both .pt files were trained with (their checkpoints say 8.4.144)
