@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <functional>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -40,6 +41,7 @@
 #include "crusader_bt/path_math.hpp"
 #include "crusader_bt/planned_leg.hpp"
 #include "crusader_bt/run_start.hpp"
+#include "crusader_bt/task4_math.hpp"
 
 namespace crusader_bt
 {
@@ -251,6 +253,61 @@ struct Context
   };
   GlobalPassage global_passage;
 
+  // ---- Task 1 Core: where the ENTRY/EXIT in use came from (bt_runner_node refuseLocked) ----
+  /// SEEN by the boat this run, or GIVEN (the GCS MANUAL field): never kept from an earlier run
+  /// (the competition re-deals the light beacons every run), not guessed. The Core scan (ScanForBuoys, AnchorSeen) looks until it has these.
+  bool entry_seen = false;
+  bool exit_seen = false;
+  /// The EXIT in use is a GUESS: the operator's field centre mirrored through the ENTRY. Good
+  /// enough to plan the approach and the transit; replaced the moment the boat sees the EXIT.
+  bool exit_guessed = false;
+  /// This mission lets the runner GUESS the EXIT (the root's t1_guess_exit="true", read at Start;
+  /// only the Core scan trees set it). Off: guessExit does nothing and exit_guessed stays false.
+  bool guess_exit = false;
+  /// Ids of the unnamed buoys (no colour yet) DrivePlanPhase has already stopped to look at
+  /// (pause_unknown_m): one look per buoy per run, across phase restarts, Retry re-plans and a
+  /// Task 4 resume. Cleared at goal start. Under mu.
+  std::set<int> looked_unnamed;
+
+  // ---- the operator's mission inputs: the GCS Run panel -> bt_runner_node, read at Start ----
+  struct Inputs
+  {
+    bool field_set = false;          ///< t1_field_lat/lon are set (0, 0 = not)
+    nav::LatLon field_ll;            ///< the Task 1 buoy field's approximate centre
+    double scan_dwell_s = 5.0;       ///< t1_scan_dwell_s: each look of a scan, each mid-field pause
+    double pause_every_m = 5.0;      ///< t1_pause_every_m: a look every this far along the transit
+    double backoff_m = 4.0;          ///< t3_backoff_m: the docked hold once the fire is out
+    bool via_set = false;            ///< t3_via_lat/lon are set (0, 0 = not)
+    nav::LatLon via_ll;              ///< a point the boat drives through from Task 1 to Task 3
+    bool approach_set = false;       ///< t1_approach_lat/lon are set (0, 0 = not)
+    nav::LatLon approach_ll;         ///< where Task 1 drives to before it scans for the field
+    double unknown_range_m = 12.0;   ///< t1_unknown_range_m: stop to look at a colourless buoy this near (0 = never)
+  };
+  Inputs inputs;
+
+  // ---- Task 4 Disruptive: RoboCommand's moving objects (task4_math.hpp, task4_leaves.cpp) ----
+  //
+  // The runner folds every MovingObjectAlert in (any time, a mission running or not) and
+  // re-reads the settings every second; knownHazards() carries the objects' swept keep-outs;
+  // the AvoidInvaders decorator steps the boat aside and writes what it is doing below.
+  struct Task4
+  {
+    t4::Settings settings;           ///< bt_runner_node t4_*
+    std::vector<t4::Invader> objects;
+    int next_id = 1;
+    int alerts = 0;                  ///< MovingObjectAlerts received since the node started
+    double last_alert_s = -1.0;      ///< now_s of the newest; < 0 = none yet
+    double last_seq = 0.0;           ///< RxCommand.seq of the newest alert applied; 0 = none (a run start, run end or All Clear resets it)
+    std::string state;               ///< AvoidInvaders: CLEAR EVADING WAITING RETURNING RESTORING
+    std::string why;
+    double state_s = -1.0;           ///< now_s when the guard last wrote; < 0 = never this run
+    bool have_target = false;        ///< where the guard is driving (escape or return point)
+    nav::Vec2 target;
+    t4::Assessment last;             ///< the guard's last verdict
+    int evasions = 0;                ///< this run
+  };
+  Task4 task4;
+
   // ---- written by NextWaypoint, read by NavigateTo ----
   nav::Vec2 waypoint;
   bool have_waypoint = false;
@@ -424,7 +481,49 @@ inline bool hazardsPublishable(const Context & c)
 ///
 inline std::vector<path::Hazard> knownHazards(const Context & c)
 {
-  return path::buildHazards(c.buoys, c.obstacles, c.dock, c.dock_min_obs, c.nav);
+  std::vector<path::Hazard> hz =
+    path::buildHazards(c.buoys, c.obstacles, c.dock, c.dock_min_obs, c.nav);
+  // Task 4: every moving object's keep-out, swept along its projected travel (SRC_KEEPOUT)
+  const std::vector<path::Hazard> ko = t4::hazards(c.task4.objects, c.task4.settings, c.now_s);
+  hz.insert(hz.end(), ko.begin(), ko.end());
+  return hz;
+}
+
+/// The operator's Task 1 field centre in the local frame. False without one (or no origin).
+/// CALL UNDER ctx.mu.
+inline bool fieldCentre(const Context & c, nav::Vec2 * p)
+{
+  if (!c.inputs.field_set || !c.origin_set) {return false;}
+  *p = nav::toLocal(c.inputs.field_ll, c.origin);
+  return true;
+}
+
+/// Hazards from Task 4's moving objects only. CALL UNDER ctx.mu.
+inline std::vector<path::Hazard> invaderHazards(const Context & c)
+{
+  return t4::hazards(c.task4.objects, c.task4.settings, c.now_s);
+}
+
+/// A Task 4 keep-out is within near_m of `path` (a point or polyline). A leg blocked by one is
+/// WAITING for a moving object to pass, which must not time the leg out. CALL UNDER ctx.mu.
+inline bool invaderNear(const Context & c, const std::vector<nav::Vec2> & path, double near_m)
+{
+  const std::vector<path::Hazard> ko = invaderHazards(c);
+  if (ko.empty() || path.empty()) {return false;}
+  for (std::size_t i = 0; i < path.size(); ++i) {
+    if (path::minClearance(ko, path[i]) < near_m) {return true;}
+    if (i + 1 < path.size()) {
+      const nav::Vec2 a = path[i], b = path[i + 1];
+      const double len = nav::norm(b - a);
+      const int n = static_cast<int>(len / 0.5);
+      for (int k = 1; k < n; ++k) {
+        if (path::minClearance(ko, a + (b - a) * (static_cast<double>(k) / n)) < near_m) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
 }
 
 // ------------------------------------------------------------------ nav_mode
@@ -494,6 +593,13 @@ inline std::string jsonNum(double v, int digits)
 }
 
 /// `[lat, lon]` of a local point, or `null` when there is none (or no origin).
+/// A position the operator typed: finite, on the globe, and not the 0, 0 a blank GCS field leaves.
+inline bool latLonGiven(double lat, double lon)
+{
+  return std::isfinite(lat) && std::isfinite(lon) && std::fabs(lat) <= 90.0 &&
+         std::fabs(lon) <= 180.0 && !(lat == 0.0 && lon == 0.0);
+}
+
 inline std::string jsonLatLon(const Context & c, bool have, nav::Vec2 p)
 {
   if (!have || !c.origin_set) {return "null";}
@@ -532,7 +638,8 @@ inline std::string safePassageReportJson(const Context & c)
   }
   o += "]";
   if (c.have_entry) {o += ",\"entry_position\":" + jsonPosition(c, c.entry);}
-  if (c.have_exit) {o += ",\"exit_position\":" + jsonPosition(c, c.exitp);}
+  // a GUESSED EXIT (the field centre mirrored through the ENTRY) steers the plan, never the report
+  if (c.have_exit && !c.exit_guessed) {o += ",\"exit_position\":" + jsonPosition(c, c.exitp);}
   return o + "}";
 }
 
@@ -992,6 +1099,8 @@ void registerTask3Nodes(BT::BehaviorTreeFactory & factory);
 void registerFireNodes(BT::BehaviorTreeFactory & factory);
 /// The whole-field Task 1 leaves (src/global_leaves.cpp, lib/common/task1_plan_drive.xml).
 void registerGlobalPassageNodes(BT::BehaviorTreeFactory & factory);
+/// Task 4's AvoidInvaders guard (src/task4_leaves.cpp).
+void registerTask4Nodes(BT::BehaviorTreeFactory & factory);
 
 }  // namespace crusader_bt
 

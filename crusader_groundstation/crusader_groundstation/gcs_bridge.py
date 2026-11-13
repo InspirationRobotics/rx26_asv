@@ -80,7 +80,7 @@ PARAMS = {
     "record_settings_file": "",         # "" = record_settings.json beside record_dir (a bind mount)
     "planner_profiles_dir": "/root/robotx_ws/src/rx26_asv/crusader_sim/config/tuning_profiles",
     "planner_profiles_save_dir": "~/.cache/crusader/planner_profiles",
-    "operator_settings_file": "~/.cache/crusader/operator_settings.json",   # dock heading, search side
+    "operator_settings_file": "~/.cache/crusader/operator_settings.json",   # the Run panel's inputs
 }
 
 LEG_TOPIC = "/crsd/nav/leg_status"      # = bt_runner_node.nav_leg_topic (check_config)
@@ -91,7 +91,6 @@ CLUSTERS_TOPIC = "/crsd/lidar_clusters"
 CAM_STREAMS = {"annotated": "image", "raw": "raw"}      # _op_cam's stream -> its lease key
 MISSION_ACTION = "/crsd/run_mission"
 RELEASE_SERVICE = "/crsd/bt_runner/release_run_start"    # the bench release (bt_runner_node)
-FORGET_ENTRY_EXIT_SERVICE = "/crsd/bt_runner/forget_entry_exit"   # Task 1 memory (bt_runner_node)
 CHECK_TIMEOUT_S = 30.0                  # bt_tree_check loads the whole library: ~1 s, more on a busy Jetson
 STATE_PERIOD_S = 0.5
 EVENT_PERIOD_S = 0.25
@@ -436,7 +435,6 @@ class GcsBridge(Node):
         self._cancel = self.create_client(CancelGoal, MISSION_ACTION + "/_action/cancel_goal")
         self._radio_test = self.create_client(Trigger, "/crsd/radio/send_test")
         self._run_release = self.create_client(Trigger, RELEASE_SERVICE)
-        self._task1_forget = self.create_client(Trigger, FORGET_ENTRY_EXIT_SERVICE)
         self._goal = None
         self._missions_lock = threading.Lock()      # one change to the mission files at a time
         self._nodes_cache = None                    # (bt_tree_check's stamp, its parsed --models)
@@ -810,8 +808,9 @@ class GcsBridge(Node):
             "profiles": [{"id": k, "label": v[0]} for k, v in reg.PROFILES.items()]})
 
     def _watch_bt_runner(self):
-        """A bt_runner_node that is new (first seen, or a new pid) gets the operator's dock
-        heading and search side back if it came up without them. Off the executor thread:
+        """A bt_runner_node that is new (first seen, or a new pid) gets the operator's Run panel
+        inputs (operator_settings.KEYS: dock heading, search side, field centre ...) back if it
+        came up without them. Off the executor thread:
         the parameter calls block on it."""
         node = operator_settings.NODE_PATH
         seen = (node, tuple(self._pids.get(reg.BY_NAME["bt_runner_node"].executable, [])))
@@ -830,16 +829,15 @@ class GcsBridge(Node):
             if not values:
                 return
             ok, msg, _data = self._param_set(node, values, remember=False)
-            said = ", ".join(
-                (f"dock heading {float(v):g}°" if k == "dock_heading_deg" else f"search first {v}")
-                + f" (set {self.settings.set_at(k)})" for k, v in values.items())
+            said = ", ".join(operator_settings.describe(k, v) + f" (set {self.settings.set_at(k)})"
+                             for k, v in values.items())
             if ok:
                 self.get_logger().info(f"restored {said} after bt_runner_node came up without them")
             else:
                 self.get_logger().warn(f"could not restore {said}: {msg}")
         except Exception as e:  # noqa: BLE001 - its param services may not be up yet
             self._bt_seen = None            # the next graph scan tries again
-            self.get_logger().warn(f"dock heading/search side restore: {e}; retrying",
+            self.get_logger().warn(f"Run panel inputs restore: {e}; retrying",
                                    throttle_duration_sec=10.0)
         finally:
             self._restoring = False
@@ -1233,7 +1231,7 @@ class GcsBridge(Node):
         try:
             kept = self.settings.remember(applied)
         except OSError as e:
-            self.get_logger().warn(f"dock heading/search side not saved to "
+            self.get_logger().warn(f"Run panel inputs not saved to "
                                    f"{self.settings.path}: {e}; a bt_runner restart loses them")
             return
         if kept:
@@ -1559,13 +1557,6 @@ class GcsBridge(Node):
         RoboCommand. bt_runner_node refuses when nothing is waiting, and logs the release."""
         self.get_logger().warn("run_release requested from the ground station")
         return self._call_trigger(self._run_release, RELEASE_SERVICE, "bt_runner_node", 3.0)
-
-    def _op_task1_forget(self, conn, req):
-        """Forget the Task 1 ENTRY/EXIT bt_runner_node remembers between runs (the Map tab
-        shows them from /crsd/bt_status's "task1")."""
-        self.get_logger().warn("forget the remembered Task 1 ENTRY/EXIT, from the ground station")
-        return self._call_trigger(self._task1_forget, FORGET_ENTRY_EXIT_SERVICE, "bt_runner_node",
-                                  3.0)
 
     def _op_ocs_tiers(self, conn, req):
         """The operator's tier declaration, sent to the OCS through ocs_client's link. The OCS

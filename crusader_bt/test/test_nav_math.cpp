@@ -12,6 +12,7 @@
 // directions spelled out.
 #include <cmath>
 #include <cstdio>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -588,6 +589,40 @@ int main()
     chk("entry is the FLASHING blue", e != nullptr && e->id == 1);
     chk("exit is the STEADY blue", x != nullptr && x->id == 2);
     chk("an absent state returns null", findBeacon(f, Beacon::Off) == nullptr);
+  }
+
+  // ------------------------------------------------------- unnamedInView
+  {
+    const std::set<int> none;
+    const Vec2 boat{0, 0};
+    std::vector<Buoy> f{{7, {0, 8}, Beacon::Unknown, false}};     // 8 m due north
+    chk("unnamed buoy dead ahead within range -> its id",
+      unnamedInView(f, boat, 0.0, 12.0, 35.0, none) == 7);
+    chk("range_m <= 0 -> none", unnamedInView(f, boat, 0.0, 0.0, 35.0, none) == -1);
+    chk("beyond range -> none", unnamedInView(f, boat, 0.0, 6.0, 35.0, none) == -1);
+    chk("bow pointing east: a buoy to the north is 90 deg off -> none",
+      unnamedInView(f, boat, 90.0, 12.0, 35.0, none) == -1);
+    std::vector<Buoy> e{{8, {8, 0}, Beacon::Unknown, false}};     // 8 m due east
+    chk("bow pointing east sees the buoy to the east",
+      unnamedInView(e, boat, 90.0, 12.0, 35.0, none) == 8);
+    chk("bow pointing north does not see the buoy to the east",
+      unnamedInView(e, boat, 0.0, 12.0, 35.0, none) == -1);
+    std::vector<Buoy> side{{9, {8 * std::sin(40.0 * kDeg), 8 * std::cos(40.0 * kDeg)},
+        Beacon::Unknown, false}};                                   // bearing 040
+    chk("40 deg off the bow is outside +-35 deg",
+      unnamedInView(side, boat, 0.0, 12.0, 35.0, none) == -1);
+    chk("... and inside +-45 deg", unnamedInView(side, boat, 0.0, 12.0, 45.0, none) == 9);
+    chk("already looked at -> none", unnamedInView(f, boat, 0.0, 12.0, 35.0, {7}) == -1);
+    std::vector<Buoy> named{{3, {0, 8}, Beacon::FlashingRed, false}};
+    chk("a buoy with a colour is not unnamed",
+      unnamedInView(named, boat, 0.0, 12.0, 35.0, none) == -1);
+    std::vector<Buoy> two{{1, {0, 10}, Beacon::Unknown, false},
+      {2, {1, 5}, Beacon::Unknown, false}};
+    chk("the nearest of two", unnamedInView(two, boat, 0.0, 12.0, 35.0, none) == 2);
+    chk("the nearest is skipped once looked at",
+      unnamedInView(two, boat, 0.0, 12.0, 35.0, {2}) == 1);
+    chk("an unknown heading -> none",
+      unnamedInView(f, boat, std::nan(""), 12.0, 35.0, none) == -1);
   }
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fails);

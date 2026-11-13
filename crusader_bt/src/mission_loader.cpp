@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <system_error>
 
 #include "ament_index_cpp/get_package_share_directory.hpp"
@@ -86,6 +88,33 @@ MissionFile resolveMission(const MissionDirs & dirs, const std::string & name)
   throw MissionError(
     "no mission '" + name + "' (built-in: " + joinNames(missionNames(dirs.builtin)) +
     "; yours: " + joinNames(missionNames(dirs.user)) + ")");
+}
+
+bool rootFlag(const std::string & path, const std::string & attr)
+{
+  std::ifstream in(path);
+  if (!in) {return false;}
+  std::stringstream ss;
+  ss << in.rdbuf();
+  std::string text = ss.str();
+  // Comments first: a header comment may quote <root ...>.
+  for (std::size_t a = text.find("<!--"); a != std::string::npos; a = text.find("<!--")) {
+    const std::size_t b = text.find("-->", a + 4);
+    text.erase(a, b == std::string::npos ? std::string::npos : b + 3 - a);
+  }
+  std::size_t r = text.find("<root");
+  while (r != std::string::npos && r + 5 < text.size() &&
+    !std::isspace(static_cast<unsigned char>(text[r + 5])) && text[r + 5] != '>')
+  {
+    r = text.find("<root", r + 5);                // <rootx ...> is not the root element
+  }
+  if (r == std::string::npos) {return false;}
+  const std::size_t end = text.find('>', r);
+  const std::string tag = text.substr(r, end == std::string::npos ? end : end - r);
+  for (const char q : {'"', '\''}) {
+    if (tag.find(" " + attr + "=" + q + "true" + q) != std::string::npos) {return true;}
+  }
+  return false;
 }
 
 BT::Tree loadMission(

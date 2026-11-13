@@ -661,11 +661,12 @@ inline std::vector<Vec2> ringPoints(Vec2 c, double r, bool cw, double step_m)
 /// ring keeps max(hard, orbit_clear_m) from every other hazard and encloses nothing (then:
 /// the same, a black buoy or a track allowed inside); failing both, the radius with the most
 /// water on both sides that is still >= hard from everything. A red, green or blue buoy is
-/// never inside an orbit. `others` must already leave out the anchor's own hazards; `buoys`
-/// says which hazard is which colour.
+/// never inside an orbit, except one of the anchor's own colour `own`: there is one ENTRY and
+/// one EXIT, so that is the tracker's second copy of the anchor (kept clear of, may be inside).
+/// `others` must already leave out the anchor's own hazards; `buoys` says which is which colour.
 inline Ring chooseRing(
   Vec2 c, double anchor_r, const std::vector<Hazard> & others, const std::vector<nav::Buoy> & buoys,
-  double r_cap, bool cw, double hard, const Params & p)
+  double r_cap, bool cw, double hard, const Params & p, nav::Beacon own = nav::Beacon::Unknown)
 {
   Ring best;
   best.c = c;
@@ -683,8 +684,8 @@ inline Ring chooseRing(
         if (nav::norm(hc - c) >= r) {continue;}
         const nav::Beacon s = h.source == path::HazardSource::PlanBuoy ? colour_of(h.id) :
           nav::Beacon::Off;
-        if (s == nav::Beacon::FlashingRed || s == nav::Beacon::FlashingGreen ||
-          s == nav::Beacon::FlashingBlue || s == nav::Beacon::SteadyBlue)
+        if (s != own && (s == nav::Beacon::FlashingRed || s == nav::Beacon::FlashingGreen ||
+          s == nav::Beacon::FlashingBlue || s == nav::Beacon::SteadyBlue))
         {
           return true;
         }
@@ -1052,7 +1053,10 @@ inline std::vector<int> wrongSideNow(
 /// Core tier: does a change in the boat's own field matter for the plan in hand? "" = no (the
 /// caller absorbs it); otherwise the reason, for the log. It matters when
 ///   * the ENTRY moved more than move_m before the entry orbit started (phase < EntryOrbit), or
-///     the EXIT before the exit orbit did (phase < ExitOrbit): the rings are round the old spot;
+///     the EXIT before the exit orbit has STARTED (phase <= ExitOrbit: transit's finish() already
+///     sets ExitOrbit, and the EXIT scan between the two is where an EXIT first seen shows up;
+///     the exit orbit is not replanned mid-leg, so this only acts when its leg starts): the
+///     rings are round the old spot;
 ///   * some red/green would now be passed on the wrong side by `judged` (the plan's transit for
 ///     the approach and entry orbit; the track driven plus what is left of the leg in the transit).
 /// Hazards crowding the path are not this function's business (shrunk / blocked).
@@ -1072,7 +1076,7 @@ inline std::string sensorChangeMatters(
   if (phase < Phase::EntryOrbit && moved(pl.entry_c, entry_c)) {
     return "the ENTRY moved " + detail::fmt(nav::norm(entry_c - pl.entry_c), 1) + " m";
   }
-  if (phase < Phase::ExitOrbit && moved(pl.exit_c, exit_c)) {
+  if (phase <= Phase::ExitOrbit && moved(pl.exit_c, exit_c)) {
     return "the EXIT moved " + detail::fmt(nav::norm(exit_c - pl.exit_c), 1) + " m";
   }
   if (phase > Phase::Transit || judged.size() < 2) {return "";}
@@ -1128,12 +1132,14 @@ inline Plan planAt(const Request & rq, const Params & p, const Grid & grid, doub
   const auto others_of = [&](int id) {
       return id >= 0 ? path::exempt(rq.hazards, {id}, false, 1.0) : rq.hazards;
     };
+  // A second track of the anchor's colour stays a hazard the ring keeps clear of (the path
+  // follower checks it too), but may be inside the ring: chooseRing's `own`.
   Ring xr;
   {
     const double cap = std::isfinite(last_along) ?
       (L - last_along) - p.along_margin_m : std::numeric_limits<double>::infinity();
     xr = chooseRing(out.exit_c, anchorRadius(rq.hazards, out.exit_id, p.buoy_radius_m),
-        others_of(out.exit_id), rq.buoys, cap, false, hard, p);
+        others_of(out.exit_id), rq.buoys, cap, false, hard, p, nav::Beacon::SteadyBlue);
     if (!xr.ok) {out.why = "no orbit fits round the EXIT: " + xr.why; return out;}
   }
   out.exit_r = xr.r;
@@ -1143,7 +1149,7 @@ inline Plan planAt(const Request & rq, const Params & p, const Grid & grid, doub
     const double cap = std::isfinite(first_along) ?
       first_along - p.along_margin_m : std::numeric_limits<double>::infinity();
     er = chooseRing(out.entry_c, anchorRadius(rq.hazards, out.entry_id, p.buoy_radius_m),
-        others_of(out.entry_id), rq.buoys, cap, true, hard, p);
+        others_of(out.entry_id), rq.buoys, cap, true, hard, p, nav::Beacon::FlashingBlue);
     if (!er.ok) {out.why = "no orbit fits round the ENTRY: " + er.why; return out;}
     out.entry_r = er.r;
     out.entry_ring = er.pts;

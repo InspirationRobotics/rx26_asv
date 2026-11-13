@@ -607,6 +607,46 @@ static void testNoisyClosedLoop()
   CHECK(worst >= 0.3, "noisy closed loop came within %.2f m of a buoy (%s)", worst, worst_name.c_str());
 }
 
+// The tracker can hold the ENTRY or the EXIT twice (a far sighting ranged long, or one placed
+// mid-turn; the 2026-11-13 sim had copies 3.3-3.6 m off). There is one of each, so a copy may
+// be inside the orbit - but the orbit still keeps clear of it (the path follower checks it).
+static void testTwinAnchors()
+{
+  const path::NavParams np;
+  const gp::Params p = params(np);
+  Field base;
+  for (const Field & f : fields()) {if (f.name == "task1_core") {base = f;}}
+  for (const double d : {0.9, 3.4}) {
+    Field f = base;
+    const int n = static_cast<int>(f.buoys.size());
+    Buoy x2, e2;
+    x2.id = n;
+    x2.p = f.exitp + Vec2{0.0, d};
+    x2.state = Beacon::SteadyBlue;
+    e2.id = n + 1;
+    e2.p = f.entry + Vec2{0.0, d};
+    e2.state = Beacon::FlashingBlue;
+    f.buoys.push_back(x2);
+    f.buoys.push_back(e2);
+    const auto hz = hazardsOf(f, np);
+    const gp::Plan pl = gp::plan(request(f, hz), p);
+    CHECK(pl.ok, "copies %.1f m off the ENTRY/EXIT: no plan (%s)", d, pl.why.c_str());
+    if (!pl.ok) {continue;}
+    std::vector<path::Hazard> copies;
+    for (const path::Hazard & h : hz) {
+      if (h.source == path::HazardSource::PlanBuoy && h.id >= n) {copies.push_back(h);}
+    }
+    double clear = 1e9;
+    for (const auto & leg : pl.legs) {
+      for (const Vec2 & q : leg) {clear = std::min(clear, path::minClearance(copies, q));}
+    }
+    CHECK(clear >= pl.hard_used - 0.05, "copies %.1f m off: the plan passes %.2f m from one",
+      d, clear);
+    std::printf("    copies %.1f m off: entry r %.2f, exit r %.2f, %.2f m from a copy\n", d,
+      pl.entry_r, pl.exit_r, clear);
+  }
+}
+
 int main()
 {
   std::printf("primitives\n");
@@ -617,6 +657,7 @@ int main()
   testReplanFromTransit();
   testRecolourAtCheckpoint();
   testRelaxAndBoxedIn();
+  testTwinAnchors();
   std::printf("closed loop\n");
   testClosedLoop();
   testNoisyClosedLoop();

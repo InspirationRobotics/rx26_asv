@@ -48,7 +48,7 @@ class OperatorSettingsTest(unittest.TestCase):
         live = {"dock_heading_deg": 90.0, "search_first": ""}
         self.assertEqual(store.to_restore(live), {"search_first": "left"})
 
-    def test_only_its_two_keys_are_kept(self):
+    def test_only_its_keys_are_kept(self):
         store = ops.Store(self.path)
         kept = store.remember({"nav_orbit_radius_m": 3.0, "dock_heading_deg": 45.0})
         self.assertEqual(kept, ["dock_heading_deg"])
@@ -76,6 +76,55 @@ class OperatorSettingsTest(unittest.TestCase):
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump({"dock_heading_deg": 60.0, "x": {"value": 1}}, f)   # not {value, set_t}
         self.assertEqual(ops.Store(self.path).to_restore(UNSET), {})
+
+
+    def test_mission_inputs_unset_at_their_defaults(self):
+        self.assertTrue(ops.is_unset("t3_backoff_m", 4.0))
+        self.assertTrue(ops.is_unset("t3_backoff_m", 4))              # a browser's 4 is a double's 4.0
+        self.assertFalse(ops.is_unset("t3_backoff_m", 5.0))
+        self.assertTrue(ops.is_unset("t1_field_lat", 0.0))
+        self.assertFalse(ops.is_unset("t1_field_lat", 1.2805))
+        self.assertFalse(ops.is_unset("t1_pause_every_m", 0.0))       # 0 = no pauses, a choice
+        self.assertTrue(ops.is_unset("t1_pause_every_m", 5.0))
+
+    def test_mission_inputs_come_back_after_a_restart(self):
+        ops.Store(self.path).remember({"t3_backoff_m": 5.0, "t1_field_lat": 1.2805,
+                                       "t1_field_lon": 103.8557, "t1_pause_every_m": 0.0})
+        live = {"t3_backoff_m": 4.0, "t1_field_lat": 0.0, "t1_field_lon": 0.0,
+                "t1_pause_every_m": 5.0, "t3_via_lat": 0.0}
+        self.assertEqual(ops.Store(self.path).to_restore(live),
+                         {"t3_backoff_m": 5.0, "t1_field_lat": 1.2805, "t1_field_lon": 103.8557,
+                          "t1_pause_every_m": 0.0})
+
+    def test_task1_approach_and_unknown_range(self):
+        self.assertTrue(ops.is_unset("t1_approach_lat", 0.0))
+        self.assertFalse(ops.is_unset("t1_approach_lon", 103.8557))
+        self.assertTrue(ops.is_unset("t1_unknown_range_m", 12))       # a browser's 12 is a double's 12.0
+        self.assertFalse(ops.is_unset("t1_unknown_range_m", 0.0))     # 0 = never look, a choice
+        ops.Store(self.path).remember({"t1_approach_lat": 1.2805, "t1_approach_lon": 103.8557,
+                                       "t1_unknown_range_m": 0.0})
+        live = {"t1_approach_lat": 0.0, "t1_approach_lon": 0.0, "t1_unknown_range_m": 12.0}
+        self.assertEqual(ops.Store(self.path).to_restore(live),
+                         {"t1_approach_lat": 1.2805, "t1_approach_lon": 103.8557,
+                          "t1_unknown_range_m": 0.0})
+
+    def test_task1_approach_and_unknown_range_never_overwrite_a_set_value(self):
+        ops.Store(self.path).remember({"t1_approach_lat": 1.2805, "t1_unknown_range_m": 20.0})
+        live = {"t1_approach_lat": 1.3, "t1_unknown_range_m": 5.0}
+        self.assertEqual(ops.Store(self.path).to_restore(live), {})
+
+    def test_task4_settings_are_never_kept(self):
+        store = ops.Store(self.path)
+        self.assertEqual(store.remember({"t4_enabled": False, "t4_margin_m": 6.0}), [])
+        self.assertEqual(store.to_restore({"t4_enabled": True, "t4_margin_m": 3.0}), {})
+
+    def test_describe(self):
+        self.assertEqual(ops.describe("t3_backoff_m", 5), "back off 5 m")
+        self.assertEqual(ops.describe("dock_heading_deg", 60.0), "dock heading 60°")
+        self.assertEqual(ops.describe("search_first", "left"), "search first left")
+        self.assertEqual(ops.describe("t1_field_lat", 1.28), "field centre lat 1.2800000")
+        self.assertEqual(ops.describe("t1_approach_lon", 103.8), "Task 1 approach lon 103.8000000")
+        self.assertEqual(ops.describe("t1_unknown_range_m", 12.0), "look at unnamed buoys within 12 m")
 
 
 if __name__ == "__main__":

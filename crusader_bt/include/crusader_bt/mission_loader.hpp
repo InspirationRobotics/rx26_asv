@@ -57,6 +57,11 @@ BT::Tree loadMission(
   BT::BehaviorTreeFactory & factory, const MissionDirs & dirs, const MissionFile & file,
   BT::Blackboard::Ptr blackboard);
 
+/// True when the mission file's <root> element carries `attr="true"` (the way the root's
+/// declare_task1..4 are read by the ground station): a switch a mission turns on for itself,
+/// e.g. t1_guess_exit. False for a missing file, a missing attribute or any other value.
+bool rootFlag(const std::string & path, const std::string & attr);
+
 /// The stems of the .xml files directly in `dir`, sorted; empty when there is no such directory.
 std::vector<std::string> missionNames(const std::string & dir);
 

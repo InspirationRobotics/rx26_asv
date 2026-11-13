@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- MISSION: Task 1 Core (scan, plan, pass), then Task 3 (dock, fire, back off), keeping out of Task 4's moving object throughout. -->
+<!--
+  mission_t1_t3_t4.xml - one run: Task 1 Core, the way to the dock, Task 3; Task 4 Disruptive
+  all along. Declares T1 core, T2 none, T3 disruptive, T4 disruptive.
+
+    TASK 1 (TASK_SAFE_PASSAGE, GUIDED): lib/task1_core_scan.xml - drive to the Task 1 approach
+       point when one is set, scan for the field, plan and drive the passage, pausing to look
+       (every t1_pause_every_m, and at buoys with no colour yet). ENTRY/EXIT are never
+       remembered between runs; the root's t1_guess_exit="true" lets an unseen EXIT be guessed. It gives up (no field found, a phase blocked four
+       times) -> on to Task 3 all the same, while the boat is still in GUIDED. Out of GUIDED
+       during Task 1 (the pilot) ends the run, as task1_core_scan.xml does.
+    THE WAY TO THE DOCK (in Task 3's attempt, GUIDED; skipped when MANUAL, as Task 3's own leg):
+       1. the operator's VIA point, when set, rounding the field on the way when the straight
+          line would cross it;
+       2. ROUND THE FIELD: when the straight line from the boat to the APPROACH POINT passes
+          closer than 3 m to a known buoy, fence or the dock, first to the point beside it that
+          clears it by the shortest way (PickDetour). With nav_mode off every leg is a straight
+          guarded one, and a straight line through the field holds at the first buoy and fails.
+       A leg blocked 30 s is given up and the next one tried.
+    TASK 3 (TASK_COORDINATED_LOGISTICS): lib/task3_scan_fire.xml, as task3_scan_fire.xml:
+       GUIDED to the approach point, MANUAL, find the GREEN bay, dock, report, and the fire loop:
+       spray the RED window until GREEN, back off to t3_backoff_m, report, decode, report.
+    TASK 4: AvoidInvaders round each task. A RoboCommand moving object whose projected travel
+       comes inside its keep-out (radius, else t4_radius_m, plus t4_margin_m) of the boat: the
+       task is halted, the boat goes GUIDED and gets out of the way, comes back, restores the
+       mode, and the task resumes where it can (Task 1 re-plans and skips finished phases; the
+       way to the dock goes on from the leg it was on; Task 3 keeps its bay). Its keep-out is
+       also a hazard every leg and plan avoids or waits out (bt_runner_node).
+
+  GCS Run panel (bt_runner_node parameters; the Task 1/3 ones are read at Start, t4_* live):
+    approach point   approach lat/lon: a few metres in front of the dock (Task 3 needs it)
+    dock heading, slide first                      (Task 3, as before)
+    field centre     t1_field_lat/lon: the rough middle of the Task 1 buoy field
+    scan dwell       t1_scan_dwell_s (5 s)     pause every   t1_pause_every_m (5 m, 0 = none)
+    Task 1 approach  t1_approach_lat/lon: drive there first, then scan for the field (blank = scan
+                     from where the boat is)
+    unknown range    t1_unknown_range_m (12 m, 0 = never): stop to look at a buoy with no colour
+                     yet that comes this near ahead during the Task 1 drive
+    back off         t3_backoff_m (4 m)        via point     t3_via_lat/lon (blank = none)
+    Task 4           t4_enabled, t4_margin_m (3 m), t4_radius_m (10 m), t4_horizon_s (40 s)
+  Run timeout: leave the Run panel's at 0 (the boat's default_timeout_s 0 = no limit, only the
+  pilot ends a run); a timeout typed there must cover both tasks.
+-->
+<root BTCPP_format="4" main_tree_to_execute="Main" declare_task1="core" declare_task2="none" declare_task3="disruptive" declare_task4="disruptive" t1_guess_exit="true">
+  <include path="lib/task1_core_scan.xml"/>
+  <include path="lib/task3_scan_fire.xml"/>
+
+  <BehaviorTree ID="Main">
+    <!-- MANUAL is let through: Task 3 drives the sticks itself. HOLD, or the autonomy-drop
+         latch (SC) in MANUAL, ends the run, also while a Task 4 escape has a task halted. -->
+    <ReactiveSequence name="guard_band">
+      <IsAutonomous manual="true"/>
+      <Sequence name="mission">
+
+        <Fallback name="task1">
+          <TaskAttempt token="TASK_SAFE_PASSAGE">
+            <ReactiveSequence name="task1_guard">
+              <IsAutonomous/>
+              <ResolveBuoyStates/>
+              <ReportSafePassage min_period_s="1.0"/>
+              <AvoidInvaders>
+                <SubTree ID="Task1CoreScan" _autoremap="true"/>
+              </AvoidInvaders>
+            </ReactiveSequence>
+          </TaskAttempt>
+          <!-- Task 1 gave up while the boat is still autonomous: on to Task 3 -->
+          <IsAutonomous/>
+        </Fallback>
+
+        <TaskAttempt token="TASK_COORDINATED_LOGISTICS">
+          <AvoidInvaders>
+            <!-- with memory: a Task 4 escape resumes the step it broke off, not the way to the dock again -->
+            <SequenceWithMemory name="task3">
+              <ReactiveFallback name="to_the_dock">
+                <ModeIs mode="MANUAL"/>
+                <ReactiveSequence name="guided">
+                  <IsAutonomous/>
+                  <NotDropped/>
+                  <SequenceWithMemory name="legs">
+                    <ForceSuccess name="operator_via">
+                      <Sequence>
+                        <FixGiven lat="{t3_via_lat}" lon="{t3_via_lon}"/>
+                        <ForceSuccess>
+                          <Sequence>
+                            <PickDetour target="fix" lat="{t3_via_lat}" lon="{t3_via_lon}" via="{via}"/>
+                            <NavigateTo target="port" goal="{via}" tolerance="3.0"
+                                        blocked_timeout_s="30.0"/>
+                          </Sequence>
+                        </ForceSuccess>
+                        <NavigateTo target="fix" lat="{t3_via_lat}" lon="{t3_via_lon}" tolerance="3.0"
+                                    blocked_timeout_s="30.0"/>
+                      </Sequence>
+                    </ForceSuccess>
+                    <ForceSuccess name="round_the_field">
+                      <Sequence>
+                        <PickDetour target="approach" margin_m="3.0" via="{via}"/>
+                        <NavigateTo target="port" goal="{via}" tolerance="3.0"
+                                    blocked_timeout_s="30.0"/>
+                      </Sequence>
+                    </ForceSuccess>
+                  </SequenceWithMemory>
+                </ReactiveSequence>
+              </ReactiveFallback>
+              <SubTree ID="Task3ScanFire" _autoremap="true"/>
+            </SequenceWithMemory>
+          </AvoidInvaders>
+        </TaskAttempt>
+
+      </Sequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

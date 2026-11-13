@@ -24,9 +24,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <ctime>
-#include <filesystem>
-#include <fstream>
 #include <memory>
 #include <mutex>
 #include <algorithm>
@@ -66,7 +63,6 @@
 
 #include "crusader_bt/context.hpp"
 #include "crusader_bt/dock_math.hpp"
-#include "crusader_bt/task1_memory.hpp"
 #include "crusader_bt/nav_math.hpp"
 #include "crusader_bt/mission_loader.hpp"
 #include "crusader_bt/nav_params.hpp"
@@ -78,6 +74,52 @@ namespace crusader_bt
 using RunMission = crusader_msgs::action::RunMission;
 using GoalHandle = rclcpp_action::ServerGoalHandle<RunMission>;
 using namespace std::chrono_literals;
+
+/// Where the Core tier's ENTRY or EXIT in use comes from this run. Never from an earlier run:
+/// the competition re-deals the light beacons, so nothing about them is kept between runs.
+enum class AnchorSource {None, Plan, Seen};
+
+static const char * sourceName(AnchorSource s)
+{
+  switch (s) {
+    case AnchorSource::Plan: return "plan";
+    case AnchorSource::Seen: return "seen";
+    case AnchorSource::None: break;
+  }
+  return "none";
+}
+
+/// A plan position that means something: finite and not the (0, 0) a cleared or partial
+/// PassagePlan carries for "no point".
+static bool validLatLon(double lat, double lon)
+{
+  return std::isfinite(lat) && std::isfinite(lon) && std::fabs(lat) <= 90.0 &&
+         std::fabs(lon) <= 180.0 && !(lat == 0.0 && lon == 0.0);
+}
+
+/// Does the plan hold any side rule? None = Core tier (the plan gives only the anchors).
+static bool planHasSides(const std::vector<nav::PlanBuoy> & plan)
+{
+  for (const nav::PlanBuoy & b : plan) {
+    if (nav::isSideConstrained(b.state)) {return true;}
+  }
+  return false;
+}
+
+struct Anchor
+{
+  bool have = false;
+  nav::Vec2 p{};
+  AnchorSource src = AnchorSource::None;
+};
+
+/// The point used for one beacon: the plan's, else the one the boat sees now.
+static Anchor pickAnchor(bool plan_ok, nav::Vec2 plan_p, const nav::Buoy * seen)
+{
+  if (plan_ok) {return {true, plan_p, AnchorSource::Plan};}
+  if (seen != nullptr) {return {true, seen->p, AnchorSource::Seen};}
+  return {};
+}
 
 /// The idle task token. TASK_UNKNOWN is never sent: RoboCommand reads it as "unparsed".
 static constexpr const char * kTaskNone = "TASK_NONE";
@@ -108,6 +150,23 @@ public:
     default_timeout_s_ = declare_parameter<double>("default_timeout_s", 600.0);
     declare_parameter<double>("dock_heading_deg", -1.0);   // live: the GCS sets it, read per goal
     declare_parameter<std::string>("search_first", "");    // live, per goal: left | right | "" = the tree's
+    // The operator's mission inputs (the GCS Run panel sets them; gcs_bridge keeps them across a
+    // restart of this node). Read at every Start, like the two above.
+    declare_parameter<double>("t1_field_lat", 0.0);        // Task 1 field's rough centre; 0, 0 = unset
+    declare_parameter<double>("t1_field_lon", 0.0);
+    declare_parameter<double>("t1_scan_dwell_s", 5.0);     // each look of a scan, each mid-field pause
+    declare_parameter<double>("t1_pause_every_m", 5.0);    // a look every this far along the transit; 0 = none
+    declare_parameter<double>("t1_approach_lat", 0.0);    // Task 1: drive here, then scan; 0, 0 = scan from where the boat is
+    declare_parameter<double>("t1_approach_lon", 0.0);
+    declare_parameter<double>("t1_unknown_range_m", 12.0); // stop to look at a buoy with no colour this near ahead; 0 = never
+    declare_parameter<double>("t3_backoff_m", 4.0);        // the docked hold once the fire is out
+    declare_parameter<double>("t3_via_lat", 0.0);          // Task 1 -> Task 3 through here; 0, 0 = straight
+    declare_parameter<double>("t3_via_lon", 0.0);
+    // Task 4 Disruptive (task4_math.hpp): re-read every second, so a change applies at once.
+    declare_parameter<bool>("t4_enabled", true);           // false: alerts shown, never acted on
+    declare_parameter<double>("t4_margin_m", 3.0);         // kept beyond the object's keep-out
+    declare_parameter<double>("t4_radius_m", 10.0);        // keep-out when an alert has none (3.3.5)
+    declare_parameter<double>("t4_horizon_s", 40.0);       // its projected travel this far ahead
     mode_grace_s_ = declare_parameter<double>("mode_grace_s", 3.0);
     // Backstop for the RunStart gate: a RunStart older than this never opens it, whatever the
     // OCS did or did not clear. An hour covers a long wait for the previous team's run.
@@ -290,30 +349,11 @@ public:
           res->message = "no mission is waiting for RunStart";
         }
       });
-    // Task 1 Core between runs (task1_memory.hpp): every mission start makes target_tracker
-    // forget the buoys' COLOURS (the competition re-deals red and green), and the ENTRY/EXIT
-    // the boat was sure of are kept in a file, used when it cannot see them on a later run.
-    memory_file_ = declare_parameter<std::string>(
-      "task1_memory_file", "/root/robotx_ws/state/task1_entry_exit.txt");
-    const int64_t min_hits = declare_parameter<int64_t>("task1_remember_min_hits", 30);
-    remember_min_hits_ = static_cast<int>(min_hits);
+    // Task 1 between runs: every mission start makes target_tracker forget the buoys' COLOURS
+    // (the competition re-deals the light beacons, red and green, ENTRY and EXIT, every run).
+    // Nothing about ENTRY/EXIT is kept: they come from what the boat sees this run.
     forget_colours_pub_ =
       create_publisher<std_msgs::msg::String>("/crsd/world_model/forget_colours", 10);
-    forget_memory_srv_ = create_service<std_srvs::srv::Trigger>(
-      "/crsd/bt_runner/forget_entry_exit",
-      [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
-      std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-        std::lock_guard<std::mutex> lk(ctx_->mu);
-        mem_entry_ = mem_exit_ = t1mem::Remembered{};
-        std::error_code ec;
-        std::filesystem::remove(memory_file_, ec);
-        refuseLocked();
-        res->success = true;
-        res->message = "forgot the remembered ENTRY/EXIT";
-        RCLCPP_WARN(get_logger(), "remembered ENTRY/EXIT forgotten (%s removed)",
-          memory_file_.c_str());
-      });
-    loadMemory();
     idle_timer_ = create_wall_timer(1s, [this] {if (!busy_) {publishIdle();}});
 
     RCLCPP_INFO(
@@ -511,7 +551,7 @@ private:
     // A plan with NO red or green (the ground station's MANUAL field holding only ENTRY/EXIT,
     // or a cleared one) is CORE TIER too: it gives at most the anchors, and the reds and greens
     // are the boat's own, with the sensor replans (global_leaves coreMode: plan empty).
-    if (!t1mem::hasSides(plan)) {plan.clear();}
+    if (!planHasSides(plan)) {plan.clear();}
     ctx_->plan = plan;
 
     // NO PLAN MEANS CORE TIER, and the tracker is the only source. fusePassage()
@@ -533,9 +573,9 @@ private:
 
     // The plan's ENTRY/EXIT, where it has them: (0, 0) is a cleared plan's "no point".
     const bool plan_e = plan_raw_ &&
-      t1mem::validLatLon(plan_raw_->entry_latitude, plan_raw_->entry_longitude);
+      validLatLon(plan_raw_->entry_latitude, plan_raw_->entry_longitude);
     const bool plan_x = plan_raw_ &&
-      t1mem::validLatLon(plan_raw_->exit_latitude, plan_raw_->exit_longitude);
+      validLatLon(plan_raw_->exit_latitude, plan_raw_->exit_longitude);
     const nav::Vec2 pe = plan_e ?
       nav::toLocal({plan_raw_->entry_latitude, plan_raw_->entry_longitude}, ctx_->origin) :
       nav::Vec2{};
@@ -546,98 +586,73 @@ private:
       // ENTRY and EXIT come from the PLAN above Core tier. Not from findBeacon
       // over what the boat can see: the EXIT sits ~92 m out in a full field,
       // far past the camera, and a transit that waits to SEE it never starts.
-      useAnchor("ENTRY", t1mem::pick(plan_e, pe, nullptr, {}, ctx_->origin), ctx_->entry,
-        ctx_->have_entry, entry_src_);
-      useAnchor("EXIT", t1mem::pick(plan_x, px, nullptr, {}, ctx_->origin), ctx_->exitp,
-        ctx_->have_exit, exit_src_);
+      useAnchor("ENTRY", pickAnchor(plan_e, pe, nullptr), ctx_->entry, ctx_->have_entry,
+        entry_src_);
+      useAnchor("EXIT", pickAnchor(plan_x, px, nullptr), ctx_->exitp, ctx_->have_exit, exit_src_);
+      ctx_->entry_seen = ctx_->have_entry;
+      ctx_->exit_seen = ctx_->have_exit;
+      ctx_->exit_guessed = false;
       return;
     }
-    // Core tier: the MANUAL field's points first, then the boat's own eyes, then what it
-    // remembered from an earlier run (t1mem::pick says the order).
+    // Core tier: the MANUAL field's points first, then the boat's own eyes (pickAnchor says the
+    // order).
     // By EVIDENCE and sticky (nav::bestBeacon), not the first in the list: labels flicker, and
     // on the real course unlit buoys were often called blue.
     const nav::Buoy * e = chooseBeacon("ENTRY", nav::Beacon::FlashingBlue, entry_track_id_,
         exit_track_id_);
     const nav::Buoy * x = chooseBeacon("EXIT", nav::Beacon::SteadyBlue, exit_track_id_,
         entry_track_id_);
-    remember("ENTRY", e, mem_entry_);
-    remember("EXIT", x, mem_exit_);
-    useAnchor("ENTRY", t1mem::pick(plan_e, pe, e, mem_entry_, ctx_->origin), ctx_->entry,
-      ctx_->have_entry, entry_src_);
-    useAnchor("EXIT", t1mem::pick(plan_x, px, x, mem_exit_, ctx_->origin), ctx_->exitp,
-      ctx_->have_exit, exit_src_);
+    useAnchor("ENTRY", pickAnchor(plan_e, pe, e), ctx_->entry, ctx_->have_entry, entry_src_);
+    useAnchor("EXIT", pickAnchor(plan_x, px, x), ctx_->exitp, ctx_->have_exit, exit_src_);
+    // Plan or seen are the only sources, so a point in use is a point seen or given.
+    ctx_->entry_seen = ctx_->have_entry;
+    ctx_->exit_seen = ctx_->have_exit;
+    guessExit();
+  }
+
+  /// Core tier, no EXIT known (not seen or given) but the ENTRY and the operator's
+  /// field centre are: GUESS it at the far end of the field, the centre mirrored through the
+  /// ENTRY (on the 2026-11-10 field that lands 1.1 m from the real EXIT). Only to plan the approach
+  /// and the transit with: the boat's own sighting replaces it, and an EXIT that moves before its
+  /// orbit re-plans. Only for a mission whose root says t1_guess_exit="true" (ctx_->guess_exit);
+  /// any other tree plans round what it has seen or been given. CALL WITH ctx_->mu HELD.
+  void guessExit()
+  {
+    const bool was = ctx_->exit_guessed;
+    ctx_->exit_guessed = false;
+    nav::Vec2 c;
+    if (ctx_->guess_exit && !ctx_->have_exit && ctx_->have_entry && fieldCentre(*ctx_, &c)) {
+      const nav::Vec2 g = c + (c - ctx_->entry);
+      if (nav::norm(g - ctx_->entry) >= 4.0) {      // an ENTRY at the centre gives no axis
+        ctx_->exitp = g;
+        ctx_->have_exit = true;
+        ctx_->exit_guessed = true;
+      }
+    }
+    if (ctx_->exit_guessed != was) {
+      if (ctx_->exit_guessed) {
+        const nav::LatLon ll = nav::toLatLon(ctx_->exitp, ctx_->origin);
+        RCLCPP_INFO(get_logger(), "EXIT GUESSED at %.7f, %.7f (the field centre mirrored through "
+          "the ENTRY) until the boat sees it", ll.lat, ll.lon);
+      } else {
+        RCLCPP_INFO(get_logger(), "EXIT no longer guessed (%s)", ctx_->have_exit ?
+          sourceName(exit_src_) : "no ENTRY or field centre");
+      }
+    }
   }
 
   /// Set one of the context's ENTRY/EXIT and log where it now comes from, once per change.
   /// CALL WITH ctx_->mu HELD.
-  void useAnchor(const char * name, const t1mem::Anchor & a, nav::Vec2 & p, bool & have,
-    t1mem::Source & src)
+  void useAnchor(const char * name, const Anchor & a, nav::Vec2 & p, bool & have,
+    AnchorSource & src)
   {
     have = a.have;
     if (a.have) {p = a.p;}
     if (a.src != src) {
-      RCLCPP_INFO(get_logger(), "%s from %s (was %s)%s", name, t1mem::sourceName(a.src),
-        t1mem::sourceName(src), a.have ? "" : ": none known yet");
+      RCLCPP_INFO(get_logger(), "%s from %s (was %s)%s", name, sourceName(a.src),
+        sourceName(src), a.have ? "" : ": none known yet");
       src = a.src;
     }
-  }
-
-  /// Keep a confident sighting of the ENTRY or EXIT for later runs: in memory and in
-  /// task1_memory_file. A refinement is written at most every 5 s. CALL WITH ctx_->mu HELD.
-  void remember(const char * name, const nav::Buoy * seen, t1mem::Remembered & mem)
-  {
-    if (!t1mem::shouldRemember(seen, mem, ctx_->origin, remember_min_hits_, 0.5)) {return;}
-    const double t = nowS();
-    if (mem.have && t - last_mem_write_ < 5.0) {return;}
-    const bool first = !mem.have;
-    char stamp[32] = "-";
-    const std::time_t wall = std::time(nullptr);
-    std::strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%S", std::localtime(&wall));
-    mem = t1mem::Remembered{true, nav::toLatLon(seen->p, ctx_->origin), seen->hits, stamp};
-    last_mem_write_ = t;
-    saveMemory();
-    RCLCPP_INFO(get_logger(), "%s %s at %.8f, %.8f (track %d, %d hits)", name,
-      first ? "remembered" : "remembered position refined", mem.ll.lat, mem.ll.lon, seen->id,
-      seen->hits);
-  }
-
-  /// task1_memory_file, written whole through a temporary so a crash never leaves half of it.
-  void saveMemory()
-  {
-    std::error_code ec;
-    const std::filesystem::path f(memory_file_);
-    if (f.has_parent_path()) {std::filesystem::create_directories(f.parent_path(), ec);}
-    const std::string tmp = memory_file_ + ".tmp";
-    {
-      std::ofstream out(tmp, std::ios::trunc);
-      out << t1mem::serialize(mem_entry_, mem_exit_);
-      if (!out) {
-        RCLCPP_WARN(get_logger(), "could not write %s: the ENTRY/EXIT is remembered only "
-          "until bt_runner_node restarts", tmp.c_str());
-        return;
-      }
-    }
-    std::filesystem::rename(tmp, memory_file_, ec);
-    if (ec) {
-      RCLCPP_WARN(get_logger(), "could not save %s: %s", memory_file_.c_str(),
-        ec.message().c_str());
-    }
-  }
-
-  void loadMemory()
-  {
-    std::ifstream in(memory_file_);
-    if (!in) {
-      RCLCPP_INFO(get_logger(), "no remembered Task 1 ENTRY/EXIT (%s)", memory_file_.c_str());
-      return;
-    }
-    std::stringstream text;
-    text << in.rdbuf();
-    std::lock_guard<std::mutex> lk(ctx_->mu);
-    t1mem::parse(text.str(), mem_entry_, mem_exit_);
-    RCLCPP_INFO(get_logger(), "remembered from %s: ENTRY %s, EXIT %s", memory_file_.c_str(),
-      mem_entry_.have ? mem_entry_.saved.c_str() : "none",
-      mem_exit_.have ? mem_exit_.saved.c_str() : "none");
   }
 
   /// A new run: the competition re-deals red and green, so target_tracker forgets every buoy's
@@ -653,14 +668,17 @@ private:
       mission.c_str());
   }
 
-  /// The Core tier's ENTRY/EXIT for /crsd/bt_status: where each comes from now and what is
-  /// remembered between runs (the ground station's Map tab shows both). Takes ctx_->mu.
+  /// The Core tier's ENTRY/EXIT for /crsd/bt_status: where each comes from now (seen, guessed
+  /// or none; the ground station's Map tab shows them). Takes ctx_->mu.
   std::string task1Json()
   {
     std::lock_guard<std::mutex> lk(ctx_->mu);
-    return std::string("{\"entry_src\":\"") + t1mem::sourceName(entry_src_) +
-      "\",\"exit_src\":\"" + t1mem::sourceName(exit_src_) + "\",\"mem_entry\":" +
-      t1mem::json(mem_entry_) + ",\"mem_exit\":" + t1mem::json(mem_exit_) + "}";
+    nav::Vec2 fc;
+    const bool have_fc = fieldCentre(*ctx_, &fc);
+    return std::string("{\"entry_src\":\"") + sourceName(entry_src_) +
+      "\",\"exit_src\":\"" + (ctx_->exit_guessed ? "guessed" : sourceName(exit_src_)) +
+      "\",\"exit_guess\":" + jsonLatLon(*ctx_, ctx_->exit_guessed, ctx_->exitp) +
+      ",\"field_centre\":" + jsonLatLon(*ctx_, have_fc, fc) + "}";
   }
 
   /// Task 3 for /crsd/bt_status, which the run recording keeps whole: the phase, the bay
@@ -1003,6 +1021,209 @@ private:
       ctx_->readiness_confirmed = true;
       RCLCPP_INFO(get_logger(), "RoboCommand confirmed the docking report");
     }
+    // Task 4: a new run, a run over or an All Clear forgets every moving object
+    if (run_start || dir != runstart::Directive::None || t4::isAllClear(m->data)) {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      if (!ctx_->task4.objects.empty()) {
+        RCLCPP_INFO(get_logger(), "Task 4: %zu moving object(s) forgotten (%s)",
+          ctx_->task4.objects.size(), run_start ? "RunStart" :
+          dir != runstart::Directive::None ? "the run ended" : "All Clear");
+        ctx_->task4.objects.clear();
+      }
+      ctx_->task4.last_seq = 0.0;
+    }
+    t4::Alert alert;
+    if (t4::parseAlert(m->data, &alert)) {onMovingObject(alert);}
+  }
+
+  /// One MovingObjectAlert (handbook 3.3.5 Disruptive), folded in whether or not a mission runs.
+  void onMovingObject(const t4::Alert & a)
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    ++ctx_->task4.alerts;
+    if (!t4::acceptSeq(a.seq, ctx_->task4.last_seq)) {
+      RCLCPP_WARN(get_logger(), "Task 4: MovingObjectAlert seq %.0f IGNORED: a re-delivered or "
+        "late alert (seq %.0f was already applied)", a.seq, ctx_->task4.last_seq);
+      return;
+    }
+    if (!ctx_->origin_set) {
+      RCLCPP_WARN(get_logger(), "Task 4: MovingObjectAlert at %.7f, %.7f IGNORED: no position "
+        "fix yet to place it against", a.lat, a.lon);
+      return;
+    }
+    const double t = nowS();
+    ctx_->now_s = std::max(ctx_->now_s, t);
+    const nav::Vec2 p = nav::toLocal({a.lat, a.lon}, ctx_->origin);
+    const std::size_t before = ctx_->task4.objects.size();
+    const int id = t4::ingest(ctx_->task4.objects, ctx_->task4.next_id, a, p, t,
+        ctx_->task4.settings);
+    ctx_->task4.last_alert_s = t;
+    std::string domains;
+    for (const std::string & d : a.domains) {domains += (domains.empty() ? "" : " ") + d;}
+    const double dist = ctx_->pose_fresh ? nav::norm(p - ctx_->boat) : std::nan("");
+    RCLCPP_WARN(get_logger(), "Task 4: MovingObjectAlert -> object %d (%s): %.7f, %.7f heading "
+      "%.0f deg at %.2f m/s, keep-out %s m, domains [%s]%s; %.0f m from the boat%s", id,
+      ctx_->task4.objects.size() > before ? "new" : "update", a.lat, a.lon, a.heading_deg,
+      a.speed_mps, a.radius_m > 0.0 ? std::to_string(a.radius_m).c_str() : "none given",
+      domains.empty() ? "none named: all" : domains.c_str(),
+      t4::affectsUsv(a) ? "" : " (not the USV)",
+      dist, ctx_->task4.settings.enabled ? "" : " [Task 4 avoidance is OFF: t4_enabled]");
+    if (t4::shouldAck(ctx_->task4.objects.size() > before, a)) {
+      sendReport(*ctx_, "incident_ack", t4::incidentAckJson(a.seq));
+      RCLCPP_WARN(get_logger(), "Task 4: IncidentAck sent for object %d (command_seq %.0f)",
+        id, a.seq);
+    }
+  }
+
+  /// The operator's mission inputs, as the parameters are now. CALL WITH ctx_->mu HELD.
+  void readInputs()
+  {
+    Context::Inputs & in = ctx_->inputs;
+    const double lat = get_parameter("t1_field_lat").as_double();
+    const double lon = get_parameter("t1_field_lon").as_double();
+    in.field_set = latLonGiven(lat, lon);
+    in.field_ll = {lat, lon};
+    in.scan_dwell_s = std::clamp(get_parameter("t1_scan_dwell_s").as_double(), 1.0, 30.0);
+    in.pause_every_m = std::clamp(get_parameter("t1_pause_every_m").as_double(), 0.0, 50.0);
+    const double alat = get_parameter("t1_approach_lat").as_double();
+    const double alon = get_parameter("t1_approach_lon").as_double();
+    in.approach_set = latLonGiven(alat, alon);
+    in.approach_ll = in.approach_set ? nav::LatLon{alat, alon} : nav::LatLon{0.0, 0.0};
+    in.unknown_range_m = std::clamp(get_parameter("t1_unknown_range_m").as_double(), 0.0, 30.0);
+    in.backoff_m = std::clamp(get_parameter("t3_backoff_m").as_double(), 1.0, 8.0);
+    const double vlat = get_parameter("t3_via_lat").as_double();
+    const double vlon = get_parameter("t3_via_lon").as_double();
+    in.via_set = latLonGiven(vlat, vlon);
+    in.via_ll = in.via_set ? nav::LatLon{vlat, vlon} : nav::LatLon{0.0, 0.0};
+  }
+
+  /// Every Run-panel setting the mission reads once per run, as the parameters are now: the dock
+  /// heading, which way to slide first (left | right, else the tree's own) and readInputs().
+  /// Read at goal accept AND again when the RunStart hold opens, so a Set made while the run
+  /// waited is the one used. CALL WITH ctx_->mu HELD.
+  void readRunPanel()
+  {
+    ctx_->dock_heading = get_parameter("dock_heading_deg").as_double();
+    ctx_->search_first = get_parameter("search_first").as_string();
+    readInputs();
+    if (!ctx_->search_first.empty() && ctx_->search_first != "left" &&
+      ctx_->search_first != "right")
+    {
+      RCLCPP_WARN(get_logger(), "search_first '%s' is not left or right: the tree's own",
+        ctx_->search_first.c_str());
+      ctx_->search_first.clear();
+    }
+  }
+
+  /// The Run-panel settings in the GOAL log line's words. CALL WITH ctx_->mu HELD.
+  std::string runPanelText() const
+  {
+    return std::string("dock_heading=") + (ctx_->dock_heading >= 0.0 ?
+      std::to_string(static_cast<int>(std::lround(ctx_->dock_heading))) : std::string("unset")) +
+      " search_first=" + (ctx_->search_first.empty() ? std::string("tree") : ctx_->search_first) +
+      " " + inputsText();
+  }
+
+  /// The operator's numbers the XML uses directly ({t3_backoff_m} ...), from ctx_->inputs.
+  /// Takes ctx_->mu.
+  void putInputsOnBlackboard(const BT::Blackboard::Ptr & bb)
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    const Context::Inputs & in = ctx_->inputs;
+    bb->set("t3_backoff_m", in.backoff_m);
+    bb->set("t1_scan_dwell_s", in.scan_dwell_s);
+    bb->set("t1_pause_every_m", in.pause_every_m);
+    bb->set("t1_unknown_range_m", in.unknown_range_m);
+    bb->set("t1_approach_lat", in.approach_ll.lat);    // 0, 0 when unset: FixGiven says no
+    bb->set("t1_approach_lon", in.approach_ll.lon);
+    bb->set("t3_via_lat", in.via_ll.lat);              // 0, 0 when unset: FixGiven says no
+    bb->set("t3_via_lon", in.via_ll.lon);
+  }
+
+  /// For the GOAL log line. CALL WITH ctx_->mu HELD.
+  std::string inputsText() const
+  {
+    const Context::Inputs & in = ctx_->inputs;
+    char b[360];
+    char f[40] = "unset", v[40] = "none", ap[40] = "none";
+    if (in.field_set) {std::snprintf(f, sizeof(f), "%.7f,%.7f", in.field_ll.lat, in.field_ll.lon);}
+    if (in.via_set) {std::snprintf(v, sizeof(v), "%.7f,%.7f", in.via_ll.lat, in.via_ll.lon);}
+    if (in.approach_set) {
+      std::snprintf(ap, sizeof(ap), "%.7f,%.7f", in.approach_ll.lat, in.approach_ll.lon);
+    }
+    std::snprintf(b, sizeof(b),
+      "t1_field=%s t1_approach=%s scan_dwell=%.0fs pause_every=%.1fm unknown_range=%.1fm "
+      "t3_backoff=%.1fm t3_via=%s",
+      f, ap, in.scan_dwell_s, in.pause_every_m, in.unknown_range_m, in.backoff_m, v);
+    return b;
+  }
+
+  /// Task 4's settings, re-read every second (a change applies at once, mid-run too).
+  void readTask4Settings()
+  {
+    t4::Settings s;
+    s.enabled = get_parameter("t4_enabled").as_bool();
+    s.margin_m = std::clamp(get_parameter("t4_margin_m").as_double(), 0.0, 20.0);
+    s.fallback_radius_m = std::clamp(get_parameter("t4_radius_m").as_double(), 1.0, 50.0);
+    s.horizon_s = std::clamp(get_parameter("t4_horizon_s").as_double(), 5.0, 180.0);
+    s.sweep_s = std::min(s.sweep_s, s.horizon_s);
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    if (s.enabled != ctx_->task4.settings.enabled) {
+      RCLCPP_WARN(get_logger(), "Task 4 avoidance %s", s.enabled ? "ON" : "OFF (t4_enabled false)");
+    }
+    // a radius that came with no alert follows the fallback
+    for (t4::Invader & v : ctx_->task4.objects) {
+      if (!v.radius_given) {v.radius_m = s.fallback_radius_m;}
+    }
+    ctx_->task4.settings = s;
+  }
+
+  /// Task 4 for /crsd/bt_status: the settings, every object (where it is predicted NOW, its
+  /// projected track over the horizon, how close it comes to the boat), and what the guard is
+  /// doing. Ages, not times: a viewer never needs our clock. Takes ctx_->mu.
+  std::string task4Json()
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    const Context & c = *ctx_;
+    const Context::Task4 & k = c.task4;
+    const double t = nowS();
+    const t4::Settings & s = k.settings;
+    std::string objs;
+    for (const t4::Invader & v : k.objects) {
+      const nav::Vec2 p = t4::at(v, t);
+      const bool boat = c.pose_fresh;
+      const t4::Cpa cpa = boat ? t4::cpaFixed(v, c.boat, t, s.horizon_s) : t4::Cpa{};
+      const double ko = t4::keepout(v, s);
+      std::string track;
+      for (int i = 0; i <= 4; ++i) {
+        track += std::string(i ? "," : "") + jsonLatLon(c, true, t4::at(v, t + s.horizon_s * i / 4.0));
+      }
+      objs += std::string(objs.empty() ? "" : ",") + "{\"id\":" + std::to_string(v.id) +
+        ",\"now\":" + jsonLatLon(c, true, p) +
+        ",\"reported\":[" + jsonNum(v.ll0.lat, 7) + "," + jsonNum(v.ll0.lon, 7) + "]" +
+        ",\"age_s\":" + jsonNum(t - v.t0, 1) +
+        ",\"heading_deg\":" + jsonNum(v.heading_deg, 0) +
+        ",\"speed_mps\":" + jsonNum(v.speed_mps, 2) +
+        ",\"radius_m\":" + jsonNum(v.radius_m, 1) +
+        ",\"radius_given\":" + (v.radius_given ? "true" : "false") +
+        ",\"keepout_m\":" + jsonNum(ko, 1) +
+        ",\"affects_usv\":" + (v.affects_usv ? "true" : "false") +
+        ",\"domains\":" + jsonQuote(v.domains) +
+        ",\"reports\":" + std::to_string(v.reports) +
+        ",\"dist_m\":" + (boat ? jsonNum(nav::norm(p - c.boat), 1) : "null") +
+        ",\"cpa_m\":" + (boat ? jsonNum(cpa.d, 1) : "null") +
+        ",\"cpa_in_s\":" + (boat ? jsonNum(cpa.dt, 0) : "null") +
+        ",\"inside\":" + (boat && t4::counts(v, s) && cpa.d < ko ? "true" : "false") +
+        ",\"track\":[" + track + "]}";
+    }
+    const bool live = k.state_s >= 0.0 && c.now_s - k.state_s < 2.0;
+    return std::string("{\"enabled\":") + (s.enabled ? "true" : "false") +
+      ",\"margin_m\":" + jsonNum(s.margin_m, 1) + ",\"radius_m\":" + jsonNum(s.fallback_radius_m, 1) +
+      ",\"horizon_s\":" + jsonNum(s.horizon_s, 0) + ",\"alerts\":" + std::to_string(k.alerts) +
+      ",\"last_alert_age_s\":" + (k.last_alert_s >= 0.0 ? jsonNum(t - k.last_alert_s, 0) : "null") +
+      ",\"guard\":" + jsonQuote(live ? k.state : "") + ",\"why\":" + jsonQuote(live ? k.why : "") +
+      ",\"target\":" + jsonLatLon(c, live && k.have_target, k.target) +
+      ",\"evasions\":" + std::to_string(k.evasions) + ",\"objects\":[" + objs + "]}";
   }
 
   void publishTask(const std::string & token)
@@ -1213,6 +1434,18 @@ private:
   /// the datum, and nothing after it stops being.
   void publishHazards()
   {
+    // Task 4 runs at all times: its settings follow the parameters, objects age out, and between
+    // missions (no tick to move the clock) the swept keep-outs still advance.
+    readTask4Settings();
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      if (!busy_) {ctx_->now_s = std::max(ctx_->now_s, nowS());}
+      const int gone = t4::expire(ctx_->task4.objects, nowS(), ctx_->task4.settings);
+      if (gone > 0) {
+        RCLCPP_INFO(get_logger(), "Task 4: %d object(s) not re-reported for %.0f s, dropped", gone,
+          ctx_->task4.settings.expire_s);
+      }
+    }
     crusader_msgs::msg::HazardArray msg;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
@@ -1334,20 +1567,16 @@ private:
       resetFire(*ctx_);
       goal_mode_ = ctx_->mode;
       ctx_->handed_mode.clear();
-      ctx_->dock_heading = get_parameter("dock_heading_deg").as_double();
-      ctx_->search_first = get_parameter("search_first").as_string();
-      if (!ctx_->search_first.empty() && ctx_->search_first != "left" &&
-        ctx_->search_first != "right")
-      {
-        RCLCPP_WARN(get_logger(), "search_first '%s' is not left or right: the tree's own",
-          ctx_->search_first.c_str());
-        ctx_->search_first.clear();
-      }
+      ctx_->looked_unnamed.clear();
+      ctx_->guess_exit = false;        // set from the mission's root once it is read, below
+      readRunPanel();
+      ctx_->task4.state.clear();
+      ctx_->task4.why.clear();
+      ctx_->task4.state_s = -1.0;
+      ctx_->task4.have_target = false;
+      ctx_->task4.evasions = 0;
       goal_inputs_ = "mode=" + (ctx_->mode.empty() ? std::string("?") : ctx_->mode) +
-        (ctx_->drop_tripped ? " DROP-LATCHED" : "") +
-        " dock_heading=" + (ctx_->dock_heading >= 0.0 ?
-        std::to_string(static_cast<int>(std::lround(ctx_->dock_heading))) : std::string("unset")) +
-        " search_first=" + (ctx_->search_first.empty() ? std::string("tree") : ctx_->search_first);
+        (ctx_->drop_tripped ? " DROP-LATCHED" : "") + " " + runPanelText();
       // "Home" is where THIS attempt started, not the autopilot's HOME.
       ctx_->home = ctx_->boat;
       ctx_->have_home = ctx_->pose_fresh;
@@ -1364,6 +1593,12 @@ private:
       registerCrusaderNodes(factory);
       auto bb = BT::Blackboard::create();
       bb->set("ctx", ctx_);
+      // The operator's numbers the XML uses directly ({t3_backoff_m} ...), as they were at Start.
+      putInputsOnBlackboard(bb);
+      {
+        std::lock_guard<std::mutex> lk(ctx_->mu);
+        ctx_->guess_exit = rootFlag(file.path, "t1_guess_exit");
+      }
       BT::Tree tree = loadMission(factory, dirs_, file, bb);
       TreeView view(tree);
       FailureTrace failed_at(tree);
@@ -1381,6 +1616,18 @@ private:
       if (!awaitRunStart(gh, fb, goal->name, started, &outcome, &detail)) {
         // Cancelled, no HEARTBEAT, or the node is stopping: nothing was ticked, nothing to halt.
         throw GateClosed{};
+      }
+      // A Set the operator made while the run waited for RunStart is the one to use.
+      {
+        std::string before, after;
+        {
+          std::lock_guard<std::mutex> lk(ctx_->mu);
+          before = runPanelText();
+          readRunPanel();
+          after = runPanelText();
+        }
+        putInputsOnBlackboard(bb);
+        if (after != before) {RCLCPP_INFO(get_logger(), "inputs at RunStart: %s", after.c_str());}
       }
 
       while (rclcpp::ok() && !stop_) {
@@ -1593,7 +1840,7 @@ private:
     m.data = "{\"state\":\"WAITING_RUN_START\",\"name\":" + jsonQuote(name) +
       ",\"waiting_s\":" + jsonNum(waiting, 1) + ",\"running_node\":\"\",\"current_task\":" +
       jsonQuote(kTaskNone) + ",\"warning\":" + jsonQuote(warning) + ",\"task1\":" +
-      task1Json() + "}";
+      task1Json() + ",\"task4\":" + task4Json() + "}";
     bt_status_pub_->publish(m);
   }
 
@@ -1653,7 +1900,7 @@ private:
       ",\"elapsed_s\":" + jsonNum(elapsed, 1) + ",\"running_node\":" + jsonQuote(fb->running_node) +
       ",\"current_task\":" + jsonQuote(fb->current_task) + ",\"warning\":" + jsonQuote(warning) +
       ",\"nodes\":" + view.nodesJson() + ",\"task1\":" + task1Json() + ",\"task3\":" +
-      task3Json() + "}";
+      task3Json() + ",\"task4\":" + task4Json() + "}";
     bt_status_pub_->publish(m);
   }
 
@@ -1662,10 +1909,11 @@ private:
   {
     std_msgs::msg::String m;
     const std::string task1 = task1Json();     // takes ctx_->mu: never inside status_mu_
+    const std::string task4 = task4Json();
     {
       std::lock_guard<std::mutex> lk(status_mu_);
       m.data = "{\"state\":\"IDLE\",\"last\":" + (last_.empty() ? std::string("null") : last_) +
-        ",\"task1\":" + task1 + "}";
+        ",\"task1\":" + task1 + ",\"task4\":" + task4 + "}";
     }
     bt_status_pub_->publish(m);
   }
@@ -1712,15 +1960,9 @@ private:
   std::vector<nav::Buoy> tracked_;
   /// Core tier: the tracks chosen as ENTRY and EXIT (-1 = none yet), kept while still candidates.
   int entry_track_id_ = -1, exit_track_id_ = -1;
-  /// Task 1 between runs (task1_memory.hpp), under ctx_->mu: what is remembered, where the
-  /// context's ENTRY/EXIT come from now, and the file.
-  t1mem::Remembered mem_entry_, mem_exit_;
-  t1mem::Source entry_src_ = t1mem::Source::None, exit_src_ = t1mem::Source::None;
-  double last_mem_write_ = -1e9;
-  std::string memory_file_;
-  int remember_min_hits_ = 30;
+  /// Where the context's ENTRY/EXIT come from now, under ctx_->mu.
+  AnchorSource entry_src_ = AnchorSource::None, exit_src_ = AnchorSource::None;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr forget_colours_pub_;
-  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr forget_memory_srv_;
   crusader_msgs::msg::PassagePlan::SharedPtr plan_raw_;
   /// For /crsd/bt_status and feedback: the running goal's name, the current task token, and
   /// how the last goal ended (JSON). Guarded by status_mu_.

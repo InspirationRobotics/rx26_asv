@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Task3ScanFire: Task 3 dock-and-fire, the body only: no task token, no guard band, no Task 4
+  guard. The callers wrap it: task3_scan_fire.xml on its own, mission_t1_t3_t4.xml after Task 1.
+  Moved here unchanged from task3_scan_fire.xml (2026-11-12), so both run the same body.
+
+  From the caller's blackboard (_autoremap; bt_runner_node puts the GCS Run panel's numbers there
+  at Start): t3_backoff_m, the docked hold's distance off the face once the fire is out (4 m).
+  It writes use_lidar, hold_m, bay, target, window and request there.
+
+  Task 3 in one run, from the GCS with an APPROACH POINT (the Run
+  box's approach lat/lon: a few metres in front of the dock) and a long timeout (3600 s).
+
+    camera: SetCameraModel puts camera_node on the dock model and waits until it sees with
+       it. A camera restart comes back on buoy, which never sees the dock.
+    0. GUIDED to the approach point (skipped when the run starts in MANUAL;
+       cut short, the run going on, when the pilot switches to MANUAL mid-leg).
+    1. the tree switches GUIDED -> MANUAL itself (only from GUIDED; SC still takes it back).
+    2. SEARCH: turn to the dock heading, slide one way (the Run panel's "slide first", else
+       left) along the dock until a bay
+       the camera sees reads GREEN with confidence (CommitFirstGreen: the first one, not every bay; numbered
+       left to right for the docking report).
+    From GREEN on, two branches side by side (Parallel):
+    3. APPROACH: square to the dock heading, strafe the GREEN bay's FACE onto the bow's
+       line (the indicator only says which bay; its spot kept on the map, so a few lost frames do not stop it), then a
+       steady, gently ramped push straight in (ApproachBay), to 2.0 m and centred.
+    4. HOLD: the camera 1.7 m off the face (its depth), the face centred, square
+       (StrafeKeep). The docking report goes the FIRST time the boat is in close (the face
+       1.3-2.1 m off the camera, within 0.30 m of the bow's line, within 10 deg of square:
+       hold_s 0); nothing is checked after it, the hold only keeps the bay in front of the cannon.
+    5. THE FIRE, in a loop, docked or not: a window of our bay reads RED -> the cannon
+       sprays it, water on until it reads GREEN (and on through drop-outs of up to 5 s)
+       -> BACK OFF: the hold moves out to t3_backoff_m off the face (the GCS Run panel's
+       "back off", bt_runner_node t3_backoff_m, 4 m when unset), still centred and square
+       -> firefighting report -> the 2-colour code (read from out there) -> resource
+       delivery report -> wait for the next RED; a new RED brings the hold back in to 1.7 m.
+       At the competition the light comes on only after step 4.
+
+  RoboCommand (via ocs_client and the OCS): the heartbeat says TASK_COORDINATED_LOGISTICS
+  while this runs (TaskAttempt). The docking report names the bay, and RoboCommand lights
+  a window in THAT bay: the number is the layout's when all three bays are known, else a
+  guess from the bays seen either side and the slide direction (start at the dock's right
+  end when sliding left). The indicator colour comes from the classifier (indicator="yolo";
+  task3_scan_fire_cv reads it by colour thresholds).
+-->
+<root BTCPP_format="4">
+
+  <BehaviorTree ID="Task3ScanFire">
+    <Sequence name="scan_fire">
+      <Script code="use_lidar := false"/>
+      <!-- the docked hold's distance off the face: 1.7 m to fire, t3_backoff_m (the GCS Run
+           panel, put on the blackboard by bt_runner_node at Start) once the fire is out -->
+      <Script code="hold_m := 1.7"/>
+
+      <SetCameraModel model="dock" indicator="yolo" timeout_s="15.0"/>
+
+      <!-- 0-1. GUIDED to the waypoint, then MANUAL -->
+      <!-- Reactive: MANUAL is checked on every tick, so the pilot switching to MANUAL
+           mid-leg skips straight to the MANUAL body and the run goes on (robot state
+           stays AUTO); HOLD or the e-stop still ends it -->
+      <ReactiveFallback name="to_the_waypoint">
+        <ModeIs mode="MANUAL"/>
+        <Sequence>
+          <!-- no dock sightings here: placing them needs the heading, and it is poor
+               while the autopilot pivots onto the waypoint -->
+          <ReactiveSequence name="guided_leg">
+            <IsAutonomous/>
+            <NotDropped/>
+            <NavigateTo target="approach" tolerance="2.0"/>
+          </ReactiveSequence>
+          <RequestMode mode="MANUAL" from="GUIDED" timeout_s="1000000"/>
+        </Sequence>
+      </ReactiveFallback>
+
+      <!-- 2-5. MANUAL on the sticks: only the pilot's switches end it -->
+      <ReactiveSequence name="manual">
+        <ModeIs mode="MANUAL"/>
+        <NotDropped/>
+        <UpdateDockBook/>
+        <Sequence name="dock_and_fire">
+          <Fallback name="the_green_bay">
+            <BayChosen/>
+            <ReactiveFallback name="search_until_green">
+              <!-- A bay's GREEN confidence = the share of its colour reads that said GREEN;
+                   min_conf of it after min_reads reads commits (0.5 after 3: at least half).
+                   OFF counts as GREEN (the classifier reads the lit GREEN indicator as off,
+                   the course 2026-11-12). No bay GREEN/OFF: two bays read RED make the third
+                   ours (out of view: the slide goes back to it); past the dock's end, the
+                   last bay along the slide not read RED -->
+              <CommitFirstGreen bay="{bay}" min_reads="3" min_conf="0.5" min_obs="4" max_turn_deg="15"
+                                off_is_green="true" bays="3"/>
+              <!-- one way only: the GCS Run panel's "slide first" (bt_runner_node
+                   search_first), LEFT when unset (start the run at the dock's right end).
+                   leg_m is longer than the dock, so it never turns back; past it, it
+                   would sweep back the other way -->
+              <StrafeSearch leg_m="20.0" lat_us="100" min_out_m="3.5" forever="true"/>
+            </ReactiveFallback>
+          </Fallback>
+
+          <!-- docking and the cannon side by side, from the moment GREEN is chosen.
+               At the competition the RED window lights only after ReportDocking (3.3.4),
+               so the report stays on the docking side; at the lake the mock-up is lit
+               already and the cannon starts while the boat is still lining up. -->
+          <Parallel name="dock_while_firing" success_count="-1" failure_count="1">
+            <Sequence name="dock">
+              <ApproachBay fwd_us="60" strafe_us="100" slew_us_s="40" centre_tol_m="0.15"
+                           centred_s="1.0" recentre_m="0.40" kp_lat="100" kd_lat="40"
+                           handover_m="2.0" use_lidar="{use_lidar}"/>
+              <ReactiveSequence name="docked">
+                <StrafeKeep fire_range_m="{hold_m}" use_lidar="{use_lidar}"
+                            deadband_range_m="0.05" deadband_lat_m="0.04" deadband_yaw_deg="3.0"
+                            kp_fwd="90" kd_fwd="60" kp_lat="100" kd_lat="200" kp_yaw="5" kd_yaw="0.5"
+                            ki_fwd="40" ki_lat="10" i_max_us="100"
+                            min_us="30" max_us="120" slew_us_s="200"
+                            min_range_m="0.6" square_first_deg="10"/>
+                <Sequence name="on_station">
+                  <AwaitStrafeSolution steady="false" fire_range_m="1.7" range_tol_m="0.40" lat_tol_m="0.30"
+                                       yaw_tol_deg="10.0" hold_s="0.0" miss_s="1.0"/>
+                  <ReportDocking bay="{bay}"/>
+                  <KeepRunningUntilFailure>
+                    <AlwaysSuccess/>
+                  </KeepRunningUntilFailure>
+                </Sequence>
+              </ReactiveSequence>
+            </Sequence>
+            <!-- the cannon: our bay's window RED for 0.2 s -> (back in to 1.7 m) spray it until
+                 GREEN, through drop-outs of up to 5 s (once docked, through any drop-out,
+                 re-aimed when the window is seen again) -> back off to t3_backoff_m ->
+                 firefighting report -> the 2-colour code -> resource delivery report -> wait
+                 for the next RED, backed off -->
+            <KeepRunningUntilFailure>
+              <ForceSuccess>
+                <Sequence name="one_fire">
+                  <AwaitFireTarget bay="{bay}" target="{target}" min_red_s="0.2"
+                                   refire_red_s="1.5" timeout_s="1000000" resend_s="10.0"/>
+                  <Script code="hold_m := 1.7"/>
+                  <SprayUntilHit target="{target}" window="{window}" timeout_s="1000000"
+                                 min_green_s="0.4" max_aim_age_s="5.0"
+                                 keep_after_docking="true"/>
+                  <Script code="hold_m := t3_backoff_m"/>
+                  <ReportFirefighting window="{window}"/>
+                  <DecodeResourceRequest request="{request}" timeout_s="80.0" hold_s="5.0"
+                                         min_frames="20"/>
+                  <ReportResourceDelivery request="{request}"/>
+                </Sequence>
+              </ForceSuccess>
+            </KeepRunningUntilFailure>
+          </Parallel>
+        </Sequence>
+      </ReactiveSequence>
+    </Sequence>
+  </BehaviorTree>
+
+</root>

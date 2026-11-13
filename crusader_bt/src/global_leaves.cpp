@@ -24,6 +24,8 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <set>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -32,6 +34,7 @@
 
 #include "crusader_bt/context.hpp"
 #include "crusader_bt/global_passage.hpp"
+#include "crusader_bt/hold_heading.hpp"
 #include "crusader_bt/path_follower.hpp"
 
 namespace crusader_bt
@@ -228,6 +231,39 @@ void holdHere(Context & c, const rclcpp::Logger & lg, const char * why)
   sendHold(c, lg, std::string("hold (") + why + ") at");
 }
 
+/// Task 4: a moving object's keep-out within 20 m of the boat. TAKES ctx.mu ITSELF.
+bool invaderNearBoat(Context & c)
+{
+  std::lock_guard<std::mutex> lk(c.mu);
+  return invaderNear(c, {c.boat}, 20.0);
+}
+
+/// Compass degrees, from "0,-45,45". Unparsable entries are skipped; none at all = {0}.
+std::vector<double> parseDegrees(const std::string & text)
+{
+  std::vector<double> out;
+  std::stringstream ss(text);
+  std::string item;
+  while (std::getline(ss, item, ',')) {
+    try {
+      std::size_t used = 0;
+      const double v = std::stod(item, &used);
+      if (used > 0 && std::isfinite(v)) {out.push_back(v);}
+    } catch (const std::exception &) {
+    }
+  }
+  if (out.empty()) {out.push_back(0.0);}
+  return out;
+}
+
+/// -180..180
+double wrap180(double d)
+{
+  double w = std::fmod(d + 180.0, 360.0);
+  if (w < 0.0) {w += 360.0;}
+  return w - 180.0;
+}
+
 // ---------------------------------------------------------------- conditions
 
 /// The transit is behind the boat (every gate and side driven).
@@ -374,6 +410,8 @@ public:
         holdHere(*ctx_, log(), "no plan fits");
       }
     }
+    // Task 4: a moving object's keep-out near the boat is a wait for it to pass, never a timeout
+    if (invaderNearBoat(*ctx_)) {t0_ = now;}
     if (std::chrono::duration<double>(now - t0_).count() >= getInput<double>("timeout_s").value_or(60.0)) {
       RCLCPP_ERROR(log(), "no plan for the %s in %.0f s: giving up", gp::phaseName(phase),
         std::chrono::duration<double>(now - t0_).count());
@@ -419,7 +457,15 @@ public:
       BT::InputPort<double>("sensor_settle_s", 1.0,
         "Core tier: a change in the boat's own field must persist this long before it is acted on"),
       BT::InputPort<double>("sensor_replan_min_s", 3.0,
-        "Core tier: least time between two sensor-triggered replans")};
+        "Core tier: least time between two sensor-triggered replans"),
+      BT::InputPort<double>("pause_every_m", 0.0,
+        "transit only: stop and look every this far along it (0 = never)"),
+      BT::InputPort<double>("pause_s", 5.0, "... for this long (the tracker needs ~4 s)"),
+      BT::InputPort<double>("pause_unknown_m", 0.0,
+        "approach, entry orbit and transit: stop and look at a buoy with no colour yet this near "
+        "ahead, once per buoy, up to pause_s (0 = never)"),
+      BT::InputPort<double>("unknown_fov_deg", 70.0,
+        "... that counts as ahead: within half this angle of the bow either side")};
   }
 
   BT::NodeStatus onStart() override
@@ -449,6 +495,15 @@ public:
     raw_since_ = -1.0;
     last_sensor_replan_ = -kInf;
     sensor_failed_ = false;
+    pausing_ = false;
+    look_id_ = -1;
+    pause_every_ = phase_ == Phase::Transit ?
+      std::max(0.0, getInput<double>("pause_every_m").value_or(0.0)) : 0.0;
+    pause_s_ = std::max(0.0, getInput<double>("pause_s").value_or(5.0));
+    pause_unknown_ = phase_ == Phase::ExitOrbit ? 0.0 :
+      std::max(0.0, getInput<double>("pause_unknown_m").value_or(0.0));
+    unknown_half_fov_ = 0.5 * std::clamp(getInput<double>("unknown_fov_deg").value_or(70.0),
+        0.0, 360.0);
     follower_.reset({});
     rest_.clear();
     if (!startLeg(true)) {
@@ -521,10 +576,13 @@ public:
       "no plan fits the changed field" :
       o.blocked ? "a hazard is on the path ahead" : nullptr;
 
-    // 3. Stuck: hold, re-plan every second, FAILURE at blocked_timeout_s.
+    // 3. Stuck: hold, re-plan every second, FAILURE at blocked_timeout_s. Blocked by a Task 4
+    //    object's keep-out it is WAITING for the object to pass: that time never counts.
     if (stuck != nullptr) {
+      const bool invader = invaderAhead(boat);
+      if (invader) {stuck = "a Task 4 object's keep-out is on the path ahead: waiting for it to pass";}
       if (!blocked_) {enterBlocked(stuck);}
-      blocked_s_ += dt;
+      if (!invader) {blocked_s_ += dt;}
       clear_since_ = -1.0;
       if (now - last_replan_ >= 1.0) {replanHere(now, stuck);}
       writeStatus(o, "BLOCKED", stuck);
@@ -538,7 +596,7 @@ public:
     // 4. Clear again: drive on only once it has STAYED clear (a flickering track must not
     //    make the boat lurch at it), counting toward the timeout meanwhile.
     if (blocked_) {
-      blocked_s_ += dt;
+      if (!invaderAhead(boat)) {blocked_s_ += dt;}
       if (clear_since_ < 0.0) {clear_since_ = now;}
       if (now - clear_since_ + 1e-6 < reset_s) {
         writeStatus(o, "BLOCKED", "clear; holding until it has stayed clear");
@@ -552,6 +610,32 @@ public:
       o = follower_.step(boat, hz);
     }
     if (o.arrived) {return finish(o);}
+
+    // 4b. Core tier's LOOKS: hold the spot up to pause_s so the tracker can call the lights of
+    //     the buoys now near (it needs ~4 s), then drive on. Two causes: every pause_every_m
+    //     along the transit, and a buoy with no colour yet coming into view ahead
+    //     (pause_unknown_m, once per buoy). A replan meanwhile (sensorStep, above) is taken as
+    //     usual. Pause time is never blocked time (blocked_s_ only grows in steps 3 and 4).
+    if (pausing_) {
+      if (!lookOver(now)) {
+        writeStatus(o, "PAUSED", pause_why_);
+        return BT::NodeStatus::RUNNING;
+      }
+      endLook(o.s);
+      o = follower_.step(boat, hz);
+    } else if (const int id = unnamedAhead(); id >= 0) {
+      beginLook(now, "a buoy with no colour yet", "a buoy with no colour yet: looking", id);
+      writeStatus(o, "PAUSED", pause_why_);
+      return BT::NodeStatus::RUNNING;
+    } else if (pause_every_ > 0.0 && offset_ + o.s >= next_pause_ &&
+      o.total - o.s > 0.5 * pause_every_)
+    {
+      beginLook(now, "a look at the field", "looking at the buoys near the boat", -1);
+      RCLCPP_INFO(log(), "%s: %.1f m in, %.1f m to go: pausing %.0f s to look",
+        gp::phaseName(phase_), offset_ + o.s, o.total - o.s, pause_s_);
+      writeStatus(o, "PAUSED", pause_why_);
+      return BT::NodeStatus::RUNNING;
+    }
 
     // 5. Not blocked, but the water ahead shrank since planning (the boat's camera moved a
     //    buoy from the aircraft's ~1 m fix, or a track appeared): re-plan without stopping,
@@ -619,6 +703,7 @@ private:
     }
     follower_.setParams(fp_);
     follower_.reset(std::move(path));
+    next_pause_ = pause_every_ > 0.0 ? offset_ + pause_every_ : kInf;
     // the water every vertex had when this leg was loaded: shrunk() compares against it
     std::vector<path::Hazard> hz;
     {
@@ -696,6 +781,20 @@ private:
     }
   }
 
+  /// A Task 4 keep-out within 1 m of the next 12 m of this leg (or of the boat).
+  bool invaderAhead(Vec2 boat)
+  {
+    std::vector<Vec2> ahead{boat};
+    const std::vector<Vec2> rem = follower_.remaining();
+    double run = 0.0;
+    for (std::size_t i = 0; i < rem.size() && run < 12.0; ++i) {
+      if (i > 0) {run += nav::norm(rem[i] - rem[i - 1]);}
+      ahead.push_back(rem[i]);
+    }
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    return invaderNear(*ctx_, ahead, 1.0);
+  }
+
   bool inCoreMode()
   {
     std::lock_guard<std::mutex> lk(ctx_->mu);
@@ -720,12 +819,77 @@ private:
     return retasked(*ctx_);
   }
 
+  /// Stop on the spot: hold, and forget what was sent so the first carrot after is sent again.
+  void holdAndForget(const char * why)
+  {
+    holdHere(*ctx_, log(), why);
+    follower_.forgetSent();
+  }
+
+  /// Start a look: hold for up to pause_s. `buoy_id` >= 0 is the unnamed buoy being looked at
+  /// (the look ends early once it has a colour or its track is gone), -1 a timed look.
+  void beginLook(double now, const char * hold_why, const char * status_why, int buoy_id)
+  {
+    pausing_ = true;
+    pause_until_ = now + pause_s_;
+    look_id_ = buoy_id;
+    pause_why_ = status_why;
+    holdAndForget(hold_why);
+  }
+
+  /// The look is over: pause_s has passed, or the buoy looked at has a colour (or no track) now.
+  bool lookOver(double now)
+  {
+    if (now >= pause_until_) {return true;}
+    if (look_id_ < 0) {return false;}
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    const nav::Buoy * b = nav::findById(ctx_->buoys, look_id_);
+    return b == nullptr || b->state != nav::Beacon::Unknown;
+  }
+
+  /// Finish a look at transit arc `s`: reschedule the periodic look from here, mark every unnamed
+  /// buoy now in view as looked at (one look per buoy, whatever it ended up called), drive on.
+  void endLook(double s)
+  {
+    pausing_ = false;
+    next_pause_ = offset_ + s + pause_every_;
+    if (pause_unknown_ > 0.0) {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      std::set<int> & looked = ctx_->looked_unnamed;
+      if (look_id_ >= 0) {looked.insert(look_id_);}
+      for (int id; (id = nav::unnamedInView(ctx_->buoys, ctx_->boat, ctx_->heading_deg,
+        pause_unknown_, unknown_half_fov_, looked)) >= 0;)
+      {
+        looked.insert(id);
+      }
+    }
+    look_id_ = -1;
+    follower_.forgetSent();
+    RCLCPP_INFO(log(), "%s: look done, driving on", gp::phaseName(phase_));
+  }
+
+  /// The nearest buoy with no colour yet, in view ahead and not looked at before: its id, and
+  /// the pause is logged here. -1 when pause_unknown_m is off or there is none.
+  int unnamedAhead()
+  {
+    if (pause_unknown_ <= 0.0) {return -1;}
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    const int id = nav::unnamedInView(ctx_->buoys, ctx_->boat, ctx_->heading_deg, pause_unknown_,
+        unknown_half_fov_, ctx_->looked_unnamed);
+    if (id >= 0) {
+      const nav::Buoy * b = nav::findById(ctx_->buoys, id);
+      RCLCPP_INFO(log(), "%s: buoy %d %.1f m ahead has no colour yet - pausing up to %.0f s to "
+        "look", gp::phaseName(phase_), id, b != nullptr ? nav::norm(b->p - ctx_->boat) : 0.0,
+        pause_s_);
+    }
+    return id;
+  }
+
   void enterBlocked(const char * why)
   {
     blocked_ = true;
     clear_since_ = -1.0;
-    holdHere(*ctx_, log(), why);
-    follower_.forgetSent();
+    holdAndForget(why);
     RCLCPP_WARN(log(), "%s: %s - holding, re-planning every second", gp::phaseName(phase_), why);
   }
 
@@ -801,6 +965,409 @@ private:
   double raw_since_ = -1.0;                   ///< when the current raw change was first seen
   double last_sensor_replan_ = -kInf;
   bool sensor_failed_ = false;                ///< a needed sensor replan found no plan
+  // the transit's looks (pause_every_m)
+  double pause_every_ = 0.0, pause_s_ = 5.0;
+  double next_pause_ = kInf;                  ///< transit arc of the next look
+  bool pausing_ = false;
+  double pause_until_ = 0.0;
+  std::string pause_why_;                     ///< the PAUSED status line
+  // the looks at unnamed buoys (pause_unknown_m)
+  double pause_unknown_ = 0.0;                ///< range, m; 0 = off (and always off in the exit orbit)
+  double unknown_half_fov_ = 35.0;            ///< deg either side of the bow
+  int look_id_ = -1;                          ///< the unnamed buoy being looked at, -1 = a timed look
+};
+
+// ------------------------------------------------- Core tier: looking for the field
+
+/// The ENTRY / EXIT / both were SEEN this run by the boat (or given by the GCS MANUAL field):
+/// not remembered from an earlier run, not guessed (Context::entry_seen, exit_seen).
+class AnchorSeen : public CrusaderCondition
+{
+public:
+  AnchorSeen(const std::string & n, const BT::NodeConfig & c) : CrusaderCondition(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {BT::InputPort<std::string>("which", "entry", "entry | exit | both")};
+  }
+
+  BT::NodeStatus tick() override
+  {
+    const std::string w = getInput<std::string>("which").value_or("entry");
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    const bool ok = w == "exit" ? ctx_->exit_seen :
+      w == "both" ? (ctx_->entry_seen && ctx_->exit_seen) : ctx_->entry_seen;
+    return ok ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
+  }
+};
+
+/// The passage is under way: a plan was made, or the mission is past its approach. A Task 4
+/// resume (AvoidInvaders restarts its child) then skips the search and goes straight to planning.
+class PassageStarted : public CrusaderCondition
+{
+public:
+  PassageStarted(const std::string & n, const BT::NodeConfig & c) : CrusaderCondition(n, c) {}
+  static BT::PortsList providedPorts() {return {};}
+
+  BT::NodeStatus tick() override
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    const Context::GlobalPassage & g = ctx_->global_passage;
+    return (g.plans > 0 || g.phase > Phase::Approach) ?
+           BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
+  }
+};
+
+/// Stand still and LOOK (Core tier: the boat finds the field itself).
+///
+/// Keeps the spot it started on (HoldHeading's rule: the heading+speed command, back to the spot
+/// when it drifts past radius_m) and turns through the looks: headings offsets_deg from the base
+/// `face`, staying dwell_s at each once within settle_deg of it (the tracker needs ~4 s to call a
+/// buoy's light; a turn that takes longer than turn_timeout_s looks from where it got to).
+///   face: field = toward the operator's field centre (the GCS Run panel), exit / entry = toward
+///         that buoy (the EXIT may be the guess), heading = where the bow points now. Any of them
+///         unknown: the bow's heading.
+/// SUCCESS after the last look, or as soon as `until` (entry | exit | both) is SEEN; never
+/// FAILURE for what it did not see (the tree decides). FAILURE only on a pose stale for 5 s.
+/// GUIDED only; sends nothing when publish_setpoints is false.
+class ScanForBuoys : public CrusaderAction
+{
+public:
+  ScanForBuoys(const std::string & n, const BT::NodeConfig & c) : CrusaderAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<std::string>("face", "field", "field | exit | entry | heading"),
+      BT::InputPort<std::string>("offsets_deg", "0,-45,45", "the looks, from the base heading"),
+      BT::InputPort<double>("dwell_s", 5.0, "each look, once on the heading"),
+      BT::InputPort<double>("settle_deg", 12.0, "on the heading within this"),
+      BT::InputPort<double>("turn_timeout_s", 15.0, "a turn taking longer looks from there"),
+      BT::InputPort<double>("radius_m", 1.5, "drift from the spot that triggers a return"),
+      BT::InputPort<std::string>("until", "", "end early once SEEN: entry | exit | both | field (ENTRY seen, EXIT seen or "
+        "guessed) | (never)")};
+  }
+
+  BT::NodeStatus onStart() override
+  {
+    looks_ = parseDegrees(getInput<std::string>("offsets_deg").value_or("0,-45,45"));
+    dwell_s_ = std::max(0.5, getInput<double>("dwell_s").value_or(5.0));
+    settle_deg_ = getInput<double>("settle_deg").value_or(12.0);
+    turn_timeout_s_ = getInput<double>("turn_timeout_s").value_or(15.0);
+    prm_.radius_m = std::max(0.5, getInput<double>("radius_m").value_or(1.5));
+    prm_.return_speed_mps = 0.3;
+    until_ = getInput<std::string>("until").value_or("");
+    const std::string face = getInput<std::string>("face").value_or("field");
+    std::string base_from = "the bow";
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      if (!ctx_->pose_fresh || !ctx_->origin_set) {
+        RCLCPP_ERROR(log(), "ScanForBuoys: no fresh pose, cannot take the spot");
+        return BT::NodeStatus::FAILURE;
+      }
+      anchor_ = ctx_->boat;
+      start_s_ = turn_s_ = ctx_->now_s;
+      base_ = std::isfinite(ctx_->heading_deg) ? ctx_->heading_deg : 0.0;
+      Vec2 toward;
+      bool have = false;
+      if (face == "field") {
+        have = fieldCentre(*ctx_, &toward);
+      } else if (face == "exit") {
+        have = ctx_->have_exit;
+        toward = ctx_->exitp;
+        if (!have) {have = fieldCentre(*ctx_, &toward);}
+      } else if (face == "entry") {
+        have = ctx_->have_entry;
+        toward = ctx_->entry;
+        if (!have) {have = fieldCentre(*ctx_, &toward);}
+      }
+      if (have && nav::norm(toward - anchor_) > 1.0) {
+        base_ = nav::bearingDeg(anchor_, toward);
+        base_from = face == "field" ? "the field centre" : "the " + face;
+      }
+    }
+    look_ = 0;
+    dwelling_since_ = -1.0;
+    returning_ = false;
+    stale_ = false;
+    RCLCPP_INFO(log(), "scan: %zu looks of %.0f s round %03.0f deg (toward %s)%s", looks_.size(),
+      dwell_s_, holdheading::wrap360(base_), base_from.c_str(),
+      ctx_->publish_setpoints ? "" : "  [NOT SENT: publish_setpoints is false]");
+    return onRunning();
+  }
+
+  BT::NodeStatus onRunning() override
+  {
+    Vec2 boat;
+    double now, hdg_now;
+    bool fresh, done_early;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      boat = ctx_->boat;
+      now = ctx_->now_s;
+      hdg_now = ctx_->heading_deg;
+      fresh = ctx_->pose_fresh;
+      done_early = until_ == "entry" ? ctx_->entry_seen :
+        until_ == "exit" ? ctx_->exit_seen :
+        until_ == "both" ? (ctx_->entry_seen && ctx_->exit_seen) :
+        until_ == "field" ? fieldKnown(*ctx_) : false;
+    }
+    if (done_early) {
+      RCLCPP_INFO(log(), "scan: %s seen after %.0f s - done", until_.c_str(), now - start_s_);
+      return BT::NodeStatus::SUCCESS;
+    }
+    if (!fresh) {
+      if (!stale_) {
+        stale_ = true;
+        stale_s_ = now;
+        RCLCPP_WARN(log(), "scan: pose stale, not commanding");
+      }
+      if (now - stale_s_ > 5.0) {
+        RCLCPP_ERROR(log(), "scan: pose stale for 5 s, giving up");
+        return BT::NodeStatus::FAILURE;
+      }
+      return BT::NodeStatus::RUNNING;
+    }
+    stale_ = false;
+    prm_.heading_deg = holdheading::wrap360(base_ + looks_[look_]);
+    const holdheading::Command cmd = holdheading::decide(boat, anchor_, returning_, prm_);
+    returning_ = cmd.returning;
+    const bool on_heading = !cmd.returning && std::isfinite(hdg_now) &&
+      std::fabs(wrap180(prm_.heading_deg - hdg_now)) <= settle_deg_;
+    if (dwelling_since_ < 0.0 && (on_heading || now - turn_s_ > turn_timeout_s_)) {
+      dwelling_since_ = now;
+      RCLCPP_INFO(log(), "scan: look %d/%zu at %03.0f deg%s", look_ + 1, looks_.size(),
+        prm_.heading_deg, on_heading ? "" : " (turn timed out: looking from here)");
+    }
+    if (dwelling_since_ >= 0.0 && now - dwelling_since_ >= dwell_s_) {
+      if (++look_ >= static_cast<int>(looks_.size())) {
+        RCLCPP_INFO(log(), "scan: done after %.0f s", now - start_s_);
+        return BT::NodeStatus::SUCCESS;
+      }
+      dwelling_since_ = -1.0;
+      turn_s_ = now;
+      prm_.heading_deg = holdheading::wrap360(base_ + looks_[look_]);
+    }
+    if (ctx_->publish_setpoints && ctx_->heading_speed) {
+      ctx_->heading_speed(cmd.returning ? cmd.heading_deg : prm_.heading_deg,
+        cmd.returning ? cmd.speed_mps : 0.0);
+    }
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      Context::LegStatus & s = ctx_->leg;
+      s = Context::LegStatus{};
+      s.leaf = "ScanForBuoys";
+      s.name = "look " + std::to_string(look_ + 1) + "/" + std::to_string(looks_.size());
+      s.state = dwelling_since_ >= 0.0 ? "LOOKING" : (returning_ ? "RETURNING" : "TURNING");
+      s.why = "heading " + std::to_string(static_cast<int>(std::lround(prm_.heading_deg)));
+      s.have_goal = true;
+      s.goal = anchor_;
+      ++ctx_->leg_seq;
+    }
+    return BT::NodeStatus::RUNNING;
+  }
+
+  void onHalted() override
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    clearLeg(*ctx_);
+  }
+
+private:
+  std::vector<double> looks_;
+  holdheading::Params prm_;
+  Vec2 anchor_;
+  double base_ = 0.0, dwell_s_ = 5.0, settle_deg_ = 12.0, turn_timeout_s_ = 15.0;
+  double start_s_ = 0.0, turn_s_ = 0.0, dwelling_since_ = -1.0, stale_s_ = 0.0;
+  int look_ = 0;
+  bool returning_ = false, stale_ = false;
+  std::string until_;
+};
+
+/// The next vantage point round the operator's field centre, for NavigateTo target="port":
+/// radius_m from the centre, the first on the line from the centre to where the boat is when
+/// this first runs, the next ones offsets_deg round from it (in order; then round again).
+/// Each call moves on one. FAILURE without a field centre.
+class PickFieldVantage : public CrusaderSyncAction
+{
+public:
+  PickFieldVantage(const std::string & n, const BT::NodeConfig & c) : CrusaderSyncAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<double>("radius_m", 12.0, "from the field centre (the field is ~8 x 13 m)"),
+      BT::InputPort<std::string>("offsets_deg", "0,60,120,180,240,300",
+        "round the centre, from the boat's side, in the order visited"),
+      BT::OutputPort<Waypoint>("goal", "the vantage point")};
+  }
+
+  BT::NodeStatus tick() override
+  {
+    const double r = getInput<double>("radius_m").value_or(12.0);
+    const std::vector<double> offs =
+      parseDegrees(getInput<std::string>("offsets_deg").value_or("0,60,120,180,240,300"));
+    Waypoint w;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      Vec2 c;
+      if (!fieldCentre(*ctx_, &c) || !ctx_->pose_fresh) {
+        RCLCPP_WARN(log(), "PickFieldVantage: %s", ctx_->pose_fresh ?
+          "no field centre (set it on the GCS Run panel): cannot search round the field" :
+          "no fresh pose");
+        return BT::NodeStatus::FAILURE;
+      }
+      if (!have_base_) {
+        base_ = nav::norm(ctx_->boat - c) > 1.0 ? nav::bearingDeg(c, ctx_->boat) : 180.0;
+        have_base_ = true;
+      }
+      const double brg = base_ + offs[next_ % offs.size()];
+      const Vec2 p = c + nav::headingVec(brg) * r;
+      const nav::LatLon ll = nav::toLatLon(p, ctx_->origin);
+      w.lat = ll.lat;
+      w.lon = ll.lon;
+      w.why = "vantage " + std::to_string(next_ + 1) + ": " + std::to_string(static_cast<int>(r)) +
+        " m from the field centre, bearing " +
+        std::to_string(static_cast<int>(std::lround(holdheading::wrap360(brg)))) + " from it";
+    }
+    ++next_;
+    RCLCPP_INFO(log(), "search: %s", w.why.c_str());
+    setOutput("goal", w);
+    return BT::NodeStatus::SUCCESS;
+  }
+
+private:
+  bool have_base_ = false;
+  double base_ = 0.0;
+  std::size_t next_ = 0;
+};
+
+/// The ENTRY and the EXIT are known (seen, given, or the EXIT guessed from the GCS field centre):
+/// WaitForField would return at once.
+class FieldKnown : public CrusaderCondition
+{
+public:
+  FieldKnown(const std::string & n, const BT::NodeConfig & c) : CrusaderCondition(n, c) {}
+  static BT::PortsList providedPorts() {return {};}
+
+  BT::NodeStatus tick() override
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    return fieldKnown(*ctx_) ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
+  }
+};
+
+/// lat/lon hold a position: finite, on the globe, and not the 0, 0 a blank GCS field leaves.
+/// Guards a NavigateTo target="fix" whose numbers come from the operator (it would drive to 0, 0).
+class FixGiven : public CrusaderCondition
+{
+public:
+  FixGiven(const std::string & n, const BT::NodeConfig & c) : CrusaderCondition(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<double>("lat", 0.0, "latitude"),
+      BT::InputPort<double>("lon", 0.0, "longitude")};
+  }
+
+  BT::NodeStatus tick() override
+  {
+    const double la = getInput<double>("lat").value_or(0.0);
+    const double lo = getInput<double>("lon").value_or(0.0);
+    return latLonGiven(la, lo) ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
+  }
+};
+
+/// Round the fixed field on the way to `target`. With nav_mode off every leg is a guarded straight
+/// one, and a straight line through the Task 1 buoy field holds in front of the first buoy and
+/// FAILS (Task 1 EXIT -> Task 3 approach point). t4::detour picks one point beside the field.
+///
+/// SUCCESS: drive to {via} first (the shortest boat -> via -> target that keeps margin_m from
+///          every known buoy, fence and the dock, else 2 m, else nav_hard_m; inside the course).
+/// FAILURE: go straight: the straight line already keeps that, or the target is not available,
+///          or no point within 40 m clears the field (logged: the straight leg then holds in
+///          front of it). Use it as ForceSuccess(Sequence(PickDetour, NavigateTo port {via})).
+/// Task 4's moving keep-outs are not part of the field: AvoidInvaders handles them.
+class PickDetour : public CrusaderSyncAction
+{
+public:
+  PickDetour(const std::string & n, const BT::NodeConfig & c) : CrusaderSyncAction(n, c) {}
+  static BT::PortsList providedPorts()
+  {
+    return {
+      BT::InputPort<std::string>("target", "approach", "approach | fix | port"),
+      BT::InputPort<double>("lat", 0.0, "with target=fix: latitude"),
+      BT::InputPort<double>("lon", 0.0, "with target=fix: longitude"),
+      BT::InputPort<Waypoint>("goal", "with target=port: a Waypoint from an upstream leaf"),
+      BT::InputPort<double>("margin_m", 3.0, "clearance wanted from every buoy and the dock"),
+      BT::OutputPort<Waypoint>("via", "the point to drive to first")};
+  }
+
+  BT::NodeStatus tick() override
+  {
+    const std::string which = getInput<std::string>("target").value_or("approach");
+    const double margin = std::clamp(getInput<double>("margin_m").value_or(3.0), 0.5, 20.0);
+    const double la = getInput<double>("lat").value_or(0.0);
+    const double lo = getInput<double>("lon").value_or(0.0);
+    const auto port = getInput<Waypoint>("goal");
+    Vec2 boat, goal;
+    std::vector<path::Hazard> field;
+    std::vector<Vec2> course;
+    std::vector<double> clears{margin};
+    nav::LatLon origin;
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      if (!ctx_->origin_set || !ctx_->pose_fresh) {
+        RCLCPP_WARN(log(), "PickDetour: no fresh pose: straight on");
+        return BT::NodeStatus::FAILURE;
+      }
+      bool have = false;
+      if (which == "approach" && ctx_->has_approach) {
+        goal = nav::toLocal({ctx_->approach_lat, ctx_->approach_lon}, ctx_->origin);
+        have = true;
+      } else if (which == "fix" && latLonGiven(la, lo)) {
+        goal = nav::toLocal({la, lo}, ctx_->origin);
+        have = true;
+      } else if (which == "port" && port) {
+        goal = nav::toLocal({port.value().lat, port.value().lon}, ctx_->origin);
+        have = true;
+      }
+      if (!have) {
+        RCLCPP_WARN(log(), "PickDetour: target '%s' is not available", which.c_str());
+        return BT::NodeStatus::FAILURE;
+      }
+      boat = ctx_->boat;
+      origin = ctx_->origin;
+      for (const path::Hazard & h : knownHazards(*ctx_)) {
+        if (h.source != path::HazardSource::Keepout) {field.push_back(h);}
+      }
+      for (const nav::LatLon & ll : ctx_->course_corners) {
+        course.push_back(nav::toLocal(ll, ctx_->origin));
+      }
+      if (margin > 2.0) {clears.push_back(2.0);}
+      if (ctx_->nav.hard_m < clears.back()) {clears.push_back(ctx_->nav.hard_m);}
+    }
+    const t4::Detour d = t4::detour(boat, goal, field, clears, course);
+    if (d.route == t4::Route::Straight) {
+      RCLCPP_INFO(log(), "PickDetour %s: straight (%.0f m, keeps %.1f m of the field)",
+        which.c_str(), d.len_m, d.clear_m);
+      return BT::NodeStatus::FAILURE;
+    }
+    if (d.route == t4::Route::None) {
+      RCLCPP_WARN(log(), "PickDetour %s: no point within 40 m takes the leg round the field "
+        "(%zu hazards): straight on, and the leg holds in front of it", which.c_str(),
+        field.size());
+      return BT::NodeStatus::FAILURE;
+    }
+    const nav::LatLon ll = nav::toLatLon(d.via, origin);
+    Waypoint w;
+    w.lat = ll.lat;
+    w.lon = ll.lon;
+    char why[160];
+    std::snprintf(why, sizeof(why), "round the field to %s: %.0f m instead of %.0f, %.1f m clear",
+      which.c_str(), d.len_m, nav::norm(goal - boat), d.clear_m);
+    w.why = why;
+    RCLCPP_INFO(log(), "PickDetour: %s", why);
+    setOutput("via", w);
+    return BT::NodeStatus::SUCCESS;
+  }
 };
 
 }  // namespace
@@ -811,6 +1378,13 @@ void registerGlobalPassageNodes(BT::BehaviorTreeFactory & factory)
   factory.registerNodeType<WaitForField>("WaitForField");
   factory.registerNodeType<PlanGlobalPassage>("PlanGlobalPassage");
   factory.registerNodeType<DrivePlanPhase>("DrivePlanPhase");
+  factory.registerNodeType<AnchorSeen>("AnchorSeen");
+  factory.registerNodeType<PassageStarted>("PassageStarted");
+  factory.registerNodeType<ScanForBuoys>("ScanForBuoys");
+  factory.registerNodeType<PickFieldVantage>("PickFieldVantage");
+  factory.registerNodeType<FieldKnown>("FieldKnown");
+  factory.registerNodeType<FixGiven>("FixGiven");
+  factory.registerNodeType<PickDetour>("PickDetour");
 }
 
 }  // namespace crusader_bt

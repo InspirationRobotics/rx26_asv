@@ -100,6 +100,15 @@ class TrackerParams:
     tentative_timeout_s: float = 3.0  # unconfirmed tracks expire fast; ALWAYS
     track_timeout_s: float = 0.0     # confirmed: 0 = never expire. See _prune
     max_tracks: int = 64             # hard cap; see _prune
+    # A camera frame and the pose it is projected with are not from one instant
+    # (detector latency vs the pose stream): turning at w rad/s, a sighting at
+    # range R lands about R * w * turn_skew_s sideways of its buoy. Past
+    # assoc_radius_m that is a new track that never expires (a ghost copy of
+    # the buoy, often family-merged with its gate partner); inside it, it drags
+    # the real track. Camera-only sightings whose expected smear exceeds
+    # turn_smear_max_m are dropped (0 = off). LiDAR-positioned ones are kept.
+    turn_smear_max_m: float = 1.0
+    turn_skew_s: float = 0.2
 
     # -- colour voting (stage 3). See the module docstring, "ONE BUOY, MANY
     # COLOURS". Tuples, because the node hands in whatever list rclpy gives it
@@ -163,6 +172,7 @@ class BoatState:
     roll: float
     pitch: float
     yaw: float
+    yaw_rate: float = 0.0   # rad/s, Attitude.yawspeed; 0 = steady or unknown
 
 
 @dataclass
@@ -570,6 +580,7 @@ class TargetTracker:
         the area).
         """
         obs, stats = fuse(cameras, lidars, self.p)
+        obs, stats["turn_dropped"] = self._drop_turn_smear(obs, boat)
 
         projected = []
         for o in obs:
@@ -591,6 +602,18 @@ class TargetTracker:
             or t.label.startswith("unknown_"))
         self.stats = stats
         return tracks
+
+    def _drop_turn_smear(self, obs, boat: BoatState):
+        """(kept, dropped count): camera-only sightings too far out to place while
+        turning this fast (see TrackerParams.turn_smear_max_m)."""
+        lim = self.p.turn_smear_max_m
+        rate = abs(boat.yaw_rate)
+        if lim <= 0.0 or not math.isfinite(rate) or rate == 0.0:
+            return obs, 0
+        per_m = rate * self.p.turn_skew_s
+        kept = [o for o in obs
+                if o.sources != SOURCE_CAMERA or o.range_h * per_m <= lim]
+        return kept, len(obs) - len(kept)
 
     def forget_colours(self) -> int:
         """A new run: the competition re-deals red and green between runs, and votes from the

@@ -69,6 +69,9 @@ _NO_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 TIERS = ("none", "core", "advanced", "disruptive")
 TASKS = ("task1", "task2", "task3", "task4")
 DECLARE_ATTRS = tuple("declare_" + t for t in TASKS)
+# bt_runner_node reads these root flags (mission_loader rootFlag); BT.CPP ignores them. t1_guess_exit="true":
+# Task 1 Core may plan round an EXIT guessed from the field centre (task1_core_scan, mission_t1_t3_t4).
+ROOT_FLAGS = ("t1_guess_exit",)
 #: RoboCommand's RxTask token -> the task number it runs, for the declaration warnings.
 TASK_TOKENS = {"TASK_SAFE_PASSAGE": 1, "TASK_INFRA_SURVEY_REPAIR": 2,
                "TASK_COORDINATED_LOGISTICS": 3, "TASK_DYNAMIC_INCIDENT": 4}
@@ -389,7 +392,7 @@ class _Check:
     def top(self, root):
         """The body elements of a mission whose top level is exactly the guard, else None and why."""
         trees = [c for c in root if c.tag != "include"]       # an include is reported once, by issues()
-        plain = {k: v for k, v in root.attrib.items() if k not in DECLARE_ATTRS}
+        plain = {k: v for k, v in root.attrib.items() if k not in DECLARE_ATTRS + ROOT_FLAGS}
         if root.tag != "root" or plain != {"BTCPP_format": "4", "main_tree_to_execute": MAIN}:
             why = 'the root must be <root BTCPP_format="4" main_tree_to_execute="Main">'
         elif len(trees) != 1 or trees[0].tag != "BehaviorTree" or trees[0].attrib != {"ID": MAIN}:

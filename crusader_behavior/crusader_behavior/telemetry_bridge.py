@@ -557,6 +557,9 @@ class TelemetryBridge(Node):
                    self._mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, POSITION_ONLY_TYPE_MASK,
                    int(round(msg.latitude * 1e7)), int(round(msg.longitude * 1e7)),
                    0, 0, 0, 0, 0, 0, 0, 0, 0)
+        # The setpoint replaced any heading+speed target: the dead-man's stop would override it.
+        with self._hs_lock:
+            self.hs.on_position_setpoint()
 
     @guarded
     def _obstacle_cb(self, msg: ObstacleDistance):

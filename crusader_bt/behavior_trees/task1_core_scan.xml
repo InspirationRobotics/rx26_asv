@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- MISSION: Task 1 Core: find the field by scanning (here, then round the field centre), plan and drive it, pausing to look. -->
+<!--
+  task1_core_scan.xml - Task 1 Safe Passage at Core tier, nothing about the field written in:
+  lib/task1_core_scan.xml (Task1CoreScan) does the work and says how.
+
+  GCS Run panel (bt_runner_node parameters, read at Start):
+    field centre   t1_field_lat / t1_field_lon: the rough middle of the buoy field. Set it: it
+                   points the scans, places the vantage points and lets the EXIT be guessed
+                   until it is seen. Blank: the boat only looks from where it starts.
+    scan dwell     t1_scan_dwell_s, 5 s: each look, and each pause in the transit
+    pause every    t1_pause_every_m, 5 m: a pause to look along the transit; 0 = none
+    approach point t1_approach_lat / t1_approach_lon: drive here first, THEN scan for the field
+                   (skipped once a plan exists; a blocked leg falls through to scanning from
+                   where the boat is). Blank: scan from where the boat starts.
+    unknown range  t1_unknown_range_m, 12 m: stop up to the scan dwell to look at a buoy with
+                   no colour yet that comes within this range, +-35 deg of the bow, in the
+                   approach, entry orbit and transit (once per buoy); 0 = never
+  ENTRY/EXIT are what the boat sees this run (the competition re-deals them): nothing is
+  remembered between runs. This tree's root says t1_guess_exit="true", so an EXIT not seen yet
+  is GUESSED (field centre mirrored through the ENTRY) for planning, never reported.
+  Task 4 (Disruptive, task4_leaves.cpp): AvoidInvaders breaks off to keep out of a RoboCommand
+  moving object's way and resumes; its settings (t4_*) are on the Run panel too, live.
+-->
+<root BTCPP_format="4" main_tree_to_execute="Main" declare_task1="core" declare_task2="none" declare_task3="none" declare_task4="none" t1_guess_exit="true">
+  <include path="lib/task1_core_scan.xml"/>
+
+  <BehaviorTree ID="Main">
+    <ReactiveSequence name="guard_band">
+      <IsAutonomous/>
+      <TaskAttempt token="TASK_SAFE_PASSAGE">
+        <ReactiveSequence name="task1_guard">
+          <ResolveBuoyStates/>
+          <ReportSafePassage min_period_s="1.0"/>
+          <AvoidInvaders>
+            <SubTree ID="Task1CoreScan" _autoremap="true"/>
+          </AvoidInvaders>
+        </ReactiveSequence>
+      </TaskAttempt>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>
