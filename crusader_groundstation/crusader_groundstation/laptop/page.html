@@ -104,6 +104,16 @@ input, select, textarea { background: var(--field); color: var(--fg); border: 1p
                           border-radius: 4px; padding: 3px 5px; }
 input.num { width: 7em; }
 input.ll { width: 9.5em; }
+/* the Run panel's "Task 3 control": label | box | unit | note, one row per knob, by group */
+#m-t3ctl summary { cursor: pointer; }
+.t3g { display: grid; grid-template-columns: max-content 6.5em max-content 1fr; gap: 3px 8px;
+       align-items: center; margin-top: 4px; }
+.t3g h4 { grid-column: 1 / -1; margin: 8px 0 0; font-size: 13px; }
+.t3row { display: contents; }
+.t3row input { width: 6.5em; }
+.t3row.pend input { outline: 2px solid var(--warn); }
+.t3row.tuned > span:first-child { font-weight: 600; }
+.t3row.tuned [data-now] { color: var(--warn); }
 textarea { width: 100%; font: 12px ui-monospace, Consolas, monospace; }
 h3 { margin: 12px 0 6px; font-size: 15px; }
 .box { border: 1px solid var(--line); border-radius: 4px; padding: 8px; margin-bottom: 10px; }
@@ -307,6 +317,15 @@ body.ed-dragging { cursor: grabbing; user-select: none; }
             slide first <select id="m-slide"><option>left</option><option>right</option></select>
             <button id="m-slide-set">Set</button> <span id="m-slide-now" class="muted"></span></div></div>
         <div id="m-inputs"></div>
+        <details id="m-t3ctl" style="margin-top: 6px; display: none">
+          <summary title="Task 3's docking position and control gains, on bt_runner_node (t3_*), read at Start: a change applies from the next run, no rebuild"><b>Task 3 control</b> <span id="m-t3ctl-sum" class="muted small"></span></summary>
+          <div id="m-t3ctl-rows"></div>
+          <div style="margin-top: 6px">
+            <button id="m-t3ctl-set" title="send every box that differs from what the boat holds (outlined)">Set changed</button>
+            <button id="m-t3ctl-def" title="type every default into the boxes; nothing is sent until Set changed (or Start)">Defaults</button>
+            <span class="muted small">bold = not the default on the boat; outlined = typed, not sent yet (Start sends it)</span>
+          </div>
+        </details>
         <div style="margin-top: 6px">
           <button class="primary" id="m-start">Start</button>
           <button class="danger" id="m-stop">Stop</button>
@@ -850,13 +869,15 @@ $("m-start").onclick = async () => {
     if (e) return toast("approach: " + e, false);
     args.approach = [+la, +lo];
   }
-  // a Run-panel value typed or picked but not Set would be ignored: send it first
+  // a Run-panel value typed or picked but not Set would be ignored: send them first, in one set
+  const pending = {};
   for (const d of RUN_INPUTS) {
     if (runRow(d.key).style.display === "none" || !runPending(d)) continue;
     const p = runRowParams(d);
     if (p.err) return toast(`${d.label}: ${p.err}`, false);
-    await setBtParams(p.values);
+    Object.assign(pending, p.values);
   }
+  if (Object.keys(pending).length) await setBtParams(pending);
   const diff = CrsdEditor.tierMismatch();      // null while the OCS's tiers are unknown
   if (!confirm(`Start ${name}?
 
@@ -917,6 +938,51 @@ const RUN_INPUTS = [
   {key: "t3_via", ll: true, label: "via point", show: /^mission_t[0-9]/,
    tip: "The way to the dock (from Task 1, or from the start when Task 3 goes first): a point the boat drives through (t3_via_lat/lon). Clear = none: straight, and round the Task 1 field when the straight line would cross it"},
 ];
+// "Task 3 control": crusader_bt's t3_tuning.hpp knobs (the same list as there and in
+// operator_settings.py T3_CONTROL; test_operator_settings checks all three). Rows in groups, no
+// per-row Set: "Set changed" sends every outlined box at once, Start sends them too.
+const T3_DOCK = /^(task3_(scan_fire|first_dock)|mission_t[0-9])/;
+const T3_GROUPS = {pos: "Where to dock", search: "Search slide", app: "Approach: line up on the bay, then drive in",
+                   hold: "Docked hold"};
+const t3k = (key, group, label, unit, def, min, max, step, tip) =>
+  ({key, group, label, unit, def, min, max, step, tip, show: T3_DOCK});
+RUN_INPUTS.push(
+  t3k("t3_hold_m", "pos", "distance off the face", "m", 1.7, 0.8, 6, 0.1,
+      "The docked hold while firing: camera to the bay's face"),
+  t3k("t3_lat_offset_m", "pos", "sideways offset", "m, + = left", 0, -0.6, 0.6, 0.05,
+      "Where to sit across the bay, facing the dock: + = left of the bay's centre, - = right, 0 = centred"),
+  t3k("t3_handover_m", "pos", "hand over to the hold at", "m", 2.0, 1, 6, 0.1,
+      "The approach stops driving in and the hold takes over this far from the face; keep it at or beyond the distance off the face"),
+  t3k("t3_search_lat_us", "search", "slide stick", "us", 80, 40, 200, 5,
+      "The sideways stick while the search slides along the dock (100 us was ~0.3 m/s on the water, 2026-11-13). Slower: less overshoot past the bay, a longer search"),
+  t3k("t3_app_kp_lat", "app", "sideways gain", "us per m", 250, 0, 1000, 10,
+      "Sideways stick per metre off the bay's centre (on top of the smallest correction)"),
+  t3k("t3_app_kd_lat", "app", "sideways damping", "us per m/s", 150, 0, 1000, 10,
+      "Brakes the sideways slide: at 0.3 m/s, 150 gives 45 us against it"),
+  t3k("t3_app_min_us", "app", "smallest correction", "us", 45, 0, 150, 5,
+      "Every sideways correction starts here: the FC's 30 us RC dead zone (RC4_DZ) plus what it takes to move the hull"),
+  t3k("t3_app_strafe_us", "app", "sideways stick cap", "us", 100, 20, 300, 5, "The most sideways stick the approach uses"),
+  t3k("t3_app_fwd_us", "app", "drive-in stick", "us", 60, 0, 200, 5, "The forward stick once centred"),
+  t3k("t3_app_centre_tol_m", "app", "centred within", "m", 0.08, 0.02, 1, 0.01,
+      "Centred = this close to the bay's centre (or the sideways offset) ..."),
+  t3k("t3_app_centred_s", "app", "centred for", "s", 1.5, 0, 10, 0.5, "... for this long, then it drives in"),
+  t3k("t3_app_recentre_m", "app", "re-centre past", "m", 0.20, 0.05, 2, 0.01,
+      "Driving in, it stops and re-centres when this far off; keep it under the slip's side clearance"),
+  t3k("t3_app_coast_s", "app", "coast window", "s", 1.5, 0, 5, 0.1,
+      "No sideways stick while the offset would close within this anyway; 0 = always steer, so the damping brakes the slide"),
+  t3k("t3_app_kp_yaw", "app", "yaw gain", "us per deg", 4, 0, 50, 0.5, "Turn stick per degree off the dock heading"),
+  t3k("t3_app_kd_yaw", "app", "yaw damping", "us per deg/s", 3, 0, 50, 0.5, "Against the turn rate"),
+  t3k("t3_hold_kp_lat", "hold", "sideways gain", "us per m", 200, 0, 1000, 10, "Sideways stick per metre off the bay's centre"),
+  t3k("t3_hold_kd_lat", "hold", "sideways damping", "us per m/s", 200, 0, 1000, 10, "Against the sideways speed"),
+  t3k("t3_hold_ki_lat", "hold", "sideways integral", "us per m.s", 20, 0, 200, 1, "Builds up against a steady set"),
+  t3k("t3_hold_kp_fwd", "hold", "in/out gain", "us per m", 90, 0, 1000, 10, "Forward stick per metre off the distance off the face"),
+  t3k("t3_hold_kd_fwd", "hold", "in/out damping", "us per m/s", 60, 0, 1000, 10, "Against the in/out speed"),
+  t3k("t3_hold_ki_fwd", "hold", "in/out integral", "us per m.s", 40, 0, 200, 1, "Builds up against a steady set"),
+  t3k("t3_hold_kp_yaw", "hold", "yaw gain", "us per deg", 5, 0, 50, 0.5, "Turn stick per degree off square"),
+  t3k("t3_hold_kd_yaw", "hold", "yaw damping", "us per deg/s", 2, 0, 50, 0.5, "Against the turn rate"),
+  t3k("t3_hold_min_us", "hold", "smallest correction", "us", 45, 0, 150, 5, "Every hold correction starts here (the FC's 30 us dead zone and more)"),
+  t3k("t3_hold_max_us", "hold", "stick cap", "us", 120, 20, 300, 5, "The most stick the hold uses, every axis"),
+);
 function runInputRow(d) {
   const set = '<button data-act="set">Set</button>', now = '<span class="muted" data-now></span>';
   return `<div data-key="${d.key}" style="margin-top: 6px; display: none" title="${esc(d.tip)}">${esc(d.label)} ` +
@@ -927,8 +993,44 @@ function runInputRow(d) {
           : `<input class="num" type="number" min="${d.min}" max="${d.max}" step="${d.step}" aria-label="${esc(d.label)}"> ${esc(d.unit)} ${set} ${now}`) +
     "</div>";
 }
-$("m-inputs").innerHTML = RUN_INPUTS.map(runInputRow).join("");
-const runRow = key => $("m-inputs").querySelector(`[data-key="${key}"]`);
+function t3Row(d) {
+  return `<div class="t3row" data-key="${d.key}" title="${esc(d.tip)} (default ${d.def}; bt_runner_node ${d.key})">` +
+    `<span>${esc(d.label)}</span><input class="num" type="number" min="${d.min}" max="${d.max}" step="${d.step}" aria-label="${esc(d.label)}">` +
+    `<span class="muted small">${esc(d.unit)}</span><span class="muted small" data-now></span></div>`;
+}
+$("m-inputs").innerHTML = RUN_INPUTS.filter(d => !d.group).map(runInputRow).join("");
+$("m-t3ctl-rows").innerHTML = '<div class="t3g">' + Object.entries(T3_GROUPS).map(([g, title]) =>
+  `<h4>${esc(title)}</h4>` + RUN_INPUTS.filter(d => d.group === g).map(t3Row).join("")).join("") + "</div>";
+const runRow = key => document.querySelector(`#m-inputs [data-key="${key}"], #m-t3ctl-rows [data-key="${key}"]`);
+const T3_ROWS = RUN_INPUTS.filter(d => d.group);
+function t3Mark() {                              // bold = tuned on the boat, outline = typed not sent; the summary counts
+  let tuned = 0, pend = 0, known = false;
+  for (const d of T3_ROWS) {
+    const row = runRow(d.key), h = runHeld[d.key];
+    known = known || h !== undefined;
+    const isTuned = h !== undefined && h !== null && h !== d.def, isPend = runPending(d);
+    row.classList.toggle("tuned", isTuned);
+    row.classList.toggle("pend", isPend);
+    tuned += isTuned; pend += isPend;
+  }
+  $("m-t3ctl-sum").textContent = !known ? "(bt_runner_node has none: an older build?)" :
+    (tuned ? `${tuned} tuned away from the defaults` : "all at the defaults") + (pend ? `, ${pend} typed, not sent` : "");
+}
+$("m-t3ctl-rows").addEventListener("input", t3Mark);
+$("m-t3ctl-set").onclick = () => {
+  const values = {};
+  for (const d of T3_ROWS.filter(runPending)) {
+    const p = runRowParams(d);
+    if (p.err) return toast(`${d.label}: ${p.err}`, false);
+    Object.assign(values, p.values);
+  }
+  if (!Object.keys(values).length) return toast("Task 3 control: nothing typed differs from the boat");
+  setBtParams(values);
+};
+$("m-t3ctl-def").onclick = () => {
+  for (const d of T3_ROWS) runRow(d.key).querySelector("input").value = d.def;
+  t3Mark();
+};
 const runBox = (key, f) => runRow(key).querySelector(`[data-f="${f}"]`);
 const runHeld = {};                              // what the boat holds per row: {lat, lon} (null = not set) or a number
 function runPending(d) {                         // the row's box differs from what the boat holds (empty = nothing typed)
@@ -963,6 +1065,7 @@ function runPointsMark() {                       // the field centre, approach a
 async function loadRunInputs() {
   const name = $("m-name").value;
   for (const d of RUN_INPUTS) runRow(d.key).style.display = d.show.test(name) ? "" : "none";
+  $("m-t3ctl").style.display = T3_DOCK.test(name) ? "" : "none";
   runPointsMark();
   const node = btNode();
   if (!node || !RUN_INPUTS.some(d => d.show.test(name))) return;
@@ -982,11 +1085,13 @@ async function loadRunInputs() {
     } else {
       const v = val(d.key), box = row.querySelector("input");
       runHeld[d.key] = v == null ? undefined : v;
-      nowEl.textContent = v == null ? "" : `now ${v}`;
+      // a Task 3 control row: the box shows what the boat holds; the note only when it is tuned
+      nowEl.textContent = v == null ? "" : !d.group ? `now ${v}` : v !== d.def ? `default ${d.def}` : "";
       if (v != null && box.value === "") box.value = v;
     }
   }
   runPointsMark();
+  t3Mark();
 }
 $("m-name").addEventListener("change", loadRunInputs);
 $("m-inputs").addEventListener("input", runPointsMark);

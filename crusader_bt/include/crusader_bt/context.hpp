@@ -41,6 +41,7 @@
 #include "crusader_bt/path_math.hpp"
 #include "crusader_bt/planned_leg.hpp"
 #include "crusader_bt/run_start.hpp"
+#include "crusader_bt/t3_tuning.hpp"
 #include "crusader_bt/task4_math.hpp"
 
 namespace crusader_bt
@@ -282,6 +283,7 @@ struct Context
     bool approach_set = false;       ///< t1_approach_lat/lon are set (0, 0 = not)
     nav::LatLon approach_ll;         ///< where Task 1 drives to before it scans for the field
     double unknown_range_m = 12.0;   ///< t1_unknown_range_m: stop to look at a colourless buoy this near (0 = never)
+    t3tune::Values t3 = t3tune::defaults();   ///< Task 3 control, t3_tuning.hpp's knobs, clamped
   };
   Inputs inputs;
 

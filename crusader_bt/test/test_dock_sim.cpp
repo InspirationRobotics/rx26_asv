@@ -92,6 +92,13 @@ struct Scenario
   double t4_lead_m = 60.0, t4_off_m = 5.0, t4_mps = 1.0;
   bool guided_moves = false;            ///< the boat follows GUIDED setpoints (Task 4's escape)
   bool t4_after_hit = false;            ///< t4_alert_s counts from the hit, not the start
+  // The stick path (2026-11-13 water runs: the search slid left at 100 us, ~0.3 m/s, and the
+  // approach's 30-60 us corrections barely moved the hull back: the boat hit the bay's left finger)
+  double fc_dz_us = 0.0;                ///< the FC's RC dead zone (RCx_DZ), taken off every stick
+  double lat_mps = 0.35;                ///< sway 75 us past the ESC deadband
+  double sway_tau_s = 0.8;              ///< how long a sideways slide takes to die away
+  cb::t3tune::Values t3;                ///< the Run panel's "Task 3 control"; a key not here: default
+  bool baseline = false;                ///< a before-picture: its checks are printed, not counted
 };
 
 /// How many reports of `kind` the run sent.
@@ -113,6 +120,10 @@ struct World
   static constexpr double kWinDx = 0.25;       ///< windows 0 / 1 this far left / right of centre
   static constexpr double kWinZ = 0.6;         ///< ... and this far above the camera, m
   static constexpr double kFx = 1173.0, kCx = 960.0;   ///< the RGB pinhole, 1920 px wide
+  static constexpr double kSlipW = 1.5;        ///< between a bay's fingers (nav_dock_slip_w_m)
+  static constexpr double kFingerLen = 2.0;    ///< fingers out from the faces (nav_dock_finger_len_m)
+  /// The hull about the body origin, ASSUMED: Nav2's robot_radius 0.82 m circumscribes it.
+  static constexpr double kHullL = 1.4, kHullB = 0.8;
 
   const Scenario & sc;
   int lit_bay = -1;                            ///< 0-based bay with the lit window; -1 = no fire
@@ -140,18 +151,39 @@ struct World
   double gauss(double s) {return std::normal_distribution<double>(0.0, s)(rng);}
   bool chance(double pr) {return std::uniform_real_distribution<double>(0.0, 1.0)(rng) < pr;}
 
-  /// Sticks in us about neutral (fwd + ahead, lat + starboard, yaw + right) for dt s. The
-  /// T200 ESCs do nothing within +-25 us of neutral; 100 us out is 0.45 / 0.35 m/s, 30 deg/s.
+  /// Sticks in us about neutral (fwd + ahead, lat + starboard, yaw + right) for dt s. The FC
+  /// takes its RC dead zone (sc.fc_dz_us) off each; the T200 ESCs then do nothing within +-25 us
+  /// of neutral; 100 us out is 0.45 m/s, sc.lat_mps sideways, 30 deg/s.
   void step(double fwd_us, double lat_us, double yaw_us, double dt)
   {
-    auto esc = [](double us) {
-        const double a = std::max(0.0, std::min(std::fabs(us), 150.0) - 25.0) / 75.0;
+    auto esc = [this](double us) {
+        const double past_dz = std::max(0.0, std::fabs(us) - sc.fc_dz_us);
+        const double a = std::max(0.0, std::min(past_dz, 150.0) - 25.0) / 75.0;
         return std::copysign(a, us);
       };
     lag(u, esc(fwd_us) * 0.45, 0.8, dt);
-    lag(v, esc(lat_us) * 0.35, 0.8, dt);
+    lag(v, esc(lat_us) * sc.lat_mps, sc.sway_tau_s, dt);
     lag(w, esc(yaw_us) * 30.0, 0.5, dt);
     integrate(dt);
+  }
+
+  /// How far a hull corner is into bay i's fingers, m (0 = clear): a corner between the faces
+  /// and the finger tips, past the slip's side and short of the next slip.
+  double fingerDepth(int i) const
+  {
+    const Vec2 bf = nav::headingVec(h), sb = nav::starboardOf(bf);
+    double deepest = 0.0;
+    for (const double a : {-0.5, 0.5}) {
+      for (const double b : {-0.5, 0.5}) {
+        const Vec2 c = p + bf * (a * kHullL) + sb * (b * kHullB) -
+          faces[static_cast<std::size_t>(i)];
+        const double out = -nav::dot(c, fwd), across = std::fabs(nav::dot(c, right));
+        if (out < 0.0 || out > kFingerLen) {continue;}
+        const double into = std::min(across - kSlipW / 2.0, kPitch - kSlipW / 2.0 - across);
+        deepest = std::max(deepest, into);
+      }
+    }
+    return deepest;
   }
 
   /// GUIDED: ArduRover's position controller as a velocity toward the setpoint (WP_SPEED 0.5,
@@ -397,6 +429,16 @@ static void run(const Scenario & sc, const std::string & trace_dir)
   for (const char * k : {"t1_approach_lat", "t1_approach_lon", "t3_via_lat", "t3_via_lon"}) {
     bb->set(k, 0.0);                              // unset, as the Run panel leaves them
   }
+  for (const cb::t3tune::Knob & k : cb::t3tune::kKnobs) {   // Task 3 control, as at Start
+    bb->set(k.key, cb::t3tune::get(sc.t3, k.key));
+  }
+  const double hold_m = cb::t3tune::get(sc.t3, "t3_hold_m");
+  const double offset_m = cb::t3tune::get(sc.t3, "t3_lat_offset_m");
+  // a baseline's checks are a picture of the old behaviour: printed, not counted
+  auto ck = [&sc](const std::string & what, bool pass) {
+      if (!sc.baseline) {chk(what, pass); return;}
+      std::printf("   [baseline, not counted] %s: %s\n", what.c_str(), pass ? "yes" : "NO");
+    };
   BT::Tree tree = factory.createTreeFromFile(std::string(CRSD_BT_DIR) + "/" + sc.tree, bb);
 
   std::ofstream trace;
@@ -408,6 +450,9 @@ static void run(const Scenario & sc, const std::string & trace_dir)
   std::deque<dk::Frame> pipe;
   double next_frame = 0.0, last_obs = -1e9, worst_lat = 0.0, worst_out = 0.0, best_out = 1e9;
   int commit_tracks = -1, most_tracks = 0;
+  // from the commit: time with a hull corner in the bay's fingers and the deepest; the camera's
+  // furthest left / right of where it should sit
+  double commit_t = -1.0, finger_s = 0.0, finger_depth = 0.0, most_left = 0.0, most_right = 0.0;
   // the fire: when the light came on, the camera's distance out when the spray first counted,
   // the hit, and the hold 15-30 s after it (out, |across|, |bow off square|)
   double light_t = -1.0, spray_out = -1.0, pumped = 0.0, hit_t = -1.0;
@@ -448,6 +493,15 @@ static void run(const Scenario & sc, const std::string & trace_dir)
         bo_yaw = std::max(bo_yaw, std::fabs(cb::fire::wrap180(W.h - W.dock_h)));
       }
     }
+    if (commit_t >= 0.0) {                        // from the commit on: the slip and the overshoot
+      const double depth = W.fingerDepth(sc.expect_bay - 1);
+      if (depth > 0.0) {finger_s += dt;}
+      finger_depth = std::max(finger_depth, depth);
+      double c_across, c_out;
+      W.offBay(sc.expect_bay - 1, c_across, c_out);
+      most_left = std::max(most_left, -c_across - offset_m);
+      most_right = std::max(most_right, c_across + offset_m);
+    }
     if (t >= next_frame) {pipe.push_back(W.frame(t)); next_frame += frame_dt;}
     {
       std::lock_guard<std::mutex> lk(ctx->mu);
@@ -480,6 +534,7 @@ static void run(const Scenario & sc, const std::string & trace_dir)
       most_tracks = std::max(most_tracks, static_cast<int>(ctx->dock.tracks.size()));
       if (commit_tracks < 0 && ctx->chosen_track >= 0) {
         commit_tracks = static_cast<int>(ctx->dock.tracks.size());
+        commit_t = t;
       }
     }
     st = tree.tickOnce();
@@ -494,7 +549,7 @@ static void run(const Scenario & sc, const std::string & trace_dir)
       double across, out;
       W.offBay(sc.expect_bay - 1, across, out);
       if (t - report_t <= 15.0 && hit_t < 0.0) {     // the docked hold, before any back-off
-        worst_lat = std::max(worst_lat, std::fabs(across));
+        worst_lat = std::max(worst_lat, std::fabs(across + offset_m));   // from where it should sit
         worst_out = std::max(worst_out, out);
         best_out = std::min(best_out, out);
       }
@@ -516,26 +571,35 @@ static void run(const Scenario & sc, const std::string & trace_dir)
     report_t >= 0.0 ? ("at " + std::to_string(static_cast<int>(report_t)) + " s").c_str() : "never");
   std::printf("   camera now %+.2f m across bay %d's face, %.2f m out, bow %+.1f deg off square\n",
     across, sc.expect_bay, out, cb::fire::wrap180(W.h - W.dock_h));
-  chk(sc.name + ": committed bay " + std::to_string(sc.expect_bay),
+  ck(sc.name + ": committed bay " + std::to_string(sc.expect_bay),
     ctx->chosen_bay == sc.expect_bay);
-  chk(sc.name + ": docking reported", report_t >= 0.0);
-  chk(sc.name + ": in the bay at the report and 15 s on (|across| " +
-    std::to_string(worst_lat).substr(0, 4) + " <= 0.30 m, out " +
-    std::to_string(best_out).substr(0, 4) + "-" + std::to_string(worst_out).substr(0, 4) +
-    " in 1.3-2.1 m)",
-    report_t >= 0.0 && worst_lat <= 0.30 && best_out >= 1.3 && worst_out <= 2.1);
-  chk(sc.name + ": never more than the dock's 3 bays in the book (" +
+  std::printf("   from the commit (%.1f s): camera up to %.2f m left / %.2f m right of its spot; "
+    "a hull corner in the fingers %.1f s, %.2f m deep at most\n",
+    commit_t, most_left, most_right, finger_s, finger_depth);
+  ck(sc.name + ": docking reported", report_t >= 0.0);
+  char want[96];
+  std::snprintf(want, sizeof want, "|across - spot| <= 0.30 m, out in %.1f-%.1f m",
+    hold_m - 0.4, hold_m + 0.4);
+  ck(sc.name + ": in the bay at the report and 15 s on (" + want + "; |across - spot| " +
+    std::to_string(worst_lat).substr(0, 4) + ", out " +
+    std::to_string(best_out).substr(0, 4) + "-" + std::to_string(worst_out).substr(0, 4) + ")",
+    report_t >= 0.0 && worst_lat <= 0.30 && best_out >= hold_m - 0.4 &&
+    worst_out <= hold_m + 0.4);
+  ck(sc.name + ": never into the bay's fingers (" + std::to_string(finger_s).substr(0, 4) +
+    " s, " + std::to_string(finger_depth).substr(0, 4) + " m)", finger_s <= 0.0);
+  ck(sc.name + ": never more than the dock's 3 bays in the book (" +
     std::to_string(most_tracks) + "), " + std::to_string(ctx->dock.fenced) +
     " faces beyond the course dropped", most_tracks >= 1 && most_tracks <= 3);
   if (sc.fire) {
     std::printf("   fire: RED at %.1f s, spray counted from %.2f m out, GREEN at %.1f s; 15-30 s "
       "after: %.2f-%.2f m out (want %.1f), |across| <= %.2f m, |off square| <= %.1f deg\n",
       light_t, spray_out, hit_t, bo_min, bo_max, sc.backoff_m, bo_lat, bo_yaw);
-    chk(sc.name + ": sprayed from the hold (1.3-2.1 m out)", spray_out >= 1.3 && spray_out <= 2.1);
-    chk(sc.name + ": the window went GREEN", hit_t >= 0.0);
-    chk(sc.name + ": firefighting reported", fire_reported);
+    ck(sc.name + ": sprayed from the hold (t3_hold_m +-0.4 m out)",
+      spray_out >= hold_m - 0.4 && spray_out <= hold_m + 0.4);
+    ck(sc.name + ": the window went GREEN", hit_t >= 0.0);
+    ck(sc.name + ": firefighting reported", fire_reported);
     if (!sc.t4_after_hit) {                      // a break-off then takes the boat away
-      chk(sc.name + ": backed off to t3_backoff_m " + std::to_string(sc.backoff_m).substr(0, 3) +
+      ck(sc.name + ": backed off to t3_backoff_m " + std::to_string(sc.backoff_m).substr(0, 3) +
         " +-0.4 m, centred (<= 0.35 m) and square (<= 10 deg), 15-30 s after the hit",
         hit_t >= 0.0 && bo_min >= sc.backoff_m - 0.4 && bo_max <= sc.backoff_m + 0.4 &&
         bo_lat <= 0.35 && bo_yaw <= 10.0);
@@ -548,22 +612,22 @@ static void run(const Scenario & sc, const std::string & trace_dir)
       "request at %.1f s: %s), %.2f m off the face; current_task %s\n", guided_t, fire_report_t,
       resource_t, resource_body.c_str(), handover_out, seq.c_str());
     if (!sc.code.empty()) {
-      chk(sc.name + ": the resource request reported, right colours, before the handover",
+      ck(sc.name + ": the resource request reported, right colours, before the handover",
         resource_t >= 0.0 && resource_t <= guided_t &&      // the same tick: report, then GUIDED
         resource_body == dk::resourceRequestJson(dk::requestFrom("code", sc.code)));
     }
-    chk(sc.name + ": Task 3 ENDED after the fire and asked for GUIDED for Task 1",
+    ck(sc.name + ": Task 3 ENDED after the fire and asked for GUIDED for Task 1",
       guided_t >= 0.0 && fire_report_t >= 0.0 && guided_t > fire_report_t);
     if (!sc.t4_after_hit) {
-      chk(sc.name + ": left the dock from the back-off (" + std::to_string(handover_out).substr(0, 4) +
+      ck(sc.name + ": left the dock from the back-off (" + std::to_string(handover_out).substr(0, 4) +
         " m, want " + std::to_string(sc.backoff_m).substr(0, 3) + " +-0.5)",
         handover_out >= sc.backoff_m - 0.5 && handover_out <= sc.backoff_m + 0.5);
     }
-    chk(sc.name + ": firefighting reported once", countReports(reports, "firefighting") == 1);
-    chk(sc.name + ": current_task Task 3, then NONE, then Task 1",
+    ck(sc.name + ": firefighting reported once", countReports(reports, "firefighting") == 1);
+    ck(sc.name + ": current_task Task 3, then NONE, then Task 1",
       tasks.size() >= 3 && tasks[0] == "TASK_COORDINATED_LOGISTICS" && tasks[1] == "TASK_NONE" &&
       tasks[2] == "TASK_SAFE_PASSAGE");
-    chk(sc.name + ": the docking report names bay " + std::to_string(sc.expect_bay),
+    ck(sc.name + ": the docking report names bay " + std::to_string(sc.expect_bay),
       reports.find("docking " + dk::dockingReportJson(sc.expect_bay)) != std::string::npos);
   }
   if (sc.t4_alert_s >= 0.0) {
@@ -571,10 +635,10 @@ static void run(const Scenario & sc, const std::string & trace_dir)
     std::printf("   Task 4: %d alerts, %d acknowledged, %d break-offs; the virtual boat came no "
       "closer than %.1f m (at %.0f s)\n", ctx->task4.alerts, acks, ctx->task4.evasions, t4_min,
       t4_min_t);
-    chk(sc.name + ": Task 4 acknowledged once, command_seq 4217 (not the re-delivery or the update)",
+    ck(sc.name + ": Task 4 acknowledged once, command_seq 4217 (not the re-delivery or the update)",
       acks == 1 && reports.find("incident_ack " + t4::incidentAckJson(4217.0)) != std::string::npos);
-    chk(sc.name + ": broke off for the virtual boat", ctx->task4.evasions >= 1);
-    chk(sc.name + ": never within the virtual boat's 10 m (closest " +
+    ck(sc.name + ": broke off for the virtual boat", ctx->task4.evasions >= 1);
+    ck(sc.name + ": never within the virtual boat's 10 m (closest " +
       std::to_string(t4_min).substr(0, 4) + " m)", t4_min >= 10.0);
   }
 }
@@ -667,6 +731,52 @@ int main(int argc, char ** argv)
     s.code_s = 400.0;    // the decode's 80 s timeout is wall clock, never reached here: the code
                          // stays on for the restart to read (at the competition it ends 60 s after
                          // the hit, and a restart after that gives up on it after 80 s)
+    all.push_back(s);
+  }
+  // 2026-11-13 on the water: the search slid LEFT at 100 us (~0.3 m/s), and the approach's
+  // corrections (30 us + 100 us/m) mostly fell inside the FC's 30 us RC dead zone, so the slide
+  // carried the boat left of the GREEN bay and it went in against the left finger. This world
+  // has that dead zone, a sway that makes 100 us ~0.3 m/s as on the water, and a slide that glides.
+  {
+    Scenario s;
+    s.name = "left_slide_old_gains";
+    s.tree = "task3_scan_fire.xml";
+    s.colours = {C::Red, C::Green, C::Red};
+    s.expect_bay = 2;
+    s.right_m = 6.0;
+    s.bow_off_deg = 10.0;
+    s.fc_dz_us = 30.0;
+    s.lat_mps = 0.5;
+    s.sway_tau_s = 2.5;                          // the hull glides on once the stick is off
+    s.seed = 21;
+    s.baseline = true;                           // the gains the boat ran that morning
+    s.t3 = {{"t3_search_lat_us", 100.0}, {"t3_app_kp_lat", 100.0}, {"t3_app_kd_lat", 40.0},
+      {"t3_app_min_us", 30.0}, {"t3_app_centre_tol_m", 0.15}, {"t3_app_centred_s", 1.0},
+      {"t3_app_recentre_m", 0.40}, {"t3_hold_kp_lat", 100.0}, {"t3_hold_ki_lat", 10.0},
+      {"t3_hold_kd_yaw", 0.5}, {"t3_hold_min_us", 30.0}};
+    all.push_back(s);
+  }
+  {
+    Scenario s = all.back();                     // the same water with the retuned defaults
+    s.name = "left_slide_retuned";
+    s.baseline = false;
+    s.t3.clear();
+    all.push_back(s);
+  }
+  {
+    Scenario s = all.back();                     // the Run panel's docking position: 2.5 m off
+    s.name = "left_slide_hold_2p5m_0p2m_left";   // the face, 0.2 m left of the bay's centre
+    s.t3 = {{"t3_hold_m", 2.5}, {"t3_lat_offset_m", 0.2}, {"t3_handover_m", 2.8}};
+    s.seed = 23;
+    all.push_back(s);
+  }
+  {
+    Scenario s = all.back();                     // a harder glide and a stronger set: the slide
+    s.name = "left_slide_retuned_long_glide";    // carries well past the bay before it commits
+    s.t3.clear();
+    s.sway_tau_s = 4.0;
+    s.current_mps = 0.04;
+    s.seed = 29;
     all.push_back(s);
   }
   for (const auto & s : all) {run(s, trace_dir);}

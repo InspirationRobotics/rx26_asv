@@ -3,7 +3,8 @@ so a bt_runner_node restart does not lose them.
 
 bt_runner_node holds them as live parameters, read at every Start: Task 3's dock heading and
 search side (dock_heading_deg, search_first), back-off (t3_backoff_m) and Task 1 -> Task 3 via
-point (t3_via_lat/lon), and Task 1 Core's field centre, scan dwell and pause spacing, approach point
+point (t3_via_lat/lon), Task 3 control (T3_CONTROL: the approach's and the hold's gains, the hold
+distance and sideways offset), and Task 1 Core's field centre, scan dwell and pause spacing, approach point
 (t1_approach_lat/lon) and unnamed-buoy look range (t1_unknown_range_m). A
 restart puts them back to their declared defaults, and nothing sent them again: the boat then
 held whatever heading it arrived on (2026-10-25). gcs_bridge saves what the operator sets here
@@ -23,12 +24,26 @@ import os
 import time
 
 NODE_PATH = "/bt_runner_node"
+# The Run panel's "Task 3 control": crusader_bt's t3_tuning.hpp kKnobs, name -> default. The same
+# list is in t3_tuning.hpp and the laptop page's RUN_INPUTS (test_operator_settings checks all three).
+T3_CONTROL = {
+    "t3_hold_m": 1.7, "t3_lat_offset_m": 0.0, "t3_handover_m": 2.0,
+    "t3_search_lat_us": 80.0,
+    "t3_app_kp_lat": 250.0, "t3_app_kd_lat": 150.0, "t3_app_min_us": 45.0,
+    "t3_app_strafe_us": 100.0, "t3_app_fwd_us": 60.0, "t3_app_centre_tol_m": 0.08,
+    "t3_app_centred_s": 1.5, "t3_app_recentre_m": 0.20, "t3_app_coast_s": 1.5,
+    "t3_app_kp_yaw": 4.0, "t3_app_kd_yaw": 3.0,
+    "t3_hold_kp_lat": 200.0, "t3_hold_kd_lat": 200.0, "t3_hold_ki_lat": 20.0,
+    "t3_hold_kp_fwd": 90.0, "t3_hold_kd_fwd": 60.0, "t3_hold_ki_fwd": 40.0,
+    "t3_hold_kp_yaw": 5.0, "t3_hold_kd_yaw": 2.0, "t3_hold_min_us": 45.0, "t3_hold_max_us": 120.0,
+}
 # name -> bt_runner_node's declared default, its "not set" (dock_heading_deg: any negative)
 DEFAULTS = {
     "dock_heading_deg": -1.0, "search_first": "",
     "t1_field_lat": 0.0, "t1_field_lon": 0.0, "t1_scan_dwell_s": 5.0, "t1_pause_every_m": 5.0,
     "t1_approach_lat": 0.0, "t1_approach_lon": 0.0, "t1_unknown_range_m": 12.0,
     "t3_backoff_m": 4.0, "t3_via_lat": 0.0, "t3_via_lon": 0.0,
+    **T3_CONTROL,
 }
 KEYS = tuple(DEFAULTS)
 _SAID = {
@@ -57,6 +72,9 @@ def is_unset(name, value):
 
 def describe(name, value):
     """One value for the log: "back off 5 m"."""
+    if name in T3_CONTROL:
+        return f"Task 3 control {name} {value:g}" if isinstance(value, (int, float)) else \
+            f"Task 3 control {name} {value}"
     try:
         return _SAID[name].format(float(value) if name != "search_first" else value)
     except (KeyError, TypeError, ValueError):
