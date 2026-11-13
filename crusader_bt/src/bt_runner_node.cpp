@@ -504,6 +504,7 @@ private:
       b.consumed = consumed_.count(b.id) > 0;
       b.hits = static_cast<int>(t.hits);
       b.conf = t.confidence;
+      b.sd = t.position_stddev;
       next.push_back(b);
     }
     tracked_.swap(next);          // RAW. ctx_->buoys is the FUSION; see below.

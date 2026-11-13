@@ -58,6 +58,16 @@ std::vector<path::Hazard> planHazards(const Context & c)
   return hz;
 }
 
+/// What `phase`'s leg is checked against: planHazards(), except that an ORBIT is not stopped by
+/// a track too vague to trust (gp::weakTrack) - the planner fitted the rings without it
+/// (gp::orbitHazards). The approach and the transit keep clear of every track. CALL UNDER ctx.mu.
+std::vector<path::Hazard> legHazards(const Context & c, Phase phase)
+{
+  std::vector<path::Hazard> hz = planHazards(c);
+  if (!gp::isOrbit(phase)) {return hz;}
+  return gp::orbitHazards(hz, c.buoys, c.global_passage.params.weak_sd_m);
+}
+
 /// Enough to plan with: ENTRY, EXIT, a frame and a boat. CALL UNDER ctx.mu.
 bool fieldKnown(const Context & c)
 {
@@ -161,7 +171,7 @@ std::string planUnusable(Context & c, Phase phase, const rclcpp::Logger & lg)
   double d = kInf;
   for (const Vec2 & q : head) {d = std::min(d, nav::norm(q - c.boat));}
   if (d > 2.5) {return "the boat is " + gp::detail::fmt(d, 1) + " m off the plan";}
-  const double clear = gp::polylineClearance(left, planHazards(c));
+  const double clear = gp::polylineClearance(left, legHazards(c, phase));
   if (clear < g.plan.hard_used - 0.05) {
     return "a hazard is now " + gp::detail::fmt(clear, 2) + " m from the plan";
   }
@@ -185,6 +195,7 @@ bool replan(Context & c, Phase from, const rclcpp::Logger & lg, const std::strin
     rq.hazards = planHazards(c);
     rq.entry = c.entry;
     rq.exitp = c.exitp;
+    rq.exit_guessed = c.exit_guessed;
     rq.cleared = c.cleared_gates;
     if (from >= Phase::Transit) {
       rq.entry_ring_done = g.entry_ring;
@@ -354,6 +365,9 @@ public:
       BT::InputPort<double>("anchor_snap_m", 1.5,
         "a blue buoy this close to the ENTRY/EXIT point anchors its orbit (neighbours are 1.9-3.5 m "
         "apart on the real field: a 3 m snap can reach the wrong one)"),
+      BT::InputPort<double>("weak_sd_m", 0.6,
+        "a track with no colour and more position spread than this does not shape the ENTRY/EXIT "
+        "orbits (0 = every track does); the approach and transit still keep clear of it"),
       BT::InputPort<double>("retry_s", 1.0, "between tries while no plan fits"),
       BT::InputPort<double>("timeout_s", 60.0, "FAILURE after this long without a plan")};
   }
@@ -378,6 +392,7 @@ public:
     p.res_m = getInput<double>("res_m").value_or(0.1);
     p.retask_move_m = getInput<double>("retask_move_m").value_or(2.0);
     p.anchor_snap_m = getInput<double>("anchor_snap_m").value_or(1.5);
+    p.weak_sd_m = getInput<double>("weak_sd_m").value_or(0.6);
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       ctx_->global_passage.params = p;
@@ -528,7 +543,7 @@ public:
       datum_ok = !ctx_->datum_mismatch;
       now = ctx_->now_s;
       reset_s = ctx_->nav.unblock_reset_s;
-      hz = planHazards(*ctx_);
+      hz = legHazards(*ctx_, phase_);
       if (fresh && phase_ == Phase::Transit) {recordTrack(boat);}
     }
     const double dt = std::max(0.0, now - last_now_);
@@ -708,7 +723,7 @@ private:
     std::vector<path::Hazard> hz;
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
-      hz = planHazards(*ctx_);
+      hz = legHazards(*ctx_, phase_);
       soft_ = ctx_->global_passage.params.soft_m;
     }
     cum_ = gp::arcLengths(follower_.path());

@@ -182,6 +182,7 @@ struct Buoy
   bool consumed = false;
   int hits = 0;            ///< sightings behind this track (TrackedTarget.hits); 0 = not a track
   double conf = 0.0;       ///< detector confidence of its latest sighting [0..1]
+  double sd = 0.0;         ///< tracker position spread (TrackedTarget.position_stddev); 0 = none
 };
 
 /// Where to steer so `buoy` ends up on the side the handbook demands.
