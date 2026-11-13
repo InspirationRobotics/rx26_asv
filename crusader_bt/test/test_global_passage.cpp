@@ -607,6 +607,153 @@ static void testNoisyClosedLoop()
   CHECK(worst >= 0.3, "noisy closed loop came within %.2f m of a buoy (%s)", worst, worst_name.c_str());
 }
 
+// The tracker can hold the ENTRY or the EXIT twice (a far sighting ranged long, or one placed
+// mid-turn; the 2026-11-13 sim had copies 3.3-3.6 m off). There is one of each, so a copy may
+// be inside the orbit - but the orbit still keeps clear of it (the path follower checks it).
+static void testTwinAnchors()
+{
+  const path::NavParams np;
+  const gp::Params p = params(np);
+  Field base;
+  for (const Field & f : fields()) {if (f.name == "task1_core") {base = f;}}
+  for (const double d : {0.9, 3.4}) {
+    Field f = base;
+    const int n = static_cast<int>(f.buoys.size());
+    Buoy x2, e2;
+    x2.id = n;
+    x2.p = f.exitp + Vec2{0.0, d};
+    x2.state = Beacon::SteadyBlue;
+    e2.id = n + 1;
+    e2.p = f.entry + Vec2{0.0, d};
+    e2.state = Beacon::FlashingBlue;
+    f.buoys.push_back(x2);
+    f.buoys.push_back(e2);
+    const auto hz = hazardsOf(f, np);
+    const gp::Plan pl = gp::plan(request(f, hz), p);
+    CHECK(pl.ok, "copies %.1f m off the ENTRY/EXIT: no plan (%s)", d, pl.why.c_str());
+    if (!pl.ok) {continue;}
+    std::vector<path::Hazard> copies;
+    for (const path::Hazard & h : hz) {
+      if (h.source == path::HazardSource::PlanBuoy && h.id >= n) {copies.push_back(h);}
+    }
+    double clear = 1e9;
+    for (const auto & leg : pl.legs) {
+      for (const Vec2 & q : leg) {clear = std::min(clear, path::minClearance(copies, q));}
+    }
+    CHECK(clear >= pl.hard_used - 0.05, "copies %.1f m off: the plan passes %.2f m from one",
+      d, clear);
+    std::printf("    copies %.1f m off: entry r %.2f, exit r %.2f, %.2f m from a copy\n", d,
+      pl.entry_r, pl.exit_r, clear);
+  }
+}
+
+static Field coreField()
+{
+  for (const Field & f : fields()) {if (f.name == "task1_core") {return f;}}
+  return {};
+}
+
+static Buoy track(int id, Vec2 p, Beacon s, double sd)
+{
+  Buoy b;
+  b.id = id;
+  b.p = p;
+  b.state = s;
+  b.sd = sd;
+  return b;
+}
+
+// 2026-11-13, Singapore, run 2: the EXIT had three colourless tracks 1.0, 1.5 and 1.9 m off it,
+// spread 1.0, 0.7 and 1.6 m, and no orbit fitted (best 0.30 m). Such tracks no longer shape an
+// orbit (Params::weak_sd_m); the transit still keeps clear of them, and a colourless track
+// whose position IS known (spread 0.3 m), or a black one, still shapes it.
+static void testWeakTracks()
+{
+  path::NavParams np;
+  np.orbit_radius_m = 2.5;                 // the boat's nav_orbit_radius_m on 2026-11-13
+  const Field base = coreField();
+  const int n = static_cast<int>(base.buoys.size());
+  const Vec2 offs[3] = {{0.0, 1.0}, {1.5, 0.0}, {0.0, -1.9}};
+  const double sds[3] = {1.0, 0.7, 1.6};
+  const auto with = [&](Beacon s, double scale) {
+      Field f = base;
+      for (int k = 0; k < 3; ++k) {f.buoys.push_back(track(n + k, f.exitp + offs[k], s, sds[k] * scale));}
+      return f;
+    };
+  {
+    const Field f = with(Beacon::Unknown, 1.0);
+    const auto hz = hazardsOf(f, np);
+    gp::Params p = params(np);
+    p.weak_sd_m = 0.0;                     // the old behaviour
+    const gp::Plan old = gp::plan(request(f, hz), p);
+    CHECK(!old.ok, "weak tracks, every track counts: expected no plan, got %s",
+      gp::summary(old).c_str());
+    p.weak_sd_m = 0.6;
+    const gp::Plan pl = gp::plan(request(f, hz), p);
+    std::printf("  %-20s %s\n", "weak tracks at EXIT", gp::summary(pl).c_str());
+    CHECK(pl.ok, "weak tracks: %s", pl.why.c_str());
+    if (pl.ok) {
+      CHECK(pl.exit_r > 0.0 && !pl.exit_pending, "weak tracks: exit r %.2f", pl.exit_r);
+      CHECK(pl.exit_sweep_deg >= 380.0, "weak tracks: exit sweep %.0f", pl.exit_sweep_deg);
+      for (const int k : {0, 2}) {        // the approach and the transit keep clear of them
+        CHECK(gp::polylineClearance(pl.legs[k], hz) >= pl.hard_used - 0.06,
+          "weak tracks: leg %d only %.2f m from a hazard", k, gp::polylineClearance(pl.legs[k], hz));
+      }
+      const auto orbit_hz = gp::orbitHazards(hz, f.buoys, p.weak_sd_m);
+      CHECK(orbit_hz.size() + 3 == hz.size(), "weak tracks: %zu of %zu left", orbit_hz.size(), hz.size());
+      CHECK(gp::polylineClearance(pl.legs[3], orbit_hz) >= pl.hard_used - 0.06,
+        "weak tracks: exit orbit %.2f m from a trusted hazard", gp::polylineClearance(pl.legs[3], orbit_hz));
+    }
+  }
+  // known positions (spread 0.3 m) and black buoys are never weak: no orbit may pass close
+  for (const auto & c : {std::make_pair(Beacon::Unknown, 0.3), std::make_pair(Beacon::Off, 1.0)}) {
+    const Field f = with(c.first, c.second);
+    const auto hz = hazardsOf(f, np);
+    const gp::Plan pl = gp::plan(request(f, hz), params(np));
+    const double clear = pl.ok ? gp::polylineClearance(pl.legs[3], hz) : 1e9;
+    CHECK(!pl.ok || clear >= pl.hard_used - 0.06, "trusted tracks: the exit orbit passes %.2f m off", clear);
+  }
+  CHECK(!gp::weakTrack(track(0, {}, Beacon::Off, 2.0), 0.6), "a black buoy is never weak");
+  CHECK(!gp::weakTrack(track(0, {}, Beacon::Unknown, 2.0), 0.0), "weak_sd_m 0 switches it off");
+  CHECK(gp::weakTrack(track(0, {}, Beacon::Unknown, 0.61), 0.6), "colourless, 0.61 m: weak");
+}
+
+// 2026-11-13, run 4: the EXIT unseen, the runner guessed it (the field centre mirrored through
+// the ENTRY) and the guess landed 0.4-0.9 m from a green buoy: "every radius encloses a red, green
+// or blue buoy", and the boat held at the start for two minutes. A guess no orbit fits round
+// now gives a plan whose transit ends near it, with the exit orbit left for when the EXIT is seen.
+static void testGuessedExit()
+{
+  path::NavParams np;
+  np.orbit_radius_m = 2.5;
+  Field f = coreField();
+  f.buoys.erase(std::remove_if(f.buoys.begin(), f.buoys.end(),
+    [](const Buoy & b) {return b.state == Beacon::SteadyBlue;}), f.buoys.end());
+  f.exitp = {42.6, 2.0};                   // 0.6 m east of the green at (42, 2)
+  const auto hz = hazardsOf(f, np);
+  const gp::Params p = params(np);
+  gp::Request rq = request(f, hz);
+  const gp::Plan seen = gp::plan(rq, p);
+  CHECK(!seen.ok, "a SEEN EXIT on a green: expected no plan, got %s", gp::summary(seen).c_str());
+  rq.exit_guessed = true;
+  const gp::Plan pl = gp::plan(rq, p);
+  std::printf("  %-20s %s\n", "guessed EXIT", gp::summary(pl).c_str());
+  CHECK(pl.ok, "guessed EXIT: %s", pl.why.c_str());
+  if (!pl.ok) {return;}
+  CHECK(pl.exit_pending && pl.legs[3].empty() && pl.exit_r == 0.0, "guessed EXIT: exit orbit planned");
+  CHECK(nav::norm(pl.legs[2].back() - f.exitp) <= p.orbit_r_pref_m + 0.15,
+    "guessed EXIT: the transit ends %.2f m from the guess", nav::norm(pl.legs[2].back() - f.exitp));
+  CHECK(gp::wrongSide(pl.legs[2], pl.rays).empty(), "guessed EXIT: a held buoy on the wrong side");
+  CHECK(pl.entry_sweep_deg <= -380.0, "guessed EXIT: entry sweep %.0f", pl.entry_sweep_deg);
+  CHECK(pl.min_clear >= pl.hard_used - 0.06, "guessed EXIT: min clearance %.2f", pl.min_clear);
+  CHECK(gp::summary(pl).find("once the EXIT is seen") != std::string::npos, "guessed EXIT: summary");
+  // from ExitOrbit there is nothing to drive without an orbit: still no plan
+  gp::Request rx = rq;
+  rx.from = Phase::ExitOrbit;
+  rx.boat = pl.legs[2].back();
+  CHECK(!gp::plan(rx, p).ok, "guessed EXIT: a plan from ExitOrbit round a guess that fits nothing");
+}
+
 int main()
 {
   std::printf("primitives\n");
@@ -617,6 +764,9 @@ int main()
   testReplanFromTransit();
   testRecolourAtCheckpoint();
   testRelaxAndBoxedIn();
+  testTwinAnchors();
+  testWeakTracks();
+  testGuessedExit();
   std::printf("closed loop\n");
   testClosedLoop();
   testNoisyClosedLoop();

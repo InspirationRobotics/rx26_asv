@@ -101,6 +101,12 @@ class OcsClient(Node):
         self._outbox = deque(maxlen=500)    # frames that went out
         self._receipts = deque(maxlen=200)  # ocs_receipts
         self._cmd_pub = self.create_publisher(String, "/crsd/ocs_command", 10)
+        # The newest course the OCS relayed (ocs_info.course, the RxCourse; null = none),
+        # latched: bt_runner_node drops dock faces outside it, also after a restart.
+        self._course_pub = self.create_publisher(
+            String, "/crsd/ocs_course",
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self._traffic_pub = self.create_publisher(String, "/crsd/ocs_traffic", 50)
         self.create_subscription(String, "/crsd/ocs_tiers", self._on_tiers, 10)
         self.create_subscription(RoboCommandReport, "/crsd/robocommand/report",
@@ -212,6 +218,9 @@ class OcsClient(Node):
             cmd = self._inbox.popleft()
             self._cmd_pub.publish(String(data=json.dumps(cmd)))
             self.get_logger().info("OCS command -> /crsd/ocs_command: %s" % sorted(cmd))
+            info = cmd.get("ocs_info") if isinstance(cmd, dict) else None
+            if isinstance(info, dict) and "course" in info:
+                self._course_pub.publish(String(data=json.dumps(info["course"])))
             self._echo("rx", kind_of(cmd, "command"), cmd, "republished")
         while self._receipts:
             r = self._receipts.popleft()

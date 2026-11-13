@@ -101,6 +101,31 @@ TEST_F(MissionLoader, TwoSubtreesSharingACommonBodyDoNotCollide)
   EXPECT_NO_THROW(load(file));
 }
 
+TEST_F(MissionLoader, RootFlagReadsAMissionsOwnSwitch)
+{
+  const std::string on =
+    "<!-- <root t1_guess_exit=\"false\"> quoted in a comment -->\n"
+    "<root BTCPP_format=\"4\" main_tree_to_execute=\"Main\" t1_guess_exit=\"true\">";
+  const MissionFile yes = put("guesses", on + "</root>");
+  EXPECT_TRUE(crusader_bt::rootFlag(yes.path, "t1_guess_exit"));
+  EXPECT_FALSE(crusader_bt::rootFlag(yes.path, "t1_other"));
+  const MissionFile no = put("silent", mission(""));
+  EXPECT_FALSE(crusader_bt::rootFlag(no.path, "t1_guess_exit"));
+  const MissionFile off = put("off",
+    "<root BTCPP_format=\"4\" t1_guess_exit=\"false\"></root>");
+  EXPECT_FALSE(crusader_bt::rootFlag(off.path, "t1_guess_exit"));
+  EXPECT_FALSE(crusader_bt::rootFlag("/no/such/file.xml", "t1_guess_exit"));
+  // the two built-in missions that opt in, and one that must not
+  for (const char * name : {"task1_core_scan", "mission_t1_t3_t4"}) {
+    EXPECT_TRUE(crusader_bt::rootFlag(crusader_bt::resolveMission(dirs_, name).path,
+      "t1_guess_exit")) << name;
+  }
+  for (const char * name : {"task1_core_survey", "task1_advanced"}) {
+    EXPECT_FALSE(crusader_bt::rootFlag(crusader_bt::resolveMission(dirs_, name).path,
+      "t1_guess_exit")) << name;
+  }
+}
+
 TEST_F(MissionLoader, UnknownSubtreeIdIsAnError)
 {
   const MissionFile file = put(

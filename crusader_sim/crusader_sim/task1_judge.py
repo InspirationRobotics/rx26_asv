@@ -261,7 +261,8 @@ class Task1Judge:
                 want = "cw" if b[3] == "flash_blue" else "ccw"
                 old = self.circles.get(b[0])
                 circles[b[0]] = old if old and old["want"] == want else {
-                    "want": want, "xy": (b[1], b[2]), "swept": 0.0, "last": None, "done": None}
+                    "want": want, "xy": (b[1], b[2]), "swept": 0.0, "last": None, "done": None,
+                    "hi": 0.0, "lo": 0.0, "best": {"cw": 0.0, "ccw": 0.0}}
         self.circles = circles
 
     def set_states(self, states):
@@ -397,9 +398,14 @@ class Task1Judge:
                 if c["last"] is not None:
                     c["swept"] += (a - c["last"] + math.pi) % (2 * math.pi) - math.pi
                 c["last"] = a
-                deg = math.degrees(c["swept"])
-                if c["done"] is None and abs(deg) >= CIRCLE_DEG:
-                    got = "ccw" if deg > 0 else "cw"
+                # One CONTINUOUS sweep, measured from the running extreme the other way: passing
+                # the buoy on the way in (half a turn the other way) must not cancel the orbit.
+                c["hi"], c["lo"] = max(c["hi"], c["swept"]), min(c["lo"], c["swept"])
+                b = c["best"]
+                b["ccw"] = max(b["ccw"], math.degrees(c["swept"] - c["lo"]))
+                b["cw"] = max(b["cw"], math.degrees(c["hi"] - c["swept"]))
+                if c["done"] is None and max(b.values()) >= CIRCLE_DEG:
+                    got = "ccw" if b["ccw"] >= CIRCLE_DEG else "cw"
                     c["done"] = "correct" if got == c["want"] else f"WRONG ({got})"
                     self._say(f"circled {name} {got}: {c['done']}")
             else:
@@ -435,7 +441,8 @@ class Task1Judge:
     def verdict(self):
         with self._lock:
             gates_ok = sum(1 for g in self.gates if g["result"] == "correct")
-            circles = {n: (c["done"] or f"not circled ({math.degrees(c['swept']):.0f} deg)")
+            circles = {n: (c["done"] or f"not circled (best {c['want']} sweep "
+                                         f"{c['best'][c['want']]:.0f} deg)")
                        for n, c in self.circles.items()}
             results = self._buoy_results()
             buoys_ok = sum(1 for _, r in results if r is not None and r["ok"])

@@ -325,15 +325,16 @@ int main()
     chk("two bays seen: no numbering", !T.ok);
     chk("and it says why", T.why.find("2 of 3") != std::string::npos);
 
-    // A false positive seen twice must not displace a real bay seen six times.
+    // A false positive seen twice must not displace a real bay seen six times: the dock
+    // has three bays, the book holds three, and none of them is weak enough to drop.
     DockBook fp = b;
     Frame junk;
     junk.bays = {see({0, 8}, 0.0, m, {10, 18}, south)};
     fp.ingest(junk, {0, 8}, 0.0, m);
     fp.ingest(junk, {0, 8}, 0.0, m);
     const DockLayout F = layout(fp, 5);
-    chk("a weak fourth track is left out", F.ok && F.ids.size() == 3 &&
-      F.numberOf(fp.tracks.back().id) == 0);
+    chk("a false fourth face finds the book full: the 3 bays keep their numbers",
+      F.ok && fp.tracks.size() == 3 && F.ids == L.ids);
 
     // Two tracks 1 m apart are not two bays: layout refuses them (built by
     // hand here, because ingest would merge them first - see below).
@@ -467,6 +468,23 @@ int main()
       t.red = 2; t.other = 2; t.off = 2; t.nonred_ema = 0.5;
       chk("OFF read as GREEN: too few reads, no call",
         verdictOffIsGreen(t, v) == Verdict::Unresolved);
+    }
+    {
+      // CommitFirstGreen's rule: GREEN confidence = the share of the colour reads saying GREEN
+      BayTrack t;
+      ColourRule r;                         // 3 reads, 0.5
+      t.red = 1; t.green = 2;
+      chk("2 of 3 GREEN: GREEN", confidenceVerdict(t, r) == Verdict::Green);
+      t.green = 1;
+      chk("2 reads: too few, no call", confidenceVerdict(t, r) == Verdict::Unresolved);
+      t.off = 2; r.off_is_green = true;
+      chk_near("1 RED 1 GREEN 2 OFF, OFF as GREEN: 0.75", greenConfidence(t, true), 0.75, 1e-9);
+      chk("... GREEN", confidenceVerdict(t, r) == Verdict::Green);
+      r.off_is_green = false; t.red = 3;
+      chk("3 RED 1 GREEN: RED", confidenceVerdict(t, r) == Verdict::Red);
+      t.red = 2; t.green = 2; r.min_conf = 0.8;
+      chk("half and half at min_conf 0.8: no call", confidenceVerdict(t, r) == Verdict::Unresolved);
+      chk("no reads: confidence unknown", std::isnan(greenConfidence(BayTrack{}, true)));
     }
   }
 

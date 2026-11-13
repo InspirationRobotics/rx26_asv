@@ -121,8 +121,12 @@ static void testSensorCheck()
     "entry moved once orbiting");
   CHECK(matters(pl, Phase::Transit, bs, bs[0].p, bs[1].p + Vec2{0.0, 3.0}, tr).find("EXIT") !=
     std::string::npos, "exit moved in transit");
-  CHECK(matters(pl, Phase::ExitOrbit, bs, bs[0].p, bs[1].p + Vec2{0.0, 3.0}, {}).empty(),
-    "exit moved once orbiting");
+  // At Phase::ExitOrbit the transit is done and the orbit not yet flown: an EXIT first seen in
+  // the pre-orbit scan (3 m off the guess the plan was made round) must re-plan the orbit.
+  CHECK(matters(pl, Phase::ExitOrbit, bs, bs[0].p, bs[1].p + Vec2{0.0, 3.0}, {}).find("EXIT") !=
+    std::string::npos, "exit moved before the exit orbit");
+  CHECK(matters(pl, Phase::ExitOrbit, bs, bs[0].p, bs[1].p + Vec2{0.0, 0.5}, {}).empty(),
+    "exit scatter under the threshold before the exit orbit");
   CHECK(matters(pl, Phase::Approach, bs, bs[0].p + Vec2{1.0, 0.0}, bs[1].p, tr).empty(),
     "entry scatter under the threshold");
 

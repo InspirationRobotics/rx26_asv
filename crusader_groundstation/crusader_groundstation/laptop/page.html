@@ -214,13 +214,10 @@ body.ed-dragging { cursor: grabbing; user-select: none; }
         <button id="field-clear-boat">Clear on boat</button><br>
         <button id="field-load">Copy current plan</button>
         <button id="field-clear">Clear editor</button>
-        <h3>Remembered ENTRY/EXIT</h3>
-        <p class="muted small">What the boat was sure of on an earlier run, kept across runs and
-          restarts. It uses, in order: this MANUAL field's, the ones it sees now, these. Every
-          mission start makes it forget the buoys' colours (not where they are).</p>
+        <h3>Task 1 ENTRY/EXIT in use</h3>
+        <p class="muted small">Nothing carries over between runs (the competition changes ENTRY/EXIT
+          and the colours every run): seen now, guessed, or none.</p>
         <div id="task1-mem" class="mono small">bt_runner_node not reporting</div>
-        <button id="task1-forget">Forget remembered</button>
-        <button id="task1-copy">Copy to editor</button>
       </div>
       <div class="box">
         <h3>Place by lat/lon</h3>
@@ -299,7 +296,7 @@ body.ed-dragging { cursor: grabbing; user-select: none; }
         <select id="m-name"></select>
         timeout <input id="m-timeout" class="num" type="number" min="0" value="0"> s (0 = default)
         <div style="margin-top: 6px" title="Task 3: where to look for the dock when no bay has been seen yet; empty = none">
-          approach <input id="m-alat" class="ll" placeholder="lat" aria-label="approach latitude" inputmode="decimal">
+          <span id="m-alabel">approach</span> <input id="m-alat" class="ll" placeholder="lat" aria-label="approach latitude" inputmode="decimal">
           <input id="m-alon" class="ll" placeholder="lon" aria-label="approach longitude" inputmode="decimal">
           <button id="m-here">Boat here</button>
           <button id="m-apick" title="the next click on the map below sets the approach point (Esc: cancel)">Pick on map</button></div>
@@ -309,6 +306,7 @@ body.ed-dragging { cursor: grabbing; user-select: none; }
           <div style="margin-top: 6px" title="Task 3: which way the search slides along the dock (bt_runner_node search_first, read at Start); not set = left">
             slide first <select id="m-slide"><option>left</option><option>right</option></select>
             <button id="m-slide-set">Set</button> <span id="m-slide-now" class="muted"></span></div></div>
+        <div id="m-inputs"></div>
         <div style="margin-top: 6px">
           <button class="primary" id="m-start">Start</button>
           <button class="danger" id="m-stop">Stop</button>
@@ -317,6 +315,15 @@ body.ed-dragging { cursor: grabbing; user-select: none; }
       <canvas id="map2" class="map small"></canvas>
       <div class="box" style="margin-top: 10px"><h3 style="margin-top: 0">Tree</h3><div id="m-state"></div>
         <div class="scroll"><table id="m-nodes"></table></div></div>
+      <div class="box" style="margin-top: 10px"><h3 style="margin-top: 0">Task 4: moving object</h3>
+        <div id="t4-state" class="small"></div>
+        <div class="scroll"><table id="t4-objs"></table></div>
+        <div style="margin-top: 6px" title="bt_runner_node t4_*: live, applied within a second, also mid-run. Not kept across a bt_runner restart (back to these defaults: on, 3 m, 10 m, 40 s)">
+          <label><input id="t4-on" type="checkbox"> avoid</label>
+          margin <input id="t4-margin" class="num" type="number" min="0" max="20" step="0.5"> m
+          radius <input id="t4-radius" class="num" type="number" min="1" max="50" step="1"> m
+          horizon <input id="t4-horizon" class="num" type="number" min="5" max="180" step="5"> s
+          <button id="t4-set">Set</button></div></div>
     </div>
   </div>
 </section>
@@ -493,7 +500,8 @@ const handlers = {
   path(f) { CrsdMap.update("path", f); },
   hazards(f) { CrsdMap.update("hazards", f); },
   nodes(f) { G.nodes = f; nodes(); },
-  tree(f) { G.tree = f; tree(); CrsdMap.update("task1", f.task1 || null); task1Info(); },
+  tree(f) { G.tree = f; tree(); CrsdMap.update("task1", f.task1 || null); task1Info();
+            CrsdMap.update("task4", f.task4 || null); task4Info(); task4Tile(); },
   log(f) { if (f.replay) G.logs = []; G.logs.push(...f.items); G.logs = G.logs.slice(-2000); logs(); },
   radio(f) { if (f.replay) G.radio = []; G.radio.push(...f.items); G.radio = G.radio.slice(-500);
              G.radioSummary = f; radio(); },
@@ -676,6 +684,7 @@ function strip() {
   const age = stateAge(), L = G.link, s = G.state || {};
   linkTile(age);
   ocsTile();
+  task4Tile();
   gate(age);
   const live = !!(L && L.up && age != null && age <= AGE_BAD_S);
   const why = !L ? "no link yet" : !L.up ? "link down" : age == null ? "no state yet" : `state ${age.toFixed(0)} s old`;
@@ -712,26 +721,13 @@ $("field-send").onclick = () => {
 };
 $("field-clear-boat").onclick = () => confirm("Clear the MANUAL field on the boat? bt_runner will have no plan.") && req("manual_field", {clear: true});
 $("field-load").onclick = () => CrsdMap.loadPlan();
-// the Task 1 ENTRY/EXIT bt_runner_node remembers between runs, from bt_status's "task1"
+// the source of the Task 1 ENTRY/EXIT bt_runner_node is using (seen / guessed / none), from bt_status's "task1"
 function task1Info() {
   const t = G.tree && G.tree.ok ? G.tree.task1 : null;
   if (!t) { $("task1-mem").textContent = "bt_runner_node not reporting"; return; }
-  const one = (name, k) => {
-    const m = t["mem_" + k];
-    return `${name}: in use ${t[k + "_src"] || "none"}; remembered ` +
-      (m ? `${m.lat.toFixed(7)}, ${m.lon.toFixed(7)} (${m.hits} hits, ${m.saved})` : "none");
-  };
+  const one = (name, k) => `${name}: ${t[k + "_src"] || "none"}`;
   $("task1-mem").textContent = one("ENTRY", "entry") + "\n" + one("EXIT", "exit");
 }
-$("task1-forget").onclick = () => confirm("Forget the ENTRY/EXIT the boat remembers between runs?") &&
-  req("task1_forget", {});
-$("task1-copy").onclick = () => {                 // into the editor, replacing any ENTRY/EXIT there
-  const t = G.tree && G.tree.task1, add = [];
-  if (t && t.mem_entry) add.push({lat: t.mem_entry.lat, lon: t.mem_entry.lon, beacon: 4});
-  if (t && t.mem_exit) add.push({lat: t.mem_exit.lat, lon: t.mem_exit.lon, beacon: 5});
-  if (!add.length) return toast("nothing remembered", false);
-  CrsdMap.setManual(manualList().filter(b => b.beacon !== 4 && b.beacon !== 5).concat(add));
-};
 $("field-clear").onclick = () => CrsdMap.clearManual();
 $("trail-clear").onclick = () => CrsdMap.clearTrail();
 
@@ -819,6 +815,7 @@ async function loadMissions(pick) {             // pick: the name to select; els
   const keep = pick || $("m-name").value;
   $("m-name").innerHTML = '<option value="">choose a mission</option>' + r.data.names.map(n => `<option>${esc(n)}</option>`).join("");
   $("m-name").value = r.data.names.includes(keep) ? keep : "";
+  loadDockHeading(); loadRunInputs();           // a value set here fires no change event
 }
 CrsdEditor.init({ask, toast, esc, stored: name => loadMissions(name),
                  boat: () => (G.state || {}).boat, ocsRun: () => (G.state || {}).ocs_run,
@@ -843,7 +840,7 @@ $("gate-release").onclick = async () => {
   $("gate-answer").textContent = `${r.ok ? "released" : "not released"}: ${r.msg || ""}`;
   $("gate-answer").className = "small " + (r.ok ? "ok" : "bad");
 };
-$("m-start").onclick = () => {
+$("m-start").onclick = async () => {
   const name = $("m-name").value;
   if (!name) return toast("choose a mission to run first", false);
   const args = {name, timeout_s: +$("m-timeout").value || 0};
@@ -852,6 +849,13 @@ $("m-start").onclick = () => {
     const e = llError(+la, +lo);
     if (e) return toast("approach: " + e, false);
     args.approach = [+la, +lo];
+  }
+  // a Run-panel value typed or picked but not Set would be ignored: send it first
+  for (const d of RUN_INPUTS) {
+    if (runRow(d.key).style.display === "none" || !runPending(d)) continue;
+    const p = runRowParams(d);
+    if (p.err) return toast(`${d.label}: ${p.err}`, false);
+    await setBtParams(p.values);
   }
   const diff = CrsdEditor.tierMismatch();      // null while the OCS's tiers are unknown
   if (!confirm(`Start ${name}?
@@ -866,8 +870,13 @@ WARNING: ${diff}` : "")))
 // Task 3: the dock heading, on bt_runner_node (dock_heading_deg; < 0 = not set)
 function btNode() { return ((G.nodes || {}).graph || []).find(n => n.endsWith("/bt_runner_node")); }
 async function loadDockHeading() {
-  const show = /^task3_(scan_fire|first_dock|cannon_fire)/.test($("m-name").value);   // and copies
+  const name = $("m-name").value, merged = /^mission_t[0-9]/.test(name);   // mission_t1_t3_t4, mission_t3_t4_t1
+  const show = merged || /^task3_(scan_fire|first_dock|cannon_fire)/.test(name);   // and copies
   $("m-dockh").style.display = show ? "" : "none";
+  $("m-alabel").textContent = merged ? "Task 3 approach" : "approach";
+  $("m-alabel").parentElement.title = merged
+    ? "Where Task 3 looks for the dock when no bay has been seen yet; empty = none. Task 1 has its own approach point (Task 1 approach, below)"
+    : "Task 3: where to look for the dock when no bay has been seen yet; empty = none";
   const node = btNode();
   if (!show || !node) return;
   const r = await req("params_list", {node}, true);
@@ -881,7 +890,7 @@ async function setBtParams(values) {
   const node = btNode();
   if (!node) return toast("bt_runner_node is not running", false);
   await req("params_set", {node, values});
-  loadDockHeading();
+  loadDockHeading(); loadRunInputs();
 }
 $("m-dockh-set").onclick = () => {
   const v = parseFloat($("m-dockh-v").value);
@@ -889,6 +898,124 @@ $("m-dockh-set").onclick = () => {
   setBtParams({dock_heading_deg: v});
 };
 $("m-slide-set").onclick = () => setBtParams({search_first: $("m-slide").value});
+// ---- the Run panel's mission inputs: bt_runner_node parameters read at Start (gcs_bridge keeps
+// them across a bt_runner restart: operator_settings.py). Each row says what the boat holds now.
+const T1_SCAN = /^(task1_core_scan|mission_t[0-9])/, T3_FIRE = /^(task3_scan_fire(?!_cv)|mission_t[0-9])/;
+const RUN_INPUTS = [
+  {key: "t1_approach", ll: true, label: "Task 1 approach", show: T1_SCAN,
+   tip: "Task 1: drive here first (GUIDED), then the static scan; Clear = scan where the boat is (bt_runner_node t1_approach_lat/lon, read at Start)"},
+  {key: "t1_field", ll: true, label: "field centre", show: T1_SCAN,
+   tip: "Task 1 Core: the rough middle of the buoy field (t1_field_lat/lon). It points the scans, places the vantage points round the field and lets the EXIT be guessed until it is seen. Clear = not known: the boat only looks from where it starts"},
+  {key: "t1_scan_dwell_s", label: "scan dwell", unit: "s", min: 1, max: 30, step: 0.5, show: T1_SCAN,
+   tip: "Task 1 Core: each look of a scan, and each pause in the transit (the tracker needs ~4 s on a buoy)"},
+  {key: "t1_pause_every_m", label: "pause every", unit: "m (0 = never)", min: 0, max: 50, step: 1, show: T1_SCAN,
+   tip: "Task 1 Core: a stop to look again every this far along the transit"},
+  {key: "t1_unknown_range_m", label: "look at unnamed buoys within", unit: "m", min: 0, max: 30, step: 1, show: T1_SCAN,
+   tip: "Task 1 Core: stop and look (up to the scan dwell) when a buoy with no colour yet is in front within this range; each buoy once; 0 = never (bt_runner_node t1_unknown_range_m, read at Start)"},
+  {key: "t3_backoff_m", label: "back off", unit: "m", min: 1, max: 8, step: 0.5, show: T3_FIRE,
+   tip: "Task 3: the docked hold's distance off the dock face once the fire is out (1.7 m while firing)"},
+  {key: "t3_via", ll: true, label: "via point", show: /^mission_t[0-9]/,
+   tip: "The way to the dock (from Task 1, or from the start when Task 3 goes first): a point the boat drives through (t3_via_lat/lon). Clear = none: straight, and round the Task 1 field when the straight line would cross it"},
+];
+function runInputRow(d) {
+  const set = '<button data-act="set">Set</button>', now = '<span class="muted" data-now></span>';
+  return `<div data-key="${d.key}" style="margin-top: 6px; display: none" title="${esc(d.tip)}">${esc(d.label)} ` +
+    (d.ll ? `<input class="ll" data-f="lat" placeholder="lat" inputmode="decimal" aria-label="${esc(d.label)} latitude">
+      <input class="ll" data-f="lon" placeholder="lon" inputmode="decimal" aria-label="${esc(d.label)} longitude">
+      <button data-act="here">Boat here</button> <button data-act="pick">Pick on map</button> ${set}
+      <button data-act="clear">Clear</button> ${now}`
+          : `<input class="num" type="number" min="${d.min}" max="${d.max}" step="${d.step}" aria-label="${esc(d.label)}"> ${esc(d.unit)} ${set} ${now}`) +
+    "</div>";
+}
+$("m-inputs").innerHTML = RUN_INPUTS.map(runInputRow).join("");
+const runRow = key => $("m-inputs").querySelector(`[data-key="${key}"]`);
+const runBox = (key, f) => runRow(key).querySelector(`[data-f="${f}"]`);
+const runHeld = {};                              // what the boat holds per row: {lat, lon} (null = not set) or a number
+function runPending(d) {                         // the row's box differs from what the boat holds (empty = nothing typed)
+  const h = runHeld[d.key];
+  if (h === undefined) return false;
+  if (d.ll) {
+    const la = runBox(d.key, "lat").value.trim(), lo = runBox(d.key, "lon").value.trim();
+    if (!la && !lo) return false;
+    return !h || !la || !lo || +la !== +h.lat.toFixed(7) || +lo !== +h.lon.toFixed(7);
+  }
+  const t = runRow(d.key).querySelector("input").value.trim();
+  return t !== "" && h !== null && parseFloat(t) !== h;
+}
+function runRowParams(d) {                       // {values} to set on bt_runner_node from the row's boxes, or {err}
+  const row = runRow(d.key);
+  if (d.ll) {
+    const a = runBox(d.key, "lat").value.trim(), b = runBox(d.key, "lon").value.trim();
+    const err = !a || !b ? "both lat and lon" : llError(+a, +b);
+    return err ? {err} : {values: {[d.key + "_lat"]: +a, [d.key + "_lon"]: +b}};
+  }
+  const v = parseFloat(row.querySelector("input").value);
+  return v >= d.min && v <= d.max ? {values: {[d.key]: v}} : {err: `${d.min} to ${d.max} ${d.unit}`};
+}
+function runPointsMark() {                       // the field centre, approach and via points on the maps, while valid
+  for (const d of RUN_INPUTS.filter(q => q.ll)) {
+    const la = runBox(d.key, "lat").value.trim(), lo = runBox(d.key, "lon").value.trim();
+    const shown = runRow(d.key).style.display !== "none";
+    // a third element true = typed or picked, not yet on the boat
+    callMap("setRunPoint", d.label, shown && la && lo && !llError(+la, +lo) ? [+la, +lo, runPending(d)] : null);
+  }
+}
+async function loadRunInputs() {
+  const name = $("m-name").value;
+  for (const d of RUN_INPUTS) runRow(d.key).style.display = d.show.test(name) ? "" : "none";
+  runPointsMark();
+  const node = btNode();
+  if (!node || !RUN_INPUTS.some(d => d.show.test(name))) return;
+  const r = await req("params_list", {node}, true);
+  if (!r.ok) return;
+  const val = n => { const p = r.data.params.find(q => q.name === n); return p ? p.value : null; };
+  for (const d of RUN_INPUTS) {
+    const row = runRow(d.key), nowEl = row.querySelector("[data-now]");
+    if (d.ll) {
+      const la = val(d.key + "_lat"), lo = val(d.key + "_lon");
+      const set = num(la) && num(lo) && !(la === 0 && lo === 0);
+      runHeld[d.key] = la == null ? undefined : set ? {lat: la, lon: lo} : null;
+      nowEl.textContent = la == null ? "" : set ? `now ${la.toFixed(7)}, ${lo.toFixed(7)}` : "not set";
+      if (set && !runBox(d.key, "lat").value.trim() && !runBox(d.key, "lon").value.trim()) {
+        runBox(d.key, "lat").value = la.toFixed(7); runBox(d.key, "lon").value = lo.toFixed(7);
+      }
+    } else {
+      const v = val(d.key), box = row.querySelector("input");
+      runHeld[d.key] = v == null ? undefined : v;
+      nowEl.textContent = v == null ? "" : `now ${v}`;
+      if (v != null && box.value === "") box.value = v;
+    }
+  }
+  runPointsMark();
+}
+$("m-name").addEventListener("change", loadRunInputs);
+$("m-inputs").addEventListener("input", runPointsMark);
+$("m-inputs").addEventListener("click", e => {
+  const act = e.target.dataset ? e.target.dataset.act : null, row = e.target.closest("[data-key]");
+  if (!act || !row) return;
+  const d = RUN_INPUTS.find(q => q.key === row.dataset.key);
+  if (act === "here") {
+    const b = (G.state || {}).boat || {};
+    if (!num(b.lat) || !num(b.lon)) return toast("no boat position yet", false);
+    runBox(d.key, "lat").value = b.lat.toFixed(7); runBox(d.key, "lon").value = b.lon.toFixed(7);
+    runPointsMark();
+  } else if (act === "pick") {
+    if (!CrsdMap.hasOrigin()) return toast("the map has no position yet: type the lat/lon instead", false);
+    CrsdMap.beginPick(point => {
+      if (!point) return;
+      runBox(d.key, "lat").value = point[0].toFixed(7); runBox(d.key, "lon").value = point[1].toFixed(7);
+      runPointsMark();
+    });
+  } else if (act === "clear") {
+    runBox(d.key, "lat").value = runBox(d.key, "lon").value = "";
+    runPointsMark();
+    setBtParams({[d.key + "_lat"]: 0.0, [d.key + "_lon"]: 0.0});
+  } else if (act === "set") {
+    const p = runRowParams(d);
+    if (p.err) return toast(`${d.label}: ${p.err}`, false);
+    setBtParams(p.values);
+  }
+});
 $("m-here").onclick = () => {
   const b = (G.state || {}).boat || {};
   if (!num(b.lat) || !num(b.lon)) return toast("no boat position yet", false);
@@ -925,6 +1052,61 @@ function tree() {
   const guides = d => Array.from({length: d}, (_, k) => `<i class="bt-g l${k % 4}"></i>`).join("");
   $("m-nodes").innerHTML = (t.nodes || []).map(n =>
     `<tr><td>${guides(n.d | 0)}<span class="${/^(control|decorator)$/.test(n.kind) ? "bt-parent" : ""}">${esc(n.name)}</span></td><td class="muted">${esc(n.type)}</td><td class="${n.status === "RUNNING" ? "ok" : n.status === "FAILURE" ? "bad" : "muted"}">${esc(n.status)}</td></tr>`).join("");
+}
+
+// ---- Task 4: RoboCommand's moving objects (bt_status "task4": bt_runner_node folds every
+// MovingObjectAlert in whatever runs; AvoidInvaders in the tree says what it is doing about them)
+let t4Filled = false;                            // the settings boxes take the boat's values once
+function task4Info() {
+  const k = G.tree && G.tree.ok ? G.tree.task4 : null;
+  if (!k) {
+    $("t4-state").innerHTML = '<span class="muted">bt_runner_node not reporting</span>';
+    $("t4-objs").innerHTML = "";
+    return;
+  }
+  const g = k.guard || "", objs = k.objects || [];
+  $("t4-state").innerHTML =
+    (!k.enabled ? '<b class="warn">AVOIDANCE OFF</b> (t4_enabled): objects are shown and kept out of plans, never evaded'
+      : g === "CLEAR" ? `<b class="ok">CLEAR</b> ${esc(k.why || "")}`
+      : g ? `<b class="bad">${esc(g)}</b> ${esc(k.why || "")}`
+      : '<span class="muted">no Task 4 guard ticking (no run, or a tree without AvoidInvaders)</span>') +
+    `<br>alerts ${k.alerts}${k.last_alert_age_s != null ? `, the last ${fmt(k.last_alert_age_s, 0)} s ago` : ""}` +
+    ` · evasions ${k.evasions} · keep-out = its radius (${fmt(k.radius_m, 0)} m when the alert has none)` +
+    ` + ${fmt(k.margin_m, 1)} m, along ${fmt(k.horizon_s, 0)} s of its travel`;
+  $("t4-objs").innerHTML = !objs.length ? "" :
+    "<tr><th>#</th><th>off the boat</th><th>closest</th><th>moving</th><th>keep-out</th><th>reported</th></tr>" +
+    objs.map(o => `<tr class="${o.inside ? "bad" : ""}" title="domains ${esc(o.domains || "?")}` +
+      `${o.affects_usv ? "" : " (not the USV: never avoided)"}"><td>${o.id}</td><td>${fmt(o.dist_m, 0, " m")}</td>` +
+      `<td>${o.cpa_m == null ? DASH : `${fmt(o.cpa_m, 0)} m in ${fmt(o.cpa_in_s, 0)} s`}${o.inside ? " <b>INSIDE</b>" : ""}</td>` +
+      `<td>${fmt(o.speed_mps, 1)} m/s ${fmt(o.heading_deg, 0)}°</td>` +
+      `<td>${fmt(o.keepout_m, 0)} m${o.radius_given ? "" : " (default radius)"}</td>` +
+      `<td>${fmt(o.age_s, 0)} s ago${o.reports > 1 ? `, ${o.reports} reports` : ""}</td></tr>`).join("");
+  if (!t4Filled) {
+    t4Filled = true;
+    $("t4-on").checked = !!k.enabled;
+    $("t4-margin").value = k.margin_m; $("t4-radius").value = k.radius_m; $("t4-horizon").value = k.horizon_s;
+  }
+}
+$("t4-set").onclick = () => {
+  const m = parseFloat($("t4-margin").value), r = parseFloat($("t4-radius").value), h = parseFloat($("t4-horizon").value);
+  if (!(m >= 0 && m <= 20)) return toast("Task 4 margin: 0 to 20 m", false);
+  if (!(r >= 1 && r <= 50)) return toast("Task 4 radius: 1 to 50 m", false);
+  if (!(h >= 5 && h <= 180)) return toast("Task 4 horizon: 5 to 180 s", false);
+  if (!$("t4-on").checked &&
+      !confirm("Switch Task 4 avoidance OFF? The boat will not get out of a moving object's way.")) return;
+  setBtParams({t4_enabled: $("t4-on").checked, t4_margin_m: m, t4_radius_m: r, t4_horizon_s: h});
+};
+function task4Tile() {                           // on the strip, every tab
+  const k = G.tree && G.tree.ok ? G.tree.task4 : null;
+  const tip = "Task 4 Disruptive: RoboCommand's moving objects and what the boat does about them (Mission tab)";
+  if (!k) return tile("t4", "TASK 4", "stale", DASH, "not reporting", tip);
+  const objs = k.objects || [], g = k.guard || "";
+  const near = objs.filter(o => num(o.dist_m)).sort((a, b) => a.dist_m - b.dist_m)[0];
+  const sub = objs.length ? `${objs.length} object${objs.length > 1 ? "s" : ""}` +
+    (near ? `, ${fmt(near.dist_m, 0)} m off` : "") : `${k.alerts} alert${k.alerts === 1 ? "" : "s"}`;
+  if (!k.enabled) return tile("t4", "TASK 4", "warn", "OFF", sub, tip + "\navoidance switched off (t4_enabled)");
+  if (g && g !== "CLEAR") return tile("t4", "TASK 4", "bad", g, sub, tip + (k.why ? "\n" + k.why : ""));
+  tile("t4", "TASK 4", objs.length ? "warn" : "ok", objs.length ? "WATCH" : "CLEAR", sub, tip);
 }
 
 // ---- sensors ----------------------------------------------------------------

@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- MISSION: Task 3 first (dock, fire, back off, read the code, report), then Task 1 Core; Task 4 breaks off for RoboCommand's moving object at any time and restarts the interrupted task. -->
+<!--
+  mission_t3_t4_t1.xml - one run, Task 3 BEFORE Task 1, always: Task 1 starts only once Task 3
+  has ended with SUCCESS. A Task 3 that fails ends the run (Task 1 is not tried). Declares
+  T1 core, T2 none, T3 disruptive, T4 disruptive (send the same tiers to the OCS before declaring).
+
+    TASK 3 (TASK_COORDINATED_LOGISTICS): the way to the dock (the operator's VIA point, then
+       round the field when the straight line to the APPROACH POINT passes within 3 m of a known
+       buoy, fence or the dock; skipped when MANUAL), then lib/task3_scan_fire_once.xml: approach
+       point, MANUAL, find the GREEN bay, dock, docking report, spray the RED window until GREEN,
+       back off to t3_backoff_m, firefighting report, read the 2-colour code, resource delivery
+       report. Then it ENDS (Task3ScanFire, the T1-first mission's, never does).
+    THE SWITCH: Task 3 left the boat in MANUAL (its own switch); the tree asks for GUIDED, only
+       from MANUAL. Any other mode is the pilot's and ends the run.
+    TASK 1 (TASK_SAFE_PASSAGE, GUIDED): round the dock / field toward the Task 1 approach point
+       when the straight line is blocked (once, before the passage starts), then
+       lib/task1_core_scan.xml: Task 1 approach point, scan, plan, drive the passage.
+    TASK 4, in the background, round each task (AvoidInvaders): a RoboCommand moving object
+       whose projected travel over t4_horizon_s comes inside its keep-out (its radius, else
+       t4_radius_m, plus t4_margin_m) of the boat BREAKS OFF the task: GUIDED, out of its way,
+       wait until clear, back to where it broke off, the task's mode again (MANUAL when docking),
+       and the interrupted task RESTARTS from its first step. A docking waits at its escape point
+       for where it broke off to clear (up to 2 min): the bays are out of the camera's reach from
+       there. A Task 3 restart skips what is done: after the fire it does not wait for a second
+       RED, and after the resource report it does not read the code again (t3_fire_out,
+       t3_request_sent, set false below at the start). The keep-out is also a hazard every
+       leg and the Task 1 planner avoid. The boat acknowledges each new object to RoboCommand
+       (IncidentAck, bt_runner_node), whatever the tree. current_task stays the task's.
+
+  GCS Run panel (bt_runner_node parameters; the Task 1/3 ones read at Start, t4_* live):
+    approach point   approach lat/lon: a few metres in front of the dock (Task 3 needs it)
+    dock heading, slide first                      (Task 3, as before)
+    via point        t3_via_lat/lon: start -> dock (blank = none)
+    back off         t3_backoff_m (4 m): the hold off the dock face once the fire is out, and
+                     where the boat leaves the dock from
+    Task 1 approach  t1_approach_lat/lon: SET IT here - Task 1 starts at the dock, and with it
+                     blank the boat scans for the field from in front of the dock
+    field centre     t1_field_lat/lon       scan dwell   t1_scan_dwell_s (5 s)
+    pause every      t1_pause_every_m (5 m) unknown range  t1_unknown_range_m (12 m)
+    Task 4           t4_enabled, t4_margin_m (3 m), t4_radius_m (10 m), t4_horizon_s (40 s)
+  Run timeout: 0 (no limit) or long enough for both tasks.
+-->
+<root BTCPP_format="4" main_tree_to_execute="Main" declare_task1="core" declare_task2="none" declare_task3="disruptive" declare_task4="disruptive" t1_guess_exit="true">
+  <include path="lib/task3_scan_fire_once.xml"/>
+  <include path="lib/task1_core_scan.xml"/>
+
+  <BehaviorTree ID="Main">
+    <!-- MANUAL is let through: Task 3 drives the sticks itself. HOLD, or the autonomy-drop
+         latch (SC) in MANUAL, ends the run, also while a Task 4 break-off has a task halted. -->
+    <ReactiveSequence name="guard_band">
+      <IsAutonomous manual="true"/>
+      <Sequence name="mission">
+        <!-- once per run, outside the break-off: a Task 3 restart must not reset them -->
+        <Script code="t3_fire_out := false; t3_request_sent := false"/>
+
+        <TaskAttempt token="TASK_COORDINATED_LOGISTICS">
+          <AvoidInvaders>
+            <!-- no memory: after a Task 4 break-off Task 3 restarts from its first step -->
+            <Sequence name="task3">
+              <ReactiveFallback name="to_the_dock">
+                <ModeIs mode="MANUAL"/>
+                <ReactiveSequence name="guided">
+                  <IsAutonomous/>
+                  <NotDropped/>
+                  <Sequence name="legs">
+                    <ForceSuccess name="operator_via">
+                      <Sequence>
+                        <FixGiven lat="{t3_via_lat}" lon="{t3_via_lon}"/>
+                        <ForceSuccess>
+                          <Sequence>
+                            <PickDetour target="fix" lat="{t3_via_lat}" lon="{t3_via_lon}" via="{via}"/>
+                            <NavigateTo target="port" goal="{via}" tolerance="3.0"
+                                        blocked_timeout_s="30.0"/>
+                          </Sequence>
+                        </ForceSuccess>
+                        <NavigateTo target="fix" lat="{t3_via_lat}" lon="{t3_via_lon}" tolerance="3.0"
+                                    blocked_timeout_s="30.0"/>
+                      </Sequence>
+                    </ForceSuccess>
+                    <ForceSuccess name="round_the_field">
+                      <Sequence>
+                        <PickDetour target="approach" margin_m="3.0" via="{via}"/>
+                        <NavigateTo target="port" goal="{via}" tolerance="3.0"
+                                    blocked_timeout_s="30.0"/>
+                      </Sequence>
+                    </ForceSuccess>
+                  </Sequence>
+                </ReactiveSequence>
+              </ReactiveFallback>
+              <SubTree ID="Task3ScanFireOnce" _autoremap="true"/>
+            </Sequence>
+          </AvoidInvaders>
+        </TaskAttempt>
+
+        <!-- Task 3 is done: out of the tree's own MANUAL, back to GUIDED for Task 1 -->
+        <RequestMode mode="GUIDED" from="MANUAL" timeout_s="10.0"/>
+
+        <TaskAttempt token="TASK_SAFE_PASSAGE">
+          <ReactiveSequence name="task1_guard">
+            <IsAutonomous/>
+            <ResolveBuoyStates/>
+            <ReportSafePassage min_period_s="1.0"/>
+            <AvoidInvaders>
+              <!-- no memory: after a Task 4 break-off Task 1 restarts (it re-plans from the boat
+                   and skips the phases it has done) -->
+              <Sequence name="task1">
+                <ForceSuccess name="round_to_task1">
+                  <Sequence>
+                    <Inverter><PassageStarted/></Inverter>
+                    <FixGiven lat="{t1_approach_lat}" lon="{t1_approach_lon}"/>
+                    <PickDetour target="fix" lat="{t1_approach_lat}" lon="{t1_approach_lon}"
+                                margin_m="3.0" via="{via}"/>
+                    <NavigateTo target="port" goal="{via}" tolerance="3.0" blocked_timeout_s="30.0"/>
+                  </Sequence>
+                </ForceSuccess>
+                <SubTree ID="Task1CoreScan" _autoremap="true"/>
+              </Sequence>
+            </AvoidInvaders>
+          </ReactiveSequence>
+        </TaskAttempt>
+
+      </Sequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

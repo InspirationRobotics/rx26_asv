@@ -28,6 +28,7 @@ const CrsdMap = (() => {
     hazard: [["--map-hazard"], "#ff9800"],
     obstacle: [["--map-obstacle"], "#7b1fa2"],
     draft: [["--map-draft"], "#c2185b"],
+    task4: [["--map-task4"], "#d50000"],
     // basemap (OSM vectors); fallback is [light, dark] when the page does not define the variable
     bWater: [["--map-water"], ["#a9cdea", "#1b3a57"]],
     bPark: [["--map-park"], ["rgba(120,170,110,0.28)", "rgba(90,140,90,0.22)"]],
@@ -47,6 +48,8 @@ const CrsdMap = (() => {
     origin: null, boat: null, trail: [], targets: [], plan: null, path: null, hazards: [],
     obstacles: [], manual: [], draft: [], draftSel: -1, beacon: 2, task1: null,
     approach: null,                               // the Run panel's approach point, [lat, lon]
+    runPoints: {},                                // the Run panel's field centre, via point: {label: [lat, lon, notOnBoat]}
+    task4: null,                                  // bt_status "task4": RoboCommand's moving objects
   };
   const views = [], listeners = [], modeListeners = [], draftListeners = [], pointListeners = [];
   let T = null;                                   // the colours of the draw in progress
@@ -103,6 +106,7 @@ const CrsdMap = (() => {
     else if (kind === "hazards") S.hazards = f.items || [];
     else if (kind === "obstacles") S.obstacles = f.items || [];   // the LiDAR clusters; [] clears
     else if (kind === "task1") S.task1 = f;                         // bt_status "task1", or null
+    else if (kind === "task4") S.task4 = f;                         // bt_status "task4", or null
     redraw();
   }
 
@@ -228,15 +232,16 @@ const CrsdMap = (() => {
       if (S.plan.entry) mark(v, S.plan.entry, "ENTRY", BEACON[4][1]);
       if (S.plan.exit) mark(v, S.plan.exit, "EXIT", BEACON[5][1]);
     }
-    // the Task 1 ENTRY/EXIT bt_runner_node remembers between runs
+    // the Task 1 EXIT bt_runner_node guesses while it has not seen it
     if (S.task1) {
-      if (S.task1.mem_entry) mark(v, [S.task1.mem_entry.lat, S.task1.mem_entry.lon], "ENTRY (mem)", BEACON[4][1]);
-      if (S.task1.mem_exit) mark(v, [S.task1.mem_exit.lat, S.task1.mem_exit.lon], "EXIT (mem)", BEACON[5][1]);
+      if (S.task1.exit_guess) mark(v, S.task1.exit_guess, "EXIT (guess)", BEACON[5][1]);
     }
     // the field being edited, each buoy numbered by its list index
     S.manual.forEach((b, i) => buoy(v, b, 1.0, i));
     drawDraft(v);
     drawApproach(v);
+    drawRunPoints(v);
+    drawTask4(v);
     // tracked targets
     for (const t of S.targets) {
       const p = at(v, t.lat, t.lon), col = labelColour(t.label);
@@ -446,7 +451,44 @@ const CrsdMap = (() => {
     disc(c, p[0], p[1], 7, T.draft, T.text, 2);
     c.font = FONT_BOLD; label(c, "approach", p[0] + 11, p[1] - 8); c.font = FONT;
   }
-  function headingArrow(c, p, deg) {              // from p toward deg (true, 0 = north, clockwise)
+  function drawRunPoints(v) {                     // the Run panel's field centre and via point
+    const c = v.ctx;
+    for (const [name, q] of Object.entries(S.runPoints)) {
+      const p = at(v, q[0], q[1]);
+      disc(c, p[0], p[1], 6, null, T.draft, 2, q[2] ? [1, 3] : [2, 2]);   // dotted = typed, not on the boat yet
+      c.font = FONT_BOLD; label(c, q[2] ? name + " (not sent)" : name, p[0] + 10, p[1] - 8); c.font = FONT;
+    }
+  }
+  // Task 4: each moving object where it is now, its keep-out round it (filled while the boat is
+  // inside it), its projected travel over the horizon (dashed, the keep-out at its end faint), and
+  // the point the boat is escaping to while AvoidInvaders has it out of the way.
+  function drawTask4(v) {
+    const k = S.task4;
+    if (!k) return;
+    const c = v.ctx;
+    for (const o of k.objects || []) {
+      if (!Array.isArray(o.now)) continue;
+      const p = at(v, o.now[0], o.now[1]), r = Math.max(4, (o.keepout_m || 0) * v.scale);
+      const track = (o.track || []).filter(Array.isArray);
+      if (track.length > 1) {
+        c.strokeStyle = T.task4; c.lineWidth = 1.5; c.setLineDash([5, 4]); c.beginPath();
+        trace(v, track, true);
+        c.stroke(); c.setLineDash([]);
+        const e = at(v, track[track.length - 1][0], track[track.length - 1][1]);
+        c.globalAlpha = 0.4; disc(c, e[0], e[1], r, null, T.task4, 1, [3, 3]); c.globalAlpha = 1;
+      }
+      c.beginPath(); c.arc(p[0], p[1], r, 0, 2 * Math.PI);
+      c.globalAlpha = o.inside ? 0.3 : 0.12; c.fillStyle = T.task4; c.fill(); c.globalAlpha = 1;
+      disc(c, p[0], p[1], r, null, T.task4, 2);
+      disc(c, p[0], p[1], 5, T.task4, T.text, 1.5);
+      if (Number.isFinite(o.heading_deg) && o.speed_mps > 0) headingArrow(c, p, o.heading_deg, T.task4);
+      c.font = FONT_BOLD;
+      label(c, `T4 #${o.id}  ${(+o.speed_mps || 0).toFixed(1)} m/s`, p[0] + 9, p[1] + 18, "left", "alphabetic", T.task4);
+      c.font = FONT;
+    }
+    if (Array.isArray(k.target)) mark(v, k.target, "escape", T.task4);
+  }
+  function headingArrow(c, p, deg, col) {         // from p toward deg (true, 0 = north, clockwise)
     const a = deg * Math.PI / 180, dx = Math.sin(a), dy = -Math.cos(a), len = 28, head = 7;
     const tip = [p[0] + dx * len, p[1] + dy * len];
     const wing = s => [tip[0] - (dx * Math.cos(s) - dy * Math.sin(s)) * head,
@@ -455,7 +497,7 @@ const CrsdMap = (() => {
     c.beginPath(); c.moveTo(p[0], p[1]); c.lineTo(tip[0], tip[1]);
     c.moveTo(l[0], l[1]); c.lineTo(tip[0], tip[1]); c.lineTo(r[0], r[1]);
     halo(c, 2);
-    c.lineWidth = 2; c.strokeStyle = T.draft; c.stroke();
+    c.lineWidth = 2; c.strokeStyle = col || T.draft; c.stroke();
   }
   function boat(v) {
     if (!S.boat) return;
@@ -625,6 +667,11 @@ const CrsdMap = (() => {
     setClickMode, clickMode: () => mode, beginPick, hasOrigin: () => !!S.origin,
     onModeChange: listen(modeListeners), onWaypoint: listen(pointListeners),
     onDraftPick: listen(draftListeners), setDraft,
+    setRunPoint(name, p) {                        // a labelled Run panel point, [lat, lon]; null clears
+      if (Array.isArray(p) && validPos(+p[0], +p[1])) S.runPoints[name] = [+p[0], +p[1], !!p[2]];
+      else delete S.runPoints[name];
+      redraw();
+    },
     setApproach(p) {                              // [lat, lon], or null to clear
       S.approach = Array.isArray(p) && validPos(+p[0], +p[1]) ? [+p[0], +p[1]] : null;
       if (!S.origin && S.approach) S.origin = S.approach.slice();

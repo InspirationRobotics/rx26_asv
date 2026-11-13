@@ -477,28 +477,21 @@ struct SpotKalman
   }
 };
 
-/// The spot the boat centres on: the GREEN indicator (SpotKalman). Until the camera has
-/// placed the indicator itself, the bay face's centre stands in (a face cut by the image
-/// edge is never given: its centre is biased); from the first indicator on, only the
-/// indicator moves it, so the two are never mixed.
+/// The spot the boat centres on: our bay's FACE centre (SpotKalman), the detector's
+/// strongest box (a face cut by the image edge is never given: its centre is biased). The
+/// indicator is read for its colour only: the small box at the face's base is missed far
+/// more often, and placed through the learned pinhole it put the bay metres from its face
+/// on the water (2026-11-12).
 struct CentreTarget
 {
   SpotKalman fix;
-  bool from_indicator = false;
 
-  void sight(nav::Vec2 face, bool have_face, nav::Vec2 ind, bool have_ind, double range_m,
-    double t_obs, double now)
+  void sight(nav::Vec2 face, double range_m, double t_obs, double now)
   {
-    if (have_ind) {
-      if (!from_indicator) {fix = SpotKalman{};}
-      fix.sight(ind, range_m, t_obs, now);
-      from_indicator = true;
-    } else if (have_face && !from_indicator) {
-      fix.sight(face, range_m, t_obs, now);
-    }
+    fix.sight(face, range_m, t_obs, now);
   }
   double age(double now) const {return fix.age(now);}
-  const char * source() const {return from_indicator ? "indicator" : "face";}
+  const char * source() const {return "face";}
 };
 
 /// A D term's rate: d(value)/dt from one tick to the next, smoothed (each new difference
@@ -536,21 +529,28 @@ inline DockFrame toDockFrame(nav::Vec2 d, double dock_heading_deg)
 
 // ------------------------------------------------------------------ the gate
 
-// "Ready" must HOLD, not flicker: a burst fires only after every condition has
-// been true for hold_s without a break.
+// "Ready" must HOLD, not flicker: true once every condition has been true for hold_s, on a
+// tick where it is true. A miss (a dropped detection, one noisy read) of up to miss_s keeps
+// the clock running; a longer one starts it again. miss_s 0: any miss starts it again.
 struct SolutionGate
 {
   double hold_s = 1.0;
+  double miss_s = 0.0;
   double since = -1.0;
+  double last_ok = -1.0;
 
   bool update(double t, bool ok)
   {
-    if (!ok) {since = -1.0; return false;}
+    if (!ok) {
+      if (since >= 0 && t - last_ok > miss_s) {since = -1.0;}
+      return false;
+    }
     if (since < 0) {since = t;}
+    last_ok = t;
     return t - since >= hold_s;
   }
   double held(double t) const {return since < 0 ? 0.0 : t - since;}
-  void reset() {since = -1.0;}
+  void reset() {since = -1.0; last_ok = -1.0;}
 };
 
 inline bool inBand(double range_m, double target_m, double tol_m)

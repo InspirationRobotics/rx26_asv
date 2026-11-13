@@ -163,6 +163,19 @@ class Building(Mission):
         empty = self.built([])
         self.assertIn('<Sequence name="mission" />', empty)
 
+    def test_a_mission_driving_in_manual_gets_the_manual_guard(self):
+        xml = self.built([leaf("ModeIs", mode="MANUAL"), leaf("StopBoat")])
+        self.assertIn('<IsAutonomous manual="true" />', xml)
+        self.assertEqual(self.reasons(xml), [])
+        self.refused(xml.replace(' manual="true"', ""), "drives the boat in MANUAL")
+        self.refused(xml.replace('manual="true"', 'manual="yes"'), "true or false")
+        plain = self.built([leaf("StopBoat")])
+        self.assertIn("<IsAutonomous />", plain)
+        self.refused(plain.replace("<IsAutonomous />", '<IsAutonomous manual="true" />'),
+                     "would go on running")
+        blocks, _notes = mission_xml.read_blocks(xml)
+        self.assertEqual(mission_xml.build_xml(blocks, CATALOGUE), xml)
+
     def test_no_include_and_no_model_in_what_it_builds(self):
         xml = self.built([sub("Task1Advanced")])
         self.assertNotIn("<include", xml)

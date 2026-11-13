@@ -51,7 +51,7 @@ constexpr double kKeepS = 8.0;
 ///                     frames and out of the picture the boat's own 20 Hz track carries it.
 ///   along_m, across_m that spot from the boat NOW, along the dock heading (+ ahead) and
 ///                     across it (+ left): bow wobble is not in them. NaN unless held.
-///   source            what built the spot: "indicator" or "face".
+///   source            what built the spot: "face".
 ///   last_side         +1 left, -1 right, 0 never seen: where the camera saw it last.
 ///   last_off          ... and how far (+ left, m; NaN never seen).
 class CameraBay
@@ -62,14 +62,20 @@ public:
     const Context::GreenBay & g = c.green;
     if (g.t > last_t_ && std::isfinite(g.bay.left_m)) {
       last_t_ = g.t;
-      hist_.push_back({g.t, g.bay.ahead_m, g.bay.left_m});
+      hist_.push_back({g.t, g.bay.ahead_m, g.bay.left_m, g.bay.plane});
     }
     while (!hist_.empty() && c.dock_t - hist_.front().t > kWindowS) {hist_.pop_front();}
     seen = !hist_.empty();
     ahead_m = left_m = fire::kNaN;
     if (seen) {
+      // Stereo first: the window-size range reads short (0.63x on the water, 11-12), and a
+      // median over both kinds swung the hold in and out as the plane came and went.
+      const bool stereo = std::any_of(hist_.begin(), hist_.end(),
+          [](const Sighting & h) {return h.plane;});
       std::vector<double> a, l;
-      for (const auto & h : hist_) {a.push_back(h.ahead); l.push_back(h.left);}
+      for (const auto & h : hist_) {
+        if (h.plane || !stereo) {a.push_back(h.ahead); l.push_back(h.left);}
+      }
       ahead_m = fire::median(a);
       left_m = fire::median(l);
       side(left_m);
@@ -99,7 +105,7 @@ private:
   }
 
   static constexpr double kWindowS = 1.0;
-  struct Sighting {double t, ahead, left;};
+  struct Sighting {double t, ahead, left; bool plane;};
   std::deque<Sighting> hist_;
   double last_t_ = -1e18;
 };
@@ -343,8 +349,11 @@ private:
   Damped range_rate_, lat_rate_;
 };
 
-/// Wait until the hold has held the spot for hold_s: range, the bay centred, square, the
-/// hull still. RUNNING until then; FAILURE only after timeout_s (0 = never).
+/// Wait until the hold has held the spot for hold_s: range, the bay centred, square, and
+/// (steady="true", for a shot) the hull still. RUNNING until then; FAILURE only after
+/// timeout_s (0 = never). Docking is a position: its stages say steady="false", because the
+/// stillness gate wants 1.5 s with no corrective thrust, which a hull holding against any set
+/// rarely gets (the dock sim: 150-180 s of "thrust too recent" before the docking report).
 class AwaitStrafeSolution : public CrusaderAction
 {
 public:
@@ -356,14 +365,18 @@ public:
       BT::InputPort<double>("lat_tol_m", 0.05, "+- the bay off the bow"),
       BT::InputPort<double>("yaw_tol_deg", 5.0, "+- off square"),
       BT::InputPort<double>("fire_range_m", 1.2, "= StrafeKeep's"),
-      BT::InputPort<double>("hold_s", 1.0, "everything true for this long"),
+      BT::InputPort<double>("hold_s", 1.0, "everything true for this long; 0 = the first time it is"),
+      BT::InputPort<double>("miss_s", 1.0,
+        "a miss (dropped detection, a noisy read) up to this long keeps the hold's clock"),
       BT::InputPort<double>("timeout_s", 0.0, "give up after this; 0 = never"),
+      BT::InputPort<bool>("steady", true, "also wait for the hull to be still (a shot)"),
     };
   }
 
   BT::NodeStatus onStart() override
   {
     gate_.hold_s = getInput<double>("hold_s").value_or(1.0);
+    gate_.miss_s = getInput<double>("miss_s").value_or(1.0);
     gate_.reset();
     std::lock_guard<std::mutex> lk(ctx_->mu);
     t0_ = ctx_->now_s;
@@ -377,6 +390,7 @@ public:
     const double ytol = getInput<double>("yaw_tol_deg").value_or(5.0);
     const double target = getInput<double>("fire_range_m").value_or(1.2);
     const double timeout = getInput<double>("timeout_s").value_or(0.0);
+    const bool need_steady = getInput<bool>("steady").value_or(true);
     std::string why;
     bool held = false;
     double now = 0.0;
@@ -399,7 +413,7 @@ public:
       } else if (std::fabs(si.yaw_err_deg) > ytol) {
         std::snprintf(buf, sizeof(buf), "%+.1f deg off square", si.yaw_err_deg);
         why = buf;
-      } else if (!st.steady) {
+      } else if (need_steady && !st.steady) {
         why = "not steady: " + st.why;
       }
       held = gate_.update(now, why.empty());
@@ -426,10 +440,10 @@ private:
   double t0_ = 0.0;
 };
 
-/// Close in on the committed bay (CameraBay), bow on the dock heading: strafe its GREEN
-/// indicator onto the bow's line holding the distance, and only once it has stayed within
+/// Close in on the committed bay (CameraBay), bow on the dock heading: strafe its FACE
+/// onto the bow's line holding the distance, and only once it has stayed within
 /// centre_tol_m for centred_s drive straight in (a constant, ramped push), re-centring
-/// only past recentre_m. The sideways error is the indicator's spot (Context::centre)
+/// only past recentre_m. The sideways error is the face's spot (Context::centre)
 /// across the dock heading, damped on its own rate, so it keeps centring for kKeepS out
 /// of the picture; with nothing held, the live face; with nothing seen either, a slide
 /// toward the side it was seen on last. SUCCESS at handover_m (rangeFix) once within
