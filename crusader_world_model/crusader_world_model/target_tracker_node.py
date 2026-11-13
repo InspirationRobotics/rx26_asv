@@ -105,6 +105,22 @@ PARAMS = {
     # are dropped while turning (0 = off): mid-turn they land metres off as ghosts
     "turn_smear_max_m": 1.0,
     "turn_skew_s": 0.2,
+    # range-aware tracking (target_tracker_core.TrackerParams says why): OFF at
+    # range_sigma_k 0. Sim calibration 0.0036; a real OAK-D about twice that.
+    "range_sigma_k": 0.0,               # stereo sigma = k * range^2 [m]; 0 = off
+    "range_sigma_floor_m": 0.10,
+    "range_gate_sigmas": 2.5,           # gate = this many sigma, in [assoc_min_m, assoc_radius_m]
+    "assoc_min_m": 0.9,
+    "vote_ambiguity_m": 0.0,            # another track this close = no colour vote; 0 = off
+    # MAPPED FIELD PRIOR (target_tracker_core.TrackerParams says how): the mapped buoys as
+    # "lat,lon;lat,lon;..." (the order does not matter). "" = OFF, every sighting tracked
+    # as before. Live: a set re-places the map at the next cycle.
+    "prior_field": "",
+    "prior_snap_m": 1.0,                # placed ON a mapped buoy within this ...
+    "prior_zone_m": 2.0,                # ... dropped if not, within this of one
+    "prior_margin_m": 0.5,              # the next-nearest mapped buoy at least this farther
+    "prior_snap_range_m": 15.0,         # only sightings from this near snap
+    "prior_align_max_m": 4.0,           # the largest map offset searched
     # colour voting. The label sets define what a RoboBuoy IS, so they are read-only
     "colour_vote_enable": True,
     "colour_family_labels": ["red_buoy", "green_buoy", "black_buoy", "flashing_blue_buoy",
@@ -122,8 +138,12 @@ RANGES = {
     "vel_alpha": (0.01, 1.0), "confirm_hits": (1, 100), "tentative_timeout_s": (0.5, 60.0),
     "track_timeout_s": (0.0, 3600.0), "max_tracks": (1, 1000), "colour_min_votes": (1, 1000),
     "colour_min_ratio": (0.0, 1.0), "turn_smear_max_m": (0.0, 20.0), "turn_skew_s": (0.0, 2.0),
+    "range_sigma_k": (0.0, 0.1), "range_sigma_floor_m": (0.01, 2.0),
+    "range_gate_sigmas": (0.5, 10.0), "assoc_min_m": (0.2, 20.0), "vote_ambiguity_m": (0.0, 5.0),
+    "prior_snap_m": (0.1, 5.0), "prior_zone_m": (0.1, 10.0), "prior_margin_m": (0.0, 5.0),
+    "prior_snap_range_m": (1.0, 60.0), "prior_align_max_m": (0.0, 10.0),
 }
-DYNAMIC = tuple(RANGES) + ("use_lidar", "colour_vote_enable")
+DYNAMIC = tuple(RANGES) + ("use_lidar", "colour_vote_enable", "prior_field")
 
 # Params that map straight onto a TrackerParams field of the same name. Listed
 # rather than inferred so a node-level parameter that is not a core parameter
@@ -136,7 +156,29 @@ _CORE_PARAMS = (
     "colour_vote_enable", "colour_family_labels", "colour_family_shapes",
     "colour_unlit_labels",
     "colour_unknown_label", "colour_min_votes", "colour_min_ratio",
-    "turn_smear_max_m", "turn_skew_s")
+    "turn_smear_max_m", "turn_skew_s",
+    "range_sigma_k", "range_sigma_floor_m", "range_gate_sigmas", "assoc_min_m",
+    "vote_ambiguity_m",
+    "prior_snap_m", "prior_zone_m", "prior_margin_m", "prior_snap_range_m",
+    "prior_align_max_m")
+
+
+def parse_prior_field(text):
+    """'lat,lon;lat,lon;...' -> [(lat, lon), ...]. Blank = []. A malformed entry raises
+    ValueError naming it, so a typo in the Params tab is refused, not half-applied."""
+    out = []
+    for part in str(text or "").replace("\n", ";").split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            lat, lon = (float(v) for v in part.split(","))
+        except ValueError:
+            raise ValueError(f"prior_field entry {part!r} is not 'lat,lon'") from None
+        if not (abs(lat) <= 90.0 and abs(lon) <= 180.0) or (lat == 0.0 and lon == 0.0):
+            raise ValueError(f"prior_field entry {part!r} is not a position")
+        out.append((lat, lon))
+    return out
 
 
 def stamp_key(header):
@@ -173,6 +215,10 @@ class TargetTrackerNode(Node):
         # stale values. Used only to stop range/bearing jumping to the origin
         # during an outage.
         self._last_boat = None
+        # The mapped field prior: lat/lon until the origin is anchored, then placed in the
+        # tracker's frame once (and again on every prior_field set).
+        self._prior_ll = parse_prior_field(p["prior_field"])
+        self._prior_placed = False
         self._last_det_key = None
         self._last_clu_key = None
         self._last_stamp = None
@@ -207,6 +253,9 @@ class TargetTrackerNode(Node):
     def _apply(self, changes):
         """A `ros2 param set` that passed its checks. TrackerParams is a plain dataclass the
         core reads every cycle, so assigning the attribute is applying the change."""
+        if "prior_field" in changes:              # parsed first: a bad map refuses the set
+            self._prior_ll = parse_prior_field(changes["prior_field"])
+            self._prior_placed = False
         for name, value in changes.items():
             if name in _CORE_PARAMS:
                 setattr(self.params, name, value)
@@ -278,6 +327,14 @@ class TargetTrackerNode(Node):
             if why:
                 self.get_logger().error(
                     f"world model input {name!r} went stale — {why}")
+
+        if not self._prior_placed and self._origin is not None:
+            self._prior_placed = True
+            self.tracker.set_prior([geo.latlon_to_xy(lat, lon, self._origin)
+                                    for lat, lon in self._prior_ll])
+            self.get_logger().info(
+                f"mapped field prior: {len(self._prior_ll)} buoy(s)" if self._prior_ll else
+                "mapped field prior: off (prior_field empty)")
 
         pose = self._pose.get(now)
         att = self._att.get(now)

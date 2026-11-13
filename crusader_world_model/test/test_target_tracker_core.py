@@ -13,6 +13,7 @@ colour_min_votes votes AND colour_min_ratio of the LIT votes, dark votes
 excluded), not read back from the code under test.
 """
 import ast
+import math
 import dataclasses
 import os
 import sys
@@ -287,6 +288,203 @@ class TurnSmearTest(unittest.TestCase):
     def test_zero_limit_is_off(self):
         t = make_tracker(turn_smear_max_m=0.0)
         self.assertEqual(len(self.run_at(t, 2.0, 30.0)), 1)
+
+
+class RangeAwareTest(unittest.TestCase):
+    """range_sigma_k > 0: the gate, the position weight and the colour vote follow the
+    stereo error, sigma(r) = k r^2 (0.0036 = the sim's depth model). The field these pin
+    is the 2026-11-10 Singapore one: buoys 1.86 m apart at the tightest."""
+
+    K = 0.0036
+
+    def ranged(self, **kw):
+        return make_tracker(range_sigma_k=self.K, **kw)
+
+    def test_off_by_default(self):
+        self.assertEqual(core.TrackerParams().range_sigma_k, 0.0)
+        self.assertEqual(core.TrackerParams().vote_ambiguity_m, 0.0)
+
+    def test_close_neighbours_stay_apart_and_keep_their_colours(self):
+        # 6 m out: sigma 0.13 m, gate 0.9 m (the floor); the buoys are 1.86 m apart
+        f = Feeder(self.ranged())
+        tracks = f.repeat(10, (6.0, 0.93, "red_buoy"), (6.0, -0.93, "green_buoy"))
+        self.assertEqual(sorted(t.label for t in tracks), ["green_buoy", "red_buoy"])
+
+    def test_the_fixed_three_metre_gate_merges_the_same_pair(self):
+        # the failure this exists for: the default gate holds both in one track
+        f = Feeder(make_tracker())
+        tracks = f.repeat(10, (6.0, 0.93, "red_buoy"), (6.0, -0.93, "green_buoy"))
+        tracks = f.repeat(10, (6.0, 0.93, "red_buoy"))
+        self.assertLessEqual(len(tracks), 2)
+        f2 = Feeder(make_tracker())
+        f2.see("red_buoy", 5, at=(6.0, 0.93))
+        self.assertEqual(len(f2.see("green_buoy", 5, at=(6.0, -0.93))), 1)
+
+    def test_far_scatter_is_one_track_not_duplicates(self):
+        # 20 m out: sigma 1.44 m, gate clamps to assoc_radius_m 3.0; sightings 1.2 m apart
+        f = Feeder(self.ranged())
+        for k in range(12):
+            f.cycle((20.0 + (1.2 if k % 2 else -1.2), 0.0, "red_buoy"))
+        self.assertEqual(len(f.tracker.tracks), 1)
+
+    def test_a_fixed_small_gate_splits_the_same_scatter(self):
+        f = Feeder(make_tracker(assoc_radius_m=1.5))
+        for k in range(12):
+            f.cycle((20.0 + (1.2 if k % 2 else -1.2), 0.0, "red_buoy"))
+        self.assertEqual(len(f.tracker.tracks), 2)
+
+    def test_a_close_sighting_corrects_a_buoy_placed_from_far(self):
+        # placed from 20 m (sigma 1.44, w 0.48), then one sighting from 5 m, 1.0 m away
+        # (sigma 0.10 floor -> 0.09: w 100): gain 100 / 100.48 = 0.995
+        f = Feeder(self.ranged())
+        f.see("red_buoy", 1, at=(20.0, 0.0))
+        t = f.tracker.tracks[0]
+        t.x, t.y = 0.0, 20.0                     # pin the world position for the arithmetic
+        boat = core.BoatState(east=0.0, north=14.0, roll=0.0, pitch=0.0, yaw=0.0)
+        f.tracker.update([core.CameraDetection(5.0, 0.0, 0.0, "red_buoy", 0.9)], [], boat, 1.0)
+        self.assertEqual(len(f.tracker.tracks), 1)    # associated, not a new track
+        self.assertAlmostEqual(t.y, 19.0, delta=0.05)
+
+    def test_a_far_sighting_barely_moves_a_buoy_fixed_from_close(self):
+        f = Feeder(self.ranged())
+        f.see("red_buoy", 20, at=(5.0, 0.0))     # info capped at 4 / 0.1^2 = 400
+        t = f.tracker.tracks[0]
+        y0 = t.y
+        f.cycle((5.0, 0.0, "red_buoy"))
+        # the same buoy seen from 20 m, 1.0 m off along the line of sight
+        boat = core.BoatState(east=0.0, north=-15.0, roll=0.0, pitch=0.0, yaw=0.0)
+        f.tracker.update([core.CameraDetection(21.0, 0.0, 0.0, "red_buoy", 0.9)], [], boat, 9.0)
+        self.assertEqual(len(f.tracker.tracks), 1)    # associated, not a new track
+        self.assertLess(abs(t.y - y0), 0.01)     # w 0.40 vs 400: 0.1 % of 1.0 m
+
+    def test_an_ambiguous_sighting_does_not_vote(self):
+        f = Feeder(self.ranged(vote_ambiguity_m=1.0))
+        f.repeat(6, (6.0, 0.93, "red_buoy"), (6.0, -0.93, "green_buoy"))
+        before = {t.label: dict(t.label_votes) for t in f.tracker.tracks}
+        f.cycle((6.0, 0.2, "green_buoy"))        # 0.73 / 1.13 m from the two: ambiguous
+        after = {t.label: dict(t.label_votes) for t in f.tracker.tracks}
+        self.assertEqual(before, after)
+        self.assertEqual(f.tracker.stats["votes_withheld"], 1)
+
+    def test_a_clear_sighting_still_votes(self):
+        f = Feeder(self.ranged(vote_ambiguity_m=1.0))
+        f.repeat(6, (6.0, 0.93, "red_buoy"), (6.0, -0.93, "green_buoy"))
+        f.cycle((6.0, 0.95, "red_buoy"))
+        red = next(t for t in f.tracker.tracks if t.label == "red_buoy")
+        self.assertEqual(red.label_votes["red_buoy"], 7)
+
+
+class PriorFieldTest(unittest.TestCase):
+    """The mapped field prior: sightings near a mapped buoy are placed ON it once the map's
+    offset is found. World frame here: BOAT at the origin facing north, so a world point
+    (east, north) is the body sighting (north, -east)."""
+
+    # a slice of the 2026-11-10 field (two neighbours 1.86 m apart and two more), moved
+    # 10 m south so every buoy is inside prior_snap_range_m of the boat at the origin
+    FIELD = [(-4.06, 8.62), (-5.78, 7.91), (-3.20, 6.55), (-5.10, 4.90)]
+
+    @staticmethod
+    def sight(tracker, world_pts, t, labels=None):
+        cams = [core.CameraDetection(n, -e, 0.0, (labels or {}).get(k, "red_buoy"), 0.9)
+                for k, (e, n) in enumerate(world_pts)]
+        return tracker.update(cams, [], BOAT, t)
+
+    def fed(self, prior, truth, cycles=40, jitter=0.4, labels=None):
+        tr = make_tracker()
+        tr.set_prior(prior)
+        for k in range(cycles):
+            # deterministic +-jitter scatter, different for each buoy and cycle
+            pts = [(e + jitter * math.sin(1.7 * k + i), n + jitter * math.cos(2.3 * k + 2 * i))
+                   for i, (e, n) in enumerate(truth)]
+            self.sight(tr, pts, 0.1 * (k + 1), labels)
+        return tr
+
+    def test_off_without_a_map(self):
+        self.assertEqual(make_tracker().prior, ())
+
+    def test_one_track_per_buoy_exactly_on_the_map(self):
+        tr = self.fed(self.FIELD, self.FIELD)
+        self.assertTrue(tr.prior_aligned)
+        self.assertEqual(len(tr.tracks), 4)
+        for t in tr.tracks:
+            d = min(math.hypot(t.x - e, t.y - n) for e, n in self.FIELD)
+            self.assertLess(d, 0.15)
+
+    def test_the_map_offset_is_found(self):
+        # the map is 2.0 m east and 1.0 m south of where the boat's GPS sees the buoys
+        shifted = [(e + 2.0, n - 1.0) for e, n in self.FIELD]
+        tr = self.fed(shifted, self.FIELD)
+        self.assertTrue(tr.prior_aligned)
+        self.assertAlmostEqual(tr.prior_offset[0], -2.0, delta=0.2)
+        self.assertAlmostEqual(tr.prior_offset[1], 1.0, delta=0.2)
+        for t in tr.tracks:
+            d = min(math.hypot(t.x - e, t.y - n) for e, n in self.FIELD)
+            self.assertLess(d, 0.25)
+
+    def test_neighbours_keep_their_own_colours(self):
+        labels = {0: "red_buoy", 1: "green_buoy", 2: "red_buoy", 3: "red_buoy"}
+        tr = self.fed(self.FIELD, self.FIELD, labels=labels)
+        by_pos = {min(range(4), key=lambda i: math.hypot(t.x - self.FIELD[i][0],
+                                                         t.y - self.FIELD[i][1])): t.label
+                  for t in tr.tracks}
+        self.assertEqual(by_pos, {0: "red_buoy", 1: "green_buoy", 2: "red_buoy", 3: "red_buoy"})
+
+    def test_a_sighting_between_two_mapped_buoys_is_dropped(self):
+        tr = self.fed(self.FIELD, self.FIELD, cycles=30, jitter=0.0)
+        n = len(tr.tracks)
+        mid = ((-4.06 - 5.78) / 2, (8.62 + 7.91) / 2)     # 0.93 m from both
+        self.sight(tr, [mid], 10.0)
+        self.assertEqual(len(tr.tracks), n)
+        self.assertEqual(tr.stats["prior_dropped"], 1)
+
+    def test_far_from_the_field_tracks_as_before(self):
+        tr = self.fed(self.FIELD, self.FIELD, cycles=30, jitter=0.0)
+        self.sight(tr, [(6.0, 2.0)], 10.0)                  # 9 m from every mapped buoy
+        self.assertEqual(len(tr.tracks), 5)
+
+    def test_nothing_near_the_field_is_tracked_before_the_map_is_placed(self):
+        tr = make_tracker()
+        tr.set_prior(self.FIELD)
+        self.sight(tr, [self.FIELD[0], (8.0, 0.0)], 0.1)   # too few sightings to align
+        self.assertFalse(tr.prior_aligned)
+        self.assertEqual(len(tr.tracks), 1)                # only the one far from the field
+
+    def test_a_new_map_replaces_tracks_in_the_field(self):
+        tr = make_tracker()
+        for k in range(5):
+            self.sight(tr, [(-4.5, 8.2), (8.0, 0.0)], 0.1 * (k + 1))
+        self.assertEqual(len(tr.tracks), 2)
+        tr.set_prior(self.FIELD)
+        self.assertEqual(len(tr.tracks), 1)
+
+
+class PriorParseTest(unittest.TestCase):
+    """The node's prior_field string, without ROS: the parser is a plain function."""
+
+    @staticmethod
+    def parse(text):
+        src = open(os.path.join(HERE, "..", "crusader_world_model",
+                                "target_tracker_node.py"), encoding="utf-8").read()
+        tree = ast.parse(src)
+        fn = next(n for n in tree.body
+                  if isinstance(n, ast.FunctionDef) and n.name == "parse_prior_field")
+        ns = {}
+        exec(compile(ast.Module([fn], []), "parse_prior_field", "exec"), ns)
+        return ns["parse_prior_field"](text)
+
+    def test_blank_is_off(self):
+        self.assertEqual(self.parse(""), [])
+        self.assertEqual(self.parse(" ; "), [])
+
+    def test_pairs(self):
+        self.assertEqual(self.parse("1.28,103.85; 1.29,103.86;"),
+                         [(1.28, 103.85), (1.29, 103.86)])
+
+    def test_a_typo_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.parse("1.28,103.85;1.29")
+        with self.assertRaises(ValueError):
+            self.parse("0,0")
 
 
 class WiringTest(unittest.TestCase):

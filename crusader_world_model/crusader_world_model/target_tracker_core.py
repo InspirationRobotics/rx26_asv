@@ -110,6 +110,63 @@ class TrackerParams:
     turn_smear_max_m: float = 1.0
     turn_skew_s: float = 0.2
 
+    # -- RANGE-AWARE TRACKING (stage 3). OFF while range_sigma_k is 0: the fixed
+    # assoc_radius_m and pos_alpha above, exactly as before.
+    #
+    # Why. Stereo range error grows with range squared (sigma ~ k * r^2), so ONE
+    # association radius cannot serve a buoy field whose buoys are 1.9-3.5 m apart
+    # (the 2026-11-10 Singapore field): 3.0 m merges neighbours seen up close
+    # (their positions drag toward each other and their colours mix), 1.5 m splits
+    # every buoy seen from 15-20 m into duplicates (23 tracks for 11 buoys in the
+    # sim, 23-25 for ten on the water on 2026-11-13). On, each camera sighting has
+    # sigma(r) = max(range_sigma_floor_m, range_sigma_k * r^2), and:
+    #   * its association radius with a track is range_gate_sigmas times their
+    #     combined sigma (the track's is 1/sqrt of its accumulated weight), clamped to
+    #     [assoc_min_m, assoc_radius_m]: tight up close on a well-placed buoy, wide
+    #     far out or on a buoy so far only seen from far;
+    #   * it moves the track by INVERSE-VARIANCE weight, w = 1 / sigma^2, against
+    #     the track's accumulated weight (capped at 4 / floor^2 so the track still
+    #     follows): a far sighting barely moves a buoy fixed from close in, a close
+    #     one corrects a buoy first placed from far away;
+    #   * a sighting whose nearest OTHER compatible track is within
+    #     vote_ambiguity_m of its own casts NO colour vote (it may be the
+    #     neighbour's light); its position still counts, at its weight.
+    # A LiDAR-positioned sighting has sigma = the floor. Sim calibration
+    # (sim_camera's depth model, f 368 px, B 0.15 m, 0.2 px): k ~ 0.0036; a real
+    # OAK-D (B 0.075 m) is about twice that.
+    range_sigma_k: float = 0.0       # m per m^2; 0 = off
+    range_sigma_floor_m: float = 0.10
+    range_gate_sigmas: float = 2.5
+    assoc_min_m: float = 0.9         # the gate never below this
+    vote_ambiguity_m: float = 0.0    # 0 = every sighting votes
+
+    # -- MAPPED FIELD PRIOR (stage 2b, between projection and association). OFF
+    # until TargetTracker.set_prior() is given the mapped buoy positions (the node:
+    # the prior_field parameter). A moored field does not move between runs, only
+    # its lights change, and the 2026-11-10 LiDAR map has it to ~0.12 m. With a map:
+    #   1. ALIGN. The map's offset from the boat's GPS frame (3 m between two runs
+    #      on 2026-11-10) is found by a coarse-to-fine grid search, every
+    #      prior_align_period_s, over the last sightings within prior_snap_range_m:
+    #      the shift (up to prior_align_max_m) that puts the most of them on a
+    #      mapped buoy. Until it is found (prior_align_min_obs sightings, half of
+    #      them explained) sightings near the field are DROPPED, never tracked, so
+    #      no stray track is born there before the map is placed.
+    #   2. SNAP. A sighting within prior_snap_m of an aligned mapped buoy, seen from
+    #      within prior_snap_range_m, whose next-nearest mapped buoy is at least
+    #      prior_margin_m farther, is placed EXACTLY on it: one track per buoy, at
+    #      the map's position, every run.
+    #   3. DROP. Any other sighting within prior_zone_m of a mapped buoy is ambiguous
+    #      (which buoy's light is it?) and is dropped.
+    #   4. PASS. A sighting farther than prior_zone_m from every mapped buoy is not
+    #      the field (a boat, a dock, a buoy moved): tracked as before.
+    prior_snap_m: float = 1.0
+    prior_zone_m: float = 2.0
+    prior_margin_m: float = 0.5
+    prior_snap_range_m: float = 15.0
+    prior_align_max_m: float = 4.0
+    prior_align_period_s: float = 2.0
+    prior_align_min_obs: int = 15
+
     # -- colour voting (stage 3). See the module docstring, "ONE BUOY, MANY
     # COLOURS". Tuples, because the node hands in whatever list rclpy gives it
     # and membership is the only thing ever asked of them.
@@ -417,6 +474,7 @@ class Track:
     vel_e: float = 0.0
     vel_n: float = 0.0
     var: float = 0.0                 # EMA of squared association residual [m^2]
+    info: float = 0.0                # range-aware tracking: accumulated 1/sigma^2
     # Snapshot of the boat-relative geometry at the last update. Recomputed on
     # every publish against the current pose, so these are only a fallback for
     # a track that was not updated this cycle.
@@ -560,6 +618,109 @@ class TargetTracker:
         self.tracks = []
         self._next_id = 1
         self.stats = {}
+        self.set_prior(())
+
+    # ---- the mapped field prior (TrackerParams, "MAPPED FIELD PRIOR") ----
+
+    def set_prior(self, points):
+        """The mapped buoys as world (x, y); empty = no prior. Resets the alignment, and a
+        map REPLACES what was tracked in the field: every track within prior_zone_m +
+        prior_align_max_m of a mapped buoy is dropped (it was placed without the map, and
+        could stay as a duplicate of the buoy the map now places)."""
+        self.prior = tuple((float(x), float(y)) for x, y in points)
+        if self.prior:
+            reach = self.p.prior_zone_m + self.p.prior_align_max_m
+            self.tracks = [t for t in self.tracks
+                           if min(math.hypot(t.x - px, t.y - py) for px, py in self.prior)
+                           > reach]
+        self.prior_offset = (0.0, 0.0)
+        self.prior_aligned = False
+        self.prior_explained = 0.0
+        self._align_buf = []
+        self._last_align = -math.inf
+
+    def _prior_dists(self, x, y, off):
+        """Sorted distances from (x, y) to every mapped buoy shifted by off, with indexes."""
+        return sorted((math.hypot(x - px - off[0], y - py - off[1]), i)
+                      for i, (px, py) in enumerate(self.prior))
+
+    def _align_score(self, pts, off):
+        """How well a shift explains the sightings: each scores 1 on a mapped buoy, 0 at
+        prior_snap_m or farther."""
+        s = 0.0
+        r = self.p.prior_snap_m
+        for x, y in pts:
+            d = min(math.hypot(x - px - off[0], y - py - off[1]) for px, py in self.prior)
+            if d < r:
+                s += 1.0 - d / r
+        return s
+
+    def _align(self):
+        """Grid search for the map's offset: 0.5 m steps over +-prior_align_max_m, then
+        0.1 m steps round the best. Ties go to the smaller shift."""
+        pts = self._align_buf[-60:]
+        lim = self.p.prior_align_max_m
+        best = None
+        n = int(lim / 0.5)
+        for i in range(-n, n + 1):
+            for j in range(-n, n + 1):
+                off = (0.5 * i, 0.5 * j)
+                key = (self._align_score(pts, off), -math.hypot(*off))
+                if best is None or key > best[0]:
+                    best = (key, off)
+        cx, cy = best[1]
+        for i in range(-5, 6):
+            for j in range(-5, 6):
+                off = (cx + 0.1 * i, cy + 0.1 * j)
+                if math.hypot(*off) > lim:
+                    continue
+                key = (self._align_score(pts, off), -math.hypot(*off))
+                if key > best[0]:
+                    best = (key, off)
+        explained = best[0][0] / len(pts)
+        self.prior_explained = explained
+        if explained >= 0.5:
+            self.prior_offset = best[1]
+            self.prior_aligned = True
+
+    def _apply_prior(self, projected, now, stats):
+        """Stage 2b: align, then snap, drop or pass every projected sighting."""
+        p = self.p
+        for o, wx, wy, _ in projected:
+            if o.range_h <= p.prior_snap_range_m:
+                self._align_buf.append((wx, wy))
+        del self._align_buf[:-200]
+        if (now - self._last_align >= p.prior_align_period_s
+                and len(self._align_buf) >= p.prior_align_min_obs):
+            self._last_align = now
+            self._align()
+        kept, snapped, dropped = [], 0, 0
+        for o, wx, wy, wz in projected:
+            if not self.prior_aligned:
+                # not placed yet: nothing near the field is tracked
+                d0 = self._prior_dists(wx, wy, (0.0, 0.0))[0][0]
+                if d0 <= p.prior_zone_m + p.prior_align_max_m:
+                    dropped += 1
+                    continue
+                kept.append((o, wx, wy, wz))
+                continue
+            ds = self._prior_dists(wx, wy, self.prior_offset)
+            d1, i = ds[0]
+            d2 = ds[1][0] if len(ds) > 1 else math.inf
+            if (d1 <= p.prior_snap_m and d2 - d1 >= p.prior_margin_m
+                    and o.range_h <= p.prior_snap_range_m):
+                px, py = self.prior[i]
+                kept.append((o, px + self.prior_offset[0], py + self.prior_offset[1], wz))
+                snapped += 1
+            elif d1 <= p.prior_zone_m:
+                dropped += 1
+            else:
+                kept.append((o, wx, wy, wz))
+        stats["prior_snapped"] = snapped
+        stats["prior_dropped"] = dropped
+        stats["prior_offset"] = (round(self.prior_offset[0], 2), round(self.prior_offset[1], 2))
+        stats["prior_aligned"] = self.prior_aligned
+        return kept
 
     # ---- the cycle ----
 
@@ -588,6 +749,8 @@ class TargetTracker:
                 o.x, o.y, o.z, boat.roll, boat.pitch, boat.yaw,
                 boat.east, boat.north)
             projected.append((o, wx, wy, wz))
+        if self.prior:
+            projected = self._apply_prior(projected, now, stats)
 
         stats["associated"] = 0
         stats["new_tracks"] = 0
@@ -651,32 +814,61 @@ class TargetTracker:
 
     # ---- association ----
 
+    def _ranged(self) -> bool:
+        return self.p.range_sigma_k > 0.0
+
+    def _sigma(self, o: Observation) -> float:
+        """Range-aware tracking: the sighting's position sigma [m] (TrackerParams)."""
+        floor = max(self.p.range_sigma_floor_m, 1e-3)
+        if o.sources & SOURCE_LIDAR:
+            return floor
+        return max(floor, self.p.range_sigma_k * o.range_h * o.range_h)
+
+    def _gate(self, o: Observation, t: Track) -> float:
+        """The association radius for this sighting and this track. Range-aware, it is
+        range_gate_sigmas times their COMBINED sigma (the track's is 1/sqrt(info)), so a
+        buoy first placed from far away still takes the close sighting that corrects it."""
+        if not self._ranged():
+            return self.p.assoc_radius_m
+        var_t = 1.0 / t.info if t.info > 0.0 else math.inf
+        g = self.p.range_gate_sigmas * math.sqrt(self._sigma(o) ** 2 + var_t)
+        return min(self.p.assoc_radius_m, max(self.p.assoc_min_m, g))
+
     def _associate(self, projected, now, stats):
         """Greedy nearest-neighbour, one observation to at most one track.
 
         Candidate pairs are scored by world-frame distance, gated by assoc_radius_m
-        and label compatibility, then consumed best-first (O(obs x tracks), both in
-        the tens): first-come would hand an observation to whichever track it reached
-        when two targets sit inside one radius, and strand the second.
+        (range-aware: by _gate) and label compatibility, then consumed best-first
+        (O(obs x tracks), both in the tens): first-come would hand an observation to
+        whichever track it reached when two targets sit inside one radius, and
+        strand the second.
         """
         pairs = []
+        nearest = []                      # per observation: distances to every compatible track
         for oi, (o, wx, wy, wz) in enumerate(projected):
+            ds = []
             for ti, t in enumerate(self.tracks):
                 if not _label_ok(t, o, self.p):
                     continue
                 d = math.hypot(wx - t.x, wy - t.y)
-                if d <= self.p.assoc_radius_m:
+                ds.append((d, ti))
+                if d <= self._gate(o, t):
                     pairs.append((d, oi, ti))
+            nearest.append(ds)
         pairs.sort()
 
         used_obs, used_tracks = set(), set()
+        stats.setdefault("votes_withheld", 0)
         for d, oi, ti in pairs:
             if oi in used_obs or ti in used_tracks:
                 continue
             used_obs.add(oi)
             used_tracks.add(ti)
             o, wx, wy, wz = projected[oi]
-            self._update_track(self.tracks[ti], o, wx, wy, wz, d, now)
+            vote = self._unambiguous(d, ti, nearest[oi])
+            if not vote and o.label:
+                stats["votes_withheld"] += 1
+            self._update_track(self.tracks[ti], o, wx, wy, wz, d, now, vote=vote)
             stats["associated"] += 1
 
         for oi, (o, wx, wy, wz) in enumerate(projected):
@@ -685,18 +877,36 @@ class TargetTracker:
             self._new_track(o, wx, wy, wz, now)
             stats["new_tracks"] += 1
 
+    def _unambiguous(self, d, ti, ds) -> bool:
+        """May this sighting vote on its track's colour? Not when another compatible
+        track is within vote_ambiguity_m of the one it joined (TrackerParams)."""
+        margin = self.p.vote_ambiguity_m
+        if margin <= 0.0:
+            return True
+        others = [dd for dd, tj in ds if tj != ti]
+        return not others or min(others) - d >= margin
+
     def _update_track(self, t: Track, o: Observation,
-                      wx: float, wy: float, wz: float, resid: float, now: float):
+                      wx: float, wy: float, wz: float, resid: float, now: float,
+                      vote: bool = True):
         """Blend one sighting into an existing track.
 
         The position gain is max(pos_alpha, 1/hits): for the first few sightings
         that IS the running mean, so a new track converges at once instead of
         crawling at 30% per frame; after ~1/pos_alpha sightings it is a fixed-gain
-        EMA that keeps responding to a moving target.
+        EMA that keeps responding to a moving target. Range-aware (range_sigma_k > 0),
+        it is the sighting's inverse-variance share of the track's weight instead
+        (TrackerParams). `vote` False = the position counts, the label does not.
         """
         dt = max(now - t.last_seen, 1e-3)
         t.hits += 1
-        a = max(self.p.pos_alpha, 1.0 / t.hits)
+        if self._ranged():
+            w = 1.0 / self._sigma(o) ** 2
+            a = w / (t.info + w)
+            cap = 4.0 / max(self.p.range_sigma_floor_m, 1e-3) ** 2
+            t.info = min(t.info + w, cap)
+        else:
+            a = max(self.p.pos_alpha, 1.0 / t.hits)
 
         nx = t.x + a * (wx - t.x)
         ny = t.y + a * (wy - t.y)
@@ -714,7 +924,7 @@ class TargetTracker:
 
         t.last_seen = now
         t.sources |= o.sources
-        if o.label:
+        if o.label and vote:
             t.label_votes[o.label] = t.label_votes.get(o.label, 0) + 1
             t.confidence = o.confidence
         if o.sources & SOURCE_LIDAR and any(o.extent):
@@ -732,7 +942,8 @@ class TargetTracker:
         t = Track(id=self._next_id, x=wx, y=wy, z=wz,
                   first_seen=now, last_seen=now, hits=1,
                   sources=o.sources, confidence=o.confidence,
-                  extent=tuple(o.extent))
+                  extent=tuple(o.extent),
+                  info=1.0 / self._sigma(o) ** 2 if self._ranged() else 0.0)
         if o.label:
             t.label_votes[o.label] = 1
         self._next_id += 1           # never reused, even after the track dies
