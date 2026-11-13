@@ -58,13 +58,13 @@
       </ForceSuccess>
 
       <!-- 1. drive to the field centre, planned round every buoy known so far (avoid is
-           NavigateTo's default; the camera adds buoys as they come into view). No centre set:
-           skipped. A leg blocked 30 s is given up and the survey runs from where the boat is -->
+           NavigateTo's default; the camera adds buoys as they come into view). Stops 3 m short: the clicked middle of a field is
+           often a buoy (task1_sg's centre is b06). No centre set: skipped. A leg blocked 30 s is given up and the survey runs from where the boat is -->
       <ForceSuccess name="drive_to_field_centre">
         <Sequence>
           <Inverter><PassageStarted/></Inverter>
           <FixGiven lat="{t1_field_lat}" lon="{t1_field_lon}"/>
-          <NavigateTo target="fix" lat="{t1_field_lat}" lon="{t1_field_lon}" tolerance="2.0"
+          <NavigateTo target="fix" lat="{t1_field_lat}" lon="{t1_field_lon}" tolerance="3.0"
                       blocked_timeout_s="30.0"/>
         </Sequence>
       </ForceSuccess>
