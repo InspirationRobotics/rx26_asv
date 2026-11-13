@@ -1,0 +1,44 @@
+[operator] armed
+[operator] mode GUIDED (confirmed by the autopilot)
+[operator] goal: task1_core_scan, approach 1.2805297 103.8556758
+[tree]    0.0 s  RunStart gate            task TASK_NONE  WARNING waiting for RoboCommand's RunStart via the OCS
+[operator] sim release of the RunStart gate (no RoboCommand)
+[tree]    0.0 s  SetCameraModel           task TASK_SAFE_PASSAGE
+[tree]    0.5 s  DrivePlanPhase           task TASK_SAFE_PASSAGE
+[tree]   37.8 s  DrivePlanPhase           task TASK_SAFE_PASSAGE  WARNING nav BLOCKED no plan for this leg
+[tree]   39.8 s  DrivePlanPhase           task TASK_SAFE_PASSAGE  WARNING nav BLOCKED clear; holding until it has stayed clear
+[tree]   42.8 s  DrivePlanPhase           task TASK_SAFE_PASSAGE
+[judge] passed b08_red (red) with it to starboard at 9.1 m: correct
+[judge] passed b03_red (red) with it to starboard at 4.9 m: correct
+[judge] passed b10_red (red) with it to starboard at 11.0 m: correct
+[judge] passed b06_red (red) with it to starboard at 7.2 m: correct
+[judge] passed b02_grn (green) with it to port at 2.7 m: correct
+[judge] passed b04_grn (green) with it to port at 3.0 m: correct
+[judge] passed b05_grn (green) with it to port at 4.8 m: correct
+[judge] passed b06_red (red) with it to port at 4.0 m: WRONG SIDE
+[judge] passed b09_grn (green) with it to port at 7.1 m: correct
+[judge] passed b03_red (red) with it to port at 1.4 m: WRONG SIDE
+[judge] passed b10_red (red) with it to port at 7.6 m: WRONG SIDE
+[judge] passed b08_red (red) with it to port at 5.6 m: WRONG SIDE
+[judge] circled b01_entry cw: correct
+[tree]   90.4 s  DrivePlanPhase           task TASK_SAFE_PASSAGE  WARNING nav BLOCKED a hazard is on the path ahead
+[tree]   94.2 s  DrivePlanPhase           task TASK_SAFE_PASSAGE  WARNING nav BLOCKED no plan fits the changed field
+[tree]  103.5 s  PlanGlobalPassage        task TASK_SAFE_PASSAGE  WARNING nav BLOCKED no plan fits the changed field
+[tree]  305.3 s  -                        task TASK_NONE  WARNING nav BLOCKED no plan fits the changed field
+[result] outcome FAILURE  tree task1_core_scan returned FAILURE at PlanGlobalPassage in guard_band > task1_guard > Task1CoreScan > core_scan > passage: its own warning, if it gave one, is in the bt_runner_node log  (310 s)
+[judge] VERDICT: FAIL — buoys 4/8 on their side (gates 0/4 crossed), contacts none
+[judge]   buoy b02_grn: correct (green kept to port, passed at 2.7 m)
+[judge]   buoy b03_red: WRONG SIDE (red kept to port, passed at 1.4 m)
+[judge]   buoy b04_grn: correct (green kept to port, passed at 3.0 m)
+[judge]   buoy b05_grn: correct (green kept to port, passed at 4.8 m)
+[judge]   buoy b06_red: WRONG SIDE (red kept to port, passed at 4.0 m)
+[judge]   buoy b08_red: WRONG SIDE (red kept to port, passed at 5.6 m)
+[judge]   buoy b09_grn: correct (green kept to port, passed at 7.1 m)
+[judge]   buoy b10_red: WRONG SIDE (red kept to port, passed at 7.6 m)
+[judge]   gate b03_red/b04_grn: not crossed
+[judge]   gate b06_red/b05_grn: not crossed
+[judge]   gate b08_red/b09_grn: not crossed
+[judge]   gate b10_red/b09_grn: not crossed
+[judge]   circle b01_entry: correct
+[judge]   circle b11_exit: not circled (best ccw sweep 0 deg)
+[judge]   min clearance 1.00 m (b03_red), non-gate 1.00 m, hull 0.43 m

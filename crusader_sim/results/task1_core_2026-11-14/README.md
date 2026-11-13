@@ -31,6 +31,7 @@ RX26_WIN_SRC=/mnt/c/<path>/rx26_asv bash crusader_sim/scripts/t1_attempt.sh LABE
 |---|---|---|---|---|---|---|
 | a01 | task1_core_scan (main 2ae0ce4, as on the boat 13 Nov) | task1_sg | field centre only | **175/325** | FAIL 6/8 sides | report perfect (ENTRY, EXIT, 4/4 G, 4/4 R within 0.33 m); both circles correct; b08 red kept to port, b09 green to starboard at the north end; 13 re-plans |
 | a02 | same (repeat) | task1_sg | field centre only | **200/325** | FAIL 6/8 sides | report perfect, both circles; all greens correct; b08 and b10 red to port. See below |
+| a03 | same | task1_sg | + LiDAR fusion (`use_lidar` true, r_max 25) | **165/325** | FAIL 4/8, no EXIT circle | worse: 4 false reports (one GREEN 0.88 m from b06 red), tree FAILED at PlanGlobalPassage. Fusion as it stands mixes neighbouring buoys; not pursued |
 
 ### What goes wrong at the north end (a02, from its track and the runner log)
 
