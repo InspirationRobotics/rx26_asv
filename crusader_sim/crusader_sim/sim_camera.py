@@ -79,6 +79,7 @@ surface's. Needs the venv from scripts/setup_yolo_venv.sh and the node started
 with ITS python (gz_rig_up.sh does); without it the node says so and runs as
 detector:=truth.
 """
+import array
 import math
 from collections import deque, namedtuple
 
@@ -319,7 +320,10 @@ class SimCamera(Node):
             out = Image(header=msg.header, height=msg.height, width=msg.width,
                         encoding="bgr8", is_bigendian=0, step=msg.width * 3)
             out.header.frame_id = "oak_rgb_camera_optical_frame"
-            out.data = bgr.tobytes()
+            # array('B'), never bytes: rosidl's setter checks a bytes value ONE ELEMENT AT A
+            # TIME in Python (6.9 M checks per 1920x1200 frame, ~90% of this node's CPU by
+            # py-spy, 2026-11-14); an array.array of typecode 'B' is stored as is.
+            out.data = array.array("B", bgr.tobytes())
             self.rgb_pub.publish(out)
         if feed:
             self.yolo.submit(bgr, t)
@@ -333,7 +337,7 @@ class SimCamera(Node):
             out = Image(header=msg.header, height=msg.height, width=msg.width,
                         encoding="16UC1", is_bigendian=0, step=msg.width * 2)
             out.header.frame_id = "oak_rgb_camera_optical_frame"
-            out.data = mm.tobytes()
+            out.data = array.array("B", mm.tobytes())     # not bytes: see _on_rgb
             self.depth_pub.publish(out)
         if self.yolo is not None:
             self._depths.append((stamp_s(msg.header), d))     # the YOLO result will ask for it
