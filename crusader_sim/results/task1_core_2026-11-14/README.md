@@ -61,6 +61,23 @@ side"), and right after that failed re-plan the runner logged **"transit complet
 with the boat still short of the gap. The exit orbit's lead-in then went round the WEST of b09
 and the turn-back near b08/b10 put both reds to port.
 
+## Status at 01:25 (session stopped at its usage limit)
+
+**Best so far: a07, 325/325**, the boat's own `task1_core_scan` tree, unchanged, plus the tracker's
+mapped field prior. Run it on the boat, after review, by setting on the GCS Params tab
+(target_tracker, live): `prior_field` = the contents of `prior_field_task1_sg.txt`, and on the Run
+panel the field centre 1.2806335, 103.8556542 as before. Everything else is main as run on 13 Nov.
+
+**Not yet done** (each is one `t1_attempt.sh` line; the map string is in `prior_field_task1_sg.txt`):
+- a08 (shifted 1.8 m E / 1.2 m S + 0.12 m noise map, to prove the alignment) was running when the
+  session stopped; its result is in `~/t1_runs/a08_scan_prior_shifted_sg.*` in WSL, not committed.
+- The prior on `task1_sg_rev` and `task1_sg_black` (same buoy positions, other lights), and repeats.
+- Dominick had pushed no Task 1 branch by 01:18, so no comparison yet.
+- No screen recording yet (`T1_GUI=1` keeps the Gazebo window for one).
+
+**Risk to weigh before the water:** the prior drops any sighting within 2 m of a mapped buoy that
+it cannot place confidently. A buoy re-moored 1-2 m from the map could go unseen. Off = `prior_field ""`.
+
 ## Sim fixes made on the way (sim only, nothing that runs on the boat)
 
 - `sim_camera.py`: frames are handed to ROS as `array('B')`, not `bytes`. rosidl's setter checked
