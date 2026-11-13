@@ -148,6 +148,14 @@ int main()
     chk("held 1 s", g.update(1.0, true));
     chk("a break resets", !g.update(1.1, false));
     chk("and it starts over", !g.update(1.2, true) && !g.update(2.1, true) && g.update(2.2, true));
+    SolutionGate d; d.hold_s = 1.0; d.miss_s = 0.5;
+    d.update(0.0, true);
+    chk("a dropped read is not held", !d.update(0.4, false));
+    chk("a 0.4 s miss keeps the clock", d.update(1.0, true));
+    d.reset(); d.update(0.0, true); d.update(0.7, false);
+    chk("a 0.7 s miss starts it again", !d.update(1.0, true) && d.held(1.0) < 1e-9);
+    SolutionGate at_once; at_once.hold_s = 0.0;
+    chk("hold_s 0: true the first time", at_once.update(5.0, true));
     chk("in band", inBand(3.25, 3.22, 0.05) && !inBand(3.30, 3.22, 0.05) && !inBand(kNaN, 3.22, 1));
   }
 
@@ -279,15 +287,11 @@ int main()
     chk("the 1-sigma grows while unseen", k.sigma(20.0) > k.sigma(5.0));
 
     CentreTarget c;
-    c.sight({0.5, 4.0}, true, {}, false, 4.0, 1.0, 1.0);
-    chk("before the indicator: the face stands in", c.fix.have && c.fix.p.x == 0.5 &&
+    c.sight({0.5, 4.0}, 4.0, 1.0, 1.0);
+    chk("the face is the spot", c.fix.have && c.fix.p.x == 0.5 &&
       std::string(c.source()) == "face");
-    c.sight({0.5, 4.0}, true, {0.8, 4.0}, true, 4.0, 1.1, 1.1);
-    chk("the first indicator starts it over on the indicator", c.fix.p.x == 0.8 &&
-      std::string(c.source()) == "indicator");
-    c.sight({0.5, 4.0}, true, {}, false, 4.0, 1.2, 1.2);
-    chk("from then on a face alone does not move it", c.fix.p.x == 0.8);
-    chk_near("... and does not refresh its age either", c.age(2.2), 1.1, 1e-12);
+    c.sight({0.5, 4.0}, 4.0, 1.1, 1.1);
+    chk_near("each face sighting refreshes its age", c.age(2.2), 1.1, 1e-12);
 
     TickRate r;
     chk("first value: no rate", !std::isfinite(r.update(0.0, 0.1)));

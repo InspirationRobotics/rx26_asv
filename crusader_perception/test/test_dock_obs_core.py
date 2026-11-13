@@ -142,6 +142,15 @@ class TestMessageShape(unittest.TestCase):
         self.assertEqual(obs["target_window_index"], -1)          # no timing layer given
         self.assertAlmostEqual(obs["observed_fps"], 14.2)
 
+    def test_bearing_is_plus_left_like_the_windows(self):
+        # dock_model's bay dict carries geometry_core's image bearing, +RIGHT (a face right of
+        # the picture's centre); the message's is +LEFT, the frame of the windows' y
+        depth, n, d, wins, boxes, fbox = face(3.0)
+        bay = bay_dict(boxes, fbox)
+        bay["bearing_deg"] = 12.0
+        self.assertAlmostEqual(do.observation([bay], depth, (W, H), INTR)["bays"][0]["bearing_deg"],
+                               -12.0)
+
     def test_windows_without_an_index_are_dropped(self):
         depth, n, d, wins, boxes, fbox = face(3.0)
         bay = bay_dict(boxes, fbox)

@@ -175,17 +175,28 @@ private:
 
 /// The autonomy latch: a CONDITION, first in the guard band, because a tree that ticks
 /// while the pilot has the boat fights the pilot. FAILURE halts everything within a tick.
+/// manual="true" is the guard of a mission that drives the sticks in MANUAL itself (the Task 3
+/// trees saved from the Mission tab, which writes it): MANUAL passes too unless the
+/// autonomy-drop latch is set (SC down, RC lost), so the pilot's switches still end it.
 class IsAutonomous : public CrusaderCondition
 {
 public:
   IsAutonomous(const std::string & n, const BT::NodeConfig & c)
   : CrusaderCondition(n, c) {}
-  static BT::PortsList providedPorts() {return {};}
+  static BT::PortsList providedPorts()
+  {
+    return {BT::InputPort<bool>("manual", false,
+      "true: MANUAL passes too unless the autonomy-drop latch is set (a mission that drives in "
+      "MANUAL itself; the Mission tab writes it)")};
+  }
 
   BT::NodeStatus tick() override
   {
+    const bool manual = getInput<bool>("manual").value_or(false);
     std::lock_guard<std::mutex> lk(ctx_->mu);
-    return ctx_->autonomous ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
+    const bool ok = ctx_->autonomous ||
+      (manual && ctx_->mode == "MANUAL" && !ctx_->drop_tripped);
+    return ok ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
   }
 };
 

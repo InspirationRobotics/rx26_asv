@@ -22,7 +22,11 @@ task block. `build` turns the blocks the Mission tab holds into the one shape th
     <root BTCPP_format="4" main_tree_to_execute="Main"><BehaviorTree ID="Main">
       <ReactiveSequence><IsAutonomous/> BODY </ReactiveSequence></BehaviorTree></root>
 
-The guard is always emitted, never edited. BODY is exactly one block, a Sequence: a
+The guard is always emitted, never edited. A mission that drives the boat in MANUAL itself (a
+ModeIs or RequestMode for MANUAL in it: the Task 3 trees) gets <IsAutonomous manual="true"/>,
+which lets MANUAL through unless the autonomy-drop latch is set; a plain guard would end it the
+moment it switched to MANUAL. Which one is derived from the body, never chosen, and the check
+refuses a guard that disagrees with its body. BODY is exactly one block, a Sequence: a
 ReactiveSequence re-ticks its finished children, so blocks side by side under it would run
 again. There is no <include>: a task block is <SubTree ID="Task1Advanced" _autoremap="true" .../>
 and the boat supplies the tree. `read_blocks` goes the other way, and also opens the boat's
@@ -46,6 +50,7 @@ MAX_BLOCKS = 2000
 MAX_DEPTH = 40
 NAME = re.compile(r"[a-z][a-z0-9_]{0,39}")
 MAIN, GUARD, AUTONOMOUS, BODY = "Main", "ReactiveSequence", "IsAutonomous", "mission"
+MANUAL = "manual"            # <IsAutonomous manual="true"/>: the guard of a mission driving in MANUAL
 EXPECTED = ('<root BTCPP_format="4" main_tree_to_execute="Main"><BehaviorTree ID="Main">'
             "<ReactiveSequence><IsAutonomous/> BODY </ReactiveSequence></BehaviorTree></root>")
 
@@ -155,6 +160,13 @@ def _node_id(el):
     return (el.get("ID") or el.tag) if el.tag in _GENERIC_TAGS else el.tag
 
 
+def _drives_manual(elements):
+    """True when the body drives the boat in MANUAL itself: a ModeIs or RequestMode for MANUAL."""
+    return any(_node_id(el) in ("ModeIs", "RequestMode")
+               and (el.get("mode") or "").strip().upper() == "MANUAL"
+               for top in elements for el in top.iter())
+
+
 def check_name(name, builtins=()):
     """Why `name` cannot be a user mission's name: a list of reasons, empty when it can."""
     if not isinstance(name, str) or not NAME.fullmatch(name):
@@ -190,7 +202,7 @@ def build_xml(blocks, catalogue, declare=None):
     root = ET.Element("root", BTCPP_format="4", main_tree_to_execute=MAIN,
                       **_declare_attrs(declare))
     guard = ET.SubElement(ET.SubElement(root, "BehaviorTree", ID=MAIN), GUARD)
-    ET.SubElement(guard, AUTONOMOUS)
+    ET.SubElement(guard, AUTONOMOUS, {MANUAL: "true"} if _drives_manual([body]) else {})
     guard.append(body)
     ET.indent(root, space="  ")
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="unicode") + "\n"
@@ -385,13 +397,29 @@ class _Check:
         elif len(trees[0]) != 1 or trees[0][0].tag != GUARD or set(trees[0][0].attrib) - {"name"}:
             why = f"Main must hold just one <{GUARD}>"
         elif (not len(trees[0][0]) or trees[0][0][0].tag != AUTONOMOUS or len(trees[0][0][0])
-              or set(trees[0][0][0].attrib) - {"name"}):
+              or set(trees[0][0][0].attrib) - {"name", MANUAL}):
             why = f"the <{GUARD}> must start with <{AUTONOMOUS}/>"
         else:
-            return list(trees[0][0])[1:]
+            body = list(trees[0][0])[1:]
+            self.guard(trees[0][0][0], body)
+            return body
         self.add(None, f"the top level is not the autonomy guard the boat runs missions under: "
                        f"{why}. It is always {EXPECTED} (plus declare_task1..4 when it declares tiers)")
         return None
+
+    def guard(self, el, body):
+        """manual="true" on the guard exactly when the body drives in MANUAL itself."""
+        word = el.get(MANUAL, "false")
+        if word not in ("true", "false"):
+            return self.add(None, f'<{AUTONOMOUS} {MANUAL}="{word}"/>: it must be true or false')
+        if _drives_manual(body) and word != "true":
+            self.add(None, f"the mission drives the boat in MANUAL (a ModeIs or RequestMode for MANUAL) "
+                           f"and a plain <{AUTONOMOUS}/> would end it there: its guard must be "
+                           f'<{AUTONOMOUS} {MANUAL}="true"/>, which the Mission tab writes when it saves')
+        elif word == "true" and not _drives_manual(body):
+            self.add(None, f'<{AUTONOMOUS} {MANUAL}="true"/> is the guard of a mission that drives in '
+                           "MANUAL itself; this one has no ModeIs or RequestMode for MANUAL, so it "
+                           "would go on running while the pilot drives")
 
     def body(self, body):
         if not body:

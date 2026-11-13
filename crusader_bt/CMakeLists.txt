@@ -86,6 +86,12 @@ if(BUILD_TESTING)
   add_executable(test_dock_math test/test_dock_math.cpp)
   target_include_directories(test_dock_math PRIVATE include)
   add_test(NAME dock_math COMMAND test_dock_math)
+  # The 2026-11-12 water run's camera at 1 Hz through the DockBook (no ROS, no tree).
+  add_executable(test_dock_replay test/test_dock_replay.cpp)
+  target_include_directories(test_dock_replay PRIVATE include)
+  target_compile_definitions(test_dock_replay PRIVATE
+    CRSD_BT_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/test/data")
+  add_test(NAME dock_replay COMMAND test_dock_replay)
   # fire_math: the fixed-nozzle shot (range/heading hold, steadiness, bursts).
   add_executable(test_fire_math test/test_fire_math.cpp)
   target_include_directories(test_fire_math PRIVATE include)
@@ -128,6 +134,15 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_mission_nodes ${DEPS})
   target_link_libraries(test_mission_nodes crusader_bt_leaves)
   add_test(NAME mission_nodes COMMAND test_mission_nodes)
+  # dock_sim: the Task 3 dock trees closed loop (the real XML, a holonomic hull, a camera that
+  # misses, cuts and mis-ranges faces): each scenario commits the right bay and docks in it
+  add_executable(test_dock_sim test/test_dock_sim.cpp)
+  target_include_directories(test_dock_sim PRIVATE include)
+  target_compile_definitions(test_dock_sim PRIVATE
+    CRSD_BT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/behavior_trees")
+  ament_target_dependencies(test_dock_sim ${DEPS})
+  target_link_libraries(test_dock_sim crusader_bt_leaves)
+  add_test(NAME dock_sim COMMAND test_dock_sim)
   # mission_loader: an uploaded mission resolves the task library by ID, and a name that is no
   # file is refused. gtest is optional here: an image without it still builds the rest.
   find_package(ament_cmake_gtest QUIET)

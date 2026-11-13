@@ -655,6 +655,37 @@ class Bridge(unittest.TestCase):
         self.assertEqual(h["data"]["items"], [])
         self.assertEqual(h["data"]["reason"], "boat heading unknown")
 
+    def test_recording_keeps_the_tree_dock_logs_and_ocs(self):
+        """2026-11-12: the dock runs left only a throttled log of what the tree did. A sample
+        now carries bt_status whole, each dock frame since the last sample, and the new log
+        lines and OCS traffic, each written once."""
+        from crusader_msgs.msg import DockBay, DockObservation
+        n = self.node
+        n._record_events(time.monotonic())                    # drain what earlier tests left
+        n._bt.set({"state": "RUNNING", "task3": {"phase": "LINE UP: holding", "bay": 3}},
+                  time.monotonic())
+        n.logs.add("bt_runner_node", 20, "first bay found: track 0, bay 3", stamp=5.0)
+        n.logs.add("bt_runner_node", 10, "a DEBUG line the recording skips", stamp=5.1)
+        n._ocs_seq += 1
+        n._ocs.append({"dir": "tx", "kind": "heartbeat", "state": "STATE_AUTO", "seq": n._ocs_seq})
+        bay = DockBay(bearing_deg=-12.5, truncated=False, has_plane=True, plane_offset=-1.7,
+                      range_from_size_m=1.1, detector_confidence=0.9, bbox=[1, 2, 3, 4],
+                      indicator_present=True, indicator_colour=DockBay.COLOUR_GREEN,
+                      indicator_confidence=0.8, lit_window_index=-1)
+        msg = DockObservation(bays=[bay])
+        msg.header.stamp.sec = 7
+        n._dock_frames.append(gcs_bridge.dock_frame(msg))
+        ev = n._record_events(time.monotonic())
+        self.assertEqual(ev["bt"]["task3"]["bay"], 3)
+        ours = lambda ev: [r["msg"] for r in ev["logs"] if r["node"] == "bt_runner_node"]
+        self.assertEqual(ours(ev), ["first bay found: track 0, bay 3"])
+        self.assertEqual([o["state"] for o in ev["ocs"]], ["STATE_AUTO"])
+        self.assertEqual(ev["dock"], [{"t": 7.0, "bays": [{
+            "brg": -12.5, "cut": False, "plane_d": -1.7, "size_m": 1.1, "conf": 0.9,
+            "box": [1, 2, 3, 4], "ind": "G", "ind_conf": 0.8, "lit": -1}]}])
+        again = n._record_events(time.monotonic())
+        self.assertEqual((ours(again), again["ocs"], again["dock"]), ([], [], []))
+
     def test_obstacles_are_subscribed_only_while_asked(self):
         self.release_leases()
         self.until(lambda: self.probe.count_subscribers(gcs_bridge.CLUSTERS_TOPIC) == 0,

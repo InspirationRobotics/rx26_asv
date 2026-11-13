@@ -207,6 +207,10 @@ public:
     ocs_sub_ = create_subscription<std_msgs::msg::String>(
       "/crsd/ocs_command", 10,
       [this](std_msgs::msg::String::SharedPtr m) {onOcsCommand(m);});
+    // Latched by ocs_client_node: a runner restarted mid-run still has the course.
+    course_sub_ = create_subscription<std_msgs::msg::String>(
+      "/crsd/ocs_course", rclcpp::QoS(1).reliable().transient_local(),
+      [this](std_msgs::msg::String::SharedPtr m) {onCourse(m);});
     wall_sub_ = create_subscription<crusader_msgs::msg::WallRange>(
       "/crsd/wall_range", 10,
       [this](crusader_msgs::msg::WallRange::SharedPtr m) {onWallRange(m);});
@@ -659,6 +663,43 @@ private:
       t1mem::json(mem_entry_) + ",\"mem_exit\":" + t1mem::json(mem_exit_) + "}";
   }
 
+  /// Task 3 for /crsd/bt_status, which the run recording keeps whole: the phase, the bay
+  /// committed to, every track across/along the dock (m, + across = right facing the bays)
+  /// with its colour reads (r, g, off; other = every non-RED/GREEN read, off included), its
+  /// GREEN confidence and verdict under the rule CommitFirstGreen used last ("rule"), seconds
+  /// since it was seen, and what the hold steered on. The 11-12 dock runs had only the
+  /// throttled log to say where the tree was.
+  std::string task3Json()
+  {
+    std::lock_guard<std::mutex> lk(ctx_->mu);
+    const Context & c = *ctx_;
+    const nav::Vec2 f = nav::headingVec(c.dock_heading >= 0.0 ? c.dock_heading : c.heading_deg);
+    const dock::ColourRule & rule = c.colour_rule;
+    std::string tracks;
+    for (const auto & t : c.dock.tracks) {
+      tracks += std::string(tracks.empty() ? "" : ",") + "{\"id\":" + std::to_string(t.id) +
+        ",\"n\":" + std::to_string(t.n) + ",\"across\":" + jsonNum(nav::dot(t.p, nav::starboardOf(f)), 2) +
+        ",\"along\":" + jsonNum(nav::dot(t.p, f), 2) + ",\"r\":" + std::to_string(t.red) +
+        ",\"g\":" + std::to_string(t.green) + ",\"off\":" + std::to_string(t.off) +
+        ",\"other\":" + std::to_string(t.other) +
+        ",\"conf\":" + jsonNum(dock::greenConfidence(t, rule.off_is_green), 2) +
+        ",\"v\":\"" + dock::verdictChar(dock::confidenceVerdict(t, rule)) + "\"" +
+        ",\"age_s\":" + jsonNum(c.now_s - t.last_seen, 1) + "}";
+    }
+    const std::string rule_json = "{\"off_is_green\":" +
+      std::string(rule.off_is_green ? "true" : "false") + ",\"min_reads\":" +
+      std::to_string(rule.min_reads) + ",\"min_conf\":" + jsonNum(rule.min_conf, 2) + "}";
+    const fire::StrafeInputs & si = c.strafe_in;
+    const fire::SteadyStatus st = c.steady.status(c.now_s);
+    return "{\"phase\":" + jsonQuote(c.task3_phase) + ",\"bay\":" + std::to_string(c.chosen_bay) +
+      ",\"track\":" + std::to_string(c.chosen_track) + ",\"frames\":" +
+      std::to_string(c.dock.frames) + ",\"obs_age_s\":" + jsonNum(c.dock_obs_age_s, 1) +
+      ",\"course\":" + jsonQuote(c.course_id) + ",\"fenced\":" + std::to_string(c.dock.fenced) +
+      ",\"rule\":" + rule_json + ",\"tracks\":[" + tracks + "],\"range_m\":" + jsonNum(si.range_m, 2) + ",\"lat_err_m\":" +
+      jsonNum(si.lat_err_m, 2) + ",\"yaw_err_deg\":" + jsonNum(si.yaw_err_deg, 1) +
+      ",\"steady\":" + jsonQuote(st.steady ? "yes" : st.why) + "}";
+  }
+
   /// The tracked buoy that is the Core tier's ENTRY or EXIT: bestBeacon over ctx_->buoys, never
   /// the track the other one holds. `remembered` is updated, and a change of choice logged once
   /// (old -> new, position, hits). CALL WITH ctx_->mu HELD.
@@ -916,6 +957,27 @@ private:
   /// ocs_client republishes RoboCommand's commands here as JSON and acts on none of them. Two
   /// matter: the RunStart WaitForRunStart waits for, and Task 3's ReadinessConfirm that answers
   /// the docking report. A key test is enough for each and keeps a JSON library out of this node.
+  /// RoboCommand's course from the OCS: the dock book drops faces placed outside it.
+  void onCourse(const std_msgs::msg::String::SharedPtr m)
+  {
+    std::string id;
+    std::vector<nav::LatLon> corners;
+    const bool ok = parseCourse(m->data, id, corners);
+    {
+      std::lock_guard<std::mutex> lk(ctx_->mu);
+      ctx_->course_id = id;
+      ctx_->course_corners = corners;
+      ++ctx_->course_seq;
+    }
+    if (ok) {
+      RCLCPP_INFO(get_logger(), "course %s from the OCS: %zu corners; dock faces outside it "
+        "are dropped", id.c_str(), corners.size());
+    } else {
+      RCLCPP_WARN(get_logger(), "no course from the OCS (or under 3 corners): dock faces are "
+        "not checked against a course");
+    }
+  }
+
   void onOcsCommand(const std_msgs::msg::String::SharedPtr m)
   {
     int run_id = -1;
@@ -1550,9 +1612,12 @@ private:
         "SC up, then Start";
     } else if (type == "IsAutonomous") {
       why = "flight mode " + mode + " is not autonomous";
-      if (mode == "MANUAL") {
-        why += "; a mission saved from the Mission tab always starts with IsAutonomous, "
-          "so it cannot run in MANUAL: run the built-in tree";
+      if (mode == "MANUAL" && ctx_->drop_tripped) {
+        why = "the autonomy-drop latch is set (SC down in MANUAL, or RC lost): SC up, then Start";
+      } else if (mode == "MANUAL") {
+        why += "; this mission's guard is a plain IsAutonomous, which ends it in MANUAL: open it "
+          "in the Mission tab and save it again (a mission that drives in MANUAL is saved with "
+          "IsAutonomous manual=\"true\")";
       }
     } else if (type == "ModeIs") {
       why = "the autopilot is in " + mode;
@@ -1587,7 +1652,8 @@ private:
     m.data = "{\"state\":\"RUNNING\",\"name\":" + jsonQuote(name) +
       ",\"elapsed_s\":" + jsonNum(elapsed, 1) + ",\"running_node\":" + jsonQuote(fb->running_node) +
       ",\"current_task\":" + jsonQuote(fb->current_task) + ",\"warning\":" + jsonQuote(warning) +
-      ",\"nodes\":" + view.nodesJson() + ",\"task1\":" + task1Json() + "}";
+      ",\"nodes\":" + view.nodesJson() + ",\"task1\":" + task1Json() + ",\"task3\":" +
+      task3Json() + "}";
     bt_status_pub_->publish(m);
   }
 
@@ -1679,7 +1745,7 @@ private:
   bool have_dock_ = false;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr cannon_pub_;
   rclcpp::Subscription<crusader_msgs::msg::DockObservation>::SharedPtr dock_sub_;
-  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr ocs_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr ocs_sub_, course_sub_;
   std::string camera_node_;
   rclcpp::AsyncParametersClient::SharedPtr camera_params_;
   std::atomic<int> camera_ask_{0};      // SetCameraModel asks; a reply to an older one is dropped

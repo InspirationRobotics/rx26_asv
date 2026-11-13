@@ -42,15 +42,15 @@ from crusader_common.node_main import declare_params, run_node
 from crusader_common.stream_cache import StreamCache
 from crusader_msgs.action import RunMission
 from crusader_msgs.msg import (Attitude, Cluster3DArray, FcuHealth, FcuStatus, HazardArray,
-                               LatLonHead, PassageBuoy, PassagePlan, RadioFrame,
-                               TrackedTargetArray)
+                               DockObservation, LatLonHead, PassageBuoy, PassagePlan,
+                               RadioFrame, TrackedTargetArray)
 
 from crusader_groundstation import (bag_recorder, camera_profiles, gcs_wire, mission_store,
                                     mission_xml, ocs_link, operator_settings, param_client,
                                     params_yaml, planner_profiles, power_client, proc_scan,
                                     record_settings, system_info)
 from crusader_groundstation import node_registry as reg
-from crusader_groundstation.log_buffer import LogBuffer
+from crusader_groundstation.log_buffer import INFO, LogBuffer
 from crusader_groundstation.process_manager import ProcessManager
 from crusader_groundstation.radio_core import RadioLog
 from crusader_groundstation.recorder import Recorder, frame_rates, free_gb
@@ -102,6 +102,8 @@ MANUAL_VERSION_BASE = 1_000_000         # clear of rfd_link_node's plan versions
 LIDAR_SCALE = 0.01                      # metres per int16 count
 RECORD_FRAME_HZ_RANGE = (0.05, 30.0)
 REPLAY_EVENTS = 300                     # log/radio rows a laptop gets when it connects
+DOCK_TOPIC = "/dock/observations"       # camera_node's dock model, every frame
+DOCK_COLOURS = {0: "?", 1: "OFF", 2: "R", 3: "G", 4: "B"}   # DockBay.COLOUR_*
 FILE_CHUNK = 256 * 1024
 BULK_WAIT_S = 30.0                      # a download gives up when the link frees no room in this
 OPS_WORKERS = 4
@@ -126,6 +128,21 @@ def signature(frame):
 
 def _round(v, n=2):
     return gcs_wire.finite(v, n)
+
+
+def dock_frame(msg):
+    """One /dock/observations frame as the recording keeps it: each face left to right, its
+    bearing (+ left), plane offset and size range (m), cut or whole, box, and indicator."""
+    def bay(b):
+        return {"brg": _round(b.bearing_deg, 1), "cut": bool(b.truncated),
+                "plane_d": _round(b.plane_offset) if b.has_plane else None,
+                "size_m": _round(b.range_from_size_m), "conf": _round(b.detector_confidence),
+                "box": [int(v) for v in b.bbox],
+                "ind": DOCK_COLOURS.get(int(b.indicator_colour)) if b.indicator_present else None,
+                "ind_conf": _round(b.indicator_confidence) if b.indicator_present else None,
+                "lit": int(b.lit_window_index)}
+    return {"t": round(msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9, 2),
+            "bays": [bay(b) for b in msg.bays]}
 
 
 class Connection:
@@ -340,6 +357,11 @@ class GcsBridge(Node):
         self._ocs_run = None                # (the newest `ocs_run` snapshot, monotonic time heard)
         self._ocs_reply = None              # (the newest `reply` in any snapshot, when heard)
         self._ocs_seq = 0
+        # What the recording has written of each stream so far (the logs and OCS by seq), and
+        # the dock frames heard since its last sample.
+        self._rec_log_seq = 0
+        self._rec_ocs_seq = 0
+        self._dock_frames = deque(maxlen=100)
         self.recorder = Recorder(p["record_dir"], p["record_min_free_gb"],
                                  logger=self.get_logger().warn)
         self.bags = bag_recorder.BagRecorder(logger=self.get_logger().info)
@@ -405,6 +427,8 @@ class GcsBridge(Node):
         self.create_subscription(RadioFrame, "/crsd/radio/traffic", self._on_radio, 50)
         self.create_subscription(String, "/crsd/ocs_traffic", self._on_ocs, 50)
         self.create_subscription(String, "/crsd/ocs_command", self._on_ocs_command, 10)
+        self.create_subscription(DockObservation, DOCK_TOPIC, self._on_dock,
+                                 qos_profile_sensor_data)
 
         self.plan_pub = self.create_publisher(PassagePlan, "/crsd/passage_plan", 10)
         self.ocs_tiers_pub = self.create_publisher(String, "/crsd/ocs_tiers", 10)
@@ -538,6 +562,11 @@ class GcsBridge(Node):
         self._ocs_seq += 1
         item["seq"] = self._ocs_seq
         self._ocs.append(item)
+
+    def _on_dock(self, msg):
+        """Keeps each dock frame, compact, for the recording's next sample."""
+        if self.recorder.recording:
+            self._dock_frames.append(dock_frame(msg))
 
     def _on_ocs_command(self, msg):
         """Keeps the newest `ocs_run` the OCS sent: its state and the tiers it will declare. A
@@ -1458,10 +1487,27 @@ class GcsBridge(Node):
             self.bags.stop()
         if not self.recorder.recording:
             return
-        state = self._last.get("state") or self._state(time.monotonic())
-        self.recorder.sample({k: state.get(k) for k in ("stamp", "boat", "att", "fcu",
-                                                        "health", "mission")}
-                             | {"targets": (self._last.get("targets") or {}).get("items", [])})
+        now = time.monotonic()
+        state = self._last.get("state") or self._state(now)
+        sample = {k: state.get(k) for k in ("stamp", "boat", "att", "fcu", "health", "mission",
+                                            "ocs_run")}
+        sample["targets"] = (self._last.get("targets") or {}).get("items", [])
+        sample.update(self._record_events(now))
+        self.recorder.sample(sample)
+
+    def _record_events(self, now):
+        """What the tree saw and decided since the last sample, for a run to be read back
+        without the GCS open: bt_status whole (its nodes, task1 and task3), every dock frame,
+        and the INFO+ log lines and OCS traffic not written yet."""
+        logs, self._rec_log_seq, _ = self.logs.read(self._rec_log_seq, min_level=INFO)
+        ocs = [i for i in list(self._ocs) if i.get("seq", 0) > self._rec_ocs_seq]
+        self._rec_ocs_seq = self._ocs_seq
+        dock = []
+        while self._dock_frames:
+            dock.append(self._dock_frames.popleft())
+        return {"bt": self._bt.get(now), "dock": dock, "ocs": ocs,
+                "logs": [{k: r.get(k) for k in ("t", "node", "level_name", "msg")}
+                         for r in logs]}
 
     # ------------------------------------------------------------------ the rest
 

@@ -404,12 +404,13 @@ static void tunableTests()
   chk("... and empty ones still fall back", std::abs(rad - 9.0) < 0.05 && hops > hops5);
 }
 
-/// Task 3's scan_fire guards, cut down: the waypoint leg, then the MANUAL body.
+/// Task 3's scan_fire guards, cut down: the waypoint leg, then the MANUAL body. Reactive, as
+/// in the trees: MANUAL is looked at on every tick, not only before the leg starts.
 static const char * kScanFireGuards =
   "<Sequence name=\"scan_fire\">"
-  "<Fallback name=\"to_the_waypoint\"><ModeIs mode=\"MANUAL\"/>"
+  "<ReactiveFallback name=\"to_the_waypoint\"><ModeIs mode=\"MANUAL\"/>"
   "<ReactiveSequence name=\"guided_leg\"><IsAutonomous/><NotDropped/><Scripted/></ReactiveSequence>"
-  "</Fallback>"
+  "</ReactiveFallback>"
   "<ReactiveSequence name=\"manual\"><ModeIs mode=\"MANUAL\"/><NotDropped/><Scripted/></ReactiveSequence>"
   "</Sequence>";
 
@@ -470,6 +471,35 @@ static void failureTraceTests()
     trace.beginTick();
     chk("SD flipped mid-run: the next tick fails at NotDropped",
       r.tick() == BAD && trace.text() == "NotDropped in scan_fire > manual");
+  }
+  {
+    // 2026-11-12 water: the pilot took MANUAL during the GUIDED leg. A plain Fallback went on
+    // ticking the running leg, its IsAutonomous failed the tree, and with no mission ticking
+    // the boat reported STATE_MANUAL to RoboCommand.
+    auto leg = [](Rig & r) {
+        r.load(kScanFireGuards);
+        r.ctx->mode = "GUIDED";
+        r.ctx->autonomous = true;
+        r.ctx->drop_tripped = false;
+        g_child = RUN;
+        g_child_starts = 0;
+        return r.tick();
+      };
+    Rig r;
+    chk("GUIDED: the waypoint leg runs", leg(r) == RUN && g_child_starts == 1);
+    r.ctx->mode = "MANUAL";
+    r.ctx->autonomous = false;
+    crusader_bt::FailureTrace trace(r.tree);
+    trace.beginTick();
+    const BT::NodeStatus s = r.tick();
+    chk("the pilot takes MANUAL mid-leg: still RUNNING, nothing failed (got '" + trace.text() +
+      "')", s == RUN && trace.text().empty());
+    chk("... the leg was dropped and the MANUAL body started", g_child_starts == 2);
+    Rig q;
+    leg(q);
+    q.ctx->mode = "HOLD";
+    q.ctx->autonomous = false;
+    chk("HOLD mid-leg still ends the run", q.tick() == BAD);
   }
   {
     Rig r;
@@ -711,8 +741,7 @@ struct FireRig : Rig
   {
     ctx->chosen_track = 0;
     ctx->centre = crusader_bt::fire::CentreTarget{};
-    ctx->centre.from_indicator = true;
-    ctx->centre.fix.sight({-left, ahead}, ahead, ctx->now_s, ctx->now_s);
+    ctx->centre.sight({-left, ahead}, ahead, ctx->now_s, ctx->now_s);
   }
 };
 
@@ -861,7 +890,7 @@ static void bayNumberTests()
     };
   // CommitFirstGreen as task3_scan_fire(_cv) has it: the number committed to, -1 for none
   auto commit = [](FireRig & r) {
-      r.load("<CommitFirstGreen bay=\"{bay}\" min_votes=\"4\" min_share=\"0.5\" "
+      r.load("<CommitFirstGreen bay=\"{bay}\" min_reads=\"4\" min_conf=\"0.5\" "
         "min_obs=\"4\" max_turn_deg=\"15\"/>");
       int b = -1;
       return r.tick() == OK && r.bb->get("bay", b) ? b : -1;
@@ -1107,18 +1136,24 @@ static void fireBesideDockingTests()
     r.frame(10.0, {}, 2.0);
     chk("read GREEN: the GREEN bay", r.ctx->green.t == 10.0);
     r.place(10.1, 4.0);                                    // the same bay, ranged 2 m long
-    chk("a range past the gate splits the bay: a second track", r.ctx->dock.tracks.size() == 2);
-    chk("... no matter: in line and not read RED, it is still the GREEN bay",
+    chk("ranged 2 m long but in line: the same bay, one track (the gate is across the dock)",
+      r.ctx->dock.tracks.size() == 1);
+    chk("... and committed to it, it is still our bay",
       r.ctx->green.t == 10.1 && std::fabs(r.ctx->green.bay.ahead_m - 2.0) > 1.0);
-    r.place(10.2, 4.0, 1.0);                               // 1 m across: the next bay over
-    chk("a bay 1 m across the dock, unread, is another bay: not taken", r.ctx->green.t == 10.1);
-    r.place(10.3, 4.0, 1.0, Colour::Green);
-    chk("... but read GREEN it is the GREEN bay, whatever track it lands on",
-      r.ctx->green.t == 10.3 && r.ctx->green.bay.left_m > 0.5);
+    r.place(10.2, 4.0, -2.0);                              // 2 m to the right: the next bay
+    chk("the next bay over, unread, is another bay: not taken",
+      r.ctx->green.t == 10.1 && r.ctx->dock.tracks.size() == 2);
+    r.place(10.3, 4.0, -2.0, Colour::Green);
+    chk("... nor when it reads GREEN: committed, our track is followed, not a light",
+      r.ctx->green.t == 10.1);
+    r.place(10.4, 4.0, 0.9);                               // no two bays are 0.9 m apart
+    chk("a face 0.9 m across is our bay again: merged into its track, and followed",
+      r.ctx->green.t == 10.4 && r.ctx->dock.tracks.size() == 2);
     FireRig q;
     q.frame(10.0, {}, 2.0);
     q.place(10.1, 4.0, 0.0, Colour::Red);
-    chk("in line but reading RED: not taken", q.ctx->green.t == 10.0);
+    chk("in line but reading RED: still our bay (its colour is the book's votes)",
+      q.ctx->green.t == 10.1);
   }
   {
     FireRig r;
@@ -1151,6 +1186,63 @@ static void fireBesideDockingTests()
   firstDockNoRedTests();
 }
 
+/// RoboCommand's course as the OCS relays it (ocs_info.course, latched on /crsd/ocs_course):
+/// the dock book places no face outside it.
+static void courseFenceTests()
+{
+  std::printf("\n-- the course fence\n");
+  namespace nav = crusader_bt::nav;
+  // The OCS's own JSON for course ALPHA on 2026-11-12: a closed ring of five corners.
+  const std::string alpha = "{\"course_id\": \"ALPHA\", \"pinger_freq_hz\": 0, \"corners\": ["
+    "{\"latitude\": 1.2809887596341554, \"longitude\": 103.85481480992878}, "
+    "{\"latitude\": 1.2808658372160693, \"longitude\": 103.85500721025717}, "
+    "{\"latitude\": 1.2810900427153769, \"longitude\": 103.85515265929305}, "
+    "{\"latitude\": 1.2812172480539488, \"longitude\": 103.8549604814802}, "
+    "{\"latitude\": 1.2809887596341554, \"longitude\": 103.85481480992878}]}";
+  std::string id;
+  std::vector<nav::LatLon> corners;
+  chk("the OCS's course parses: ALPHA, its 5 corners", crusader_bt::parseCourse(alpha, id,
+    corners) && id == "ALPHA" && corners.size() == 5 &&
+    std::fabs(corners[1].lat - 1.2808658372160693) < 1e-12 &&
+    std::fabs(corners[1].lon - 103.85500721025717) < 1e-12);
+  chk("no corners: no course", !crusader_bt::parseCourse("{\"course_id\": \"X\"}", id,
+    corners) && corners.empty());
+  chk("two corners: no course", !crusader_bt::parseCourse("{\"corners\": [{\"latitude\": 1, "
+    "\"longitude\": 2}, {\"latitude\": 1, \"longitude\": 3}]}", id, corners) && corners.empty());
+
+  // A 16 m square course around a boat heading north: 5 m ahead is in it, 9 m is 1.4 m
+  // out (the camera is 0.37 m ahead of the body), inside the 3 m margin, and 13 m is not.
+  auto fenced = [](FireRig & r) {
+      for (const nav::Vec2 c : {nav::Vec2{-8, -8}, nav::Vec2{8, -8}, nav::Vec2{8, 8},
+          nav::Vec2{-8, 8}})
+      {
+        r.ctx->course_corners.push_back(nav::toLatLon(c, r.ctx->origin));
+      }
+      ++r.ctx->course_seq;
+    };
+  {
+    FireRig r;
+    fenced(r);
+    r.place(1.0, 5.0);
+    r.place(2.0, 13.0);
+    chk("a face inside the course is a bay; one 5 m beyond it is dropped",
+      r.ctx->dock.tracks.size() == 1 && r.ctx->dock.fenced == 1);
+    r.place(3.0, 9.0);
+    chk("... one 1.4 m outside is kept: the dock may sit at the edge, its range long",
+      r.ctx->dock.tracks.size() == 2 && r.ctx->dock.fenced == 1);
+    crusader_bt::resetTask3(*r.ctx);                    // a new goal: a new book
+    r.place(4.0, 13.0);
+    chk("... and the new book is fenced too", r.ctx->dock.tracks.empty() &&
+      r.ctx->dock.fenced == 1);
+  }
+  {
+    FireRig r;                                          // the OCS sent no course
+    r.place(1.0, 13.0);
+    chk("no course: nothing is fenced", r.ctx->dock.tracks.size() == 1 &&
+      r.ctx->dock.fenced == 0);
+  }
+}
+
 int main()
 {
   rclcpp::init(0, nullptr);
@@ -1163,6 +1255,7 @@ int main()
   setCameraModelTests();
   fireBesideDockingTests();
   bayNumberTests();
+  courseFenceTests();
   rclcpp::shutdown();
   std::printf("\n%d checks, %d failed\n", g_checks, g_fails);
   std::printf("%s\n", g_fails == 0 ? "PASS" : "FAIL");

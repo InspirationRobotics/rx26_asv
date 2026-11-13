@@ -445,9 +445,9 @@ public:
 };
 
 /// Commit to the FIRST bay that reads GREEN with confidence, without waiting to see
-/// every bay (the scan stops here): any confirmed track whose votes say GREEN
-/// (dock::verdict, min_votes reads, min_share of them green, recent ones agreeing);
-/// the most-seen if several. The bay NUMBER (DockingReport, bays numbered left to
+/// every bay (the scan stops here): any confirmed track in view whose GREEN confidence
+/// (dock::ColourRule: the share of its colour reads that said GREEN) is min_conf or more
+/// after min_reads reads; the most-seen if several. The bay NUMBER (DockingReport, bays numbered left to
 /// right facing them) is the layout's when all the bays are known, else a guess from the
 /// bays seen either side of it and the way the search slides (dock::guessBayNumber),
 /// logged as one. ReportDocking takes the layout's if it is known by then. FAILURE until
@@ -460,8 +460,10 @@ public:
   static BT::PortsList providedPorts()
   {
     return {
-      BT::InputPort<int>("min_votes", 8, "GREEN/RED reads before a bay has a verdict"),
-      BT::InputPort<double>("min_share", 0.8, "share of them GREEN"),
+      BT::InputPort<int>("min_reads", 3,
+        "colour reads of a bay (RED/GREEN, and OFF with off_is_green) before its confidence counts"),
+      BT::InputPort<double>("min_conf", 0.5,
+        "GREEN confidence that commits: the share of the bay's colour reads that said GREEN, 0-1"),
       BT::InputPort<int>("min_obs", 5, "sightings before a track is a bay"),
       BT::InputPort<double>("max_turn_deg", 0.0,
         "> 0: not while the bow is further than this off the dock heading (still turning)"),
@@ -480,9 +482,12 @@ public:
 
   BT::NodeStatus tick() override
   {
-    dock::VoteParams v;
+    dock::ColourRule rule;
+    rule.min_reads = getInput<int>("min_reads").value_or(rule.min_reads);
+    rule.min_conf = getInput<double>("min_conf").value_or(rule.min_conf);
+    rule.off_is_green = getInput<bool>("off_is_green").value_or(false);
     const bool any = getInput<std::string>("colour").value_or("green") == "any";
-    const bool off_green = getInput<bool>("off_is_green").value_or(false);
+    const bool off_green = rule.off_is_green;
     const int n_bays = any ? 0 : getInput<int>("bays").value_or(0);
     const int min_obs = getInput<int>("min_obs").value_or(5);
     const double max_turn = getInput<double>("max_turn_deg").value_or(0.0);
@@ -492,9 +497,7 @@ public:
     std::string going_back;        // ours worked out but out of view: said once
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
-      v = ctx_->dock_votes;
-      v.min_votes = getInput<int>("min_votes").value_or(v.min_votes);
-      v.min_share = getInput<double>("min_share").value_or(v.min_share);
+      ctx_->colour_rule = rule;
       // mid-turn the camera sweeps the dock: wait until the bow is on the dock heading
       const double dock_h = dockHeading(*ctx_, fire::kNaN);
       if (max_turn > 0.0 && std::isfinite(dock_h) &&
@@ -503,9 +506,7 @@ public:
         return BT::NodeStatus::FAILURE;
       }
       const double square = std::isfinite(dock_h) ? dock_h : ctx_->heading_deg;
-      auto colourOf = [&](const dock::BayTrack & t) {
-          return off_green ? dock::verdictOffIsGreen(t, v) : dock::verdict(t, v);
-        };
+      auto colourOf = [&](const dock::BayTrack & t) {return dock::confidenceVerdict(t, rule);};
       const dock::BayTrack * best = nullptr;
       auto off_bow = [](const dock::BayTrack & t) {
           return std::isfinite(t.live_left_m) ? std::fabs(t.live_left_m) : 1e9;
@@ -518,11 +519,9 @@ public:
         }
         if (best == nullptr || (any ? off_bow(t) < off_bow(*best) : t.n > best->n)) {best = &t;}
       }
-      // pickGreen follows a GREEN reading; any other bay of ours is followed as itself
-      bool adopt = any || off_green;
       if (best == nullptr && n_bays > 0) {
         std::string why;
-        const dock::BayTrack * ours = deduceBay(*ctx_, colourOf, n_bays, min_obs, v.min_votes,
+        const dock::BayTrack * ours = deduceBay(*ctx_, colourOf, n_bays, min_obs, rule.min_reads,
           square, why);
         if (ours != nullptr && !inView(*ctx_, *ours)) {
           if (ctx_->search_target_track != ours->id) {
@@ -533,26 +532,19 @@ public:
         }
         if (ours != nullptr) {
           best = ours;
-          adopt = true;
           what = why;
         }
       }
       if (best != nullptr) {
-        if (adopt) {
-          // what the approach and the cannon follow (ctx.green) becomes this bay: this
-          // frame's sighting of it, across the dock heading as pickGreen measures
-          const dock::FrameBay * fb = nullptr;
-          double fb_m = kSameBayM;
-          for (const auto & b : ctx_->dock.frame_bays) {
-            const double d = std::fabs(fire::toDockFrame(b.p - best->p, square).left);
-            if (d < fb_m) {fb = &b; fb_m = d;}
-          }
-          if (fb == nullptr) {return BT::NodeStatus::FAILURE;}   // not in this frame: next tick
-          ctx_->green = Context::GreenBay{};
-          ctx_->centre = fire::CentreTarget{};
-          ctx_->target_any = true;
-          adoptBay(*ctx_, *fb, ctx_->dock_t);
-        }
+        // what the approach and the cannon follow (ctx.green) becomes this bay's FACE: this
+        // frame's sighting on its track, and from then on the face on that track (pickGreen,
+        // chosen_track), whatever its indicator or another bay's reads
+        const dock::FrameBay * fb = ctx_->dock.onTrack(best->id);
+        if (fb == nullptr) {return BT::NodeStatus::FAILURE;}   // not in this frame: next tick
+        ctx_->green = Context::GreenBay{};
+        ctx_->centre = fire::CentreTarget{};
+        ctx_->target_any = true;
+        adoptBay(*ctx_, *fb, ctx_->dock_t);
         const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs);
         bay = L.ok ? L.numberOf(best->id) : 0;
         if (bay <= 0) {             // from the bays seen either side of it

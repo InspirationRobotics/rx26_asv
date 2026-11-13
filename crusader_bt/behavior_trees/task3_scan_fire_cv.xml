@@ -18,14 +18,15 @@
        out. The thresholds are camera_node's dock_cv_* parameters, live: set them in the
        GCS's parameter editor for camera_node while watching the picture, where each bay
        shows "cv R x% G y%". Not saved: a camera_node restart goes back to the defaults.
-    0. GUIDED to the approach point (skipped when the run starts in MANUAL).
+    0. GUIDED to the approach point (skipped when the run starts in MANUAL;
+       cut short, the run going on, when the pilot switches to MANUAL mid-leg).
     1. the tree switches GUIDED -> MANUAL itself.
     2. SEARCH: turn to the dock heading, slide one way (the Run panel's "slide first", else
        left) until a bay reads GREEN (4 votes, at least half of them GREEN) and is in view,
        with the bow within 15 deg of the dock heading (CommitFirstGreen). From here on that
        bay is ours.
     From then on, two branches side by side (Parallel):
-    3. APPROACH: square to the dock heading, strafe our bay's indicator (else its face) onto
+    3. APPROACH: square to the dock heading, strafe our bay's face (not its indicator) onto
        the bow's line, then a steady push straight in (ApproachBay), to 2.0 m and centred.
     4. HOLD: the camera 1.7 m off the face (hold_m), centred, square (StrafeKeep); on
        station -> the docking report.
@@ -62,7 +63,10 @@
         <SetCameraModel model="dock" indicator="cv" timeout_s="15.0"/>
 
         <!-- 0-1. GUIDED to the waypoint, then MANUAL -->
-        <Fallback name="to_the_waypoint">
+        <!-- Reactive: MANUAL is checked on every tick, so the pilot switching to MANUAL
+             mid-leg skips straight to the MANUAL body and the run goes on (robot state
+             stays AUTO); HOLD or the e-stop still ends it -->
+        <ReactiveFallback name="to_the_waypoint">
           <ModeIs mode="MANUAL"/>
           <Sequence>
             <!-- no dock sightings here: placing them needs the heading, and it is poor
@@ -73,7 +77,7 @@
             </ReactiveSequence>
             <RequestMode mode="MANUAL" from="GUIDED" timeout_s="1000000"/>
           </Sequence>
-        </Fallback>
+        </ReactiveFallback>
 
         <!-- 2-5. MANUAL on the sticks: only the pilot's switches end it (SC to HOLD, SB) -->
         <ReactiveSequence name="manual">
@@ -83,7 +87,7 @@
             <Fallback name="the_green_bay">
               <BayChosen/>
               <ReactiveFallback name="search_until_green">
-                <CommitFirstGreen bay="{bay}" min_votes="4" min_share="0.5" min_obs="4" max_turn_deg="15"/>
+                <CommitFirstGreen bay="{bay}" min_reads="3" min_conf="0.5" min_obs="4" max_turn_deg="15"/>
                 <!-- one way only: the GCS Run panel's "slide first" (bt_runner_node
                      search_first), LEFT when unset (start the run at the dock's right end).
                      leg_m is longer than the dock, so it never turns back; past it, it
@@ -109,10 +113,8 @@
                               min_us="30" max_us="120" slew_us_s="200"
                               min_range_m="0.6" square_first_deg="10"/>
                   <Sequence name="on_station">
-                    <AwaitStrafeSolution fire_range_m="1.7" range_tol_m="0.40" lat_tol_m="0.30"
-                                         yaw_tol_deg="10.0" hold_s="0.5"/>
-                    <AwaitStrafeSolution fire_range_m="1.7" range_tol_m="0.10" lat_tol_m="0.15"
-                                         yaw_tol_deg="8.0" hold_s="2.0"/>
+                    <AwaitStrafeSolution steady="false" fire_range_m="1.7" range_tol_m="0.40" lat_tol_m="0.30"
+                                         yaw_tol_deg="10.0" hold_s="0.0" miss_s="1.0"/>
                     <ReportDocking bay="{bay}"/>
                     <KeepRunningUntilFailure>
                       <AlwaysSuccess/>

@@ -6,19 +6,21 @@
 
     camera: SetCameraModel puts camera_node on the dock model and waits until it sees with
        it. A camera restart comes back on buoy, which never sees the dock.
-    0. GUIDED to the approach point. Started in MANUAL, this step is skipped.
+    0. GUIDED to the approach point (skipped when the run starts in MANUAL;
+       cut short, the run going on, when the pilot switches to MANUAL mid-leg).
     1. the tree switches GUIDED -> MANUAL itself (only from GUIDED; SC still takes it back).
     2. SEARCH: turn to the dock heading, slide one way (the Run panel's "slide first", else
        left) along the dock until a bay
        the camera sees reads GREEN with confidence (CommitFirstGreen: the first one, not every bay; numbered
        left to right for the docking report).
     From GREEN on, two branches side by side (Parallel):
-    3. APPROACH: square to the dock heading, strafe the GREEN indicator onto the bow's
-       line (its spot kept on the map, so a few lost frames do not stop it), then a
+    3. APPROACH: square to the dock heading, strafe the GREEN bay's FACE onto the bow's
+       line (the indicator only says which bay; its spot kept on the map, so a few lost frames do not stop it), then a
        steady, gently ramped push straight in (ApproachBay), to 2.0 m and centred.
-    4. HOLD: the camera 1.7 m off the face (its depth), the indicator centred, square
-       (StrafeKeep); on station
-       -> the docking report.
+    4. HOLD: the camera 1.7 m off the face (its depth), the face centred, square
+       (StrafeKeep). The docking report goes the FIRST time the boat is in close (the face
+       1.3-2.1 m off the camera, within 0.30 m of the bow's line, within 10 deg of square:
+       hold_s 0); nothing is checked after it, the hold only keeps the bay in front of the cannon.
     5. THE FIRE, in a loop, docked or not: a window of our bay reads RED -> the cannon
        sprays it, water on until it reads GREEN (and on through drop-outs of up to 5 s)
        -> firefighting report -> the 2-colour code -> resource delivery report -> wait
@@ -43,7 +45,10 @@
         <SetCameraModel model="dock" indicator="yolo" timeout_s="15.0"/>
 
         <!-- 0-1. GUIDED to the waypoint, then MANUAL -->
-        <Fallback name="to_the_waypoint">
+        <!-- Reactive: MANUAL is checked on every tick, so the pilot switching to MANUAL
+             mid-leg skips straight to the MANUAL body and the run goes on (robot state
+             stays AUTO); HOLD or the e-stop still ends it -->
+        <ReactiveFallback name="to_the_waypoint">
           <ModeIs mode="MANUAL"/>
           <Sequence>
             <!-- no dock sightings here: placing them needs the heading, and it is poor
@@ -55,7 +60,7 @@
             </ReactiveSequence>
             <RequestMode mode="MANUAL" from="GUIDED" timeout_s="1000000"/>
           </Sequence>
-        </Fallback>
+        </ReactiveFallback>
 
         <!-- 2-5. MANUAL on the sticks: only the pilot's switches end it -->
         <ReactiveSequence name="manual">
@@ -66,11 +71,13 @@
             <Fallback name="the_green_bay">
               <BayChosen/>
               <ReactiveFallback name="search_until_green">
-                <!-- OFF counts as GREEN (the classifier reads the lit GREEN indicator as off,
+                <!-- A bay's GREEN confidence = the share of its colour reads that said GREEN;
+                     min_conf of it after min_reads reads commits (0.5 after 3: at least half).
+                     OFF counts as GREEN (the classifier reads the lit GREEN indicator as off,
                      the course 2026-11-12). No bay GREEN/OFF: two bays read RED make the third
                      ours (out of view: the slide goes back to it); past the dock's end, the
                      last bay along the slide not read RED -->
-                <CommitFirstGreen bay="{bay}" min_votes="4" min_share="0.5" min_obs="4" max_turn_deg="15"
+                <CommitFirstGreen bay="{bay}" min_reads="3" min_conf="0.5" min_obs="4" max_turn_deg="15"
                                   off_is_green="true" bays="3"/>
                 <!-- one way only: the GCS Run panel's "slide first" (bt_runner_node
                      search_first), LEFT when unset (start the run at the dock's right end).
@@ -97,10 +104,8 @@
                               min_us="30" max_us="120" slew_us_s="200"
                               min_range_m="0.6" square_first_deg="10"/>
                   <Sequence name="on_station">
-                    <AwaitStrafeSolution fire_range_m="1.7" range_tol_m="0.40" lat_tol_m="0.30"
-                                         yaw_tol_deg="10.0" hold_s="0.5"/>
-                    <AwaitStrafeSolution fire_range_m="1.7" range_tol_m="0.10" lat_tol_m="0.15"
-                                         yaw_tol_deg="8.0" hold_s="2.0"/>
+                    <AwaitStrafeSolution steady="false" fire_range_m="1.7" range_tol_m="0.40" lat_tol_m="0.30"
+                                         yaw_tol_deg="10.0" hold_s="0.0" miss_s="1.0"/>
                     <ReportDocking bay="{bay}"/>
                     <KeepRunningUntilFailure>
                       <AlwaysSuccess/>

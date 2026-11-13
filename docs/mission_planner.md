@@ -40,6 +40,8 @@ is waiting and logs a WARN. The sim scripts call it themselves. Nothing else cha
   <BehaviorTree ID="Main">
     <ReactiveSequence name="guard">
       <IsAutonomous/>                                  main-tree guard: the pilot can always take it back
+                                                       (manual="true" when the body drives in MANUAL itself,
+                                                       e.g. Task 3: MANUAL passes unless SC/RC drops it)
       <Sequence name="mission">
         <NavigateTo target="fix" lat=".." lon=".."/>   "GPS waypoint" block, anywhere in any tree
         <TaskAttempt token="TASK_SAFE_PASSAGE">        heartbeat current_task, main tree

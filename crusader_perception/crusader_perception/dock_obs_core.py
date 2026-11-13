@@ -174,7 +174,10 @@ def bay_obs(i, bay, depth_mm, rgb_size, intr, plane_kw=None):
         plane_offset=float(plane[1]) if plane is not None else 0.0,
         plane_rms_m=float(plane[2]) if plane is not None else float("nan"),
         range_from_size_m=float(rng) if rng else float("nan"),
-        bearing_deg=float(bay.get("bearing_deg", float("nan"))))
+        # dock_model's bay dict has geometry_core's image bearing, +RIGHT; the message's is
+        # +LEFT (REP-103, like the plane and the windows above). Unflipped, bt_runner placed
+        # every face mirrored about the camera axis (water, 2026-11-12).
+        bearing_deg=-float(bay.get("bearing_deg", float("nan"))))
 
 
 def observation(bays, depth_mm, rgb_size, intr, seq=None, seq_events=(), fps=0.0):

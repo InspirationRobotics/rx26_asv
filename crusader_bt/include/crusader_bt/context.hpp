@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <functional>
 #include <memory>
@@ -122,10 +123,19 @@ struct Context
   /// a bay. HERE, not on leaf ports, because SafeBayKnown and CommitSafeBay
   /// must apply the SAME rule: a condition looser than its commit stalls the tree.
   dock::VoteParams dock_votes;
+  /// The colour rule CommitFirstGreen judged the bays by on its last tick (its ports), so
+  /// /crsd/bt_status records each bay's GREEN confidence and verdict as the tree saw them.
+  dock::ColourRule colour_rule;
   int dock_min_obs = 5;
   /// The bow's heading facing the dock, deg true: bt_runner_node dock_heading_deg (the
   /// GCS sets it), read at goal start. < 0 = not set.
   double dock_heading = -1.0;
+  /// RoboCommand's course (its RxCourse corners, lat/lon), as the OCS relays it on
+  /// /crsd/ocs_course; empty = no course. The dock book drops any face placed outside it
+  /// (placeCourse). course_seq counts the courses heard, so a new one is placed afresh.
+  std::vector<nav::LatLon> course_corners;
+  std::string course_id;
+  int course_seq = 0;
   /// Which way StrafeSearch slides first: bt_runner_node search_first (the GCS sets it),
   /// read at goal start. "left" | "right", "" = not set.
   std::string search_first;
@@ -167,7 +177,7 @@ struct Context
   /// CommitFirstGreen colour="any" (task3_first_dock): `green` is then the bay committed
   /// to, whatever its indicator reads, not the GREEN one (pickGreen).
   bool target_any = false;
-  /// The centring spot (the GREEN indicator, else its face), kept on the map by a Kalman
+  /// The centring spot (our bay's face; never its indicator), kept on the map by a Kalman
   /// filter from every frame that showed it: one memory for ApproachBay and StrafeKeep, so
   /// the hand-over does not start the hold blind, and a few lost frames are ridden through.
   fire::CentreTarget centre;
@@ -664,12 +674,17 @@ inline void announceTask(Context & c, const std::string & token)
 /// be from where the GREEN one last was and still be it (pickGreen). Under half a bay's width.
 constexpr double kSameBayM = 0.6;
 
-/// This frame's GREEN bay: the bay it read GREEN (should two, the one nearer where it last
-/// was), else - a frame that read no GREEN - the bay not read RED within kSameBayM of where
-/// the GREEN one last was. Measured ACROSS the dock heading: the camera's range errors run
-/// along it. nullptr when neither. CALL UNDER ctx.mu.
+/// This frame's GREEN bay. Committed: the face on our track. Before: the bay it read GREEN
+/// (should two, the one nearer where it last was), else - a frame that read no GREEN - the
+/// bay not read RED within kSameBayM of where the GREEN one last was. Measured ACROSS the
+/// dock heading: the camera's range errors run along it. nullptr when neither.
+/// CALL UNDER ctx.mu.
 inline const dock::FrameBay * pickGreen(const Context & c)
 {
+  // Committed (chosen_track): our bay is the face the book put on its track this frame,
+  // whatever it reads, or none. Following the last sighting instead lost the bay for good
+  // whenever a cut face dragged that sighting sideways (the 11-12 recording, replayed).
+  if (c.chosen_track >= 0) {return c.dock.onTrack(c.chosen_track);}
   const double square = c.dock_heading >= 0.0 ? c.dock_heading : c.heading_deg;
   const bool had = c.green.t >= 0.0;
   auto across = [&](const dock::FrameBay & b) {
@@ -694,8 +709,9 @@ inline const dock::FrameBay * pickGreen(const Context & c)
   return best;
 }
 
-/// Make `g` (a bay of the frame stamped t) our bay's newest sighting, and feed its centring
-/// point (the indicator, else the face unless it is cut off) to ctx.centre. CALL UNDER ctx.mu.
+/// Make `g` (a bay of the frame stamped t) our bay's newest sighting, and feed its face
+/// centre to ctx.centre unless the image edge cut the face (its centre is biased). The
+/// indicator only says the bay's colour. CALL UNDER ctx.mu.
 inline void adoptBay(Context & c, const dock::FrameBay & g, double t)
 {
   c.green.t = t;
@@ -704,14 +720,61 @@ inline void adoptBay(Context & c, const dock::FrameBay & g, double t)
     c.green.windows = g.windows;
     c.green.windows_t = t;
   }
-  const bool face = !g.truncated && std::isfinite(g.left_m);
-  const bool ind = std::isfinite(g.ind_left_m);
-  c.centre.sight(
-    face ? dock::bodyToWorld(c.boat, c.heading_deg, g.ahead_m, g.left_m) : nav::Vec2{}, face,
-    ind ? dock::bodyToWorld(c.boat, c.heading_deg, g.ind_ahead_m, g.ind_left_m) :
-    nav::Vec2{}, ind,
-    ind ? std::hypot(g.ind_ahead_m, g.ind_left_m) : std::hypot(g.ahead_m, g.left_m),
-    t, c.now_s);
+  if (!g.truncated && std::isfinite(g.left_m)) {
+    c.centre.sight(dock::bodyToWorld(c.boat, c.heading_deg, g.ahead_m, g.left_m),
+      std::hypot(g.ahead_m, g.left_m), t, c.now_s);
+  }
+}
+
+/// RoboCommand's course as the OCS relays it (/crsd/ocs_course: the RxCourse JSON, or
+/// null): its id and its corners' lat/lons in order. False, with both cleared, when it has
+/// fewer than three corners - no course, and then nothing is fenced.
+inline bool parseCourse(const std::string & json, std::string & id,
+  std::vector<nav::LatLon> & corners)
+{
+  id.clear();
+  corners.clear();
+  auto number = [&json](const char * key, std::size_t from, std::size_t to, double & v) {
+      const std::size_t k = json.find(key, from);
+      if (k == std::string::npos || k >= to) {return false;}
+      const std::size_t c = json.find(':', k);
+      if (c == std::string::npos || c >= to) {return false;}
+      char * end = nullptr;
+      v = std::strtod(json.c_str() + c + 1, &end);
+      return end != json.c_str() + c + 1 && std::isfinite(v);
+    };
+  const std::size_t k = json.find("\"course_id\"");
+  if (k != std::string::npos) {
+    const std::size_t q1 = json.find('"', json.find(':', k));
+    const std::size_t q2 = q1 == std::string::npos ? q1 : json.find('"', q1 + 1);
+    if (q2 != std::string::npos) {id = json.substr(q1 + 1, q2 - q1 - 1);}
+  }
+  const std::size_t c = json.find("\"corners\"");
+  const std::size_t open = c == std::string::npos ? c : json.find('[', c);
+  const std::size_t close = open == std::string::npos ? open : json.find(']', open);
+  for (std::size_t a = open; close != std::string::npos; ) {
+    a = json.find('{', a + 1);
+    if (a == std::string::npos || a > close) {break;}
+    const std::size_t b = json.find('}', a);
+    double lat = 0.0, lon = 0.0;
+    if (b != std::string::npos && number("\"latitude\"", a, b, lat) &&
+      number("\"longitude\"", a, b, lon))
+    {
+      corners.push_back({lat, lon});
+    }
+  }
+  if (corners.size() < 3) {corners.clear(); return false;}
+  return true;
+}
+
+/// The course boundary as the dock book's keep-in polygon, in the local frame, once per
+/// course and again after resetTask3 (a new book). CALL UNDER ctx.mu.
+inline void placeCourse(Context & c)
+{
+  if (c.dock.keep_in_seq == c.course_seq || !c.origin_set) {return;}
+  c.dock.keep_in.clear();
+  for (const auto & ll : c.course_corners) {c.dock.keep_in.push_back(nav::toLocal(ll, c.origin));}
+  c.dock.keep_in_seq = c.course_seq;
 }
 
 /// Fold one DockObservation into the context. CALL UNDER ctx.mu.
@@ -726,7 +789,9 @@ inline void ingestDockObservation(Context & c, const dock::Frame & f)
 {
   if (c.origin_set && c.pose_fresh && std::isfinite(c.heading_deg)) {
     c.dock.prm.face_dz = c.dock_face_dz;
-    c.dock.ingest(f, c.boat, c.heading_deg, c.cam_mount);
+    placeCourse(c);
+    c.dock.ingest(f, c.boat, c.heading_deg, c.cam_mount,
+      c.dock_heading >= 0.0 ? c.dock_heading : fire::kNaN);
     if (const dock::FrameBay * g = pickGreen(c)) {adoptBay(c, *g, f.t);}
   }
   ++c.dock_seq;
@@ -812,6 +877,7 @@ inline void resetTask3(Context & c)
   c.search_leg_ends = 0;
   c.chosen_track = -1;
   c.chosen_bay = 0;
+  c.colour_rule = dock::ColourRule{};
   c.berth = dock::Berth{};
   c.readiness_confirmed = false;
   c.docking_report_s = -1.0;
