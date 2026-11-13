@@ -9,6 +9,7 @@
 | `/crsd/pose` | in: the BOAT packet to Ekko, 1 Hz, only from a fresh pose |
 | `/crsd/radio/send` (RadioSend), `/crsd/radio/send_test` (Trigger) | in |
 
+`sub_relay.py`: with `sub_relay_target` set, Graey's frames go whole to fleet_link on the OCS laptop (UDP) and its replies to the radio.
 `tunnel_link.py` is a byte copy of rx26_uav's `boat_link.py` (the header names the commit);
 `ekko_map.py` turns Ekko's frames into the plan. `rfd_endpoint` is the serial radio, or
 `udpin:127.0.0.1:14555` in the sim. Tests: `python3 -m pytest crusader_link/test`.

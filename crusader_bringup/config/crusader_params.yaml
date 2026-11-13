@@ -409,3 +409,7 @@ rfd_link_node:
     rfd_endpoint: "/dev/crsd-rfd"          # the radio (udev); the sim uses udpin:127.0.0.1:14555
     uav_sysid: 200                         # Ekko's companion, which sends the TUNNELs
     source_system: 42                      # the boat on the mesh (not its autopilot)
+    # Graey's leg through the boat (crusader_link/sub_relay.py). "" = off. Set it to the OCS
+    # laptop's address on the boat's subnet, or that subnet's broadcast address, and the port
+    # of [links.graey_relay] in the laptop's fleet/fleet.toml:
+    # sub_relay_target: "192.168.8.255:14573"

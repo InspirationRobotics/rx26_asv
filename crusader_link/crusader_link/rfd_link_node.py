@@ -7,8 +7,13 @@
 
 It talks to the radio, never the Pixhawk: no command it sends can arm or move the boat.
 When Ekko goes quiet it publishes nothing; downstream ages the last plan out.
+
+GRAEY'S LEG (sub_relay.py). With `sub_relay_target` set, every frame heard from Graey's systems
+goes, whole, to fleet_link on the OCS laptop over UDP, and the TUNNELs the laptop sends back for
+Graey's companion are keyed on the radio, whole. Off ("") by default: nothing changes for Ekko.
 """
 import os
+import socket
 import threading
 import time
 
@@ -22,6 +27,7 @@ from crusader_common.node_main import declare_params, run_node
 from crusader_common.stream_cache import StreamCache
 from crusader_link import tunnel_link as tl
 from crusader_link.ekko_map import EkkoMap, PlanVersion
+from crusader_link.sub_relay import SubRelay, parse_target
 
 os.environ["MAVLINK20"] = "1"     # TUNNEL is a MAVLink 2 message
 
@@ -33,6 +39,10 @@ PARAMS = {
     "pose_timeout_s": 1.0,
     "quiet_warn_s": 15.0,
     "reconnect_s": 5.0,
+    "sub_relay_target": "",             # "ip:port" of fleet_link's Graey input on the OCS laptop
+                                        # (a subnet broadcast address works); "" = no relay
+    "sub_sysids": [3, 43],              # Graey's Cube and its companion: relayed to the laptop
+    "sub_companion_sysid": 43,          # the only system the laptop may key the radio for
 }
 
 BOAT_PERIOD_S = 1.0
@@ -89,6 +99,20 @@ class RfdLinkNode(Node):
         self._quiet_warned = False
         self._said = {}
         self._test_n = 0
+        # Graey's leg. A bad target raises here: the node stops at startup with the reason,
+        # rather than run looking healthy while relaying nowhere.
+        self._relay_target = parse_target(self.p["sub_relay_target"])
+        self._relay = self._relay_sock = self._relay_rx = None
+        if self._relay_target is not None:
+            self._relay = SubRelay(self.p["sub_sysids"], self.p["sub_companion_sysid"])
+            self._relay_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._relay_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            self._relay_sock.bind(("0.0.0.0", 0))
+            self._relay_sock.settimeout(0.2)
+            self._relay_rx = threading.Thread(target=self._relay_rx_loop, daemon=True)
+            self._relay_rx.start()
+            self.get_logger().info("Graey relay ON: systems %s <-> %s:%d" % (
+                sorted(self._relay.sub_sysids), *self._relay_target))
         self._rx = threading.Thread(target=self._rx_loop, daemon=True)
         self._rx.start()
         self.create_timer(BOAT_PERIOD_S, self._send_boat)
@@ -154,6 +178,8 @@ class RfdLinkNode(Node):
         if src == self.p["source_system"]:
             return                                   # our own frame echoed by the mesh
         self._record(RadioFrame.DIR_RX, msg)
+        if self._relay is not None:
+            self._relay_up(src, msg)
         if msg.get_type() != "TUNNEL" or src != self.p["uav_sysid"]:
             return
         self._last_rx = time.monotonic()
@@ -186,6 +212,67 @@ class RfdLinkNode(Node):
             self.get_logger().info("plan v%d: %d buoys, entry %.7f %.7f, exit %.7f %.7f" % (
                 m.plan_version, len(m.buoys), m.entry_latitude, m.entry_longitude,
                 m.exit_latitude, m.exit_longitude))
+
+    # ------------------------------------------------------------------ Graey's leg
+
+    def _relay_up(self, src, msg):
+        """One frame heard from Graey -> the laptop, the bytes exactly as they arrived."""
+        raw = msg.get_msgbuf()
+        if not raw or not self._relay.up(src, len(raw), time.monotonic()):
+            return
+        try:
+            self._relay_sock.sendto(bytes(raw), self._relay_target)
+            if self._once("relay_up", "ok"):
+                self.get_logger().info("Graey heard on the radio (system %d): relaying to "
+                                       "%s:%d" % (src, *self._relay_target))
+        except OSError as e:                         # WiFi down: the frame is gone, not queued
+            if self._once("relay_up", str(e)):
+                self.get_logger().warn("Graey relay: cannot reach %s:%d (%s)" % (
+                    *self._relay_target, e))
+
+    def _relay_rx_loop(self):
+        """Datagrams from the laptop -> the radio, if sub_relay's rules pass each frame."""
+        from pymavlink import mavutil
+        while not self._stop.is_set() and rclpy.ok():
+            try:
+                data, _addr = self._relay_sock.recvfrom(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                return                               # the socket was closed: shutting down
+            # A parser per datagram (fleet_link sends whole frames, never one split across
+            # two): a stray start byte then costs that datagram, not the frames after it.
+            parser = mavutil.mavlink.MAVLink(None)
+            parser.robust_parsing = True             # bad bytes are skipped, never raised
+            try:
+                for msg in parser.parse_buffer(data) or ():
+                    if msg.get_type() != "BAD_DATA":
+                        self._relay_down(msg)
+            except Exception as e:  # noqa: BLE001 - one bad datagram must not end the leg
+                self.get_logger().warn("Graey relay: dropped a datagram: %s" % e,
+                                       throttle_duration_sec=5.0)
+
+    def _relay_down(self, msg):
+        raw = msg.get_msgbuf()
+        why = self._relay.down(msg.get_srcSystem(), msg.get_type(),
+                               getattr(msg, "target_system", 0), len(raw), time.monotonic())
+        if why is None:
+            with self._conn_lock:
+                conn = self._conn
+                if conn is None:
+                    why = "no radio"
+                elif not has_peer(conn):
+                    why = NO_PEER
+                else:
+                    try:
+                        conn.write(bytes(raw))
+                    except Exception as e:  # noqa: BLE001
+                        why = str(e) or type(e).__name__
+        if why is None:
+            self._record(RadioFrame.DIR_TX, msg)
+        else:
+            self.get_logger().warn("Graey relay: not keyed (%s); %s" % (
+                why, self._relay.summary()), throttle_duration_sec=5.0)
 
     # ------------------------------------------------------------------ TX
 
@@ -268,6 +355,12 @@ class RfdLinkNode(Node):
             self.get_logger().warn("could not record a frame: %s" % e, throttle_duration_sec=5.0)
 
     def _quiet_check(self):
+        if self._relay is not None:
+            heard = self._relay.heard(time.monotonic())
+            if self._once("relay_heard", heard):
+                self.get_logger().info("Graey %s; relay %s" % (
+                    "is on the radio" if heard else "is NOT heard on the radio (submerged, "
+                    "out of range, or its radio node is down)", self._relay.summary()))
         quiet_s = self.get_parameter("quiet_warn_s").value
         if self._quiet_warned:
             return
@@ -280,6 +373,10 @@ class RfdLinkNode(Node):
         self._stop.set()
         if self._rx.is_alive():
             self._rx.join(timeout=2.0)
+        if self._relay_sock is not None:
+            self._relay_sock.close()
+        if self._relay_rx is not None and self._relay_rx.is_alive():
+            self._relay_rx.join(timeout=2.0)
         super().destroy_node()
 
 
