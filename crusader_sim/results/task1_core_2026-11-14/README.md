@@ -30,6 +30,18 @@ RX26_WIN_SRC=/mnt/c/<path>/rx26_asv bash crusader_sim/scripts/t1_attempt.sh LABE
 | # | tree | course | Run panel | score | judge | notes |
 |---|---|---|---|---|---|---|
 | a01 | task1_core_scan (main 2ae0ce4, as on the boat 13 Nov) | task1_sg | field centre only | **175/325** | FAIL 6/8 sides | report perfect (ENTRY, EXIT, 4/4 G, 4/4 R within 0.33 m); both circles correct; b08 red kept to port, b09 green to starboard at the north end; 13 re-plans |
+| a02 | same (repeat) | task1_sg | field centre only | **200/325** | FAIL 6/8 sides | report perfect, both circles; all greens correct; b08 and b10 red to port. See below |
+
+### What goes wrong at the north end (a02, from its track and the runner log)
+
+The only legal route past b08/b09/b10 is through the b09 (green) / b10 (red) gap: 1.86 m centre to
+centre, 1.43 m between buoy surfaces, ~0.71 m from the boat's centre to each buoy when centred.
+Camera-only, the tracker's buoy positions wobble 0.3-0.4 m (stereo depth), so the transit
+re-planned five times ("a buoy moved 0.4 m toward the path ahead"), already relaxed to 0.50 m.
+One wobble left **no plan at any clearance** (0.80 / 0.70 / 0.50 m: "no passage keeps every
+side"), and right after that failed re-plan the runner logged **"transit complete -> exit_orbit"**
+with the boat still short of the gap. The exit orbit's lead-in then went round the WEST of b09
+and the turn-back near b08/b10 put both reds to port.
 
 ## Sim fixes made on the way (sim only, nothing that runs on the boat)
 

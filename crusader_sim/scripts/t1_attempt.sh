@@ -8,6 +8,8 @@
 #      window (to watch or record); T1_UP_ARGS adds gz_sim_up flags (e.g. "--tuning FILE").
 #   2. Every key=value is set on /bt_runner_node before the goal: the GCS Run panel's inputs
 #      (t1_field_lat, t1_field_lon, t1_scan_dwell_s, t1_approach_lat ...), read at Start.
+#      node/key=value sets another node's live parameter (target_tracker/pos_alpha=0.1), as
+#      the GCS Params tab would. SIM_TRACKER_LIDAR=1 in the environment = LiDAR fusion on.
 #   3. task1_score record in the background, task1_goal --tree TREE in the foreground.
 #   4. task1_score score. Kept in ~/t1_runs/: LABEL.log (task1_goal + judge), LABEL.report.json
 #      (the last safe_passage report), LABEL.track.csv (the true track), LABEL.png (track,
@@ -30,8 +32,10 @@ RX26_WIN_SRC="$WIN_SRC" TREE="$TREE" bash /tmp/gz_sim_up.sh "$COURSE" --no-uav $
   > "$OUT/$LABEL.up.log" 2>&1 || { echo "*** sim did not come up: $OUT/$LABEL.up.log"; tail -5 "$OUT/$LABEL.up.log"; exit 2; }
 
 for kv in "$@"; do
-  docker exec "$CT" bash -c "$ROS && ros2 param set /bt_runner_node ${kv%%=*} ${kv#*=}" 2>&1 \
-    | grep -v '^Set parameter successful' | sed "s/^/  param ${kv%%=*}: /"
+  key="${kv%%=*}"; node=bt_runner_node
+  case "$key" in */*) node="${key%%/*}"; key="${key#*/}" ;; esac   # node/param=value
+  docker exec "$CT" bash -c "$ROS && ros2 param set /$node $key ${kv#*=}" 2>&1 \
+    | grep -v '^Set parameter successful' | sed "s|^|  param $node/$key: |"
 done
 
 docker exec "$CT" rm -f /tmp/t1_report.json /tmp/t1_report.json.track.csv
