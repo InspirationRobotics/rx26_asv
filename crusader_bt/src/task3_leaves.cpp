@@ -102,9 +102,12 @@ public:
 /// wait until it is on it. For "dock", also how the dock model reads the bays' indicator
 /// colour: `indicator`, camera_node's live dock_indicator (no reload) - yolo, the
 /// detector's dock_indicator box (the default), or cv, colour thresholds at the base of
-/// each face. camera_node is always asked: the runner reads both first and sets only what
-/// differs, so a camera already right costs a round trip, not a reload, and no tree runs
-/// on the indicator the last one left behind. On the dock model means the ask answered
+/// each face. Also which detector: `dock_weights`, camera_node's dock_weights (a change
+/// reloads the dock model) - "" (the default) is dock_ffcv_dir's best.pt, the new detector;
+/// task3_scan_fire_old_dock names the Oct 3 one. camera_node is always asked: the runner
+/// reads them first and sets only what differs, so a camera already right costs a round
+/// trip, not a reload, and no tree runs on the indicator or the detector the last one left
+/// behind. On the dock model means the ask answered
 /// and two DockObservations since (the frame in flight at a switch may be the old way).
 /// FAILURE when camera_node is not up, refuses, or timeout_s passes. A camera restart comes
 /// back on its YAML model (buoy), which is blind to the dock: this is what stops a Task 3
@@ -120,6 +123,9 @@ public:
       BT::InputPort<std::string>("indicator", "yolo",
         "dock only: yolo (the detector's indicator box, colour_core) | cv (colour thresholds "
         "at the base of each face) - camera_node dock_indicator"),
+      BT::InputPort<std::string>("dock_weights", "",
+        "dock only: the detector, \"\" = dock_ffcv_dir's best.pt (the new one), else a .pt "
+        "path on the boat - camera_node dock_weights; a change reloads the dock model"),
       BT::InputPort<double>("timeout_s", 15.0, "FAILURE when not on it after this")};
   }
 
@@ -130,6 +136,9 @@ public:
     if (model_ == "dock" && indicator_ != "yolo" && indicator_ != "cv") {
       return fail("indicator must be yolo or cv, not '" + indicator_ + "'");
     }
+    // A "{dock_weights}" that names no blackboard entry (a wrapper that does not set it) is
+    // the default: the new detector.
+    weights_ = model_ == "dock" ? getInput<std::string>("dock_weights").value_or("") : "";
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       t0_ = ctx_->now_s;
@@ -138,7 +147,7 @@ public:
     }
     acked_ = false;
     std::string why = "bt_runner_node has no way to ask camera_node";
-    if (!ctx_->set_camera_model || !ctx_->set_camera_model(model_, indicator_, why)) {
+    if (!ctx_->set_camera_model || !ctx_->set_camera_model(model_, indicator_, weights_, why)) {
       return fail(why);
     }
     RCLCPP_INFO(log(), "camera_node -> the %s", what().c_str());
@@ -192,15 +201,17 @@ private:
     return BT::NodeStatus::FAILURE;
   }
 
-  /// "dock model (indicator by cv)", for the log and the reasons.
+  /// "dock model (indicator by cv, new weights)", for the log and the reasons.
   std::string what() const
   {
-    return model_ + " model" + (indicator_.empty() ? "" : " (indicator by " + indicator_ + ")");
+    if (indicator_.empty()) {return model_ + " model";}
+    return model_ + " model (indicator by " + indicator_ + ", " +
+           (weights_.empty() ? std::string("new weights") : "weights " + weights_) + ")";
   }
 
   static constexpr double kFreshS = 1.0;
   static constexpr std::uint32_t kFramesAfterAck = 2;
-  std::string model_, indicator_;
+  std::string model_, indicator_, weights_;
   double t0_ = 0.0;
   bool acked_ = false;                ///< the answer seen, and the frame count then
   std::uint32_t seq_ack_ = 0;

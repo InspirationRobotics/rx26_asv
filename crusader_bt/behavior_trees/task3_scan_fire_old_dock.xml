@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<!-- MISSION: Task 3 scan fire on the OLD dock detector (Oct 3 weights) - otherwise identical to task3_scan_fire. -->
+<!--
+  task3_scan_fire_old_dock.xml - task3_scan_fire.xml run on the OLD dock detector: the Oct 3
+  weights, models/ffcv_c1002_2026-10-03/best.pt, instead of the new one (models/ffcv/best.pt).
+  Everything else is task3_scan_fire's: the same body (lib/task3_scan_fire.xml,
+  Task3ScanFire), the same guard band and Task 4 guard, and the same colour rule, window size
+  and confidence from models/ffcv (only the weights change).
+
+  Switching detectors is switching missions in the GCS: task3_scan_fire for the new one (the
+  default), this file for the old one. No YAML is edited. SetCameraModel sets camera_node's
+  dock_weights, which reloads the dock model (a few seconds), and the next tree that runs puts
+  camera_node back on whatever detector it names (unset = the new one).
+
+  See task3_scan_fire.xml for the run itself.
+-->
+<root BTCPP_format="4" main_tree_to_execute="ScanFireOldDock">
+  <include path="lib/task3_scan_fire.xml"/>
+
+  <BehaviorTree ID="ScanFireOldDock">
+    <!-- the heartbeat's current_task (handbook 3.4.11): TASK_COORDINATED_LOGISTICS from
+         the first tick, TASK_NONE when the run ends; RoboCommand starts Task 3's
+         attempt on it -->
+    <TaskAttempt token="TASK_COORDINATED_LOGISTICS">
+      <ReactiveSequence name="guard_band">
+        <IsAutonomous manual="true"/>
+        <AvoidInvaders>
+          <SubTree ID="Task3ScanFire" _autoremap="true"
+                   dock_weights="/root/robotx_ws/models/ffcv_c1002_2026-10-03/best.pt"/>
+        </AvoidInvaders>
+      </ReactiveSequence>
+    </TaskAttempt>
+  </BehaviorTree>
+</root>

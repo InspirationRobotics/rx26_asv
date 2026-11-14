@@ -22,7 +22,7 @@
     1. FIND THE FIELD (skipped once a passage plan exists, so a Task 4 resume goes straight to 2).
        a. A static scan where the boat is: face the field centre (none: the bow), look at 0, -45
           and +45 deg for t1_scan_dwell_s each, done early once the field is known.
-       b. Not known yet: up to 6 vantage points 12 m from the field centre (one lap), the first
+       b. Not known yet: up to 6 vantage points 8 m from the field centre (one lap), the first
           on the boat's side, then 60 deg round each time; drive there and scan the same way.
           Without a field centre there are none.
        c. WaitForField: 60 s more for the field to become known, then FAILURE (Task 1 gives up;
@@ -70,7 +70,7 @@
         </Sequence>
         <RetryUntilSuccessful num_attempts="6">
           <Sequence name="look_from_round_the_field">
-            <PickFieldVantage radius_m="12.0" offsets_deg="0,60,120,180,240,300" goal="{vantage}"/>
+            <PickFieldVantage radius_m="8.0" offsets_deg="0,60,120,180,240,300" goal="{vantage}"/>
             <NavigateTo target="port" goal="{vantage}" tolerance="2.0" blocked_timeout_s="20.0"/>
             <ScanForBuoys face="field" offsets_deg="0,-45,45" dwell_s="{t1_scan_dwell_s}"
                           until="field"/>

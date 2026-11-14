@@ -10,6 +10,11 @@
   t3_lat_offset_m, t3_handover_m, t3_search_lat_us, and the approach's (t3_app_*) and the hold's
   (t3_hold_*) gains. It writes use_lidar, hold_m, bay, target, window and request there.
 
+  dock_weights, from the caller (a SubTree attribute): the dock detector SetCameraModel puts
+  camera_node on. Unset or "" is the new detector (models/ffcv/best.pt), the default for every
+  caller; task3_scan_fire_old_dock.xml names the Oct 3 one. Only the weights change: the colour
+  rule, window size and confidence stay models/ffcv's.
+
   Task 3 in one run, from the GCS with an APPROACH POINT (the Run
   box's approach lat/lon: a few metres in front of the dock) and a long timeout (3600 s).
 
@@ -54,7 +59,8 @@
            panel, put on the blackboard by bt_runner_node at Start) once the fire is out -->
       <Script code="hold_m := t3_hold_m"/>
 
-      <SetCameraModel model="dock" indicator="yolo" timeout_s="15.0"/>
+      <!-- the detector: the caller's dock_weights, unset = the new one -->
+      <SetCameraModel model="dock" indicator="yolo" dock_weights="{dock_weights}" timeout_s="15.0"/>
 
       <!-- 0-1. GUIDED to the waypoint, then MANUAL -->
       <!-- Reactive: MANUAL is checked on every tick, so the pilot switching to MANUAL

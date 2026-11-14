@@ -102,7 +102,7 @@
                   </SequenceWithMemory>
                 </ReactiveSequence>
               </ReactiveFallback>
-              <SubTree ID="Task3ScanFire" _autoremap="true"/>
+              <SubTree ID="Task3ScanFire" _autoremap="true" dock_weights=""/>
             </SequenceWithMemory>
           </AvoidInvaders>
         </TaskAttempt>

@@ -806,8 +806,8 @@ private:
         set_mode_pub_->publish(m);
       };
     ctx_->set_camera_model = [this](const std::string & model, const std::string & indicator,
-        std::string & why) {
-        return askCameraModel(model, indicator, why);
+        const std::string & weights, std::string & why) {
+        return askCameraModel(model, indicator, weights, why);
       };
     ctx_->release_sticks = [this]() {
         crusader_msgs::msg::RcChannels m;
@@ -817,18 +817,35 @@ private:
       };
   }
 
-  /// SetCameraModel's ask: camera_node's `model`, and its `dock_indicator` when `indicator`
-  /// is not "". Both are read first and only what differs is set: a `model` set reloads the
-  /// model even to the value in force, seconds with no detections (`dock_indicator` never
-  /// reloads). The answer lands in ctx_->camera_model_ack, and only the newest ask's does.
-  bool askCameraModel(const std::string & model, const std::string & indicator, std::string & why)
+  /// SetCameraModel's ask: camera_node's `model`, and on the dock model (`indicator` not "")
+  /// its `dock_indicator` and `dock_weights` ("" = dock_ffcv_dir's best.pt, the new detector).
+  /// All are read first and only what differs is set: a `model` set reloads the model even to
+  /// the value in force, seconds with no detections, and so does a `dock_weights` change on
+  /// the dock model (`dock_indicator` never reloads). The answer lands in
+  /// ctx_->camera_model_ack, and only the newest ask's does.
+  bool askCameraModel(
+    const std::string & model, const std::string & indicator, const std::string & weights,
+    std::string & why)
   {
     if (!camera_params_->service_is_ready()) {
       why = camera_node_ + " has no parameter service: is it running?";
       return false;
     }
+    std::vector<CameraWant> want;
+    // Set in this order: rclpy applies a multi-parameter set one parameter at a time, so the
+    // weights must be in place before `model` loads the dock model, or it loads twice and
+    // runs the detector the last tree left behind in between.
+    if (!indicator.empty()) {
+      want.push_back({"dock_weights", weights, weights.empty(),
+        "camera_node has no dock_weights parameter (an older build): it cannot run " +
+        weights});
+      want.push_back({"dock_indicator", indicator, indicator == "yolo",
+        "camera_node has no dock_indicator parameter (an older build): it cannot read the "
+        "indicator by " + indicator});
+    }
+    want.push_back({"model", model, false, ""});
     const int ask = ++camera_ask_;
-    askCamera(model, indicator, [this, ask](int ack, const std::string & reason) {
+    askCamera(want, [this, ask](int ack, const std::string & reason) {
         std::lock_guard<std::mutex> lk(ctx_->mu);
         if (ask != camera_ask_) {return;}
         ctx_->camera_model_ack = ack;
@@ -837,40 +854,50 @@ private:
     return true;
   }
 
+  /// One camera_node string parameter an ask wants. `optional`: an older camera_node without
+  /// the parameter already does what `value` asks, so it is dropped and the rest asked again;
+  /// otherwise that camera_node cannot do it, and `missing` says why.
+  struct CameraWant
+  {
+    std::string name, value;
+    bool optional;
+    std::string missing;
+  };
+
   /// askCameraModel's read, then set. rclpy answers a read that names an undeclared
-  /// parameter with no values: a camera_node from before dock_indicator, which reads the
-  /// indicator the yolo way and no other, so for yolo it is asked again for the model alone.
-  void askCamera(
-    const std::string & model, const std::string & indicator,
-    std::function<void(int, const std::string &)> answer)
+  /// parameter with no values at all: a camera_node from before dock_weights (or before
+  /// dock_indicator too). The newest of the dock parameters is then dropped if it asks for
+  /// what that build does anyway (weights "", indicator yolo), and the camera asked again;
+  /// else the ask is refused, saying why.
+  void askCamera(std::vector<CameraWant> want, std::function<void(int, const std::string &)> answer)
   {
     using Params = std::shared_future<std::vector<rclcpp::Parameter>>;
     using Results = std::shared_future<std::vector<rcl_interfaces::msg::SetParametersResult>>;
-    std::vector<std::string> names{"model"};
-    if (!indicator.empty()) {names.push_back("dock_indicator");}
-    camera_params_->get_parameters(names, [this, model, indicator, names, answer](Params f) {
+    std::vector<std::string> names;
+    for (const auto & w : want) {names.push_back(w.name);}
+    camera_params_->get_parameters(names, [this, want, answer](Params f) {
         try {
           const auto now = f.get();
-          auto holds = [&now](std::size_t i, const std::string & want) {
+          auto is_string = [&now](std::size_t i) {
               return i < now.size() &&
-                     now[i].get_type() == rclcpp::ParameterType::PARAMETER_STRING &&
-                     now[i].as_string() == want;
+                     now[i].get_type() == rclcpp::ParameterType::PARAMETER_STRING;
             };
-          if (!indicator.empty() && (now.size() < names.size() ||
-            now[1].get_type() != rclcpp::ParameterType::PARAMETER_STRING))
-          {
-            if (indicator == "yolo") {
-              askCamera(model, "", answer);
+          bool all = now.size() >= want.size();
+          for (std::size_t i = 0; all && i < want.size(); ++i) {all = is_string(i);}
+          if (!all && want.size() > 1) {
+            // want.front() is the newest dock parameter still asked about (`model` is last)
+            if (!want.front().optional) {
+              answer(-1, want.front().missing);
               return;
             }
-            answer(-1, "camera_node has no dock_indicator parameter (an older build): it "
-              "cannot read the indicator by " + indicator);
+            askCamera(std::vector<CameraWant>(want.begin() + 1, want.end()), answer);
             return;
           }
           std::vector<rclcpp::Parameter> set;
-          if (!holds(0, model)) {set.emplace_back("model", model);}
-          if (!indicator.empty() && !holds(1, indicator)) {
-            set.emplace_back("dock_indicator", indicator);
+          for (std::size_t i = 0; i < want.size(); ++i) {
+            if (!is_string(i) || now[i].as_string() != want[i].value) {
+              set.emplace_back(want[i].name, want[i].value);
+            }
           }
           if (set.empty()) {
             answer(1, "");

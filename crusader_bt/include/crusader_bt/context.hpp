@@ -383,11 +383,12 @@ struct Context
   /// Ask the autopilot for a flight mode: /crsd/set_mode (RequestMode).
   std::function<void(const std::string &)> request_mode;
   /// Ask camera_node for a model (its live `model` parameter, SetCameraModel) and, when
-  /// `indicator` is not "", how the dock model reads the indicator (its live
-  /// `dock_indicator`: yolo | cv). False, with the reason in `why`, when it cannot be asked;
-  /// the answer lands in camera_model_ack.
+  /// `indicator` is not "" (the dock model), how the dock model reads the indicator (its live
+  /// `dock_indicator`: yolo | cv) and which detector it runs (its `dock_weights`: "" for
+  /// dock_ffcv_dir's best.pt, the new one, else a .pt path). False, with the reason in `why`,
+  /// when it cannot be asked; the answer lands in camera_model_ack.
   std::function<bool(const std::string & model, const std::string & indicator,
-    std::string & why)> set_camera_model;
+    const std::string & weights, std::string & why)> set_camera_model;
   int camera_model_ack = 0;                   ///< the last ask: 0 waiting, 1 applied, -1 refused
   std::string camera_model_why;               ///< camera_node's refusal, then the leaf's FAILURE
 };

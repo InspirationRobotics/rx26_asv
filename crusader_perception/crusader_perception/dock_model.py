@@ -23,6 +23,12 @@ THE MODEL IS INTERIM: its card says it was trained on the incorrectly built mock
 
 dock_ffcv_dir holds best.pt, colour_core.py, geometry_core.py, dock_sequence_core.py,
 window_template.json, ffcv.yaml and colour_eval_full.json (the fitted thresholds).
+
+THE WEIGHTS, `dock_weights` (camera_node, dynamic, a change reloads the dock model): "" is
+dock_ffcv_dir's best.pt, the current (new) detector; a path is another detector's .pt, run
+with dock_ffcv_dir's cores, config and thresholds all the same. Task 3 trees set it with
+SetCameraModel (task3_scan_fire_old_dock names the Oct 3 detector), so the GCS mission picks
+the detector and no YAML is edited.
 """
 import json
 import os
@@ -39,6 +45,7 @@ PARAMS = {
     "dock_ffcv_dir": "/root/robotx_ws/models/ffcv",
     "dock_conf": 0.0,                   # detector confidence; 0 = ffcv.yaml's eval.conf
     "dock_indicator": "yolo",           # yolo | cv: how the indicator's colour is read (above)
+    "dock_weights": "",                 # "" = dock_ffcv_dir/best.pt; else a .pt path (above)
     # cv's settings, dock_cv_<name> (indicator_cv_settings.DEFAULTS). A call into a pure-Python
     # module: check_config imports it to read these without ROS or numpy
     **indicator_cv_settings.as_params(),
@@ -55,6 +62,26 @@ def live_settings(p):
         raise ValueError(f"dock_indicator must be one of {', '.join(INDICATOR_MODES)}, "
                          f"not {mode!r}")
     return mode, indicator_cv_settings.from_params(p)
+
+
+# Changing one reloads the dock model (camera_node), unlike LIVE
+RELOAD = ("dock_weights",)
+
+
+def weights_path(p, check=True):
+    """The detector's .pt from camera_node's parameters `p`: dock_weights, or dock_ffcv_dir's
+    best.pt when it is "". With `check`, ValueError, saying what is wrong, for a named file
+    that is not an existing .pt, so a bad `ros2 param set` is refused before anything reloads.
+    The default is not checked here: a missing best.pt fails the load itself, as it always has."""
+    named = str(p.get("dock_weights", "") or "").strip()
+    if not named:
+        return os.path.join(p["dock_ffcv_dir"], "best.pt")
+    if check:
+        if not named.endswith(".pt"):
+            raise ValueError(f"dock_weights must be a .pt file, not {named!r}")
+        if not os.path.isfile(named):
+            raise ValueError(f"dock_weights {named!r} does not exist")
+    return named
 
 
 DET_W, DET_H = 640, 400
@@ -187,9 +214,9 @@ class DockModel:
          thr) = load_ffcv(d)
         self.classes = self.cfg["classes"]
         self.conf = p["dock_conf"] or float(self.cfg["eval"]["conf"])
-        weights = os.path.join(d, "best.pt")
+        weights = self.weights = weights_path(p)
         log.info(f"loading {weights} (classes {self.classes}, conf {self.conf}, colour "
-                 f"thresholds: {thr})")
+                 f"thresholds: {thr}, cores from {d})")
         self.model = YOLO(weights, task="detect")
         self.seqs = {}                          # per bay index, for the picture
         self.track_seq = self.DockSequence(self.cfg["sequence"])   # the tracked bay
@@ -305,7 +332,7 @@ class DockModel:
                 + (f"  reflections dropped {self.reflections}" if self.reflections else ""))
 
     def health(self):
-        return dict(det_ms=round(self.det_ms, 1), boxes=self.counts,
+        return dict(weights=self.weights, det_ms=round(self.det_ms, 1), boxes=self.counts,
                     reflections=self.reflections, indicator_by=self.indicator,
                     bays=[dict(indicator=b["indicator"] and b["indicator"]["colour"],
                                cv=b["cv"] and dict(red=round(b["cv"]["red"], 4),

@@ -1,6 +1,8 @@
 """camera_node with source topic and stand-in models: no depthai, no ultralytics, no camera.
 Needs rclpy, a built crusader_msgs and cv2; skips itself without them."""
 import json
+import os
+import tempfile
 import time
 import unittest
 
@@ -75,6 +77,7 @@ class FakeDock(FakeBuoy):
         self.closed = False
         self.seen = []
         self.live = []                  # every set_params: (dock_indicator, dock_cv_sat_min)
+        self.weights = p["dock_weights"]  # the detector this load was asked for
         self.set_params(p)
 
     def set_params(self, p):
@@ -219,6 +222,57 @@ class CameraNodeTopicSource(unittest.TestCase):
         self.assertTrue(self.setp("model", Parameter.Type.STRING, "dock").successful)
         self.assertTrue(wait(lambda: self.node.model_state == "dock ready"))
         self.assertEqual(self.node._model.live[-1], ("yolo", 0.3))   # the settings at load
+
+    def test_dock_weights_reload(self):
+        """dock_weights picks the detector: a change reloads the dock model once, with the new
+        weights; the same value does not; a bad path is refused whole; off the dock model it is
+        only kept, and the next dock load starts on it. Waits after an unload are long: the
+        first free_gpu() imports torch, seconds on the Jetson."""
+        with tempfile.TemporaryDirectory() as d:
+            old = os.path.join(d, "old.pt")
+            open(old, "wb").close()
+            self.assertTrue(self.setp("model", Parameter.Type.STRING, "dock").successful)
+            self.assertTrue(wait(lambda: self.node.model_state == "dock ready", timeout=30.0))
+            first = self.node._model
+            self.assertEqual(first.weights, "")                   # the new one by default
+            self.assertTrue(self.setp("dock_weights", Parameter.Type.STRING, old).successful)
+            self.assertTrue(wait(lambda: self.node._model is not None
+                                 and self.node._model is not first
+                                 and self.node.model_state == "dock ready", timeout=30.0))
+            self.assertEqual(self.node._model.weights, old)
+            self.assertTrue(first.closed)
+            second = self.node._model
+            self.assertTrue(self.setp("dock_weights", Parameter.Type.STRING, old).successful)
+            time.sleep(0.2)
+            self.assertIs(self.node._model, second)               # same value: no reload
+            self.assertEqual(self.node.model_state, "dock ready")
+            for bad in (os.path.join(d, "missing.pt"), os.path.join(d, "old.onnx")):
+                self.assertFalse(self.setp("dock_weights", Parameter.Type.STRING, bad).successful)
+            self.assertEqual(self.node.p["dock_weights"], old)
+            self.assertIs(self.node._model, second)
+            self.assertTrue(self.setp("model", Parameter.Type.STRING, "buoy").successful)
+            self.assertTrue(wait(lambda: self.node.model_state == "buoy ready", timeout=30.0))
+            buoy = self.node._model
+            self.assertTrue(self.setp("dock_weights", Parameter.Type.STRING, "").successful)
+            time.sleep(0.2)
+            self.assertIs(self.node._model, buoy)                 # off the dock model: kept only
+            self.assertEqual(self.node.model_state, "buoy ready")
+            self.assertTrue(self.setp("model", Parameter.Type.STRING, "dock").successful)
+            self.assertTrue(wait(lambda: self.node.model_state == "dock ready", timeout=30.0))
+            self.assertEqual(self.node._model.weights, "")        # the load starts on it
+
+    def test_weights_path(self):
+        from crusader_perception import dock_model as dm
+        p = {"dock_ffcv_dir": "/m/ffcv", "dock_weights": ""}
+        self.assertEqual(dm.weights_path(p), "/m/ffcv/best.pt")
+        with tempfile.TemporaryDirectory() as d:
+            pt = os.path.join(d, "a.pt")
+            open(pt, "wb").close()
+            self.assertEqual(dm.weights_path(dict(p, dock_weights=pt)), pt)
+            with self.assertRaises(ValueError):
+                dm.weights_path(dict(p, dock_weights=os.path.join(d, "b.pt")))
+            with self.assertRaises(ValueError):
+                dm.weights_path(dict(p, dock_weights=os.path.join(d, "a.engine")))
 
     def test_health(self):
         rec = _Rec()

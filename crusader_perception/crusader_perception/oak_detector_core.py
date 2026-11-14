@@ -51,11 +51,22 @@ PARAMS = {
     "colour_min_share": 0.6,
     "flash_period_s": 2.0,                  # RobotX Task 1: 1 s ON / 1 s OFF
     "flash_corr_min": 0.45,
-    "flash_debug_path": "",                 # jsonl of every observation, for replay
+    "flash_debug_path": "",
+    "light_raw_labels": True,               # publish each frame's light READING (lit<NN>_<colour>
+                                            # _<shape>) and let target_tracker decide flashing
+                                            # per buoy over every look; false = this node's
+                                            # per-image-track flash_/off_ labels                 # jsonl of every observation, for replay
     "range_min_m": 0.3,
     "range_max_m": 25.0,
     "min_depth_samples": 5,
 }
+
+
+def reading_label(lit_score, colour, shape):
+    """One frame's light reading for target_tracker: lit<NN>_<colour>_<shape>, NN = round(100 x
+    lit score), colour = the most likely LIT class. Parsed by crusader_world_model light_core
+    (READING): change both or neither."""
+    return "lit%d_%s_%s" % (int(round(100.0 * min(1.0, max(0.0, lit_score)))), colour, shape)
 
 
 # The colours rg_must_flash holds back until seen flashing (handbook Task 1: flashing RED and

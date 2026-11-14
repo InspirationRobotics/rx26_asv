@@ -347,7 +347,8 @@ static void run(const Scenario & sc, const std::string & trace_dir)
         guided_t = ctx->now_s;
       }
     };
-  ctx->set_camera_model = [&](const std::string &, const std::string &, std::string &) {
+  ctx->set_camera_model = [&](const std::string &, const std::string &, const std::string &,
+      std::string &) {
       ctx->camera_model_ack = 1;
       return true;
     };

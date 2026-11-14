@@ -529,17 +529,26 @@ static void failureTraceTests()
 /// A Rig whose camera_node answers through `up`: false = no parameter service.
 struct CameraRig : Rig
 {
-  std::vector<std::string> asks;      ///< "model|indicator" per ask ("" off the dock model)
+  /// "model|indicator|weights" per ask (indicator and weights "" off the dock model; weights
+  /// "" = the new detector, dock_ffcv_dir's best.pt)
+  std::vector<std::string> asks;
   bool up = true;
 
   CameraRig()
   {
     ctx->set_camera_model = [this](const std::string & m, const std::string & i,
-        std::string & why) {
+        const std::string & w, std::string & why) {
         if (!up) {why = "/camera_node has no parameter service"; return false;}
-        asks.push_back(m + "|" + i);
+        asks.push_back(m + "|" + i + "|" + w);
         return true;
       };
+  }
+
+  /// A whole file's trees, main_tree_to_execute="Main": for SubTree ports.
+  void loadFile(const std::string & trees)
+  {
+    tree = factory.createTreeFromText(
+      "<root BTCPP_format=\"4\" main_tree_to_execute=\"Main\">" + trees + "</root>", bb);
   }
 
   /// A DockObservation arrives: what the dock model, running, publishes every frame.
@@ -559,7 +568,7 @@ static void setCameraModelTests()
     r.observation();
     r.load(dock);
     chk("dock frames already arriving: asks anyway (they may be the other indicator's)",
-      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|yolo");
+      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|yolo|");
     r.ctx->camera_model_ack = 1;
     chk("accepted: RUNNING until two frames since the answer", r.tick() == RUN);
     r.observation();
@@ -571,7 +580,7 @@ static void setCameraModelTests()
     CameraRig r;                                        // dock_obs_age_s: never (1e9)
     r.load(dock);
     chk("on buoy: asks camera_node for dock, indicator yolo (the default), RUNNING",
-      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|yolo");
+      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|yolo|");
     r.ctx->camera_model_ack = 1;
     r.ctx->now_s = 2.0;
     chk("accepted, no observation yet: still RUNNING", r.tick() == RUN);
@@ -583,7 +592,7 @@ static void setCameraModelTests()
     CameraRig r;
     r.load("<SetCameraModel model=\"dock\" indicator=\"cv\" timeout_s=\"15\"/>");
     chk("indicator cv: asks for the dock model reading the indicator by cv",
-      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|cv");
+      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|cv|");
     r.ctx->camera_model_ack = 1;
     r.tick();
     r.observation();
@@ -597,7 +606,7 @@ static void setCameraModelTests()
     r.ctx->camera_model_ack = -1;
     r.ctx->camera_model_why = "camera_node has no dock_indicator parameter (an older build)";
     chk("a camera_node that cannot read by cv: FAILURE, saying so", r.tick() == BAD &&
-      r.ctx->camera_model_why.find("camera_node refused the dock model (indicator by cv): "
+      r.ctx->camera_model_why.find("camera_node refused the dock model (indicator by cv, new weights): "
       "camera_node has no dock_indicator") == 0);
   }
   {
@@ -629,7 +638,7 @@ static void setCameraModelTests()
     r.ctx->camera_model_ack = -1;
     r.ctx->camera_model_why = "model must be one of none, buoy, dock";
     chk("camera_node refuses: FAILURE, its reason kept for the GCS", r.tick() == BAD &&
-      r.ctx->camera_model_why.find("camera_node refused the dock model (indicator by yolo): "
+      r.ctx->camera_model_why.find("camera_node refused the dock model (indicator by yolo, new weights): "
       "model must be") == 0);
   }
   {
@@ -648,9 +657,71 @@ static void setCameraModelTests()
     r.observation();                                    // dock frames do not mean buoy
     r.load("<SetCameraModel model=\"buoy\" indicator=\"cv\"/>");
     chk("buoy: asks, even with dock frames arriving, and no indicator", r.tick() == RUN &&
-      r.asks.size() == 1 && r.asks[0] == "buoy|");
+      r.asks.size() == 1 && r.asks[0] == "buoy||");
     r.ctx->camera_model_ack = 1;
     chk("buoy accepted: SUCCESS", r.tick() == OK);
+  }
+
+  std::printf("\n7b. SetCameraModel: which dock detector (dock_weights)\n");
+  const std::string old_pt = "/root/robotx_ws/models/ffcv_c1002_2026-10-03/best.pt";
+  {
+    CameraRig r;
+    r.load("<SetCameraModel model=\"dock\" dock_weights=\"" + old_pt + "\"/>");
+    chk("dock_weights named: asked for, with the indicator's default",
+      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|yolo|" + old_pt);
+    r.ctx->camera_model_ack = 1;
+    r.tick();
+    r.observation();
+    r.observation();
+    chk("... two frames after the answer (the reload done): SUCCESS", r.tick() == OK);
+  }
+  {
+    CameraRig r;
+    r.load("<SetCameraModel model=\"dock\" dock_weights=\"{dock_weights}\"/>");
+    chk("dock_weights from a blackboard entry nobody set: the new detector (\"\")",
+      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|yolo|");
+  }
+  {
+    CameraRig r;
+    r.load("<SetCameraModel model=\"buoy\" dock_weights=\"" + old_pt + "\"/>");
+    chk("buoy: dock_weights not asked about", r.tick() == RUN && r.asks.size() == 1 &&
+      r.asks[0] == "buoy||");
+  }
+  {
+    CameraRig r;
+    r.load("<SetCameraModel model=\"dock\" dock_weights=\"/nowhere/x.pt\"/>");
+    r.tick();
+    r.ctx->camera_model_ack = -1;
+    r.ctx->camera_model_why = "dock_weights '/nowhere/x.pt' does not exist";
+    chk("camera_node refuses the weights: FAILURE naming them", r.tick() == BAD &&
+      r.ctx->camera_model_why.find("camera_node refused the dock model (indicator by yolo, "
+      "weights /nowhere/x.pt): dock_weights '/nowhere/x.pt' does not exist") == 0);
+  }
+  // The trees: lib/task3_scan_fire.xml's leaf reads {dock_weights}; task3_scan_fire.xml passes
+  // "" and task3_scan_fire_old_dock.xml the Oct 3 path, as SubTree attributes (_autoremap)
+  const std::string body =
+    "<BehaviorTree ID=\"Body\"><SetCameraModel model=\"dock\" indicator=\"yolo\" "
+    "dock_weights=\"{dock_weights}\" timeout_s=\"15.0\"/></BehaviorTree>";
+  {
+    CameraRig r;
+    r.loadFile(body + "<BehaviorTree ID=\"Main\"><SubTree ID=\"Body\" _autoremap=\"true\" "
+      "dock_weights=\"" + old_pt + "\"/></BehaviorTree>");
+    chk("old-dock wrapper: the SubTree's literal reaches the leaf",
+      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|yolo|" + old_pt);
+  }
+  {
+    CameraRig r;
+    r.loadFile(body + "<BehaviorTree ID=\"Main\"><SubTree ID=\"Body\" _autoremap=\"true\" "
+      "dock_weights=\"\"/></BehaviorTree>");
+    chk("new wrapper (dock_weights=\"\"): the new detector",
+      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|yolo|");
+  }
+  {
+    CameraRig r;
+    r.loadFile(body + "<BehaviorTree ID=\"Main\"><SubTree ID=\"Body\" _autoremap=\"true\"/>"
+      "</BehaviorTree>");
+    chk("a wrapper that does not set it: the new detector",
+      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|yolo|");
   }
 }
 

@@ -9,6 +9,9 @@
           dock_indicator yolo | cv, live, no reload: how the dock model reads the bays'
                  indicator colour (dock_model). Task 3 trees set it with SetCameraModel;
                  its dock_cv_* settings are live too, for tuning on the water.
+          dock_weights   "" (dock_ffcv_dir/best.pt) or another detector's .pt: a change
+                 reloads the dock model. Task 3 trees set it with SetCameraModel, so the
+                 GCS mission chooses the detector (dock_model).
   out     /crsd/camera/image/compressed  the annotated picture, only while subscribed
           /crsd/camera/raw/compressed    the frame the model saw, full size, only while
                                          subscribed: what a recording wants (frames with
@@ -64,7 +67,7 @@ RANGES = {
     **oak_controls.ranges(),
 }
 DYNAMIC = ("model", "image_max_width", "image_quality", "image_max_hz",
-           *dock_model.LIVE, *oak_controls.defaults())
+           *dock_model.LIVE, *dock_model.RELOAD, *oak_controls.defaults())
 MODELS = {"buoy": buoy_model.BuoyModel, "dock": dock_model.DockModel}
 
 # How long teardown waits for depthai to let go of the camera: under the ground station's
@@ -291,6 +294,11 @@ class CameraNode(Node):
         live = any(k in dock_model.LIVE for k in changes)
         if live:
             dock_model.live_settings(dict(self.p, **changes))   # a bad one refuses the set
+        # another detector's weights: checked now, and the dock model reloaded only when they
+        # differ from the ones in force (a set to the same value costs no reload)
+        reload = any(k in dock_model.RELOAD and changes[k] != self.p[k] for k in changes)
+        if reload:
+            dock_model.weights_path(dict(self.p, **changes))    # a bad one refuses the set
         error = oak_controls.validate(changes)
         if error:
             raise ValueError(error)
@@ -304,7 +312,11 @@ class CameraNode(Node):
             with self._run_lock:            # between two frames, never inside one
                 self._push_live(self._model)
         if "model" in changes:
-            self._set_model(changes["model"])
+            self._set_model(changes["model"])   # loads with the weights just set, if any
+        elif reload and self.p["model"] == "dock":
+            self.get_logger().info(f"dock weights -> {dock_model.weights_path(self.p)}: "
+                                   "reloading the dock model")
+            self._set_model("dock")
 
     def _push_live(self, model):
         """The live settings onto `model`, if it takes them. Under _run_lock."""

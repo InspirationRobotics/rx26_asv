@@ -43,6 +43,9 @@
   guess from the bays seen either side and the slide direction (start at the dock's right
   end when sliding left). The indicator colour comes from the classifier (indicator="yolo";
   task3_scan_fire_cv reads it by colour thresholds).
+
+  THE DOCK DETECTOR: the new one, models/ffcv/best.pt (dock_weights=""). The same run on the
+  Oct 3 detector is task3_scan_fire_old_dock.xml: pick that mission in the GCS instead.
 -->
 <root BTCPP_format="4" main_tree_to_execute="ScanFire">
   <include path="lib/task3_scan_fire.xml"/>
@@ -55,7 +58,7 @@
       <ReactiveSequence name="guard_band">
         <IsAutonomous manual="true"/>
         <AvoidInvaders>
-          <SubTree ID="Task3ScanFire" _autoremap="true"/>
+          <SubTree ID="Task3ScanFire" _autoremap="true" dock_weights=""/>
         </AvoidInvaders>
       </ReactiveSequence>
     </TaskAttempt>

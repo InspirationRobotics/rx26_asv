@@ -33,7 +33,7 @@ import numpy as np
 from crusader_msgs.msg import Detection3D, Detection3DArray
 from crusader_perception.oak_detector_core import (MUST_FLASH, FlashTracker, LabelVoter,
                                                    ShapeVoter, TrackTable, beacon_patch,
-                                                   buoy_patch, marking_shape)
+                                                   buoy_patch, marking_shape, reading_label)
 # The cls_labels entry that means "unlit". Fixed by the dataset's folder names, not chosen
 # at run time.
 OFF_CLASS = "off"
@@ -93,7 +93,7 @@ class BuoyModel:
             flash_period_s=p["flash_period_s"], flash_corr_min=p["flash_corr_min"])
         self.batched = True                 # until the engine says otherwise
         self.det_ms = self.cls_ms = self.shape_ms = 0.0
-        self.counts = dict(detections=0, no_depth=0, no_crop=0, unresolved=0, no_shape=0,
+        self.counts = dict(detections=0, no_depth=0, no_crop=0, unresolved=0, no_shape=0, other_class=0,
                            not_flashing=0)
         self.states = {}                    # track id -> latest FlashState
         self.drawn = []
@@ -142,6 +142,11 @@ class BuoyModel:
                 self.log.error(f"detector returned class {index} but det_labels has "
                                f"{len(self.shapes)} names: check it against the engine",
                                throttle_duration_sec=10.0)
+                continue
+            if self.shapes[index] not in SHAPE_NAMES:
+                # The task1 detector also boxes the beacon, markers and other buoys: only a
+                # marked buoy BODY is a buoy here (its beacon crop is cut above the body).
+                self.counts["other_class"] += 1
                 continue
             boxes.append(tuple(int(v) for v in box.xyxy[0]))
             shapes.append(self.shapes[index])
@@ -245,7 +250,7 @@ class BuoyModel:
                 self.counts["no_depth"] += 1
                 continue
             d = Detection3D()
-            d.label = label
+            d.label = self._published_label(label, probs, shapes[i])
             # The detector's "is this a buoy". The light state's confidence lives in the
             # label (an uncertain state degrades it) and on /crsd/camera/health.
             d.confidence = confidences[i]
@@ -255,6 +260,18 @@ class BuoyModel:
             array.detections.append(d)
         self.counts["detections"] += len(array.detections)
         return array
+
+    def _published_label(self, label, probs, shape):
+        """light_raw_labels: this frame's READING (target_tracker decides the light per buoy,
+        over every look); a box with no classified crop is its bare shape. Otherwise the
+        image track's label, as drawn."""
+        if not self.p.get("light_raw_labels", False) or self.off_index is None:
+            return label
+        if probs is None:
+            return shape
+        lit = [i for i in range(len(self.colours)) if i != self.off_index]
+        best = max(lit, key=lambda i: float(probs[i]))
+        return reading_label(1.0 - float(probs[self.off_index]), self.colours[best], shape)
 
     def _write_debug(self, now, track_id, shape, det_conf, box, probs, frame_index, colour,
                      state):
