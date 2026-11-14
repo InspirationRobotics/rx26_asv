@@ -139,6 +139,12 @@ class TrackerParams:
     range_gate_sigmas: float = 2.5
     assoc_min_m: float = 0.9         # the gate never below this
     vote_ambiguity_m: float = 0.0    # 0 = every sighting votes
+    # Two compatible tracks closer than this are ONE object and are merged after every
+    # cycle (votes and hits added, position weighted). A track dragged off its buoy by
+    # far sightings is replaced by a new one from close in; once the old one drifts back
+    # the field has two copies of that buoy, reported twice. Keep it under half the
+    # narrowest buoy spacing (1.86 m in Singapore). 0 = off.
+    merge_radius_m: float = 0.0
 
     # -- MAPPED FIELD PRIOR (stage 2b, between projection and association). OFF
     # until TargetTracker.set_prior() is given the mapped buoy positions (the node:
@@ -755,6 +761,7 @@ class TargetTracker:
         stats["associated"] = 0
         stats["new_tracks"] = 0
         self._associate(projected, now, stats)
+        stats["merged"] = self._merge_close()
 
         stats["expired"] = self._prune(now)
         tracks = self.snapshot(boat)
@@ -876,6 +883,48 @@ class TargetTracker:
                 continue
             self._new_track(o, wx, wy, wz, now)
             stats["new_tracks"] += 1
+
+    def _merge_close(self) -> int:
+        """Merge compatible tracks within merge_radius_m (TrackerParams). Returns how many
+        went. The older track keeps its id; the position is the hit-weighted mean."""
+        r = self.p.merge_radius_m
+        if r <= 0.0:
+            return 0
+        n = 0
+        merged = True
+        while merged:
+            merged = False
+            for i, a in enumerate(self.tracks):
+                for b in self.tracks[i + 1:]:
+                    if math.hypot(a.x - b.x, a.y - b.y) >= r:
+                        continue
+                    if a.label_votes and b.label_votes and not (
+                            _family_of(a.label_votes, self.p) is not None
+                            and _family_of(a.label_votes, self.p)
+                            == _family_of(b.label_votes, self.p)
+                            or _majority(a.label_votes) == _majority(b.label_votes)):
+                        continue
+                    keep, gone = (a, b) if a.id < b.id else (b, a)
+                    wk, wg = max(keep.hits, 1), max(gone.hits, 1)
+                    f = wg / (wk + wg)
+                    keep.x += f * (gone.x - keep.x)
+                    keep.y += f * (gone.y - keep.y)
+                    keep.z += f * (gone.z - keep.z)
+                    keep.hits += gone.hits
+                    keep.info = min(keep.info + gone.info,
+                                    4.0 / max(self.p.range_sigma_floor_m, 1e-3) ** 2)
+                    for lb, k in gone.label_votes.items():
+                        keep.label_votes[lb] = keep.label_votes.get(lb, 0) + k
+                    keep.first_seen = min(keep.first_seen, gone.first_seen)
+                    keep.last_seen = max(keep.last_seen, gone.last_seen)
+                    keep.sources |= gone.sources
+                    self.tracks.remove(gone)
+                    n += 1
+                    merged = True
+                    break
+                if merged:
+                    break
+        return n
 
     def _unambiguous(self, d, ti, ds) -> bool:
         """May this sighting vote on its track's colour? Not when another compatible

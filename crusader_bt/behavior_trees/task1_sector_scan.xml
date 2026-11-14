@@ -17,7 +17,7 @@
 
     0. DRIVE TO THE APPROACH POINT when one is given.
     1. DRIVE TO THE FIELD CENTRE when one is given: NavigateTo with obstacle avoidance (Nav2,
-       nav_mode on), round every buoy the tracker knows; 2 m arrival, a leg blocked 30 s is given
+       nav_mode on), round every buoy the tracker knows; 5 m arrival, a leg blocked 15 s is given
        up and the survey runs from where the boat got to.
     2. SECTOR SURVEY at the centre: the bow as it arrived, then +60, +120, +180, +240, +300 deg,
        6 s on each heading once settled. All six, every time.
@@ -58,14 +58,16 @@
       </ForceSuccess>
 
       <!-- 1. drive to the field centre, planned round every buoy known so far (avoid is
-           NavigateTo's default; the camera adds buoys as they come into view). Stops 3 m short: the clicked middle of a field is
-           often a buoy (task1_sg's centre is b06). No centre set: skipped. A leg blocked 30 s is given up and the survey runs from where the boat is -->
+           NavigateTo's default; the camera adds buoys as they come into view). Within 5 m is there:
+           the clicked middle of a field is often ON a buoy (task1_sg's centre is b06), and Nav2
+           stops ~4 m short of a goal inside one (3 m held the boat 84 s, run d03). No centre set:
+           skipped. A leg blocked 15 s is given up and the survey runs from where the boat is -->
       <ForceSuccess name="drive_to_field_centre">
         <Sequence>
           <Inverter><PassageStarted/></Inverter>
           <FixGiven lat="{t1_field_lat}" lon="{t1_field_lon}"/>
-          <NavigateTo target="fix" lat="{t1_field_lat}" lon="{t1_field_lon}" tolerance="3.0"
-                      blocked_timeout_s="30.0"/>
+          <NavigateTo target="fix" lat="{t1_field_lat}" lon="{t1_field_lon}" tolerance="5.0"
+                      blocked_timeout_s="15.0"/>
         </Sequence>
       </ForceSuccess>
 

@@ -152,13 +152,18 @@ def robobuoy(e, body_mesh):
     pz = z0 + RB_H
     v.append(S.visual("beacon_pipe", S.cylinder(0.04445, 0.127), "white",
                       S.pose(0, 0, pz + 0.0635)))
-    side_c = col if (col and side_on) else "black"
+    # A FLASHING light is two layers: the black band here, and the lit band in its own model
+    # "<name>_led" (flash_led below), which beacon_flasher moves under water for the OFF half
+    # of every flash. A pose change reaches the camera sensors; a material change
+    # (visual_config) only reaches the GUI.
+    flashing = state.startswith("flash_")
+    side_c = col if (col and side_on and not flashing) else "black"
     v.append(S.visual("beacon_side", S.cylinder(0.047, 0.055), side_c,
                       S.pose(0, 0, pz + 0.127 - 0.0275 - 0.01),
                       emissive=1.0 if side_c != "black" else 0.0))
     v.append(S.visual("sun_hat", S.cylinder(0.127, 0.0048), "black",
                       S.pose(0, 0, pz + 0.127 + 0.0024)))
-    up_c = col if (col and up_on) else "black"
+    up_c = col if (col and up_on and not flashing) else "black"
     v.append(S.visual("beacon_up", S.cylinder(0.035, 0.003), up_c,
                       S.pose(0, 0, pz + 0.127 + 0.006),
                       emissive=1.0 if up_c != "black" else 0.0))
@@ -167,8 +172,25 @@ def robobuoy(e, body_mesh):
     # RENDER the visuals, so they see the frustum, not this.
     top = RB_H + 0.13
     coll = S.collision("body", S.box(W, W, top), S.pose(0, 0, z0 + top / 2))
+    led = flash_led(name, x, y, yaw, pz, col, side_on, up_on) if flashing and col else ""
     return (f'<model name="{name}"><static>true</static>{S.pose(x, y, 0, 0, 0, yaw)}'
-            f'<link name="link">{coll}{"".join(v)}</link></model>')
+            f'<link name="link">{coll}{"".join(v)}</link></model>{led}')
+
+
+def flash_led(name, x, y, yaw, pz, col, side_on, up_on):
+    """The lit half of a flashing beacon: model <name>_led, a hair outside the black band so it
+    covers it when ON (beacon_flasher sinks it to LED_OFF_Z when OFF). No collision."""
+    v = []
+    if side_on:
+        v.append(S.visual("beacon_side", S.cylinder(0.0475, 0.0555), col,
+                          S.pose(0, 0, pz + 0.127 - 0.0275 - 0.01), emissive=1.0))
+    if up_on:
+        v.append(S.visual("beacon_up", S.cylinder(0.0355, 0.0035), col,
+                          S.pose(0, 0, pz + 0.127 + 0.006), emissive=1.0))
+    if not v:
+        return ""
+    return (f'<model name="{name}_led"><static>true</static>{S.pose(x, y, 0, 0, 0, yaw)}'
+            f'<link name="link">{"".join(v)}</link></model>')
 
 
 # ------------------------------------------------------------------ Task 3 dock

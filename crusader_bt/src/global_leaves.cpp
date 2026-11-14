@@ -714,7 +714,11 @@ private:
       fp_.resend_m = getInput<double>("resend_m").value_or(0.3);
       fp_.end_tol_m = getInput<double>("end_tol_m").value_or(0.8);
       fp_.pass_early_m = stop_ ? 0.0 : fp_.lookahead_m + 0.5;
-      fp_.check_clear_m = std::min(ctx_->nav.hard_m - ctx_->nav.local_check_tol_m, plan_hard_ - 0.1);
+      // ... and never more than the plan itself kept: a leg loaded at 0.52 m (a lead-in from a
+      // boat off the plan) would otherwise block the moment it loads, re-plan the same leg every
+      // second and time out (run y01, exit orbit). Only something CLOSER than planned blocks.
+      fp_.check_clear_m = std::min({ctx_->nav.hard_m - ctx_->nav.local_check_tol_m,
+                                    plan_hard_ - 0.1, g.plan.min_clear - 0.1});
     }
     follower_.setParams(fp_);
     follower_.reset(std::move(path));

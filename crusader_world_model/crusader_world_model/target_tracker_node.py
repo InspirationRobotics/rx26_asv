@@ -112,6 +112,7 @@ PARAMS = {
     "range_gate_sigmas": 2.5,           # gate = this many sigma, in [assoc_min_m, assoc_radius_m]
     "assoc_min_m": 0.9,
     "vote_ambiguity_m": 0.0,            # another track this close = no colour vote; 0 = off
+    "merge_radius_m": 0.8,              # compatible tracks this close are one buoy; 0 = off
     # MAPPED FIELD PRIOR (target_tracker_core.TrackerParams says how): the mapped buoys as
     # "lat,lon;lat,lon;..." (the order does not matter). "" = OFF, every sighting tracked
     # as before. Live: a set re-places the map at the next cycle.
@@ -139,7 +140,7 @@ RANGES = {
     "track_timeout_s": (0.0, 3600.0), "max_tracks": (1, 1000), "colour_min_votes": (1, 1000),
     "colour_min_ratio": (0.0, 1.0), "turn_smear_max_m": (0.0, 20.0), "turn_skew_s": (0.0, 2.0),
     "range_sigma_k": (0.0, 0.1), "range_sigma_floor_m": (0.01, 2.0),
-    "range_gate_sigmas": (0.5, 10.0), "assoc_min_m": (0.2, 20.0), "vote_ambiguity_m": (0.0, 5.0),
+    "range_gate_sigmas": (0.5, 10.0), "assoc_min_m": (0.2, 20.0), "vote_ambiguity_m": (0.0, 5.0), "merge_radius_m": (0.0, 3.0),
     "prior_snap_m": (0.1, 5.0), "prior_zone_m": (0.1, 10.0), "prior_margin_m": (0.0, 5.0),
     "prior_snap_range_m": (1.0, 60.0), "prior_align_max_m": (0.0, 10.0),
 }
@@ -158,7 +159,7 @@ _CORE_PARAMS = (
     "colour_unknown_label", "colour_min_votes", "colour_min_ratio",
     "turn_smear_max_m", "turn_skew_s",
     "range_sigma_k", "range_sigma_floor_m", "range_gate_sigmas", "assoc_min_m",
-    "vote_ambiguity_m",
+    "vote_ambiguity_m", "merge_radius_m",
     "prior_snap_m", "prior_zone_m", "prior_margin_m", "prior_snap_range_m",
     "prior_align_max_m")
 

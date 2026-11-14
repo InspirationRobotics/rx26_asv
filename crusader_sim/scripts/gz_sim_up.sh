@@ -234,6 +234,9 @@ nohup gz sim -s -r "$WORLD" > /tmp/gz_server.log 2>&1 &
 sleep 5
 pgrep -f "gz sim -s" >/dev/null || die "gz server exited — see /tmp/gz_server.log"
 echo "  server up (log /tmp/gz_server.log)"
+pkill -f "crusader_sim.beacon_flasher" 2>/dev/null
+nohup python3 -m crusader_sim.beacon_flasher "$WORLD" > /tmp/beacon_flasher.log 2>&1 &
+echo "  flashing beacons blink (log /tmp/beacon_flasher.log)"
 if [ "$GUI" = 1 ]; then
   nohup gz sim -g > /tmp/gz_gui.log 2>&1 &
   echo "  GUI starting on the Windows desktop (WSLg)"

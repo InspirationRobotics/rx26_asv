@@ -566,5 +566,29 @@ class ForgetColoursTest(unittest.TestCase):
         self.assertEqual(f.tracker.tracks[0].label_votes, {"dock_sign": 10})
 
 
+class MergeTest(unittest.TestCase):
+    """merge_radius_m: two tracks of one buoy become one; neighbours stay two."""
+
+    def _two_tracks(self, gap, **kw):
+        tr = make_tracker(assoc_radius_m=0.3, **kw)   # small gate: force a second track
+        f = Feeder(tr)
+        f.see("flash_red_diamond", 6, at=(10.0, 0.0))
+        return f.see("flash_red_diamond", 6, at=(10.0, gap))
+
+    def test_off_keeps_the_duplicate(self):
+        self.assertEqual(len(self._two_tracks(0.5)), 2)
+
+    def test_close_tracks_merge(self):
+        tracks = self._two_tracks(0.5, merge_radius_m=0.8)
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual(tracks[0].hits, 12)
+        # the hit-weighted mean: halfway between the two sightings, 10 m out
+        self.assertAlmostEqual(math.hypot(tracks[0].x, tracks[0].y), math.hypot(10.0, 0.25),
+                               places=2)
+
+    def test_neighbours_stay_apart(self):
+        self.assertEqual(len(self._two_tracks(1.5, merge_radius_m=0.8)), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
