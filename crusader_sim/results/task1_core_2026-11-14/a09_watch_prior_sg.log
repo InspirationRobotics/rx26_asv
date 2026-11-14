@@ -1,0 +1,46 @@
+[operator] armed
+[operator] mode GUIDED (confirmed by the autopilot)
+[operator] goal: task1_core_scan, approach 1.2805297 103.8556758
+[tree]    0.0 s  RunStart gate            task TASK_NONE  WARNING waiting for RoboCommand's RunStart via the OCS
+[operator] sim release of the RunStart gate (no RoboCommand)
+[tree]    0.0 s  SetCameraModel           task TASK_SAFE_PASSAGE
+[tree]    0.5 s  ScanForBuoys             task TASK_SAFE_PASSAGE
+[tree]    1.0 s  DrivePlanPhase           task TASK_SAFE_PASSAGE
+[judge] passed b03_red (red) with it to starboard at 4.9 m: correct
+[judge] passed b02_grn (green) with it to port at 2.8 m: correct
+[judge] passed b04_grn (green) with it to port at 3.3 m: correct
+[judge] passed b05_grn (green) with it to port at 5.2 m: correct
+[judge] passed b06_red (red) with it to port at 4.5 m: WRONG SIDE
+[judge] passed b09_grn (green) with it to port at 7.6 m: correct
+[judge] passed b03_red (red) with it to port at 1.9 m: WRONG SIDE
+[judge] passed b10_red (red) with it to port at 8.1 m: WRONG SIDE
+[judge] passed b08_red (red) with it to port at 6.1 m: WRONG SIDE
+[judge] circled b01_entry cw: correct
+[judge] gate b03_red/b04_grn: correct
+[judge] passed b03_red (red) with it to starboard at 1.3 m: correct
+[judge] passed b06_red (red) with it to starboard at 1.2 m: correct
+[judge] gate b06_red/b05_grn: correct
+[judge] passed b08_red (red) with it to starboard at 1.5 m: correct
+[judge] gate b08_red/b09_grn: correct
+[judge] passed b08_red (red) with it to port at 1.4 m: WRONG SIDE
+[judge] circled b11_exit ccw: correct
+[judge] passed b10_red (red) with it to starboard at 0.9 m: correct
+[judge] clearance: b10_red 0.68 m (boat at -4.4, 19.5, t 480.1 s)
+[tree]  482.9 s  -                        task TASK_NONE
+[result] outcome SUCCESS  tree task1_core_scan completed  (483 s)
+[judge] VERDICT: FAIL — buoys 7/8 on their side (gates 3/4 crossed), contacts none
+[judge]   buoy b02_grn: correct (green kept to port, passed at 1.8 m)
+[judge]   buoy b03_red: correct (red kept to starboard, passed at 1.3 m)
+[judge]   buoy b04_grn: correct (green kept to port, passed at 1.5 m)
+[judge]   buoy b05_grn: correct (green kept to port, passed at 1.0 m)
+[judge]   buoy b06_red: correct (red kept to starboard, passed at 0.9 m)
+[judge]   buoy b08_red: WRONG SIDE (red kept to port, passed at 1.4 m)
+[judge]   buoy b09_grn: correct (green kept to port, passed at 1.4 m)
+[judge]   buoy b10_red: correct (red kept to starboard, passed at 0.9 m)
+[judge]   gate b03_red/b04_grn: correct
+[judge]   gate b06_red/b05_grn: correct
+[judge]   gate b08_red/b09_grn: correct
+[judge]   gate b10_red/b09_grn: not crossed
+[judge]   circle b01_entry: correct
+[judge]   circle b11_exit: correct
+[judge]   min clearance 0.59 m (b06_red), non-gate 0.68 m, hull 0.12 m

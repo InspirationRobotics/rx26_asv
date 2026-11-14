@@ -36,6 +36,9 @@ RX26_WIN_SRC=/mnt/c/<path>/rx26_asv bash crusader_sim/scripts/t1_attempt.sh LABE
 | a05 | same | task1_sg | + range-aware tracking (`range_sigma_k` 0.0036, `vote_ambiguity_m` 1.0) | **150/325** | FAIL, touched b08 | 20 tracks: the stereo-only error model is too optimistic up close (pose/frame timing adds error), its 0.9 m gate split buoys. Kept in the code (off), not used |
 | a06 | baseline repeat | task1_sg | field centre only | **200/325** | FAIL 7/8 | report perfect, both circles, only b03 red to port. **Baseline over a01/a02/a06: 175, 200, 200** |
 | a07 | same tree | task1_sg | + **mapped field prior** (`target_tracker/prior_field` = the LiDAR map, `prior_field_task1_sg.txt`) | **325/325** | **PASS 8/8** | everything: report, both circles, every side, the b09/b10 gap threaded, bonus. 11 tracks for 11 buoys (no duplicates), 13 plans (baseline 76-120) |
+| a08 | same | task1_sg | + prior with a map shifted 1.8 m E / 1.2 m S, 0.12 m noise | **200/325** | FAIL, struck b10 | greens to the wrong side, 966 s: the alignment did not fully absorb the shift (EXIT reported 0.5 m off) |
+| a09 | same as a07 (exact map), GUI on | task1_sg | as a07 | **200/325** | FAIL 7/8 | b08 red to port; 483 s |
+| a10 | same as a07 (exact map), GUI on | task1_sg | as a07 | **200/325** | FAIL 6/8, struck b09 | b08 and b10 red to port; 377 s |
 
 ### One association radius cannot serve this field (a03, a04)
 
@@ -61,22 +64,25 @@ side"), and right after that failed re-plan the runner logged **"transit complet
 with the boat still short of the gap. The exit orbit's lead-in then went round the WEST of b09
 and the turn-back near b08/b10 put both reds to port.
 
-## Status at 01:25 (session stopped at its usage limit)
+## Where it stands (corrected after a08-a10)
 
-**Best so far: a07, 325/325**, the boat's own `task1_core_scan` tree, unchanged, plus the tracker's
-mapped field prior. Run it on the boat, after review, by setting on the GCS Params tab
-(target_tracker, live): `prior_field` = the contents of `prior_field_task1_sg.txt`, and on the Run
-panel the field centre 1.2806335, 103.8556542 as before. Everything else is main as run on 13 Nov.
+**No change here is a reliable improvement yet. Do not put the mapped field prior on the boat.**
+With the exact map it scored 325, 200, 200 (a07, a09, a10); with a shifted map, as the real one
+will be, 200 (a08). The baseline, the boat's tree as run on 13 Nov, scored 175, 200, 200. a07 was
+one good run, not a fix.
 
-**Not yet done** (each is one `t1_attempt.sh` line; the map string is in `prior_field_task1_sg.txt`):
-- a08 (shifted 1.8 m E / 1.2 m S + 0.12 m noise map, to prove the alignment) was running when the
-  session stopped; its result is in `~/t1_runs/a08_scan_prior_shifted_sg.*` in WSL, not committed.
-- The prior on `task1_sg_rev` and `task1_sg_black` (same buoy positions, other lights), and repeats.
-- Dominick had pushed no Task 1 branch by 01:18, so no comparison yet.
-- No screen recording yet (`T1_GUI=1` keeps the Gazebo window for one).
+What every run gets right, baseline included: the report (ENTRY, EXIT, 4/4 reds, 4/4 greens within
+~0.3 m) and both circles, 150 of the 325 points. What every run loses: one or two buoys on the wrong
+side at the north end (b08/b09/b10, the 1.43 m gap), which costs a 25-point side item and the
+100-point bonus. Clean, stable buoy positions (a07/a09/a10 had 11 tracks for 11 buoys) did NOT stop
+it, so the cause is in how the plan is driven through the gap and handed to the exit orbit (see
+"What goes wrong at the north end"), not only in perception.
 
-**Risk to weigh before the water:** the prior drops any sighting within 2 m of a mapped buoy that
-it cannot place confidently. A buoy re-moored 1-2 m from the map could go unseen. Off = `prior_field ""`.
+**Open:** that north-end driving failure; the reversed and lights-off courses; the comparison with
+Dominick (no Task 1 branch from him as of 01:18). No screen recording (Chris watched live instead).
+
+The tracker's two new options (range-aware tracking, mapped field prior) stay OFF by default and
+change nothing unless set.
 
 ## Sim fixes made on the way (sim only, nothing that runs on the boat)
 
