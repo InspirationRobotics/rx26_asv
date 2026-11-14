@@ -1,0 +1,28 @@
+# task1_dense_s5 — a RANDOM DENSE Task 1 field: gen_dense_course.py --seed 5.
+# Neighbours 2-4 m apart (as on the 2026 Singapore field, task1_sg.yaml); the channel runs
+# north: RED east of it (starboard), GREEN west (port). Regenerate rather than hand-edit.
+# Nearest neighbour per buoy: min 2.05 m, mean 2.86 m, max 4.48 m.
+
+name: task1_dense_s5
+origin: {lat: 1.28060, lon: 103.85570}
+draft_m: 0.24
+depth_m: 5.0
+boat_start: {x: -0.68, y: -10.11, yaw_deg: 90.0}
+field_centre: {x: 1.93, y: 11.72}   # the operator's click: the centroid
+staging: {x: -0.68, y: -6.11}   # 6 m off the ENTRY, outside: task1_goal --staging
+tier: core
+
+elements:
+  - {type: robobuoy, name: entry, x: -0.68, y: -0.11, beacon: flash_blue, up_beacon: false}
+  - {type: robobuoy, name: r1, x: 1.77, y: 3.69, beacon: flash_red, up_beacon: false}
+  - {type: robobuoy, name: g1, x: -1.58, y: 4.28, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: r2, x: 3.11, y: 6.92, beacon: flash_red, up_beacon: false}
+  - {type: robobuoy, name: r3, x: 3.52, y: 9.98, beacon: flash_red, up_beacon: false}
+  - {type: robobuoy, name: r4, x: 2.75, y: 12.99, beacon: flash_red, up_beacon: false}
+  - {type: robobuoy, name: r5, x: 2.30, y: 16.04, beacon: flash_red, up_beacon: false}
+  - {type: robobuoy, name: g2, x: -1.09, y: 16.21, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: r6, x: 2.77, y: 18.36, beacon: flash_red, up_beacon: false}
+  - {type: robobuoy, name: g3, x: 0.72, y: 18.44, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: exit, x: 1.53, y: 22.03, beacon: steady_blue, up_beacon: false}
+  - {type: robobuoy, name: black1, x: 5.15, y: 6.67, beacon: "off"}
+  - {type: robobuoy, name: black2, x: 4.81, y: 16.84, beacon: "off"}

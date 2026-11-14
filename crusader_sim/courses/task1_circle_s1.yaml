@@ -1,0 +1,27 @@
+# task1_circle_s1 — a RANDOM DENSE Task 1 field: gen_dense_course.py --shape circle --seed 1.
+# Neighbours 2-4 m apart (as on the 2026 Singapore field, task1_sg.yaml).
+# CIRCLE: buoys spread evenly over a disc, the channel curving from the ENTRY (south rim)
+# to the EXIT (north rim): RED to starboard, GREEN to port, some lights off (BLACK).
+# Regenerate rather than hand-edit.
+# Nearest neighbour per buoy: min 2.73 m, mean 3.08 m, max 3.60 m. 10 buoys in 8.8 x 10.0 m (east x north).
+
+name: task1_circle_s1
+origin: {lat: 1.28060, lon: 103.85570}
+draft_m: 0.24
+depth_m: 5.0
+boat_start: {x: -0.11, y: -15.00, yaw_deg: 90.0}
+field_centre: {x: -0.14, y: 0.14}   # the operator's click: the centroid
+staging: {x: -0.11, y: -11.00}   # 6 m off the ENTRY, outside: task1_goal --staging
+tier: core
+
+elements:
+  - {type: robobuoy, name: entry, x: -0.11, y: -5.00, beacon: flash_blue, up_beacon: false}
+  - {type: robobuoy, name: r1, x: 2.15, y: -2.09, beacon: flash_red, up_beacon: false}
+  - {type: robobuoy, name: r2, x: 1.04, y: 2.09, beacon: flash_red, up_beacon: false}
+  - {type: robobuoy, name: r3, x: 3.55, y: 3.17, beacon: flash_red, up_beacon: false}
+  - {type: robobuoy, name: g1, x: -2.99, y: -3.75, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: g2, x: -1.51, y: -0.75, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: g3, x: -4.66, y: -0.39, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: g4, x: -3.20, y: 2.90, beacon: flash_green, up_beacon: false}
+  - {type: robobuoy, name: exit, x: 0.17, y: 5.00, beacon: steady_blue, up_beacon: false}
+  - {type: robobuoy, name: black1, x: 4.17, y: 0.18, beacon: "off"}

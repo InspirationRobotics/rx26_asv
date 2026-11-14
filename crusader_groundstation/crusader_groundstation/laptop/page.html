@@ -921,10 +921,10 @@ $("m-dockh-set").onclick = () => {
 $("m-slide-set").onclick = () => setBtParams({search_first: $("m-slide").value});
 // ---- the Run panel's mission inputs: bt_runner_node parameters read at Start (gcs_bridge keeps
 // them across a bt_runner restart: operator_settings.py). Each row says what the boat holds now.
-const T1_SCAN = /^(task1_core_scan|mission_t[0-9])/, T3_FIRE = /^(task3_scan_fire(?!_cv)|mission_t[0-9])/;
+const T1_SCAN = /^(task1_core_scan|task1_core_centre|mission_t[0-9])/, T1_CENTRE = /^task1_core_centre/, T1_APPROACH = /^(task1_core_scan|task1_core_centre|mission_t[0-9])/, T3_FIRE = /^(task3_scan_fire(?!_cv)|mission_t[0-9])/;
 const RUN_INPUTS = [
-  {key: "t1_approach", ll: true, label: "Task 1 approach", show: T1_SCAN,
-   tip: "Task 1: drive here first (GUIDED), then the static scan; Clear = scan where the boat is (bt_runner_node t1_approach_lat/lon, read at Start)"},
+  {key: "t1_approach", ll: true, label: "Task 1 approach", show: T1_APPROACH,
+   tip: "Task 1: task1_core_scan drives here first (GUIDED), then scans; task1_core_centre backs out here AFTER its centre scan, so the passage is planned from outside the field (put it a few metres off the ENTRY). Clear = scan / plan where the boat is (bt_runner_node t1_approach_lat/lon, read at Start)"},
   {key: "t1_field", ll: true, label: "field centre", show: T1_SCAN,
    tip: "Task 1 Core: the rough middle of the buoy field (t1_field_lat/lon). It points the scans, places the vantage points round the field and lets the EXIT be guessed until it is seen. Clear = not known: the boat only looks from where it starts"},
   {key: "t1_scan_dwell_s", label: "scan dwell", unit: "s", min: 1, max: 30, step: 0.5, show: T1_SCAN,
@@ -933,6 +933,22 @@ const RUN_INPUTS = [
    tip: "Task 1 Core: a stop to look again every this far along the transit"},
   {key: "t1_unknown_range_m", label: "look at unnamed buoys within", unit: "m", min: 0, max: 30, step: 1, show: T1_SCAN,
    tip: "Task 1 Core: stop and look (up to the scan dwell) when a buoy with no colour yet is in front within this range; each buoy once; 0 = never (bt_runner_node t1_unknown_range_m, read at Start)"},
+  {key: "t1_centre_tol_m", label: "centre tolerance", unit: "m", min: 1, max: 10, step: 0.5, show: T1_CENTRE,
+   tip: "Task 1 Core centre scan: the drive to the field centre stops this near it (bt_runner_node t1_centre_tol_m, read at Start)"},
+  {key: "t1_field_radius_m", label: "field radius", unit: "m (0 = off)", min: 0, max: 200, step: 1, show: T1_SCAN,
+   tip: "Task 1 Core: a buoy farther than this from the field centre is not a field buoy: never the ENTRY/EXIT, no side to keep, never waited on (still kept clear of). 0 = keep every buoy (bt_runner_node t1_field_radius_m)"},
+  {key: "t1_scan_range_m", label: "scan range", unit: "m", min: 2, max: 50, step: 1, show: T1_CENTRE,
+   tip: "Task 1 Core centre scan: each sector waits until every buoy this near the boat in view has a colour (bt_runner_node t1_scan_range_m)"},
+  {key: "t1_cam_hfov_deg", label: "camera view", unit: "deg", min: 30, max: 180, step: 1, show: T1_CENTRE,
+   tip: "Task 1 Core centre scan: the camera's horizontal field of view; with the overlap it sets how many sectors make the circle (82 = the OAK-D's default lens)"},
+  {key: "t1_sector_overlap_deg", label: "sector overlap", unit: "deg", min: 0, max: 60, step: 1, show: T1_CENTRE,
+   tip: "Task 1 Core centre scan: each sector overlaps the next by this (82 view, 15 overlap = 6 sectors of 60 deg)"},
+  {key: "t1_sector_min_s", label: "sector look at least", unit: "s", min: 0.5, max: 30, step: 0.5, show: T1_CENTRE,
+   tip: "Task 1 Core centre scan: the shortest look at each sector, even with every buoy coloured (a flashing light needs ~4 s)"},
+  {key: "t1_sector_max_s", label: "sector look at most", unit: "s", min: 1, max: 120, step: 1, show: T1_CENTRE,
+   tip: "Task 1 Core centre scan: the longest look at each sector; then the next one, whatever still has no colour"},
+  {key: "t1_colour_wait_s", label: "colour wait per buoy", unit: "s", min: 0, max: 120, step: 1, show: T1_CENTRE,
+   tip: "Task 1 Core centre scan: a buoy still without a colour after this long in view is waited on no more (a black buoy never gets one); 0 = wait the whole sector"},
   {key: "t3_backoff_m", label: "back off", unit: "m", min: 1, max: 8, step: 0.5, show: T3_FIRE,
    tip: "Task 3: the docked hold's distance off the dock face once the fire is out (1.7 m while firing)"},
   {key: "t3_via", ll: true, label: "via point", show: /^mission_t[0-9]/,

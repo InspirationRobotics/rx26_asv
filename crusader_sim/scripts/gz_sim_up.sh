@@ -13,6 +13,10 @@
 #                 once; without it the rig says so and runs truth. SIM_CAMERA_ARGS adds ROS args.
 #     SIM_TRACKER_LIDAR=1  target_tracker fuses LiDAR clusters (use_lidar, open water) instead of
 #                 the checked-in camera-only setting (gz_rig_up.sh says why it matters).
+#     RX26_GPUS   (environment) e.g. "all": a NEW container gets `--gpus all` (needs the NVIDIA
+#                 Container Toolkit in this distro). Then SIM_DETECTOR=yolo can run on the GPU:
+#                 SIM_CAMERA_ARGS="-p yolo_device:=cuda:0" and a CUDA torch in the venv
+#                 (TORCH_INDEX_URL, setup_yolo_venv.sh). An existing container keeps what it had.
 #     RX26_IMAGE  the image a NEW container is made from. Default: crsd-sim:nav2 when
 #                 it exists, else crsd-sim:humble (no Nav2).
 #     --recreate-container
@@ -160,8 +164,10 @@ ensure_container() {
     fi
   fi
   if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
-    echo "  creating $CONTAINER from $IMAGE (--net=host --ipc=host)"
-    docker run -d --name "$CONTAINER" --net=host --ipc=host \
+    local gpus=()
+    [ -n "${RX26_GPUS:-}" ] && gpus=(--gpus "$RX26_GPUS")
+    echo "  creating $CONTAINER from $IMAGE (--net=host --ipc=host${RX26_GPUS:+ --gpus $RX26_GPUS})"
+    docker run -d --name "$CONTAINER" --net=host --ipc=host "${gpus[@]}" \
       -v "$HOME/robotx_ws:/root/robotx_ws" "$IMAGE" sleep infinity >/dev/null \
       || die "docker run $IMAGE (build it: see crusader_sim/docker/crsd-sim.Dockerfile)"
     if [ "$FULL_BUILD" = 1 ]; then
@@ -234,6 +240,10 @@ nohup gz sim -s -r "$WORLD" > /tmp/gz_server.log 2>&1 &
 sleep 5
 pgrep -f "gz sim -s" >/dev/null || die "gz server exited — see /tmp/gz_server.log"
 echo "  server up (log /tmp/gz_server.log)"
+# flashing beacons blink 1 s on / 1 s off on sim time (gen_world draws them all lit); sim_camera
+# labels its boxes by the same clock (course.beacon_lit)
+nohup python3 -m crusader_sim.beacon_driver "$SIM/courses/$COURSE.yaml" > /tmp/beacon_driver.log 2>&1 &
+echo "  beacon_driver started (log /tmp/beacon_driver.log)"
 if [ "$GUI" = 1 ]; then
   nohup gz sim -g > /tmp/gz_gui.log 2>&1 &
   echo "  GUI starting on the Windows desktop (WSLg)"
@@ -292,6 +302,51 @@ docker exec -e TREE="${TREE:-}" -e NAV_MODE="${NAV_MODE:-}" -e SIM_DETECTOR="${S
   -e SIM_CAMERA_ARGS="${SIM_CAMERA_ARGS:-}" -e SIM_TRACKER_LIDAR="${SIM_TRACKER_LIDAR:-}" \
   -e SIM_TUNING="$SIM_TUNING_C" "$CONTAINER" bash -lc \
   "bash /root/robotx_ws/src/rx26_asv/crusader_sim/scripts/gz_rig_up.sh $COURSE $UAV_ARG$RIG_ARGS" 2>&1 | sed 's/^/  /'
+
+# SITL's HEARTBEAT at 5 Hz. start_sitl.sh's MAVProxy asks once (SET_MESSAGE_INTERVAL) as it starts,
+# but a SITL still waiting for Gazebo's first frame (JSON lockstep) can miss it, and ArduPilot's
+# fixed 1 Hz is telemetry_bridge's 1 s staleness threshold: /crsd/fcu_status flaps, the mode reads
+# UNKNOWN and every guided setpoint is dropped, so the boat never leaves the start. On 2026-11-13
+# it was low on every start checked (0.75-1.00 Hz). Measured on MAVProxy's local GCS output (udp
+# 14550) and asked again until it holds.
+python3 - <<'PY' 2>&1 | sed 's/^/  /' || true
+import sys, time
+try:
+    from pymavlink import mavutil
+except ImportError:
+    print("heartbeat: no pymavlink in this distro, not checked")
+    sys.exit(0)
+m = mavutil.mavlink_connection("udpin:127.0.0.1:14550", source_system=250)
+
+
+def beats(sysid, secs=4.0):
+    n, t0 = 0, time.time()
+    while time.time() - t0 < secs:
+        msg = m.recv_match(type="HEARTBEAT", blocking=True, timeout=0.5)
+        if msg is not None and msg.get_srcSystem() == sysid:
+            n += 1
+    return n / secs
+
+
+hb, t0 = None, time.time()
+while hb is None and time.time() - t0 < 20:
+    msg = m.recv_match(type="HEARTBEAT", blocking=True, timeout=1)
+    if msg is not None and msg.autopilot != mavutil.mavlink.MAV_AUTOPILOT_INVALID:
+        hb = msg
+if hb is None:
+    print("heartbeat: none on udp 14550 in 20 s (is MAVProxy up?)")
+    sys.exit(0)
+sid, cid = hb.get_srcSystem(), hb.get_srcComponent()
+r = beats(sid)
+for _ in range(4):
+    if r >= 3.0:
+        break
+    m.mav.command_long_send(sid, cid, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+                            0, 200000, 0, 0, 0, 0, 0)
+    r = beats(sid)
+print(f"heartbeat {r:.1f} Hz" + ("" if r >= 3.0 else
+      "  *** STILL LOW: telemetry_bridge will drop guided setpoints"))
+PY
 
 if [ "$GUI" = 1 ]; then
   # The GUI sometimes segfaults at startup inside NVIDIA's WSL driver (glXChooseFBConfig ->

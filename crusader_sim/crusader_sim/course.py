@@ -6,6 +6,7 @@ this module.
 """
 import math
 import os
+import zlib
 
 import yaml
 
@@ -32,6 +33,27 @@ BEACON_CODE = {"off": 1, "flash_red": 2, "flash_green": 3,
 # judge and the UAV read it); whether it is visible is side_beacon/up_beacon,
 # so an Advanced/Disruptive course keeps the true colour with both lights off
 BEACON_STATES = tuple(BEACON_CODE)
+
+# FLASHING, as on the water: flash_red / flash_green / flash_blue are lit FLASH_ON_S then dark
+# FLASH_OFF_S, each buoy at its own phase (from its name, so every node agrees without talking);
+# steady_blue is always lit and off never is. beacon_driver draws it in Gazebo and sim_camera
+# labels its boxes by it, so the window, the rendered images and the camera stand-in all match.
+FLASH_ON_S = 1.0
+FLASH_OFF_S = 1.0
+
+
+def flash_phase_s(name):
+    """This buoy's offset into the flash cycle, s: fixed by its name."""
+    return (zlib.crc32(str(name).encode()) % 1000) / 1000.0 * (FLASH_ON_S + FLASH_OFF_S)
+
+
+def beacon_lit(state, name, t):
+    """Is a beacon showing `state` lit at sim time t (s)? t None: no flashing (always lit)."""
+    if state == "off":
+        return False
+    if t is None or not str(state).startswith("flash_"):
+        return True
+    return (t + flash_phase_s(name)) % (FLASH_ON_S + FLASH_OFF_S) < FLASH_ON_S
 
 
 def resolve(course):
