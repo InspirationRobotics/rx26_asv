@@ -42,15 +42,15 @@ from crusader_common.node_main import declare_params, run_node
 from crusader_common.stream_cache import StreamCache
 from crusader_msgs.action import RunMission
 from crusader_msgs.msg import (Attitude, Cluster3DArray, FcuHealth, FcuStatus, HazardArray,
-                               LatLonHead, PassageBuoy, PassagePlan, RadioFrame,
-                               TrackedTargetArray)
+                               DockObservation, LatLonHead, PassageBuoy, PassagePlan,
+                               RadioFrame, TrackedTargetArray)
 
 from crusader_groundstation import (bag_recorder, camera_profiles, gcs_wire, mission_store,
                                     mission_xml, ocs_link, operator_settings, param_client,
                                     params_yaml, planner_profiles, power_client, proc_scan,
                                     record_settings, system_info)
 from crusader_groundstation import node_registry as reg
-from crusader_groundstation.log_buffer import LogBuffer
+from crusader_groundstation.log_buffer import INFO, LogBuffer
 from crusader_groundstation.process_manager import ProcessManager
 from crusader_groundstation.radio_core import RadioLog
 from crusader_groundstation.recorder import Recorder, frame_rates, free_gb
@@ -80,7 +80,7 @@ PARAMS = {
     "record_settings_file": "",         # "" = record_settings.json beside record_dir (a bind mount)
     "planner_profiles_dir": "/root/robotx_ws/src/rx26_asv/crusader_sim/config/tuning_profiles",
     "planner_profiles_save_dir": "~/.cache/crusader/planner_profiles",
-    "operator_settings_file": "~/.cache/crusader/operator_settings.json",   # dock heading, search side
+    "operator_settings_file": "~/.cache/crusader/operator_settings.json",   # the Run panel's inputs
 }
 
 LEG_TOPIC = "/crsd/nav/leg_status"      # = bt_runner_node.nav_leg_topic (check_config)
@@ -91,7 +91,6 @@ CLUSTERS_TOPIC = "/crsd/lidar_clusters"
 CAM_STREAMS = {"annotated": "image", "raw": "raw"}      # _op_cam's stream -> its lease key
 MISSION_ACTION = "/crsd/run_mission"
 RELEASE_SERVICE = "/crsd/bt_runner/release_run_start"    # the bench release (bt_runner_node)
-FORGET_ENTRY_EXIT_SERVICE = "/crsd/bt_runner/forget_entry_exit"   # Task 1 memory (bt_runner_node)
 CHECK_TIMEOUT_S = 30.0                  # bt_tree_check loads the whole library: ~1 s, more on a busy Jetson
 STATE_PERIOD_S = 0.5
 EVENT_PERIOD_S = 0.25
@@ -102,6 +101,8 @@ MANUAL_VERSION_BASE = 1_000_000         # clear of rfd_link_node's plan versions
 LIDAR_SCALE = 0.01                      # metres per int16 count
 RECORD_FRAME_HZ_RANGE = (0.05, 30.0)
 REPLAY_EVENTS = 300                     # log/radio rows a laptop gets when it connects
+DOCK_TOPIC = "/dock/observations"       # camera_node's dock model, every frame
+DOCK_COLOURS = {0: "?", 1: "OFF", 2: "R", 3: "G", 4: "B"}   # DockBay.COLOUR_*
 FILE_CHUNK = 256 * 1024
 BULK_WAIT_S = 30.0                      # a download gives up when the link frees no room in this
 OPS_WORKERS = 4
@@ -126,6 +127,21 @@ def signature(frame):
 
 def _round(v, n=2):
     return gcs_wire.finite(v, n)
+
+
+def dock_frame(msg):
+    """One /dock/observations frame as the recording keeps it: each face left to right, its
+    bearing (+ left), plane offset and size range (m), cut or whole, box, and indicator."""
+    def bay(b):
+        return {"brg": _round(b.bearing_deg, 1), "cut": bool(b.truncated),
+                "plane_d": _round(b.plane_offset) if b.has_plane else None,
+                "size_m": _round(b.range_from_size_m), "conf": _round(b.detector_confidence),
+                "box": [int(v) for v in b.bbox],
+                "ind": DOCK_COLOURS.get(int(b.indicator_colour)) if b.indicator_present else None,
+                "ind_conf": _round(b.indicator_confidence) if b.indicator_present else None,
+                "lit": int(b.lit_window_index)}
+    return {"t": round(msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9, 2),
+            "bays": [bay(b) for b in msg.bays]}
 
 
 class Connection:
@@ -340,6 +356,11 @@ class GcsBridge(Node):
         self._ocs_run = None                # (the newest `ocs_run` snapshot, monotonic time heard)
         self._ocs_reply = None              # (the newest `reply` in any snapshot, when heard)
         self._ocs_seq = 0
+        # What the recording has written of each stream so far (the logs and OCS by seq), and
+        # the dock frames heard since its last sample.
+        self._rec_log_seq = 0
+        self._rec_ocs_seq = 0
+        self._dock_frames = deque(maxlen=100)
         self.recorder = Recorder(p["record_dir"], p["record_min_free_gb"],
                                  logger=self.get_logger().warn)
         self.bags = bag_recorder.BagRecorder(logger=self.get_logger().info)
@@ -405,6 +426,8 @@ class GcsBridge(Node):
         self.create_subscription(RadioFrame, "/crsd/radio/traffic", self._on_radio, 50)
         self.create_subscription(String, "/crsd/ocs_traffic", self._on_ocs, 50)
         self.create_subscription(String, "/crsd/ocs_command", self._on_ocs_command, 10)
+        self.create_subscription(DockObservation, DOCK_TOPIC, self._on_dock,
+                                 qos_profile_sensor_data)
 
         self.plan_pub = self.create_publisher(PassagePlan, "/crsd/passage_plan", 10)
         self.ocs_tiers_pub = self.create_publisher(String, "/crsd/ocs_tiers", 10)
@@ -412,7 +435,6 @@ class GcsBridge(Node):
         self._cancel = self.create_client(CancelGoal, MISSION_ACTION + "/_action/cancel_goal")
         self._radio_test = self.create_client(Trigger, "/crsd/radio/send_test")
         self._run_release = self.create_client(Trigger, RELEASE_SERVICE)
-        self._task1_forget = self.create_client(Trigger, FORGET_ENTRY_EXIT_SERVICE)
         self._goal = None
         self._missions_lock = threading.Lock()      # one change to the mission files at a time
         self._nodes_cache = None                    # (bt_tree_check's stamp, its parsed --models)
@@ -538,6 +560,11 @@ class GcsBridge(Node):
         self._ocs_seq += 1
         item["seq"] = self._ocs_seq
         self._ocs.append(item)
+
+    def _on_dock(self, msg):
+        """Keeps each dock frame, compact, for the recording's next sample."""
+        if self.recorder.recording:
+            self._dock_frames.append(dock_frame(msg))
 
     def _on_ocs_command(self, msg):
         """Keeps the newest `ocs_run` the OCS sent: its state and the tiers it will declare. A
@@ -781,8 +808,9 @@ class GcsBridge(Node):
             "profiles": [{"id": k, "label": v[0]} for k, v in reg.PROFILES.items()]})
 
     def _watch_bt_runner(self):
-        """A bt_runner_node that is new (first seen, or a new pid) gets the operator's dock
-        heading and search side back if it came up without them. Off the executor thread:
+        """A bt_runner_node that is new (first seen, or a new pid) gets the operator's Run panel
+        inputs (operator_settings.KEYS: dock heading, search side, field centre ...) back if it
+        came up without them. Off the executor thread:
         the parameter calls block on it."""
         node = operator_settings.NODE_PATH
         seen = (node, tuple(self._pids.get(reg.BY_NAME["bt_runner_node"].executable, [])))
@@ -801,16 +829,15 @@ class GcsBridge(Node):
             if not values:
                 return
             ok, msg, _data = self._param_set(node, values, remember=False)
-            said = ", ".join(
-                (f"dock heading {float(v):g}°" if k == "dock_heading_deg" else f"search first {v}")
-                + f" (set {self.settings.set_at(k)})" for k, v in values.items())
+            said = ", ".join(operator_settings.describe(k, v) + f" (set {self.settings.set_at(k)})"
+                             for k, v in values.items())
             if ok:
                 self.get_logger().info(f"restored {said} after bt_runner_node came up without them")
             else:
                 self.get_logger().warn(f"could not restore {said}: {msg}")
         except Exception as e:  # noqa: BLE001 - its param services may not be up yet
             self._bt_seen = None            # the next graph scan tries again
-            self.get_logger().warn(f"dock heading/search side restore: {e}; retrying",
+            self.get_logger().warn(f"Run panel inputs restore: {e}; retrying",
                                    throttle_duration_sec=10.0)
         finally:
             self._restoring = False
@@ -1204,7 +1231,7 @@ class GcsBridge(Node):
         try:
             kept = self.settings.remember(applied)
         except OSError as e:
-            self.get_logger().warn(f"dock heading/search side not saved to "
+            self.get_logger().warn(f"Run panel inputs not saved to "
                                    f"{self.settings.path}: {e}; a bt_runner restart loses them")
             return
         if kept:
@@ -1458,10 +1485,27 @@ class GcsBridge(Node):
             self.bags.stop()
         if not self.recorder.recording:
             return
-        state = self._last.get("state") or self._state(time.monotonic())
-        self.recorder.sample({k: state.get(k) for k in ("stamp", "boat", "att", "fcu",
-                                                        "health", "mission")}
-                             | {"targets": (self._last.get("targets") or {}).get("items", [])})
+        now = time.monotonic()
+        state = self._last.get("state") or self._state(now)
+        sample = {k: state.get(k) for k in ("stamp", "boat", "att", "fcu", "health", "mission",
+                                            "ocs_run")}
+        sample["targets"] = (self._last.get("targets") or {}).get("items", [])
+        sample.update(self._record_events(now))
+        self.recorder.sample(sample)
+
+    def _record_events(self, now):
+        """What the tree saw and decided since the last sample, for a run to be read back
+        without the GCS open: bt_status whole (its nodes, task1 and task3), every dock frame,
+        and the INFO+ log lines and OCS traffic not written yet."""
+        logs, self._rec_log_seq, _ = self.logs.read(self._rec_log_seq, min_level=INFO)
+        ocs = [i for i in list(self._ocs) if i.get("seq", 0) > self._rec_ocs_seq]
+        self._rec_ocs_seq = self._ocs_seq
+        dock = []
+        while self._dock_frames:
+            dock.append(self._dock_frames.popleft())
+        return {"bt": self._bt.get(now), "dock": dock, "ocs": ocs,
+                "logs": [{k: r.get(k) for k in ("t", "node", "level_name", "msg")}
+                         for r in logs]}
 
     # ------------------------------------------------------------------ the rest
 
@@ -1513,13 +1557,6 @@ class GcsBridge(Node):
         RoboCommand. bt_runner_node refuses when nothing is waiting, and logs the release."""
         self.get_logger().warn("run_release requested from the ground station")
         return self._call_trigger(self._run_release, RELEASE_SERVICE, "bt_runner_node", 3.0)
-
-    def _op_task1_forget(self, conn, req):
-        """Forget the Task 1 ENTRY/EXIT bt_runner_node remembers between runs (the Map tab
-        shows them from /crsd/bt_status's "task1")."""
-        self.get_logger().warn("forget the remembered Task 1 ENTRY/EXIT, from the ground station")
-        return self._call_trigger(self._task1_forget, FORGET_ENTRY_EXIT_SERVICE, "bt_runner_node",
-                                  3.0)
 
     def _op_ocs_tiers(self, conn, req):
         """The operator's tier declaration, sent to the OCS through ocs_client's link. The OCS

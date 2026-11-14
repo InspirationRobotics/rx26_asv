@@ -4,6 +4,11 @@ Heading + signed speed (SET_ATTITUDE_TARGET) goes out only in GUIDED and while t
 latch allows it, speed clamped, with one zero-speed command when commands stop for deadman_s
 or the latch trips: ArduRover itself waits 3 s, 0.9 m at 0.3 m/s next to a dock. ArduRover's
 handling is unverified until SITL (docs/G1).
+
+A GUIDED position setpoint ends heading+speed (on_position_setpoint): ArduRover drops the
+attitude target for it, so there is nothing left to stop, and a stop sent after it would
+override the setpoint and park the boat (the 2026-11-12 sim: ScanForBuoys, then NavigateTo
+within deadman_s; the stop landed 0.43 s after the setpoint and the boat never moved).
 """
 import math
 from dataclasses import dataclass
@@ -90,3 +95,9 @@ class HsGate:
             return None
         self.active = False
         return encode(self.last_heading, 0.0, self.p.wp_speed)
+
+    def on_position_setpoint(self):
+        """A GUIDED position setpoint has gone out. It replaces the attitude target in ArduRover,
+        so the dead-man has nothing left to stop: disarm it, or its zero-speed command lands after
+        the setpoint and overrides it. A later heading+speed command arms it again."""
+        self.active = False

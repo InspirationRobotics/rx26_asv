@@ -86,6 +86,9 @@ inline const char * phaseName(Phase p)
   return "done";
 }
 
+/// The two orbit phases: their legs are fitted and judged without weak tracks (orbitHazards).
+inline bool isOrbit(Phase p) {return p == Phase::EntryOrbit || p == Phase::ExitOrbit;}
+
 /// "approach" | "entry_orbit" | "transit" | "exit_orbit". False for anything else.
 inline bool parsePhase(const std::string & s, Phase & out)
 {
@@ -127,6 +130,11 @@ struct Params
   /// buoy (distance 0).
   double anchor_snap_m = 1.5;
   double buoy_radius_m = 0.3;   ///< when the anchor has no hazard of its own
+  /// A track with NO colour whose position spread is above this does not shape an orbit
+  /// (weakTrack, orbitHazards); 0 = every track does. 2026-11-13 Singapore: 23-25 tracks for the
+  /// handbook's ten buoys, the extras unclassified with 0.7-1.6 m of spread, 1-2 m from the
+  /// ENTRY/EXIT, and no orbit fitted round either (classified tracks: median spread 0.35 m).
+  double weak_sd_m = 0.6;
   // Checkpoints (Disruptive): past each gate the path crosses.
   double cp_after_m = 1.5;      ///< at least this far past the gate line
   double cp_window_m = 3.0;     ///< ... and within this much more, at the most open water
@@ -657,15 +665,61 @@ inline std::vector<Vec2> ringPoints(Vec2 c, double r, bool cw, double step_m)
   return pts;
 }
 
+/// A track too vague to fit an orbit round: no colour (Unknown; an OFF buoy is a classified
+/// black buoy and always counts) and more than sd_max of position spread. sd_max <= 0: none.
+inline bool weakTrack(const nav::Buoy & b, double sd_max)
+{
+  return sd_max > 0.0 && b.state == nav::Beacon::Unknown && b.sd > sd_max;
+}
+
+/// `hz` without the buoy hazards of weak tracks: what an ORBIT is fitted to (chooseRing) and
+/// judged against (the leaves' leg checks). The approach and the transit keep clear of every
+/// track. Why: on the 2026-11-13 field such tracks sat 1-2 m from the ENTRY and EXIT, where the
+/// handbook's ten buoys are 1.9 m apart or more, and left no radius to orbit at.
+inline std::vector<Hazard> orbitHazards(
+  const std::vector<Hazard> & hz, const std::vector<nav::Buoy> & buoys, double sd_max)
+{
+  std::vector<int> weak;
+  for (const nav::Buoy & b : buoys) {
+    if (weakTrack(b, sd_max)) {weak.push_back(b.id);}
+  }
+  if (weak.empty()) {return hz;}
+  std::vector<Hazard> out;
+  for (const Hazard & h : hz) {
+    if (h.source == path::HazardSource::PlanBuoy &&
+      std::find(weak.begin(), weak.end(), h.id) != weak.end())
+    {
+      continue;
+    }
+    out.push_back(h);
+  }
+  return out;
+}
+
+/// Where a transit may end when the EXIT is only a guess and no orbit fits round it: the guess
+/// itself and rings round it every 0.25 m out to r_m. It also stands in for the exit ring in
+/// selectRays: a red or green in it is where the exit orbit will be, so it is kept clear of but
+/// not held to a side until the EXIT is seen (held, the transit would stop beside it).
+inline std::vector<Vec2> discPoints(Vec2 c, double r_m)
+{
+  std::vector<Vec2> pts{c};
+  for (double r = 0.25; r <= r_m + 1e-9; r += 0.25) {
+    const std::vector<Vec2> ring = ringPoints(c, r, false, 0.25);
+    pts.insert(pts.end(), ring.begin(), ring.end());
+  }
+  return pts;
+}
+
 /// The orbit round the anchor `c`: the largest radius up to min(orbit_r_pref_m, r_cap) whose
 /// ring keeps max(hard, orbit_clear_m) from every other hazard and encloses nothing (then:
 /// the same, a black buoy or a track allowed inside); failing both, the radius with the most
 /// water on both sides that is still >= hard from everything. A red, green or blue buoy is
-/// never inside an orbit. `others` must already leave out the anchor's own hazards; `buoys`
-/// says which hazard is which colour.
+/// never inside an orbit, except one of the anchor's own colour `own`: there is one ENTRY and
+/// one EXIT, so that is the tracker's second copy of the anchor (kept clear of, may be inside).
+/// `others` must already leave out the anchor's own hazards; `buoys` says which is which colour.
 inline Ring chooseRing(
   Vec2 c, double anchor_r, const std::vector<Hazard> & others, const std::vector<nav::Buoy> & buoys,
-  double r_cap, bool cw, double hard, const Params & p)
+  double r_cap, bool cw, double hard, const Params & p, nav::Beacon own = nav::Beacon::Unknown)
 {
   Ring best;
   best.c = c;
@@ -683,8 +737,8 @@ inline Ring chooseRing(
         if (nav::norm(hc - c) >= r) {continue;}
         const nav::Beacon s = h.source == path::HazardSource::PlanBuoy ? colour_of(h.id) :
           nav::Beacon::Off;
-        if (s == nav::Beacon::FlashingRed || s == nav::Beacon::FlashingGreen ||
-          s == nav::Beacon::FlashingBlue || s == nav::Beacon::SteadyBlue)
+        if (s != own && (s == nav::Beacon::FlashingRed || s == nav::Beacon::FlashingGreen ||
+          s == nav::Beacon::FlashingBlue || s == nav::Beacon::SteadyBlue))
         {
           return true;
         }
@@ -853,6 +907,10 @@ struct Request
   std::vector<nav::Buoy> buoys;          ///< the fused field, colours from the aircraft
   std::vector<Hazard> hazards;           ///< everything to keep clear of (no side fences)
   Vec2 entry, exitp;                     ///< the aircraft's ENTRY and EXIT
+  /// Core tier: `exitp` is only the runner's GUESS (bt_runner_node guessExit). A guess no orbit
+  /// fits round does not stop the plan: the transit ends near it and the exit orbit waits for
+  /// the EXIT to be seen (Plan::exit_pending).
+  bool exit_guessed = false;
   /// From Transit on: the entry ring the boat orbited (its far edge bounds the passage) and
   /// the transit as driven, first point = where it began (its parity is the boat's state).
   std::vector<Vec2> entry_ring_done;
@@ -874,6 +932,10 @@ struct Plan
   Vec2 entry_c, exit_c;
   int entry_id = -1, exit_id = -1;
   double entry_r = 0.0, exit_r = 0.0;
+  /// No exit orbit yet (legs[ExitOrbit] empty, exit_r 0): the EXIT was only guessed and no orbit
+  /// fitted round the guess. The transit ends within orbit_r_pref_m of it; the exit orbit is
+  /// planned from ExitOrbit once the EXIT is seen (the leaf finds the leg missing and replans).
+  bool exit_pending = false;
   std::vector<Vec2> entry_ring;          ///< the entry ring this plan orbits (empty from Transit on)
   std::vector<Ray> rays;
   std::vector<int> excluded;             ///< red/green kept clear of but not held to a side
@@ -1052,7 +1114,10 @@ inline std::vector<int> wrongSideNow(
 /// Core tier: does a change in the boat's own field matter for the plan in hand? "" = no (the
 /// caller absorbs it); otherwise the reason, for the log. It matters when
 ///   * the ENTRY moved more than move_m before the entry orbit started (phase < EntryOrbit), or
-///     the EXIT before the exit orbit did (phase < ExitOrbit): the rings are round the old spot;
+///     the EXIT before the exit orbit has STARTED (phase <= ExitOrbit: transit's finish() already
+///     sets ExitOrbit, and the EXIT scan between the two is where an EXIT first seen shows up;
+///     the exit orbit is not replanned mid-leg, so this only acts when its leg starts): the
+///     rings are round the old spot;
 ///   * some red/green would now be passed on the wrong side by `judged` (the plan's transit for
 ///     the approach and entry orbit; the track driven plus what is left of the leg in the transit).
 /// Hazards crowding the path are not this function's business (shrunk / blocked).
@@ -1072,7 +1137,7 @@ inline std::string sensorChangeMatters(
   if (phase < Phase::EntryOrbit && moved(pl.entry_c, entry_c)) {
     return "the ENTRY moved " + detail::fmt(nav::norm(entry_c - pl.entry_c), 1) + " m";
   }
-  if (phase < Phase::ExitOrbit && moved(pl.exit_c, exit_c)) {
+  if (phase <= Phase::ExitOrbit && moved(pl.exit_c, exit_c)) {
     return "the EXIT moved " + detail::fmt(nav::norm(exit_c - pl.exit_c), 1) + " m";
   }
   if (phase > Phase::Transit || judged.size() < 2) {return "";}
@@ -1125,25 +1190,54 @@ inline Plan planAt(const Request & rq, const Params & p, const Grid & grid, doub
     if (a > 0.0) {first_along = std::min(first_along, a);}
     if (a < L) {last_along = std::max(last_along, a);}
   }
+  // The rings are fitted, and the orbit legs judged, without weak tracks (orbitHazards).
+  const std::vector<Hazard> orbit_hz = orbitHazards(rq.hazards, rq.buoys, p.weak_sd_m);
+  if (orbit_hz.size() < rq.hazards.size()) {
+    out.notes.push_back(std::to_string(rq.hazards.size() - orbit_hz.size()) +
+      " track(s) with no colour and over " + fmt(p.weak_sd_m, 2) +
+      " m of position spread left out of the orbits");
+  }
   const auto others_of = [&](int id) {
-      return id >= 0 ? path::exempt(rq.hazards, {id}, false, 1.0) : rq.hazards;
+      return id >= 0 ? path::exempt(orbit_hz, {id}, false, 1.0) : orbit_hz;
     };
+  // A second track of the anchor's colour stays a hazard the ring keeps clear of (the path
+  // follower checks it too), but may be inside the ring: chooseRing's `own`.
   Ring xr;
   {
     const double cap = std::isfinite(last_along) ?
       (L - last_along) - p.along_margin_m : std::numeric_limits<double>::infinity();
     xr = chooseRing(out.exit_c, anchorRadius(rq.hazards, out.exit_id, p.buoy_radius_m),
-        others_of(out.exit_id), rq.buoys, cap, false, hard, p);
-    if (!xr.ok) {out.why = "no orbit fits round the EXIT: " + xr.why; return out;}
+        others_of(out.exit_id), rq.buoys, cap, false, hard, p, nav::Beacon::SteadyBlue);
+    if (!xr.ok) {
+      // A GUESSED EXIT is not worth stopping for: drive the approach, the entry orbit and the
+      // transit, and orbit the EXIT once it is seen. From ExitOrbit there is nothing left to
+      // drive without one.
+      if (!rq.exit_guessed || rq.from == Phase::ExitOrbit) {
+        out.why = "no orbit fits round the EXIT: " + xr.why;
+        return out;
+      }
+      out.exit_pending = true;
+      out.notes.push_back("the EXIT is only guessed and no orbit fits round the guess (" + xr.why +
+        "): the transit ends within " + fmt(p.orbit_r_pref_m, 1) +
+        " m of it, the exit orbit waits until the EXIT is seen");
+    }
   }
-  out.exit_r = xr.r;
+  out.exit_r = xr.ok ? xr.r : 0.0;
+  // Pending: the transit ends anywhere in the disc round the guess (ringGoals over its points).
+  Ring disc;
+  if (out.exit_pending) {
+    disc.c = out.exit_c;
+    disc.r = p.orbit_r_pref_m;
+    disc.pts = discPoints(out.exit_c, p.orbit_r_pref_m);
+  }
+  const Ring & goal_ring = out.exit_pending ? disc : xr;
   Ring er;
   const bool with_entry = rq.from == Phase::Approach || rq.from == Phase::EntryOrbit;
   if (with_entry) {
     const double cap = std::isfinite(first_along) ?
       first_along - p.along_margin_m : std::numeric_limits<double>::infinity();
     er = chooseRing(out.entry_c, anchorRadius(rq.hazards, out.entry_id, p.buoy_radius_m),
-        others_of(out.entry_id), rq.buoys, cap, true, hard, p);
+        others_of(out.entry_id), rq.buoys, cap, true, hard, p, nav::Beacon::FlashingBlue);
     if (!er.ok) {out.why = "no orbit fits round the ENTRY: " + er.why; return out;}
     out.entry_r = er.r;
     out.entry_ring = er.pts;
@@ -1151,8 +1245,8 @@ inline Plan planAt(const Request & rq, const Params & p, const Grid & grid, doub
 
   // The passage: which red/green are held to a side (selectRays says which and why not).
   const std::vector<Vec2> & ering = with_entry ? er.pts : rq.entry_ring_done;
-  out.rays = selectRays(rq.buoys, axis, out.entry_c, out.exit_c, ering, xr.pts, &out.excluded,
-      &out.notes);
+  out.rays = selectRays(rq.buoys, axis, out.entry_c, out.exit_c, ering, goal_ring.pts,
+      &out.excluded, &out.notes);
 
   std::vector<Source> tsrc;
   int approach_goal = -1;
@@ -1222,7 +1316,8 @@ inline Plan planAt(const Request & rq, const Params & p, const Grid & grid, doub
     out.legs[static_cast<int>(Phase::ExitOrbit)] = leg;
     out.exit_sweep_deg = sweptDeg(xr.c, orbit);
   } else {
-    const Found t = search(grid, out.rays, tsrc, ringGoals(xr, out.rays, axis), xr.c, xr.r, hard, p);
+    const Found t = search(grid, out.rays, tsrc, ringGoals(goal_ring, out.rays, axis), goal_ring.c,
+        goal_ring.r, hard, p);
     out.expanded += t.expanded;
     out.layers = t.layers;
     if (!t.ok) {
@@ -1256,9 +1351,11 @@ inline Plan planAt(const Request & rq, const Params & p, const Grid & grid, doub
       }
     }
     out.legs[static_cast<int>(Phase::Transit)] = transit;
-    const std::vector<Vec2> xorbit = orbitPath(xr, t.goal, xovs);
-    out.legs[static_cast<int>(Phase::ExitOrbit)] = xorbit;
-    out.exit_sweep_deg = sweptDeg(xr.c, xorbit);
+    if (!out.exit_pending) {
+      const std::vector<Vec2> xorbit = orbitPath(xr, t.goal, xovs);
+      out.legs[static_cast<int>(Phase::ExitOrbit)] = xorbit;
+      out.exit_sweep_deg = sweptDeg(xr.c, xorbit);
+    }
     out.transit_clear = polylineClearance(transit, rq.hazards);
     out.checkpoints = placeCheckpoints(transit, out.rays, rq.hazards, rq.cleared, p);
     // judged like a referee would: on the WHOLE transit, the part already driven included
@@ -1274,7 +1371,9 @@ inline Plan planAt(const Request & rq, const Params & p, const Grid & grid, doub
     }
   }
   for (int k = static_cast<int>(rq.from); k < 4; ++k) {
-    if (!out.legs[k].empty()) {out.min_clear = std::min(out.min_clear, polylineClearance(out.legs[k], rq.hazards));}
+    if (out.legs[k].empty()) {continue;}
+    out.min_clear = std::min(out.min_clear,
+      polylineClearance(out.legs[k], isOrbit(static_cast<Phase>(k)) ? orbit_hz : rq.hazards));
   }
   out.ok = true;
   return out;
@@ -1339,7 +1438,8 @@ inline std::string summary(const Plan & pl)
       detail::fmt(arcLengths(pl.legs[k]).back(), 1) + " m,";
   }
   if (pl.entry_r > 0.0) {s += " entry r " + detail::fmt(pl.entry_r, 2) + " (" + detail::fmt(pl.entry_sweep_deg, 0) + " deg),";}
-  s += " exit r " + detail::fmt(pl.exit_r, 2) + " (" + detail::fmt(pl.exit_sweep_deg, 0) + " deg),";
+  s += pl.exit_pending ? std::string(" exit orbit once the EXIT is seen,") :
+    " exit r " + detail::fmt(pl.exit_r, 2) + " (" + detail::fmt(pl.exit_sweep_deg, 0) + " deg),";
   s += " " + std::to_string(pl.rays.size()) + " buoys held to a side";
   if (!pl.excluded.empty()) {s += ", " + std::to_string(pl.excluded.size()) + " not held (see notes)";}
   s += ", " + std::to_string(pl.checkpoints.size()) + " checkpoint(s), min clearance " +

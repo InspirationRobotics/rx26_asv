@@ -340,7 +340,27 @@ struct BookParams
   /// same number as layout()'s min_spacing_m, so nothing layout() would refuse
   /// as "too close to be two bays" stalls the survey. Under the 2 m pitch.
   double merge_m = 1.2;
-  int max_tracks = 6;           ///< room for a false positive or two
+  /// With the dock heading known (ingest's square_deg), the gate (gate_m) and the merge
+  /// (merge_across_m) are ACROSS the dock, and along it only loosely (along_gate_m): the
+  /// camera's range errors run along the ray, about along the heading, and a 0.7 m gate
+  /// both ways split one bay into six tracks on the water (2026-11-12).
+  /// Across the dock two tracks closer than merge_across_m are one bay seen twice: the
+  /// same 1.2 m as merge_m, under the 2 m pitch (with the window-size range calibrated:
+  /// at 0.25 m it read 63 %, the bays looked 1.1-1.3 m apart and 0.8 m was needed).
+  double merge_across_m = 1.2;
+  double along_gate_m = 2.5;
+  /// The dock has three bays, so the book holds at most three (Chase, 2026-11-12): a fourth
+  /// face is taken only in place of a weak stale track (prune_max_n, stale_s), and
+  /// otherwise rejected. Faces outside the course (DockBook::keep_in) never get this far.
+  int max_tracks = 3;
+  /// A full book makes room for a new bay by dropping its weakest track seen fewer than
+  /// prune_max_n times and not for stale_s (a sighting from mid-turn, a reflection).
+  int prune_max_n = 3;
+  double stale_s = 5.0;
+  /// A face is dropped only this far OUTSIDE the course (DockBook::keep_in), m. The dock
+  /// may sit at the course's edge - its bays 0.9-1.8 m in on ALPHA, 11-12 - and a size range
+  /// that reads 15 % long put them all outside (the replay at window_size_m 0.55).
+  double fence_margin_m = 3.0;
   /// Face centre above the CAMERA, m, for placing sightings from a pitched
   /// camera (faceInBody). Build guide: face centre ~0.8 m above the water;
   /// the camera is 0.41 m up. Irrelevant while the camera is level.
@@ -404,12 +424,40 @@ struct FrameBay
   Vec2 p;                                ///< face centre, local frame
   double ahead_m = kNaN, left_m = kNaN;  ///< face centre, body frame (+ left)
   bool truncated = false;                ///< cut by the image edge: centre biased
+  bool plane = false;                    ///< placed by the face plane (stereo), not the size range
+  int track = -1;                        ///< the track the book put it on (-1: none)
   /// The indicator, body frame, where the frame placed it (its box, the learned Pinhole and
   /// the face plane); NaN when it did not.
   double ind_ahead_m = kNaN, ind_left_m = kNaN;
   Colour indicator = Colour::Unknown;    ///< its reading; Unknown below min_ind_conf
   std::vector<WindowSighting> windows;
 };
+
+/// `p` inside the polygon `poly` (either winding; a repeated closing vertex is harmless).
+inline bool inPolygon(Vec2 p, const std::vector<Vec2> & poly)
+{
+  bool in = false;
+  for (std::size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++) {
+    const Vec2 a = poly[i], b = poly[j];
+    if ((a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x) {
+      in = !in;
+    }
+  }
+  return in;
+}
+
+/// `p` more than `margin_m` outside the polygon `poly`; never, for an empty one.
+inline bool beyondFence(Vec2 p, const std::vector<Vec2> & poly, double margin_m)
+{
+  if (poly.empty() || inPolygon(p, poly)) {return false;}
+  for (std::size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++) {
+    const Vec2 a = poly[j], ab = poly[i] - a;
+    const double len2 = nav::dot(ab, ab);
+    const double u = len2 > 0.0 ? std::clamp(nav::dot(p - a, ab) / len2, 0.0, 1.0) : 0.0;
+    if (nav::norm(p - (a + ab * u)) <= margin_m) {return false;}
+  }
+  return true;
+}
 
 /// The bays seen so far. Written by the runner on every DockObservation;
 /// read by the leaves.
@@ -428,6 +476,13 @@ struct DockBook
   Pinhole pinhole;
   /// The newest frame's bays, placed (FrameBay); empty when it could place none.
   std::vector<FrameBay> frame_bays;
+  /// RoboCommand's course boundary in the local frame (the runner's placeCourse), either
+  /// winding; empty = no course, and nothing is checked. A face placed more than
+  /// prm.fence_margin_m outside it is not this course's dock (a building across the
+  /// water, the shore) and places nothing.
+  std::vector<Vec2> keep_in;
+  int keep_in_seq = -1;                  ///< the Context::course_seq keep_in was made from
+  int fenced = 0;                        ///< faces dropped beyond keep_in, this mission
 
   /// The id `id` lives under now, after any merges.
   int resolve(int id) const
@@ -439,6 +494,19 @@ struct DockBook
       }
     }
     return id;
+  }
+
+  /// This frame's face on track `id` (after merges), nullptr when the frame put none there.
+  /// A committed bay is followed this way: the track holds its place against range noise
+  /// and against the cut faces that drag a single sighting sideways.
+  const FrameBay * onTrack(int id) const
+  {
+    if (id < 0) {return nullptr;}
+    id = resolve(id);
+    for (const auto & b : frame_bays) {
+      if (b.track >= 0 && resolve(b.track) == id) {return &b;}
+    }
+    return nullptr;
   }
 
   const BayTrack * find(int id) const
@@ -458,8 +526,10 @@ struct DockBook
   /// placed nothing: no range, too far, or a truncated face with no track to
   /// join). Association is greedy by distance, one sighting per track per frame:
   /// two bays in one frame are two bays, even if the gate would let both join one
-  /// track.
-  std::vector<int> ingest(const Frame & f, Vec2 boat, double heading_deg, const Mount & m)
+  /// track. `square_deg`: the dock heading (the bow's, facing the bays), NaN when
+  /// unset; with it the distance is measured across the dock (gap()).
+  std::vector<int> ingest(
+    const Frame & f, Vec2 boat, double heading_deg, const Mount & m, double square_deg = kNaN)
   {
     ++frames;
     frame_bays.clear();
@@ -482,24 +552,27 @@ struct DockBook
       // range is along the camera-frame ray, which a pitched camera tilts out of
       // the horizontal: level it and scale.
       Vec2 fb;
-      if (!(s.has_normal &&
-        faceInBody(s.bearing_deg, s.nx, s.ny, s.nz, s.d, m.pitch_deg, prm.face_dz, fb)))
-      {
+      const bool by_plane = s.has_normal &&
+        faceInBody(s.bearing_deg, s.nx, s.ny, s.nz, s.d, m.pitch_deg, prm.face_dz, fb);
+      if (!by_plane) {
         const double b = s.bearing_deg * nav::kDeg;
         fb = levelled(std::cos(b), std::sin(b), 0.0, m.pitch_deg) * s.range_m;
       }
       const double hr = nav::norm(fb);
       const Vec2 dir = camDirToWorld(heading_deg, m.yaw_deg, fb.x, fb.y);
-      placed.push_back({i, cam + dir * hr, hr, fb});
+      const Vec2 q = cam + dir * hr;
+      if (beyondFence(q, keep_in, prm.fence_margin_m)) {++fenced; continue;}
+      placed.push_back({i, q, hr, fb});
       frame_bays.push_back(frameBay(s, placed.back().q, fb, m));
+      frame_bays.back().plane = by_plane;
     }
 
     struct Pair {double d; std::size_t pi; std::size_t ti;};
     std::vector<Pair> pairs;
     for (std::size_t pi = 0; pi < placed.size(); ++pi) {
       for (std::size_t ti = 0; ti < tracks.size(); ++ti) {
-        const double d = nav::norm(placed[pi].q - tracks[ti].p);
-        if (d <= prm.gate_m) {pairs.push_back({d, pi, ti});}
+        const double d = gap(placed[pi].q, tracks[ti].p, square_deg, prm.gate_m);
+        if (std::isfinite(d)) {pairs.push_back({d, pi, ti});}
       }
     }
     std::sort(pairs.begin(), pairs.end(), [](const Pair & a, const Pair & b) {return a.d < b.d;});
@@ -510,7 +583,7 @@ struct DockBook
       const Placed & pl = placed[pr.pi];
       fold(tracks[pr.ti], f.bays[pl.i], pl.q, pl.r, cam, heading_deg, m, f.t);
       live(tracks[pr.ti], frame_bays[pr.pi]);
-      out[pl.i] = tracks[pr.ti].id;
+      out[pl.i] = frame_bays[pr.pi].track = tracks[pr.ti].id;
     }
     // Unmatched: a new bay, unless the face is cut off (its centre is biased
     // toward the image edge, and a track born from it starts in the wrong place).
@@ -518,17 +591,50 @@ struct DockBook
       if (pused[pi]) {continue;}
       const Placed & pl = placed[pi];
       if (f.bays[pl.i].truncated) {continue;}
-      if (static_cast<int>(tracks.size()) >= prm.max_tracks) {continue;}
+      if (static_cast<int>(tracks.size()) >= prm.max_tracks && !pruneOne(f.t)) {continue;}
       BayTrack t;
       t.id = next_id++;
       t.first_seen = f.t;
       tracks.push_back(t);
       fold(tracks.back(), f.bays[pl.i], pl.q, pl.r, cam, heading_deg, m, f.t);
       live(tracks.back(), frame_bays[pi]);
-      out[pl.i] = tracks.back().id;
+      out[pl.i] = frame_bays[pi].track = tracks.back().id;
     }
-    mergeClose();
+    mergeClose(square_deg);
     return out;
+  }
+
+  /// How far apart two placed faces are, for association: +inf beyond `limit`. With the
+  /// dock heading `square_deg`, the distance ACROSS it (within `limit`) plus a fifth of the
+  /// distance along it (within along_gate_m), the fifth only to rank the pairs; without,
+  /// the plain distance.
+  double gap(Vec2 a, Vec2 b, double square_deg, double limit) const
+  {
+    constexpr double kInf = std::numeric_limits<double>::infinity();
+    const Vec2 d = a - b;
+    if (!std::isfinite(square_deg)) {
+      const double r = nav::norm(d);
+      return r < limit ? r : kInf;
+    }
+    const Vec2 fwd = nav::headingVec(square_deg);
+    const double across = std::fabs(nav::dot(d, nav::portOf(fwd)));
+    const double along = std::fabs(nav::dot(d, fwd));
+    return across < limit && along < prm.along_gate_m ? across + 0.2 * along : kInf;
+  }
+
+  /// Room for a new bay in a full book: drop the weakest track seen fewer than
+  /// prune_max_n times and not for stale_s. False when there is none to drop.
+  bool pruneOne(double now)
+  {
+    std::size_t k = tracks.size();
+    for (std::size_t i = 0; i < tracks.size(); ++i) {
+      const BayTrack & t = tracks[i];
+      if (t.n >= prm.prune_max_n || now - t.last_seen < prm.stale_s) {continue;}
+      if (k == tracks.size() || t.n < tracks[k].n) {k = i;}
+    }
+    if (k == tracks.size()) {return false;}
+    tracks.erase(tracks.begin() + static_cast<std::ptrdiff_t>(k));
+    return true;
   }
 
   /// Where this sighting put the face (`q` local, `fb` camera), and its indicator if the
@@ -567,16 +673,18 @@ struct DockBook
     t.live_ind_left_m = b.ind_left_m;
   }
 
-  /// Fold together any two tracks closer than merge_m, the lighter into the
-  /// heavier, until none are. Everything is summed; the position is the
-  /// weighted mean, so the merged track sits where the better sightings say.
-  void mergeClose()
+  /// Fold together any two tracks closer than merge_m (with the dock heading: closer
+  /// than merge_across_m across it, gap()), the lighter into the heavier, until none
+  /// are. Everything is summed; the position is the weighted mean, so the merged track
+  /// sits where the better sightings say.
+  void mergeClose(double square_deg = kNaN)
   {
+    const double limit = std::isfinite(square_deg) ? prm.merge_across_m : prm.merge_m;
     for (bool again = true; again; ) {
       again = false;
       for (std::size_t i = 0; i < tracks.size() && !again; ++i) {
         for (std::size_t j = i + 1; j < tracks.size() && !again; ++j) {
-          if (nav::norm(tracks[i].p - tracks[j].p) >= prm.merge_m) {continue;}
+          if (!std::isfinite(gap(tracks[i].p, tracks[j].p, square_deg, limit))) {continue;}
           const std::size_t keep = tracks[i].w >= tracks[j].w ? i : j;
           const std::size_t drop = keep == i ? j : i;
           absorb(tracks[keep], tracks[drop]);
@@ -803,6 +911,40 @@ inline Verdict verdictOffIsGreen(const BayTrack & t, const VoteParams & v)
 inline char verdictChar(Verdict v)
 {
   return v == Verdict::Green ? 'G' : (v == Verdict::Red ? 'R' : '?');
+}
+
+/// CommitFirstGreen's colour rule, one number per bay: its GREEN CONFIDENCE is the share of its
+/// indicator reads (frames the classifier named a colour at min_ind_conf or more) that said
+/// GREEN. GREEN at min_conf or more, once it has min_reads reads; RED when 1 minus it is.
+/// off_is_green: OFF reads count as GREEN, for a detector that reads the lit GREEN indicator as
+/// unlit (the course, 2026-11-12); without it they count for neither.
+struct ColourRule
+{
+  bool off_is_green = false;
+  int min_reads = 3;            ///< reads before the confidence counts: one bad frame is not a bay
+  double min_conf = 0.5;        ///< GREEN confidence that commits
+};
+
+/// Reads behind greenConfidence: RED + GREEN (+ OFF with off_is_green).
+inline int colourReads(const BayTrack & t, bool off_is_green)
+{
+  return t.red + t.green + (off_is_green ? t.off : 0);
+}
+
+/// 0..1, NaN before the first read (see ColourRule).
+inline double greenConfidence(const BayTrack & t, bool off_is_green)
+{
+  const int n = colourReads(t, off_is_green);
+  return n > 0 ? static_cast<double>(t.green + (off_is_green ? t.off : 0)) / n :
+         std::numeric_limits<double>::quiet_NaN();
+}
+
+inline Verdict confidenceVerdict(const BayTrack & t, const ColourRule & r)
+{
+  if (colourReads(t, r.off_is_green) < std::max(1, r.min_reads)) {return Verdict::Unresolved;}
+  const double g = greenConfidence(t, r.off_is_green);
+  if (g >= r.min_conf) {return Verdict::Green;}
+  return 1.0 - g >= r.min_conf ? Verdict::Red : Verdict::Unresolved;
 }
 
 struct Choice

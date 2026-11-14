@@ -70,7 +70,7 @@ telemetry_bridge:
     # Numbers from task3-gazebo (2026-10-11/12, on the water).
     cannon_pan_channel: 11
     cannon_tilt_channel: 12
-    cannon_pump: false                     # G7 for the cannon: false = aims, water DRY
+    cannon_pump: true                      # G7 for the cannon: false = aims, water DRY
     cannon_nozzle_xyz: [0.37, 0.279, 0.635] # level with the camera fore/aft, 11 in to port;
                                            # z = the tip at tilt 0 (2026-11-06; tilt pivot 0.605,
                                            # 3.6 cm arm; 0.75 before)
@@ -146,14 +146,11 @@ led_status_node:
     estop_threshold: 1200
 
 # ---- rc_watchdog: force-disarm on RC-transmitter link loss ----
-# Reads telemetry_bridge's /crsd/rc_channels, /crsd/fcu_status and /crsd/rc_link_lost and
-# disarms through it (/crsd/force_disarm). Defense in depth beside ArduPilot FS_THR/FS_GCS and
-# the SB e-stop.
+# Reads telemetry_bridge's /crsd/rc_channels and /crsd/fcu_status and disarms through it
+# (/crsd/force_disarm). Defense in depth beside ArduPilot FS_THR/FS_GCS and the SB e-stop.
 rc_watchdog:
   ros__parameters:
     rc_channel: 7                          # SB, whose valid PWM is the RC heartbeat
-    enable_latch: true                     # the autopilot re-arms on reconnect (SB is ARM/EMSTOP):
-                                           # stay disarmed, LED RED, until the pilot resets
     reset_channel: 7                       # its low->high toggle clears an enable_latch kill
 
 # ---- crusader_perception: camera_node (the OAK-D) and lidar_node (the MID360) ----
@@ -161,22 +158,24 @@ rc_watchdog:
 # oak_controls for camera_node); this lists what is set for this boat. [DYN] = live.
 #
 # camera_node is NOT in core.launch.py: start it from the Nodes tab.
-# THE CROP PARAMS ARE A CONTRACT WITH THE TRAINING EXPORTER: cls_imgsz, crop_pad,
-# crop_top_frac (and ae_compensation, the colour the LED records as) must match what
-# cut the training crops, or the classifier is silently worse everywhere.
+# THE CLASSIFIER'S CROP IS A CONTRACT WITH THE TRAINING NOTEBOOK: cls_imgsz, the beacon crop
+# geometry (oak_detector_core.beacon_patch = vision/tools/beacon_crop.py) and ae_compensation
+# (the colour the LED records as) must match what cut the training crops, or the classifier is
+# silently worse everywhere. crop_pad is only the shape stage's padding.
 camera_node:
   ros__parameters:
     model: "buoy"                          # [DYN] none | buoy | dock
     fps: 15.0                              # the flash tracker needs 3 fps or more
     isp_denominator: 3                     # stereo and depth 640x400 (1280 wide at most)
     rgb_isp_denominator: 1                 # colour 1920x1200: the dock model wants exactly this
-    det_engine: "/root/robotx_ws/models/buoy_detector.engine"
-    det_labels: ["circle", "diamond"]      # IN ENGINE ORDER: a wrong order mislabels every box
-    cls_engine: "/root/robotx_ws/models/led_classifier.engine"
-    cls_labels: ["blue", "green", "off", "red"]   # IN ENGINE ORDER (training folder order)
+    det_engine: "/root/robotx_ws/models/buoy_detector_task1.engine"   # 2026-11-13 task1 model, 608x960
+    det_imgsz_height: 608                  # MUST match the engine (exported imgsz=608,960)
+    det_imgsz_width: 960
+    det_labels: ["diamond", "circle", "marker", "buoy", "beacon"]      # IN ENGINE ORDER: a wrong order mislabels every box
+    cls_engine: "/root/robotx_ws/models/beacon_colour_cls_b1.engine"   # 2026-11-13 task1 colour model, batch 1
+    cls_labels: ["blue", "off", "green", "red"]   # IN ENGINE ORDER; the engine calls index 1 "dark": it is the unlit class
     cls_imgsz: 64
     crop_pad: 0.1
-    crop_top_frac: 0.25
     dock_ffcv_dir: "/root/robotx_ws/models/ffcv"
     # the camera profile the boat starts on; camera_profiles.yaml holds the others
     ae_compensation: -3                    # [DYN] also a training contract, see above
@@ -233,7 +232,7 @@ target_tracker:
     cam_z: 0.65                            # m above the hull-bottom datum, as lidar_z
     cam_yaw_deg: 0.0                       # + = aimed to port. ASSUMED
     cam_pitch_deg: 0.0                     # + = aimed down. ASSUMED
-    use_lidar: false                       # [DYN] false = camera-only: in a pool or beside a
+    use_lidar: false                      # [DYN] false = camera-only: in a pool or beside a
                                            #       dock an unlabelled cluster is the WALL, and
                                            #       with track_timeout_s 0 it never leaves.
                                            #       OPEN WATER: true, with lidar_node r_max 25-40
@@ -266,10 +265,10 @@ bt_runner_node:
   ros__parameters:
     default_timeout_s: 0.0                 # 0 = no limit: only the pilot (SC, SD) ends a run;
                                            # a timeout typed in the GCS still applies
-    publish_setpoints: false               # FALSE = this node CANNOT move the boat; legs
+    publish_setpoints: true               # FALSE = this node CANNOT move the boat; legs
                                            # still poll for arrival, so a human can drive
                                            # and the tree follows. True is a G1 gate.
-    fire_pump: false                       # FALSE = FireBurst runs DRY. Moving is G1,
+    fire_pump: true                       # FALSE = FireBurst runs DRY. Moving is G1,
                                            # water is G7.
     # The sticks for the MANUAL fire tree (StrafeKeep -> /crsd/rc_override), in the
     # order [ahead, lateral, yaw]: dp_hold's map and its measured neutrals. G1 row O9
@@ -346,13 +345,13 @@ bt_runner_node:
     nav_orbit_clear_m: 1.4                  # ... until it is this clear. Also the
                                             # goal rule for every orbit hop as it
                                             # starts, ring[0] included (clearPoint)
-    nav_orbit_radius_m: 6.0                 # ENTRY/EXIT orbit radius (CircleBuoy;
+    nav_orbit_radius_m: 2.5                 # ENTRY/EXIT orbit radius (CircleBuoy;
                                             # an XML radius= still wins). Tight
                                             # fields: ~2 (buoy 0.3 + hard 0.8 +
                                             # the hull's half-length, with room)
     nav_orbit_points: 8                     # ring points; more for a small radius
                                             # so a hop stays short and on the circle
-    nav_orbit_tolerance_m: 2.0              # a ring hop counts as arrived within
+    nav_orbit_tolerance_m: 1.0              # a ring hop counts as arrived within
                                             # this; keep it under the chord
                                             # (2 r sin(180/points)) or hops are skipped
     nav_gate_standoff_m: 6.0                # gate through point, metres past the
@@ -399,8 +398,8 @@ bt_runner_node:
                                             # handbook's side. 0 = no fences
     nav_fence_spacing_m: 0.5                # circle pitch; < 2 x radius = a wall
     nav_fence_radius_m: 0.3                 # circle radius
-    nav_fence_clear_m: 8.0                  # no circle this close to the ENTRY or
-                                            # EXIT buoy: orbit radius 6 +
+    nav_fence_clear_m: 4.2                  # no circle this close to the ENTRY or
+                                            # EXIT buoy: orbit radius 2.5 +
                                             # nav_orbit_clear_m 1.4 + radius 0.3
 
 # ---- rfd_link_node: the RFD900 mesh to Ekko (crusader_link) ----

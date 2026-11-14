@@ -19,8 +19,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <functional>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -39,6 +41,7 @@
 #include "crusader_bt/path_math.hpp"
 #include "crusader_bt/planned_leg.hpp"
 #include "crusader_bt/run_start.hpp"
+#include "crusader_bt/task4_math.hpp"
 
 namespace crusader_bt
 {
@@ -122,10 +125,19 @@ struct Context
   /// a bay. HERE, not on leaf ports, because SafeBayKnown and CommitSafeBay
   /// must apply the SAME rule: a condition looser than its commit stalls the tree.
   dock::VoteParams dock_votes;
+  /// The colour rule CommitFirstGreen judged the bays by on its last tick (its ports), so
+  /// /crsd/bt_status records each bay's GREEN confidence and verdict as the tree saw them.
+  dock::ColourRule colour_rule;
   int dock_min_obs = 5;
   /// The bow's heading facing the dock, deg true: bt_runner_node dock_heading_deg (the
   /// GCS sets it), read at goal start. < 0 = not set.
   double dock_heading = -1.0;
+  /// RoboCommand's course (its RxCourse corners, lat/lon), as the OCS relays it on
+  /// /crsd/ocs_course; empty = no course. The dock book drops any face placed outside it
+  /// (placeCourse). course_seq counts the courses heard, so a new one is placed afresh.
+  std::vector<nav::LatLon> course_corners;
+  std::string course_id;
+  int course_seq = 0;
   /// Which way StrafeSearch slides first: bt_runner_node search_first (the GCS sets it),
   /// read at goal start. "left" | "right", "" = not set.
   std::string search_first;
@@ -167,7 +179,7 @@ struct Context
   /// CommitFirstGreen colour="any" (task3_first_dock): `green` is then the bay committed
   /// to, whatever its indicator reads, not the GREEN one (pickGreen).
   bool target_any = false;
-  /// The centring spot (the GREEN indicator, else its face), kept on the map by a Kalman
+  /// The centring spot (our bay's face; never its indicator), kept on the map by a Kalman
   /// filter from every frame that showed it: one memory for ApproachBay and StrafeKeep, so
   /// the hand-over does not start the hold blind, and a few lost frames are ridden through.
   fire::CentreTarget centre;
@@ -240,6 +252,61 @@ struct Context
     int plans = 0;
   };
   GlobalPassage global_passage;
+
+  // ---- Task 1 Core: where the ENTRY/EXIT in use came from (bt_runner_node refuseLocked) ----
+  /// SEEN by the boat this run, or GIVEN (the GCS MANUAL field): never kept from an earlier run
+  /// (the competition re-deals the light beacons every run), not guessed. The Core scan (ScanForBuoys, AnchorSeen) looks until it has these.
+  bool entry_seen = false;
+  bool exit_seen = false;
+  /// The EXIT in use is a GUESS: the operator's field centre mirrored through the ENTRY. Good
+  /// enough to plan the approach and the transit; replaced the moment the boat sees the EXIT.
+  bool exit_guessed = false;
+  /// This mission lets the runner GUESS the EXIT (the root's t1_guess_exit="true", read at Start;
+  /// only the Core scan trees set it). Off: guessExit does nothing and exit_guessed stays false.
+  bool guess_exit = false;
+  /// Ids of the unnamed buoys (no colour yet) DrivePlanPhase has already stopped to look at
+  /// (pause_unknown_m): one look per buoy per run, across phase restarts, Retry re-plans and a
+  /// Task 4 resume. Cleared at goal start. Under mu.
+  std::set<int> looked_unnamed;
+
+  // ---- the operator's mission inputs: the GCS Run panel -> bt_runner_node, read at Start ----
+  struct Inputs
+  {
+    bool field_set = false;          ///< t1_field_lat/lon are set (0, 0 = not)
+    nav::LatLon field_ll;            ///< the Task 1 buoy field's approximate centre
+    double scan_dwell_s = 5.0;       ///< t1_scan_dwell_s: each look of a scan, each mid-field pause
+    double pause_every_m = 5.0;      ///< t1_pause_every_m: a look every this far along the transit
+    double backoff_m = 4.0;          ///< t3_backoff_m: the docked hold once the fire is out
+    bool via_set = false;            ///< t3_via_lat/lon are set (0, 0 = not)
+    nav::LatLon via_ll;              ///< a point the boat drives through from Task 1 to Task 3
+    bool approach_set = false;       ///< t1_approach_lat/lon are set (0, 0 = not)
+    nav::LatLon approach_ll;         ///< where Task 1 drives to before it scans for the field
+    double unknown_range_m = 12.0;   ///< t1_unknown_range_m: stop to look at a colourless buoy this near (0 = never)
+  };
+  Inputs inputs;
+
+  // ---- Task 4 Disruptive: RoboCommand's moving objects (task4_math.hpp, task4_leaves.cpp) ----
+  //
+  // The runner folds every MovingObjectAlert in (any time, a mission running or not) and
+  // re-reads the settings every second; knownHazards() carries the objects' swept keep-outs;
+  // the AvoidInvaders decorator steps the boat aside and writes what it is doing below.
+  struct Task4
+  {
+    t4::Settings settings;           ///< bt_runner_node t4_*
+    std::vector<t4::Invader> objects;
+    int next_id = 1;
+    int alerts = 0;                  ///< MovingObjectAlerts received since the node started
+    double last_alert_s = -1.0;      ///< now_s of the newest; < 0 = none yet
+    double last_seq = 0.0;           ///< RxCommand.seq of the newest alert applied; 0 = none (a run start, run end or All Clear resets it)
+    std::string state;               ///< AvoidInvaders: CLEAR EVADING WAITING RETURNING RESTORING
+    std::string why;
+    double state_s = -1.0;           ///< now_s when the guard last wrote; < 0 = never this run
+    bool have_target = false;        ///< where the guard is driving (escape or return point)
+    nav::Vec2 target;
+    t4::Assessment last;             ///< the guard's last verdict
+    int evasions = 0;                ///< this run
+  };
+  Task4 task4;
 
   // ---- written by NextWaypoint, read by NavigateTo ----
   nav::Vec2 waypoint;
@@ -314,11 +381,12 @@ struct Context
   /// Ask the autopilot for a flight mode: /crsd/set_mode (RequestMode).
   std::function<void(const std::string &)> request_mode;
   /// Ask camera_node for a model (its live `model` parameter, SetCameraModel) and, when
-  /// `indicator` is not "", how the dock model reads the indicator (its live
-  /// `dock_indicator`: yolo | cv). False, with the reason in `why`, when it cannot be asked;
-  /// the answer lands in camera_model_ack.
+  /// `indicator` is not "" (the dock model), how the dock model reads the indicator (its live
+  /// `dock_indicator`: yolo | cv) and which detector it runs (its `dock_weights`: "" for
+  /// dock_ffcv_dir's best.pt, the new one, else a .pt path). False, with the reason in `why`,
+  /// when it cannot be asked; the answer lands in camera_model_ack.
   std::function<bool(const std::string & model, const std::string & indicator,
-    std::string & why)> set_camera_model;
+    const std::string & weights, std::string & why)> set_camera_model;
   int camera_model_ack = 0;                   ///< the last ask: 0 waiting, 1 applied, -1 refused
   std::string camera_model_why;               ///< camera_node's refusal, then the leaf's FAILURE
 };
@@ -414,7 +482,49 @@ inline bool hazardsPublishable(const Context & c)
 ///
 inline std::vector<path::Hazard> knownHazards(const Context & c)
 {
-  return path::buildHazards(c.buoys, c.obstacles, c.dock, c.dock_min_obs, c.nav);
+  std::vector<path::Hazard> hz =
+    path::buildHazards(c.buoys, c.obstacles, c.dock, c.dock_min_obs, c.nav);
+  // Task 4: every moving object's keep-out, swept along its projected travel (SRC_KEEPOUT)
+  const std::vector<path::Hazard> ko = t4::hazards(c.task4.objects, c.task4.settings, c.now_s);
+  hz.insert(hz.end(), ko.begin(), ko.end());
+  return hz;
+}
+
+/// The operator's Task 1 field centre in the local frame. False without one (or no origin).
+/// CALL UNDER ctx.mu.
+inline bool fieldCentre(const Context & c, nav::Vec2 * p)
+{
+  if (!c.inputs.field_set || !c.origin_set) {return false;}
+  *p = nav::toLocal(c.inputs.field_ll, c.origin);
+  return true;
+}
+
+/// Hazards from Task 4's moving objects only. CALL UNDER ctx.mu.
+inline std::vector<path::Hazard> invaderHazards(const Context & c)
+{
+  return t4::hazards(c.task4.objects, c.task4.settings, c.now_s);
+}
+
+/// A Task 4 keep-out is within near_m of `path` (a point or polyline). A leg blocked by one is
+/// WAITING for a moving object to pass, which must not time the leg out. CALL UNDER ctx.mu.
+inline bool invaderNear(const Context & c, const std::vector<nav::Vec2> & path, double near_m)
+{
+  const std::vector<path::Hazard> ko = invaderHazards(c);
+  if (ko.empty() || path.empty()) {return false;}
+  for (std::size_t i = 0; i < path.size(); ++i) {
+    if (path::minClearance(ko, path[i]) < near_m) {return true;}
+    if (i + 1 < path.size()) {
+      const nav::Vec2 a = path[i], b = path[i + 1];
+      const double len = nav::norm(b - a);
+      const int n = static_cast<int>(len / 0.5);
+      for (int k = 1; k < n; ++k) {
+        if (path::minClearance(ko, a + (b - a) * (static_cast<double>(k) / n)) < near_m) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
 }
 
 // ------------------------------------------------------------------ nav_mode
@@ -484,6 +594,13 @@ inline std::string jsonNum(double v, int digits)
 }
 
 /// `[lat, lon]` of a local point, or `null` when there is none (or no origin).
+/// A position the operator typed: finite, on the globe, and not the 0, 0 a blank GCS field leaves.
+inline bool latLonGiven(double lat, double lon)
+{
+  return std::isfinite(lat) && std::isfinite(lon) && std::fabs(lat) <= 90.0 &&
+         std::fabs(lon) <= 180.0 && !(lat == 0.0 && lon == 0.0);
+}
+
 inline std::string jsonLatLon(const Context & c, bool have, nav::Vec2 p)
 {
   if (!have || !c.origin_set) {return "null";}
@@ -522,7 +639,8 @@ inline std::string safePassageReportJson(const Context & c)
   }
   o += "]";
   if (c.have_entry) {o += ",\"entry_position\":" + jsonPosition(c, c.entry);}
-  if (c.have_exit) {o += ",\"exit_position\":" + jsonPosition(c, c.exitp);}
+  // a GUESSED EXIT (the field centre mirrored through the ENTRY) steers the plan, never the report
+  if (c.have_exit && !c.exit_guessed) {o += ",\"exit_position\":" + jsonPosition(c, c.exitp);}
   return o + "}";
 }
 
@@ -664,12 +782,17 @@ inline void announceTask(Context & c, const std::string & token)
 /// be from where the GREEN one last was and still be it (pickGreen). Under half a bay's width.
 constexpr double kSameBayM = 0.6;
 
-/// This frame's GREEN bay: the bay it read GREEN (should two, the one nearer where it last
-/// was), else - a frame that read no GREEN - the bay not read RED within kSameBayM of where
-/// the GREEN one last was. Measured ACROSS the dock heading: the camera's range errors run
-/// along it. nullptr when neither. CALL UNDER ctx.mu.
+/// This frame's GREEN bay. Committed: the face on our track. Before: the bay it read GREEN
+/// (should two, the one nearer where it last was), else - a frame that read no GREEN - the
+/// bay not read RED within kSameBayM of where the GREEN one last was. Measured ACROSS the
+/// dock heading: the camera's range errors run along it. nullptr when neither.
+/// CALL UNDER ctx.mu.
 inline const dock::FrameBay * pickGreen(const Context & c)
 {
+  // Committed (chosen_track): our bay is the face the book put on its track this frame,
+  // whatever it reads, or none. Following the last sighting instead lost the bay for good
+  // whenever a cut face dragged that sighting sideways (the 11-12 recording, replayed).
+  if (c.chosen_track >= 0) {return c.dock.onTrack(c.chosen_track);}
   const double square = c.dock_heading >= 0.0 ? c.dock_heading : c.heading_deg;
   const bool had = c.green.t >= 0.0;
   auto across = [&](const dock::FrameBay & b) {
@@ -694,8 +817,9 @@ inline const dock::FrameBay * pickGreen(const Context & c)
   return best;
 }
 
-/// Make `g` (a bay of the frame stamped t) our bay's newest sighting, and feed its centring
-/// point (the indicator, else the face unless it is cut off) to ctx.centre. CALL UNDER ctx.mu.
+/// Make `g` (a bay of the frame stamped t) our bay's newest sighting, and feed its face
+/// centre to ctx.centre unless the image edge cut the face (its centre is biased). The
+/// indicator only says the bay's colour. CALL UNDER ctx.mu.
 inline void adoptBay(Context & c, const dock::FrameBay & g, double t)
 {
   c.green.t = t;
@@ -704,14 +828,61 @@ inline void adoptBay(Context & c, const dock::FrameBay & g, double t)
     c.green.windows = g.windows;
     c.green.windows_t = t;
   }
-  const bool face = !g.truncated && std::isfinite(g.left_m);
-  const bool ind = std::isfinite(g.ind_left_m);
-  c.centre.sight(
-    face ? dock::bodyToWorld(c.boat, c.heading_deg, g.ahead_m, g.left_m) : nav::Vec2{}, face,
-    ind ? dock::bodyToWorld(c.boat, c.heading_deg, g.ind_ahead_m, g.ind_left_m) :
-    nav::Vec2{}, ind,
-    ind ? std::hypot(g.ind_ahead_m, g.ind_left_m) : std::hypot(g.ahead_m, g.left_m),
-    t, c.now_s);
+  if (!g.truncated && std::isfinite(g.left_m)) {
+    c.centre.sight(dock::bodyToWorld(c.boat, c.heading_deg, g.ahead_m, g.left_m),
+      std::hypot(g.ahead_m, g.left_m), t, c.now_s);
+  }
+}
+
+/// RoboCommand's course as the OCS relays it (/crsd/ocs_course: the RxCourse JSON, or
+/// null): its id and its corners' lat/lons in order. False, with both cleared, when it has
+/// fewer than three corners - no course, and then nothing is fenced.
+inline bool parseCourse(const std::string & json, std::string & id,
+  std::vector<nav::LatLon> & corners)
+{
+  id.clear();
+  corners.clear();
+  auto number = [&json](const char * key, std::size_t from, std::size_t to, double & v) {
+      const std::size_t k = json.find(key, from);
+      if (k == std::string::npos || k >= to) {return false;}
+      const std::size_t c = json.find(':', k);
+      if (c == std::string::npos || c >= to) {return false;}
+      char * end = nullptr;
+      v = std::strtod(json.c_str() + c + 1, &end);
+      return end != json.c_str() + c + 1 && std::isfinite(v);
+    };
+  const std::size_t k = json.find("\"course_id\"");
+  if (k != std::string::npos) {
+    const std::size_t q1 = json.find('"', json.find(':', k));
+    const std::size_t q2 = q1 == std::string::npos ? q1 : json.find('"', q1 + 1);
+    if (q2 != std::string::npos) {id = json.substr(q1 + 1, q2 - q1 - 1);}
+  }
+  const std::size_t c = json.find("\"corners\"");
+  const std::size_t open = c == std::string::npos ? c : json.find('[', c);
+  const std::size_t close = open == std::string::npos ? open : json.find(']', open);
+  for (std::size_t a = open; close != std::string::npos; ) {
+    a = json.find('{', a + 1);
+    if (a == std::string::npos || a > close) {break;}
+    const std::size_t b = json.find('}', a);
+    double lat = 0.0, lon = 0.0;
+    if (b != std::string::npos && number("\"latitude\"", a, b, lat) &&
+      number("\"longitude\"", a, b, lon))
+    {
+      corners.push_back({lat, lon});
+    }
+  }
+  if (corners.size() < 3) {corners.clear(); return false;}
+  return true;
+}
+
+/// The course boundary as the dock book's keep-in polygon, in the local frame, once per
+/// course and again after resetTask3 (a new book). CALL UNDER ctx.mu.
+inline void placeCourse(Context & c)
+{
+  if (c.dock.keep_in_seq == c.course_seq || !c.origin_set) {return;}
+  c.dock.keep_in.clear();
+  for (const auto & ll : c.course_corners) {c.dock.keep_in.push_back(nav::toLocal(ll, c.origin));}
+  c.dock.keep_in_seq = c.course_seq;
 }
 
 /// Fold one DockObservation into the context. CALL UNDER ctx.mu.
@@ -726,7 +897,9 @@ inline void ingestDockObservation(Context & c, const dock::Frame & f)
 {
   if (c.origin_set && c.pose_fresh && std::isfinite(c.heading_deg)) {
     c.dock.prm.face_dz = c.dock_face_dz;
-    c.dock.ingest(f, c.boat, c.heading_deg, c.cam_mount);
+    placeCourse(c);
+    c.dock.ingest(f, c.boat, c.heading_deg, c.cam_mount,
+      c.dock_heading >= 0.0 ? c.dock_heading : fire::kNaN);
     if (const dock::FrameBay * g = pickGreen(c)) {adoptBay(c, *g, f.t);}
   }
   ++c.dock_seq;
@@ -812,6 +985,7 @@ inline void resetTask3(Context & c)
   c.search_leg_ends = 0;
   c.chosen_track = -1;
   c.chosen_bay = 0;
+  c.colour_rule = dock::ColourRule{};
   c.berth = dock::Berth{};
   c.readiness_confirmed = false;
   c.docking_report_s = -1.0;
@@ -926,6 +1100,8 @@ void registerTask3Nodes(BT::BehaviorTreeFactory & factory);
 void registerFireNodes(BT::BehaviorTreeFactory & factory);
 /// The whole-field Task 1 leaves (src/global_leaves.cpp, lib/common/task1_plan_drive.xml).
 void registerGlobalPassageNodes(BT::BehaviorTreeFactory & factory);
+/// Task 4's AvoidInvaders guard (src/task4_leaves.cpp).
+void registerTask4Nodes(BT::BehaviorTreeFactory & factory);
 
 }  // namespace crusader_bt
 

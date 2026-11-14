@@ -11,7 +11,7 @@ is: detector -> association -> LED crop -> colour classifier -> per-track light
 state -> label. Everything that DECIDES something is a pure function in
 crusader_perception.oak_detector_core and is imported, not copied:
 
-    led_patch      the classifier's crop (the contract with the training exporter)
+    beacon_patch   the classifier's crop (the contract with the training notebook)
     TrackTable     one identity per buoy across frames
     FlashTracker   flashing / solid / off from the lit score over time, and the
                    label words (flash_red_diamond, red_diamond, off_diamond, ...)
@@ -49,8 +49,7 @@ DET_PT = "crusader_det_yolo26n.pt"
 CLS_PT = "crusader_led_cls.pt"
 VENV_PYTHON = "/root/robotx_ws/venvs/yolo/bin/python"
 
-# buoy_model.py's own constants (module scope there, parameters nowhere)
-MIN_CROP_PX = 10
+# buoy_model.py's own constant (module scope there, parameters nowhere)
 OFF_CLASS = "off"
 
 # box (x1, y1, x2, y2) RGB px, clamped to the frame; label as buoy_model would
@@ -115,10 +114,10 @@ class YoloPipeline:
                           (int(od["det_imgsz_height"]), int(od["det_imgsz_width"])))
         self.cls_imgsz = int(od["cls_imgsz"])
         self.conf_min = float(conf_min) if conf_min > 0 else float(od["det_conf_min"])
-        self.crop_pad = float(od["crop_pad"])
-        self.crop_top = float(od["crop_top_frac"])
         self.off_index = self.colours.index(OFF_CLASS) if OFF_CLASS in self.colours else None
         self.flash_enable = bool(od["flash_enable"]) and self.off_index is not None
+        self.must_flash = self.core.MUST_FLASH if od["rg_must_flash"] else ()
+        self.min_beacon_px = float(od["cls_min_beacon_px"])
         self.od = od
         self.reset()
         # first predict() pays model fusion and allocator warm-up (seconds): pay it here
@@ -152,8 +151,8 @@ class YoloPipeline:
         """{box index: probability vector}; a box too small to crop has no entry."""
         crops, index = [], []
         for i, box in enumerate(boxes):
-            patch = self.core.led_patch(bgr, box, pad=self.crop_pad, top_frac=self.crop_top,
-                                        size=self.cls_imgsz, min_height_px=MIN_CROP_PX)
+            patch = self.core.beacon_patch(bgr, box, size=self.cls_imgsz,
+                                           min_beacon_px=self.min_beacon_px)
             if patch is not None:
                 crops.append(patch)
                 index.append(i)
@@ -175,7 +174,7 @@ class YoloPipeline:
             # the soft lit score, as on the boat (argmax would turn a shrug into a vote)
             state = self.flash.update(track, now, 1.0 - float(probs[self.off_index]),
                                       frame_colour)
-            return state.label(shape), state.colour, state.state
+            return state.label(shape, self.must_flash), state.colour, state.state
         colour, _ = self.voter.update(track, probs)
         return (f"{colour}_{shape}" if colour else shape), colour, None
 

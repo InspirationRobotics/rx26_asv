@@ -258,6 +258,37 @@ class DisableTest(unittest.TestCase):
         self.assertEqual(one_label(f.see("red_buoy", 1)), "red_buoy")
 
 
+class TurnSmearTest(unittest.TestCase):
+    """Mid-turn, a far camera sighting is placed metres off its buoy (the frame and the pose
+    are not from one instant): it is dropped instead of becoming a ghost track."""
+
+    @staticmethod
+    def run_at(tracker, yaw_rate, x, n=5):
+        boat = dataclasses.replace(BOAT, yaw_rate=yaw_rate)
+        tracks = []
+        for k in range(n):
+            cams = [core.CameraDetection(x, 0.0, 0.0, "red_buoy", 0.9)]
+            tracks = tracker.update(cams, [], boat, 0.1 * (k + 1))
+        return tracks
+
+    def test_far_sighting_mid_turn_is_dropped(self):
+        t = make_tracker()                       # 1.0 m at 0.2 s: past 10 m at 0.5 rad/s
+        self.assertEqual(self.run_at(t, 0.5, 20.0), [])
+        self.assertEqual(t.stats["turn_dropped"], 1)
+        self.assertEqual(self.run_at(t, -0.5, 20.0), [])   # either way round
+
+    def test_near_sighting_mid_turn_is_kept(self):
+        self.assertEqual(len(self.run_at(make_tracker(), 0.5, 5.0)), 1)
+
+    def test_far_sighting_steady_is_kept(self):
+        self.assertEqual(len(self.run_at(make_tracker(), 0.0, 20.0)), 1)
+        self.assertEqual(len(self.run_at(make_tracker(), 0.04, 20.0)), 1)   # 0.16 m
+
+    def test_zero_limit_is_off(self):
+        t = make_tracker(turn_smear_max_m=0.0)
+        self.assertEqual(len(self.run_at(t, 2.0, 30.0)), 1)
+
+
 class WiringTest(unittest.TestCase):
     """The node cannot be imported without rclpy, so its wiring is checked from the source:
     a name in _CORE_PARAMS that TrackerParams lacks is a TypeError at node start, and a YAML

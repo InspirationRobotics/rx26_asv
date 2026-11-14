@@ -34,7 +34,7 @@ OFF = [0.02, 0.02, 0.94, 0.02]
 BLUE = [0.95, 0.02, 0.02, 0.01]
 
 
-def stub_pipeline(frames):
+def stub_pipeline(frames, rg_must_flash=True):
     """A YoloPipeline whose models are replaced: `frames` is a list of probability
     vectors, one per process() call, for a single buoy at BOX."""
     p = Y.YoloPipeline.__new__(Y.YoloPipeline)
@@ -42,6 +42,7 @@ def stub_pipeline(frames):
     p.shapes, p.colours = list(OD["det_labels"]), list(OD["cls_labels"])
     p.off_index = p.colours.index("off")
     p.flash_enable = True
+    p.must_flash = p.core.MUST_FLASH if rg_must_flash else ()
     p.od = OD
     p.reset()
     it = iter(frames)
@@ -50,10 +51,10 @@ def stub_pipeline(frames):
     return p
 
 
-def run(probs_at, seconds=12.0, hz=5.0):
+def run(probs_at, seconds=12.0, hz=5.0, rg_must_flash=True):
     """Drive the stub at hz on the sim clock; probs_at(t) -> the classifier's output."""
     ts = [i / hz for i in range(int(seconds * hz))]
-    p = stub_pipeline([probs_at(t) for t in ts])
+    p = stub_pipeline([probs_at(t) for t in ts], rg_must_flash)
     img = np.zeros((1200, 1920, 3), np.uint8)
     return [p.process(img, 100.0 + t)[0] for t in ts]
 
@@ -80,6 +81,23 @@ class LabelTest(unittest.TestCase):
         out = run(lambda t: RED)
         self.assertEqual(out[0].state, "unknown")
         self.assertEqual(out[0].label, "diamond")                      # no lit colour voted yet
+
+    def test_a_steady_red_has_no_colour(self):
+        # Task 1 never shows a solid red: a steady one is a misread, so it is a bare buoy
+        out = run(lambda t: RED)
+        self.assertEqual(out[-1].state, "solid")
+        self.assertEqual(out[-1].label, "diamond")
+        self.assertTrue(all(d.label == "diamond" for d in out))       # young track too
+
+    def test_a_steady_red_is_reported_with_the_guard_off(self):
+        out = run(lambda t: RED, rg_must_flash=False)
+        self.assertEqual(out[-1].label, "red_diamond")
+
+    def test_a_flashing_green_is_called_once_seen_flashing(self):
+        green = [0.02, 0.95, 0.02, 0.01]
+        out = run(lambda t: green if int(t) % 2 == 0 else OFF)
+        self.assertEqual(out[-1].label, "flash_green_diamond")
+        self.assertEqual(out[0].label, "diamond")                      # not before
 
     def test_the_sim_clock_not_the_wall_clock_drives_the_flash_test(self):
         # the same blink, with all 12 s of frames processed in a few ms of wall time

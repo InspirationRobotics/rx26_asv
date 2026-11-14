@@ -102,9 +102,12 @@ public:
 /// wait until it is on it. For "dock", also how the dock model reads the bays' indicator
 /// colour: `indicator`, camera_node's live dock_indicator (no reload) - yolo, the
 /// detector's dock_indicator box (the default), or cv, colour thresholds at the base of
-/// each face. camera_node is always asked: the runner reads both first and sets only what
-/// differs, so a camera already right costs a round trip, not a reload, and no tree runs
-/// on the indicator the last one left behind. On the dock model means the ask answered
+/// each face. Also which detector: `dock_weights`, camera_node's dock_weights (a change
+/// reloads the dock model) - "" (the default) is dock_ffcv_dir's best.pt, the new detector;
+/// task3_scan_fire_old_dock names the Oct 3 one. camera_node is always asked: the runner
+/// reads them first and sets only what differs, so a camera already right costs a round
+/// trip, not a reload, and no tree runs on the indicator or the detector the last one left
+/// behind. On the dock model means the ask answered
 /// and two DockObservations since (the frame in flight at a switch may be the old way).
 /// FAILURE when camera_node is not up, refuses, or timeout_s passes. A camera restart comes
 /// back on its YAML model (buoy), which is blind to the dock: this is what stops a Task 3
@@ -120,6 +123,9 @@ public:
       BT::InputPort<std::string>("indicator", "yolo",
         "dock only: yolo (the detector's indicator box, colour_core) | cv (colour thresholds "
         "at the base of each face) - camera_node dock_indicator"),
+      BT::InputPort<std::string>("dock_weights", "",
+        "dock only: the detector, \"\" = dock_ffcv_dir's best.pt (the new one), else a .pt "
+        "path on the boat - camera_node dock_weights; a change reloads the dock model"),
       BT::InputPort<double>("timeout_s", 15.0, "FAILURE when not on it after this")};
   }
 
@@ -130,6 +136,9 @@ public:
     if (model_ == "dock" && indicator_ != "yolo" && indicator_ != "cv") {
       return fail("indicator must be yolo or cv, not '" + indicator_ + "'");
     }
+    // A "{dock_weights}" that names no blackboard entry (a wrapper that does not set it) is
+    // the default: the new detector.
+    weights_ = model_ == "dock" ? getInput<std::string>("dock_weights").value_or("") : "";
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
       t0_ = ctx_->now_s;
@@ -138,7 +147,7 @@ public:
     }
     acked_ = false;
     std::string why = "bt_runner_node has no way to ask camera_node";
-    if (!ctx_->set_camera_model || !ctx_->set_camera_model(model_, indicator_, why)) {
+    if (!ctx_->set_camera_model || !ctx_->set_camera_model(model_, indicator_, weights_, why)) {
       return fail(why);
     }
     RCLCPP_INFO(log(), "camera_node -> the %s", what().c_str());
@@ -192,15 +201,17 @@ private:
     return BT::NodeStatus::FAILURE;
   }
 
-  /// "dock model (indicator by cv)", for the log and the reasons.
+  /// "dock model (indicator by cv, new weights)", for the log and the reasons.
   std::string what() const
   {
-    return model_ + " model" + (indicator_.empty() ? "" : " (indicator by " + indicator_ + ")");
+    if (indicator_.empty()) {return model_ + " model";}
+    return model_ + " model (indicator by " + indicator_ + ", " +
+           (weights_.empty() ? std::string("new weights") : "weights " + weights_) + ")";
   }
 
   static constexpr double kFreshS = 1.0;
   static constexpr std::uint32_t kFramesAfterAck = 2;
-  std::string model_, indicator_;
+  std::string model_, indicator_, weights_;
   double t0_ = 0.0;
   bool acked_ = false;                ///< the answer seen, and the frame count then
   std::uint32_t seq_ack_ = 0;
@@ -445,9 +456,9 @@ public:
 };
 
 /// Commit to the FIRST bay that reads GREEN with confidence, without waiting to see
-/// every bay (the scan stops here): any confirmed track whose votes say GREEN
-/// (dock::verdict, min_votes reads, min_share of them green, recent ones agreeing);
-/// the most-seen if several. The bay NUMBER (DockingReport, bays numbered left to
+/// every bay (the scan stops here): any confirmed track in view whose GREEN confidence
+/// (dock::ColourRule: the share of its colour reads that said GREEN) is min_conf or more
+/// after min_reads reads; the most-seen if several. The bay NUMBER (DockingReport, bays numbered left to
 /// right facing them) is the layout's when all the bays are known, else a guess from the
 /// bays seen either side of it and the way the search slides (dock::guessBayNumber),
 /// logged as one. ReportDocking takes the layout's if it is known by then. FAILURE until
@@ -460,8 +471,10 @@ public:
   static BT::PortsList providedPorts()
   {
     return {
-      BT::InputPort<int>("min_votes", 8, "GREEN/RED reads before a bay has a verdict"),
-      BT::InputPort<double>("min_share", 0.8, "share of them GREEN"),
+      BT::InputPort<int>("min_reads", 3,
+        "colour reads of a bay (RED/GREEN, and OFF with off_is_green) before its confidence counts"),
+      BT::InputPort<double>("min_conf", 0.5,
+        "GREEN confidence that commits: the share of the bay's colour reads that said GREEN, 0-1"),
       BT::InputPort<int>("min_obs", 5, "sightings before a track is a bay"),
       BT::InputPort<double>("max_turn_deg", 0.0,
         "> 0: not while the bow is further than this off the dock heading (still turning)"),
@@ -480,9 +493,12 @@ public:
 
   BT::NodeStatus tick() override
   {
-    dock::VoteParams v;
+    dock::ColourRule rule;
+    rule.min_reads = getInput<int>("min_reads").value_or(rule.min_reads);
+    rule.min_conf = getInput<double>("min_conf").value_or(rule.min_conf);
+    rule.off_is_green = getInput<bool>("off_is_green").value_or(false);
     const bool any = getInput<std::string>("colour").value_or("green") == "any";
-    const bool off_green = getInput<bool>("off_is_green").value_or(false);
+    const bool off_green = rule.off_is_green;
     const int n_bays = any ? 0 : getInput<int>("bays").value_or(0);
     const int min_obs = getInput<int>("min_obs").value_or(5);
     const double max_turn = getInput<double>("max_turn_deg").value_or(0.0);
@@ -492,9 +508,7 @@ public:
     std::string going_back;        // ours worked out but out of view: said once
     {
       std::lock_guard<std::mutex> lk(ctx_->mu);
-      v = ctx_->dock_votes;
-      v.min_votes = getInput<int>("min_votes").value_or(v.min_votes);
-      v.min_share = getInput<double>("min_share").value_or(v.min_share);
+      ctx_->colour_rule = rule;
       // mid-turn the camera sweeps the dock: wait until the bow is on the dock heading
       const double dock_h = dockHeading(*ctx_, fire::kNaN);
       if (max_turn > 0.0 && std::isfinite(dock_h) &&
@@ -503,9 +517,7 @@ public:
         return BT::NodeStatus::FAILURE;
       }
       const double square = std::isfinite(dock_h) ? dock_h : ctx_->heading_deg;
-      auto colourOf = [&](const dock::BayTrack & t) {
-          return off_green ? dock::verdictOffIsGreen(t, v) : dock::verdict(t, v);
-        };
+      auto colourOf = [&](const dock::BayTrack & t) {return dock::confidenceVerdict(t, rule);};
       const dock::BayTrack * best = nullptr;
       auto off_bow = [](const dock::BayTrack & t) {
           return std::isfinite(t.live_left_m) ? std::fabs(t.live_left_m) : 1e9;
@@ -518,11 +530,9 @@ public:
         }
         if (best == nullptr || (any ? off_bow(t) < off_bow(*best) : t.n > best->n)) {best = &t;}
       }
-      // pickGreen follows a GREEN reading; any other bay of ours is followed as itself
-      bool adopt = any || off_green;
       if (best == nullptr && n_bays > 0) {
         std::string why;
-        const dock::BayTrack * ours = deduceBay(*ctx_, colourOf, n_bays, min_obs, v.min_votes,
+        const dock::BayTrack * ours = deduceBay(*ctx_, colourOf, n_bays, min_obs, rule.min_reads,
           square, why);
         if (ours != nullptr && !inView(*ctx_, *ours)) {
           if (ctx_->search_target_track != ours->id) {
@@ -533,26 +543,19 @@ public:
         }
         if (ours != nullptr) {
           best = ours;
-          adopt = true;
           what = why;
         }
       }
       if (best != nullptr) {
-        if (adopt) {
-          // what the approach and the cannon follow (ctx.green) becomes this bay: this
-          // frame's sighting of it, across the dock heading as pickGreen measures
-          const dock::FrameBay * fb = nullptr;
-          double fb_m = kSameBayM;
-          for (const auto & b : ctx_->dock.frame_bays) {
-            const double d = std::fabs(fire::toDockFrame(b.p - best->p, square).left);
-            if (d < fb_m) {fb = &b; fb_m = d;}
-          }
-          if (fb == nullptr) {return BT::NodeStatus::FAILURE;}   // not in this frame: next tick
-          ctx_->green = Context::GreenBay{};
-          ctx_->centre = fire::CentreTarget{};
-          ctx_->target_any = true;
-          adoptBay(*ctx_, *fb, ctx_->dock_t);
-        }
+        // what the approach and the cannon follow (ctx.green) becomes this bay's FACE: this
+        // frame's sighting on its track, and from then on the face on that track (pickGreen,
+        // chosen_track), whatever its indicator or another bay's reads
+        const dock::FrameBay * fb = ctx_->dock.onTrack(best->id);
+        if (fb == nullptr) {return BT::NodeStatus::FAILURE;}   // not in this frame: next tick
+        ctx_->green = Context::GreenBay{};
+        ctx_->centre = fire::CentreTarget{};
+        ctx_->target_any = true;
+        adoptBay(*ctx_, *fb, ctx_->dock_t);
         const dock::DockLayout L = dock::layout(ctx_->dock, ctx_->dock_min_obs);
         bay = L.ok ? L.numberOf(best->id) : 0;
         if (bay <= 0) {             // from the bays seen either side of it

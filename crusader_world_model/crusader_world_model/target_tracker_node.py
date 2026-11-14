@@ -101,6 +101,16 @@ PARAMS = {
     "tentative_timeout_s": 3.0,
     "track_timeout_s": 0.0,             # 0 = confirmed tracks never expire
     "max_tracks": 64,                   # runaway guard, not a normal path
+    # camera sightings farther out than turn_smear_max_m / (|yaw rate| * turn_skew_s)
+    # are dropped while turning (0 = off): mid-turn they land metres off as ghosts
+    "turn_smear_max_m": 1.0,
+    "turn_skew_s": 0.2,
+    # beacon light state, decided per BUOY over every look (light_core); only for camera
+    # READING labels (camera_node light_raw_labels)
+    "light_window_s": 30.0,
+    "light_min_watch_s": 4.0,
+    "light_corr_min": 0.45,
+    "rg_must_flash": True,
     # colour voting. The label sets define what a RoboBuoy IS, so they are read-only
     "colour_vote_enable": True,
     "colour_family_labels": ["red_buoy", "green_buoy", "black_buoy", "flashing_blue_buoy",
@@ -117,9 +127,10 @@ RANGES = {
     "min_confidence": (0.0, 1.0), "assoc_radius_m": (0.2, 20.0), "pos_alpha": (0.01, 1.0),
     "vel_alpha": (0.01, 1.0), "confirm_hits": (1, 100), "tentative_timeout_s": (0.5, 60.0),
     "track_timeout_s": (0.0, 3600.0), "max_tracks": (1, 1000), "colour_min_votes": (1, 1000),
-    "colour_min_ratio": (0.0, 1.0),
+    "colour_min_ratio": (0.0, 1.0), "turn_smear_max_m": (0.0, 20.0), "turn_skew_s": (0.0, 2.0),
+    "light_window_s": (5.0, 600.0), "light_min_watch_s": (1.0, 60.0), "light_corr_min": (0.05, 1.0),
 }
-DYNAMIC = tuple(RANGES) + ("use_lidar", "colour_vote_enable")
+DYNAMIC = tuple(RANGES) + ("use_lidar", "colour_vote_enable", "rg_must_flash")
 
 # Params that map straight onto a TrackerParams field of the same name. Listed
 # rather than inferred so a node-level parameter that is not a core parameter
@@ -131,7 +142,9 @@ _CORE_PARAMS = (
     "confirm_hits", "tentative_timeout_s", "track_timeout_s", "max_tracks",
     "colour_vote_enable", "colour_family_labels", "colour_family_shapes",
     "colour_unlit_labels",
-    "colour_unknown_label", "colour_min_votes", "colour_min_ratio")
+    "colour_unknown_label", "colour_min_votes", "colour_min_ratio",
+    "turn_smear_max_m", "turn_skew_s",
+    "light_window_s", "light_min_watch_s", "light_corr_min", "rg_must_flash")
 
 
 def stamp_key(header):
@@ -233,7 +246,7 @@ class TargetTrackerNode(Node):
                        msg.header.stamp)
 
     def _on_att(self, msg: Attitude):
-        self._att.set((msg.roll, msg.pitch, msg.yaw), time.monotonic(),
+        self._att.set((msg.roll, msg.pitch, msg.yaw, msg.yawspeed), time.monotonic(),
                       msg.header.stamp)
 
     def _on_detections(self, msg: Detection3DArray):
@@ -283,15 +296,16 @@ class TargetTrackerNode(Node):
             return
 
         east, north, _heading = pose
-        roll, pitch, yaw = att
-        boat = core.BoatState(east, north, roll, pitch, yaw)
+        roll, pitch, yaw, yaw_rate = att
+        boat = core.BoatState(east, north, roll, pitch, yaw, yaw_rate)
         self._last_boat = boat
 
         cameras, stamp_cam = self._take_detections(now)
         lidars, stamp_lid = self._take_clusters(now)
         self._ingested += len(cameras) + len(lidars)
 
-        tracks = self.tracker.update(cameras, lidars, boat, now)
+        frame_t = None if stamp_cam is None else stamp_cam.sec + stamp_cam.nanosec * 1e-9
+        tracks = self.tracker.update(cameras, lidars, boat, now, frame_t)
         # The picture is current as of the NEWEST sensor stamp that fed it, not
         # publish time, which would claim freshness the data lacks. With no sensor
         # contributing, the pose stamp is the honest answer.

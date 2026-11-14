@@ -106,6 +106,16 @@ class TestGate(unittest.TestCase):
         g.on_command(0.1, 45.0, 0.2, "MANUAL", True)
         self.assertIsNone(g.tick(5.0))   # the pilot has it: we send nothing
 
+    def test_position_setpoint_disarms_the_deadman(self):
+        # ScanForBuoys' last look, then NavigateTo's setpoint 0.07 s later: no stop may follow it
+        g = hs.HsGate(P)
+        g.on_command(0.0, 135.0, 0.0, "GUIDED", True)
+        g.on_position_setpoint()
+        self.assertIsNone(g.tick(0.6))
+        self.assertIsNone(g.on_trip())   # nothing of ours in heading+speed to stop
+        g.on_command(1.0, 90.0, 0.2, "GUIDED", True)   # heading+speed again: armed again
+        self.assertIsNotNone(g.tick(1.6))
+
     def test_from_dict_needs_every_key(self):
         d = dict(hs_max_speed_mps=0.4, hs_wp_speed_mps=1.0, hs_deadman_s=0.5)
         self.assertEqual(hs.HsParams.from_dict(d).max_speed, 0.4)

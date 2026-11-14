@@ -4,7 +4,7 @@ marking shape, their LED colour and light state, positioned from the stereo dept
   stage 1  det_engine     where the buoys are
   stage 2  marking_shape  diamond or circle, from the outline (CPU, no model)
   stage 3  TrackTable     one identity per buoy, across frames
-  stage 4  cls_engine     what colour each LED is
+  stage 4  cls_engine     what colour each beacon is (none under cls_min_beacon_px tall)
   stage 5  FlashTracker   flashing / solid / off, from the track over time
 
 Stage 2 has no model, so stage 1 can be a single-class buoy detector: at 15 m a marking
@@ -13,9 +13,9 @@ runs before stage 4 so a crop that fails to cut does not cost a track its histor
 
 THE LABEL IS THE CONTRACT (mission logic branches on these words):
     flashing   flash_red_diamond
-    solid      red_diamond
+    solid      blue_diamond (red_diamond / green_diamond only with rg_must_flash false)
     off        off_diamond
-    no colour  diamond
+    no colour  diamond      (also a red or green not yet seen flashing, rg_must_flash)
 Flashing is a property of a track over time, not a classifier class: the off-phase of a
 flashing buoy is pixel-identical to an unlit one (FlashTracker, oak_detector_core).
 
@@ -31,16 +31,13 @@ import time
 import numpy as np
 
 from crusader_msgs.msg import Detection3D, Detection3DArray
-from crusader_perception.oak_detector_core import (FlashTracker, LabelVoter, ShapeVoter,
-                                                   TrackTable, buoy_patch, led_patch,
-                                                   marking_shape)
+from crusader_perception.oak_detector_core import (MUST_FLASH, FlashTracker, LabelVoter,
+                                                   ShapeVoter, TrackTable, beacon_patch,
+                                                   buoy_patch, marking_shape, reading_label)
 # The cls_labels entry that means "unlit". Fixed by the dataset's folder names, not chosen
 # at run time.
 OFF_CLASS = "off"
 SHAPE_NAMES = ("circle", "diamond")
-# Padded-crop height below which the LED region is a couple of rows and its colour is
-# whatever the resize invented.
-MIN_CROP_PX = 10
 # Where in the box to sample depth: centred, slightly below the middle, because a buoy's
 # upper half is often against sky where stereo has nothing to match.
 SAMPLE_V_RATIO = 0.55
@@ -79,6 +76,12 @@ class BuoyModel:
         if p["flash_enable"] and self.off_index is None:
             log.error(f"{OFF_CLASS!r} is not in cls_labels ({', '.join(self.colours)}): flash "
                       "detection is OFF, so ENTRY and EXIT buoys look the same")
+        # Task 1 never shows a solid red or green: those colours wait to be seen flashing
+        self.must_flash = MUST_FLASH if p["rg_must_flash"] else ()
+        if self.must_flash and not self.flash_enable:
+            log.warn("rg_must_flash does nothing with flash detection off: a steady red or "
+                     "green is published as seen")
+        self.min_beacon_px = float(p["cls_min_beacon_px"])
 
         self.shape_voter = ShapeVoter(min_share=p["shape_min_share"])
         self.tracks = TrackTable(iou_match=p["iou_match"], max_missed=int(p["max_missed"]))
@@ -90,7 +93,8 @@ class BuoyModel:
             flash_period_s=p["flash_period_s"], flash_corr_min=p["flash_corr_min"])
         self.batched = True                 # until the engine says otherwise
         self.det_ms = self.cls_ms = self.shape_ms = 0.0
-        self.counts = dict(detections=0, no_depth=0, no_crop=0, unresolved=0, no_shape=0)
+        self.counts = dict(detections=0, no_depth=0, no_crop=0, unresolved=0, no_shape=0, other_class=0,
+                           not_flashing=0)
         self.states = {}                    # track id -> latest FlashState
         self.drawn = []
 
@@ -139,6 +143,11 @@ class BuoyModel:
                                f"{len(self.shapes)} names: check it against the engine",
                                throttle_duration_sec=10.0)
                 continue
+            if self.shapes[index] not in SHAPE_NAMES:
+                # The task1 detector also boxes the beacon, markers and other buoys: only a
+                # marked buoy BODY is a buoy here (its beacon crop is cut above the body).
+                self.counts["other_class"] += 1
+                continue
             boxes.append(tuple(int(v) for v in box.xyxy[0]))
             shapes.append(self.shapes[index])
             confidences.append(float(box.conf[0]))
@@ -177,12 +186,11 @@ class BuoyModel:
                     self.counts["no_shape"] += 1
         self.states = {k: v for k, v in self.states.items() if k in live}
 
-        # stage 4: the LED crop and its colour
+        # stage 4: the beacon crop (above the body box) and its colour
         crops, cropped_index, led_boxes = [], [], {}
         for i, box in enumerate(boxes):
-            patch, cut = led_patch(rgb, box, pad=self.p["crop_pad"],
-                                   top_frac=self.p["crop_top_frac"], size=self.cls_imgsz,
-                                   min_height_px=MIN_CROP_PX, return_box=True)
+            patch, cut = beacon_patch(rgb, box, size=self.cls_imgsz,
+                                      min_beacon_px=self.min_beacon_px, return_box=True)
             if patch is None:
                 self.counts["no_crop"] += 1
                 continue
@@ -221,7 +229,9 @@ class BuoyModel:
                                       frame_index, colour, state)
 
             if self.flash_enable and state is not None:
-                label = state.label(shapes[i])
+                label = state.label(shapes[i], self.must_flash)
+                if state.withheld(self.must_flash):
+                    self.counts["not_flashing"] += 1
             elif colour:
                 label = f"{colour}_{shapes[i]}"
             else:
@@ -240,7 +250,7 @@ class BuoyModel:
                 self.counts["no_depth"] += 1
                 continue
             d = Detection3D()
-            d.label = label
+            d.label = self._published_label(label, probs, shapes[i])
             # The detector's "is this a buoy". The light state's confidence lives in the
             # label (an uncertain state degrades it) and on /crsd/camera/health.
             d.confidence = confidences[i]
@@ -250,6 +260,18 @@ class BuoyModel:
             array.detections.append(d)
         self.counts["detections"] += len(array.detections)
         return array
+
+    def _published_label(self, label, probs, shape):
+        """light_raw_labels: this frame's READING (target_tracker decides the light per buoy,
+        over every look); a box with no classified crop is its bare shape. Otherwise the
+        image track's label, as drawn."""
+        if not self.p.get("light_raw_labels", False) or self.off_index is None:
+            return label
+        if probs is None:
+            return shape
+        lit = [i for i in range(len(self.colours)) if i != self.off_index]
+        best = max(lit, key=lambda i: float(probs[i]))
+        return reading_label(1.0 - float(probs[self.off_index]), self.colours[best], shape)
 
     def _write_debug(self, now, track_id, shape, det_conf, box, probs, frame_index, colour,
                      state):

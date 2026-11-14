@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -181,6 +182,7 @@ struct Buoy
   bool consumed = false;
   int hits = 0;            ///< sightings behind this track (TrackedTarget.hits); 0 = not a track
   double conf = 0.0;       ///< detector confidence of its latest sighting [0..1]
+  double sd = 0.0;         ///< tracker position spread (TrackedTarget.position_stddev); 0 = none
 };
 
 /// Where to steer so `buoy` ends up on the side the handbook demands.
@@ -653,6 +655,40 @@ inline const Buoy * bestBeacon(
     !(best->hits >= rival_ratio * cur->hits && best->hits >= cur->hits + rival_margin))
   {
     return cur;
+  }
+  return best;
+}
+
+/// Core tier's "stop and look": the id of the NEAREST tracked buoy that has no colour yet
+/// (Beacon::Unknown), is not in `looked`, lies within `range_m` of the boat and within
+/// +-`half_fov_deg` of the bow; -1 if none. `heading_deg` is the bow's compass heading (degrees
+/// clockwise from north, as Context::heading_deg), turned into a direction with headingVec.
+/// range_m <= 0, or a non-finite heading or position, gives -1: never act on a guess.
+inline int unnamedInView(
+  const std::vector<Buoy> & buoys, Vec2 boat, double heading_deg, double range_m,
+  double half_fov_deg, const std::set<int> & looked)
+{
+  if (!(range_m > 0.0) || !std::isfinite(heading_deg) || !std::isfinite(boat.x) ||
+    !std::isfinite(boat.y))
+  {
+    return -1;
+  }
+  const Vec2 bow = headingVec(heading_deg);
+  const double cos_half = std::cos(std::clamp(half_fov_deg, 0.0, 180.0) * kDeg);
+  int best = -1;
+  double best_d = range_m;
+  for (const Buoy & b : buoys) {
+    if (b.state != Beacon::Unknown || looked.count(b.id) != 0 || !std::isfinite(b.p.x) ||
+      !std::isfinite(b.p.y))
+    {
+      continue;
+    }
+    const Vec2 d = b.p - boat;
+    const double r = norm(d);
+    if (r > range_m || (best >= 0 && r >= best_d)) {continue;}
+    if (r > 1e-6 && dot(d, bow) < cos_half * r) {continue;}      // outside the field of view
+    best = b.id;
+    best_d = r;
   }
   return best;
 }

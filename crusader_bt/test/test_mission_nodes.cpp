@@ -404,12 +404,13 @@ static void tunableTests()
   chk("... and empty ones still fall back", std::abs(rad - 9.0) < 0.05 && hops > hops5);
 }
 
-/// Task 3's scan_fire guards, cut down: the waypoint leg, then the MANUAL body.
+/// Task 3's scan_fire guards, cut down: the waypoint leg, then the MANUAL body. Reactive, as
+/// in the trees: MANUAL is looked at on every tick, not only before the leg starts.
 static const char * kScanFireGuards =
   "<Sequence name=\"scan_fire\">"
-  "<Fallback name=\"to_the_waypoint\"><ModeIs mode=\"MANUAL\"/>"
+  "<ReactiveFallback name=\"to_the_waypoint\"><ModeIs mode=\"MANUAL\"/>"
   "<ReactiveSequence name=\"guided_leg\"><IsAutonomous/><NotDropped/><Scripted/></ReactiveSequence>"
-  "</Fallback>"
+  "</ReactiveFallback>"
   "<ReactiveSequence name=\"manual\"><ModeIs mode=\"MANUAL\"/><NotDropped/><Scripted/></ReactiveSequence>"
   "</Sequence>";
 
@@ -472,6 +473,35 @@ static void failureTraceTests()
       r.tick() == BAD && trace.text() == "NotDropped in scan_fire > manual");
   }
   {
+    // 2026-11-12 water: the pilot took MANUAL during the GUIDED leg. A plain Fallback went on
+    // ticking the running leg, its IsAutonomous failed the tree, and with no mission ticking
+    // the boat reported STATE_MANUAL to RoboCommand.
+    auto leg = [](Rig & r) {
+        r.load(kScanFireGuards);
+        r.ctx->mode = "GUIDED";
+        r.ctx->autonomous = true;
+        r.ctx->drop_tripped = false;
+        g_child = RUN;
+        g_child_starts = 0;
+        return r.tick();
+      };
+    Rig r;
+    chk("GUIDED: the waypoint leg runs", leg(r) == RUN && g_child_starts == 1);
+    r.ctx->mode = "MANUAL";
+    r.ctx->autonomous = false;
+    crusader_bt::FailureTrace trace(r.tree);
+    trace.beginTick();
+    const BT::NodeStatus s = r.tick();
+    chk("the pilot takes MANUAL mid-leg: still RUNNING, nothing failed (got '" + trace.text() +
+      "')", s == RUN && trace.text().empty());
+    chk("... the leg was dropped and the MANUAL body started", g_child_starts == 2);
+    Rig q;
+    leg(q);
+    q.ctx->mode = "HOLD";
+    q.ctx->autonomous = false;
+    chk("HOLD mid-leg still ends the run", q.tick() == BAD);
+  }
+  {
     Rig r;
     r.load("<Sequence name=\"s\"><Inverter><AlwaysSuccess/></Inverter></Sequence>");
     const std::string at = failedAt(r, &st);
@@ -499,17 +529,26 @@ static void failureTraceTests()
 /// A Rig whose camera_node answers through `up`: false = no parameter service.
 struct CameraRig : Rig
 {
-  std::vector<std::string> asks;      ///< "model|indicator" per ask ("" off the dock model)
+  /// "model|indicator|weights" per ask (indicator and weights "" off the dock model; weights
+  /// "" = the new detector, dock_ffcv_dir's best.pt)
+  std::vector<std::string> asks;
   bool up = true;
 
   CameraRig()
   {
     ctx->set_camera_model = [this](const std::string & m, const std::string & i,
-        std::string & why) {
+        const std::string & w, std::string & why) {
         if (!up) {why = "/camera_node has no parameter service"; return false;}
-        asks.push_back(m + "|" + i);
+        asks.push_back(m + "|" + i + "|" + w);
         return true;
       };
+  }
+
+  /// A whole file's trees, main_tree_to_execute="Main": for SubTree ports.
+  void loadFile(const std::string & trees)
+  {
+    tree = factory.createTreeFromText(
+      "<root BTCPP_format=\"4\" main_tree_to_execute=\"Main\">" + trees + "</root>", bb);
   }
 
   /// A DockObservation arrives: what the dock model, running, publishes every frame.
@@ -529,7 +568,7 @@ static void setCameraModelTests()
     r.observation();
     r.load(dock);
     chk("dock frames already arriving: asks anyway (they may be the other indicator's)",
-      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|yolo");
+      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|yolo|");
     r.ctx->camera_model_ack = 1;
     chk("accepted: RUNNING until two frames since the answer", r.tick() == RUN);
     r.observation();
@@ -541,7 +580,7 @@ static void setCameraModelTests()
     CameraRig r;                                        // dock_obs_age_s: never (1e9)
     r.load(dock);
     chk("on buoy: asks camera_node for dock, indicator yolo (the default), RUNNING",
-      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|yolo");
+      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|yolo|");
     r.ctx->camera_model_ack = 1;
     r.ctx->now_s = 2.0;
     chk("accepted, no observation yet: still RUNNING", r.tick() == RUN);
@@ -553,7 +592,7 @@ static void setCameraModelTests()
     CameraRig r;
     r.load("<SetCameraModel model=\"dock\" indicator=\"cv\" timeout_s=\"15\"/>");
     chk("indicator cv: asks for the dock model reading the indicator by cv",
-      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|cv");
+      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|cv|");
     r.ctx->camera_model_ack = 1;
     r.tick();
     r.observation();
@@ -567,7 +606,7 @@ static void setCameraModelTests()
     r.ctx->camera_model_ack = -1;
     r.ctx->camera_model_why = "camera_node has no dock_indicator parameter (an older build)";
     chk("a camera_node that cannot read by cv: FAILURE, saying so", r.tick() == BAD &&
-      r.ctx->camera_model_why.find("camera_node refused the dock model (indicator by cv): "
+      r.ctx->camera_model_why.find("camera_node refused the dock model (indicator by cv, new weights): "
       "camera_node has no dock_indicator") == 0);
   }
   {
@@ -599,7 +638,7 @@ static void setCameraModelTests()
     r.ctx->camera_model_ack = -1;
     r.ctx->camera_model_why = "model must be one of none, buoy, dock";
     chk("camera_node refuses: FAILURE, its reason kept for the GCS", r.tick() == BAD &&
-      r.ctx->camera_model_why.find("camera_node refused the dock model (indicator by yolo): "
+      r.ctx->camera_model_why.find("camera_node refused the dock model (indicator by yolo, new weights): "
       "model must be") == 0);
   }
   {
@@ -618,9 +657,71 @@ static void setCameraModelTests()
     r.observation();                                    // dock frames do not mean buoy
     r.load("<SetCameraModel model=\"buoy\" indicator=\"cv\"/>");
     chk("buoy: asks, even with dock frames arriving, and no indicator", r.tick() == RUN &&
-      r.asks.size() == 1 && r.asks[0] == "buoy|");
+      r.asks.size() == 1 && r.asks[0] == "buoy||");
     r.ctx->camera_model_ack = 1;
     chk("buoy accepted: SUCCESS", r.tick() == OK);
+  }
+
+  std::printf("\n7b. SetCameraModel: which dock detector (dock_weights)\n");
+  const std::string old_pt = "/root/robotx_ws/models/ffcv_c1002_2026-10-03/best.pt";
+  {
+    CameraRig r;
+    r.load("<SetCameraModel model=\"dock\" dock_weights=\"" + old_pt + "\"/>");
+    chk("dock_weights named: asked for, with the indicator's default",
+      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|yolo|" + old_pt);
+    r.ctx->camera_model_ack = 1;
+    r.tick();
+    r.observation();
+    r.observation();
+    chk("... two frames after the answer (the reload done): SUCCESS", r.tick() == OK);
+  }
+  {
+    CameraRig r;
+    r.load("<SetCameraModel model=\"dock\" dock_weights=\"{dock_weights}\"/>");
+    chk("dock_weights from a blackboard entry nobody set: the new detector (\"\")",
+      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|yolo|");
+  }
+  {
+    CameraRig r;
+    r.load("<SetCameraModel model=\"buoy\" dock_weights=\"" + old_pt + "\"/>");
+    chk("buoy: dock_weights not asked about", r.tick() == RUN && r.asks.size() == 1 &&
+      r.asks[0] == "buoy||");
+  }
+  {
+    CameraRig r;
+    r.load("<SetCameraModel model=\"dock\" dock_weights=\"/nowhere/x.pt\"/>");
+    r.tick();
+    r.ctx->camera_model_ack = -1;
+    r.ctx->camera_model_why = "dock_weights '/nowhere/x.pt' does not exist";
+    chk("camera_node refuses the weights: FAILURE naming them", r.tick() == BAD &&
+      r.ctx->camera_model_why.find("camera_node refused the dock model (indicator by yolo, "
+      "weights /nowhere/x.pt): dock_weights '/nowhere/x.pt' does not exist") == 0);
+  }
+  // The trees: lib/task3_scan_fire.xml's leaf reads {dock_weights}; task3_scan_fire.xml passes
+  // "" and task3_scan_fire_old_dock.xml the Oct 3 path, as SubTree attributes (_autoremap)
+  const std::string body =
+    "<BehaviorTree ID=\"Body\"><SetCameraModel model=\"dock\" indicator=\"yolo\" "
+    "dock_weights=\"{dock_weights}\" timeout_s=\"15.0\"/></BehaviorTree>";
+  {
+    CameraRig r;
+    r.loadFile(body + "<BehaviorTree ID=\"Main\"><SubTree ID=\"Body\" _autoremap=\"true\" "
+      "dock_weights=\"" + old_pt + "\"/></BehaviorTree>");
+    chk("old-dock wrapper: the SubTree's literal reaches the leaf",
+      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|yolo|" + old_pt);
+  }
+  {
+    CameraRig r;
+    r.loadFile(body + "<BehaviorTree ID=\"Main\"><SubTree ID=\"Body\" _autoremap=\"true\" "
+      "dock_weights=\"\"/></BehaviorTree>");
+    chk("new wrapper (dock_weights=\"\"): the new detector",
+      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|yolo|");
+  }
+  {
+    CameraRig r;
+    r.loadFile(body + "<BehaviorTree ID=\"Main\"><SubTree ID=\"Body\" _autoremap=\"true\"/>"
+      "</BehaviorTree>");
+    chk("a wrapper that does not set it: the new detector",
+      r.tick() == RUN && r.asks.size() == 1 && r.asks[0] == "dock|yolo|");
   }
 }
 
@@ -711,8 +812,7 @@ struct FireRig : Rig
   {
     ctx->chosen_track = 0;
     ctx->centre = crusader_bt::fire::CentreTarget{};
-    ctx->centre.from_indicator = true;
-    ctx->centre.fix.sight({-left, ahead}, ahead, ctx->now_s, ctx->now_s);
+    ctx->centre.sight({-left, ahead}, ahead, ctx->now_s, ctx->now_s);
   }
 };
 
@@ -861,7 +961,7 @@ static void bayNumberTests()
     };
   // CommitFirstGreen as task3_scan_fire(_cv) has it: the number committed to, -1 for none
   auto commit = [](FireRig & r) {
-      r.load("<CommitFirstGreen bay=\"{bay}\" min_votes=\"4\" min_share=\"0.5\" "
+      r.load("<CommitFirstGreen bay=\"{bay}\" min_reads=\"4\" min_conf=\"0.5\" "
         "min_obs=\"4\" max_turn_deg=\"15\"/>");
       int b = -1;
       return r.tick() == OK && r.bb->get("bay", b) ? b : -1;
@@ -1107,18 +1207,24 @@ static void fireBesideDockingTests()
     r.frame(10.0, {}, 2.0);
     chk("read GREEN: the GREEN bay", r.ctx->green.t == 10.0);
     r.place(10.1, 4.0);                                    // the same bay, ranged 2 m long
-    chk("a range past the gate splits the bay: a second track", r.ctx->dock.tracks.size() == 2);
-    chk("... no matter: in line and not read RED, it is still the GREEN bay",
+    chk("ranged 2 m long but in line: the same bay, one track (the gate is across the dock)",
+      r.ctx->dock.tracks.size() == 1);
+    chk("... and committed to it, it is still our bay",
       r.ctx->green.t == 10.1 && std::fabs(r.ctx->green.bay.ahead_m - 2.0) > 1.0);
-    r.place(10.2, 4.0, 1.0);                               // 1 m across: the next bay over
-    chk("a bay 1 m across the dock, unread, is another bay: not taken", r.ctx->green.t == 10.1);
-    r.place(10.3, 4.0, 1.0, Colour::Green);
-    chk("... but read GREEN it is the GREEN bay, whatever track it lands on",
-      r.ctx->green.t == 10.3 && r.ctx->green.bay.left_m > 0.5);
+    r.place(10.2, 4.0, -2.0);                              // 2 m to the right: the next bay
+    chk("the next bay over, unread, is another bay: not taken",
+      r.ctx->green.t == 10.1 && r.ctx->dock.tracks.size() == 2);
+    r.place(10.3, 4.0, -2.0, Colour::Green);
+    chk("... nor when it reads GREEN: committed, our track is followed, not a light",
+      r.ctx->green.t == 10.1);
+    r.place(10.4, 4.0, 0.9);                               // no two bays are 0.9 m apart
+    chk("a face 0.9 m across is our bay again: merged into its track, and followed",
+      r.ctx->green.t == 10.4 && r.ctx->dock.tracks.size() == 2);
     FireRig q;
     q.frame(10.0, {}, 2.0);
     q.place(10.1, 4.0, 0.0, Colour::Red);
-    chk("in line but reading RED: not taken", q.ctx->green.t == 10.0);
+    chk("in line but reading RED: still our bay (its colour is the book's votes)",
+      q.ctx->green.t == 10.1);
   }
   {
     FireRig r;
@@ -1151,6 +1257,63 @@ static void fireBesideDockingTests()
   firstDockNoRedTests();
 }
 
+/// RoboCommand's course as the OCS relays it (ocs_info.course, latched on /crsd/ocs_course):
+/// the dock book places no face outside it.
+static void courseFenceTests()
+{
+  std::printf("\n-- the course fence\n");
+  namespace nav = crusader_bt::nav;
+  // The OCS's own JSON for course ALPHA on 2026-11-12: a closed ring of five corners.
+  const std::string alpha = "{\"course_id\": \"ALPHA\", \"pinger_freq_hz\": 0, \"corners\": ["
+    "{\"latitude\": 1.2809887596341554, \"longitude\": 103.85481480992878}, "
+    "{\"latitude\": 1.2808658372160693, \"longitude\": 103.85500721025717}, "
+    "{\"latitude\": 1.2810900427153769, \"longitude\": 103.85515265929305}, "
+    "{\"latitude\": 1.2812172480539488, \"longitude\": 103.8549604814802}, "
+    "{\"latitude\": 1.2809887596341554, \"longitude\": 103.85481480992878}]}";
+  std::string id;
+  std::vector<nav::LatLon> corners;
+  chk("the OCS's course parses: ALPHA, its 5 corners", crusader_bt::parseCourse(alpha, id,
+    corners) && id == "ALPHA" && corners.size() == 5 &&
+    std::fabs(corners[1].lat - 1.2808658372160693) < 1e-12 &&
+    std::fabs(corners[1].lon - 103.85500721025717) < 1e-12);
+  chk("no corners: no course", !crusader_bt::parseCourse("{\"course_id\": \"X\"}", id,
+    corners) && corners.empty());
+  chk("two corners: no course", !crusader_bt::parseCourse("{\"corners\": [{\"latitude\": 1, "
+    "\"longitude\": 2}, {\"latitude\": 1, \"longitude\": 3}]}", id, corners) && corners.empty());
+
+  // A 16 m square course around a boat heading north: 5 m ahead is in it, 9 m is 1.4 m
+  // out (the camera is 0.37 m ahead of the body), inside the 3 m margin, and 13 m is not.
+  auto fenced = [](FireRig & r) {
+      for (const nav::Vec2 c : {nav::Vec2{-8, -8}, nav::Vec2{8, -8}, nav::Vec2{8, 8},
+          nav::Vec2{-8, 8}})
+      {
+        r.ctx->course_corners.push_back(nav::toLatLon(c, r.ctx->origin));
+      }
+      ++r.ctx->course_seq;
+    };
+  {
+    FireRig r;
+    fenced(r);
+    r.place(1.0, 5.0);
+    r.place(2.0, 13.0);
+    chk("a face inside the course is a bay; one 5 m beyond it is dropped",
+      r.ctx->dock.tracks.size() == 1 && r.ctx->dock.fenced == 1);
+    r.place(3.0, 9.0);
+    chk("... one 1.4 m outside is kept: the dock may sit at the edge, its range long",
+      r.ctx->dock.tracks.size() == 2 && r.ctx->dock.fenced == 1);
+    crusader_bt::resetTask3(*r.ctx);                    // a new goal: a new book
+    r.place(4.0, 13.0);
+    chk("... and the new book is fenced too", r.ctx->dock.tracks.empty() &&
+      r.ctx->dock.fenced == 1);
+  }
+  {
+    FireRig r;                                          // the OCS sent no course
+    r.place(1.0, 13.0);
+    chk("no course: nothing is fenced", r.ctx->dock.tracks.size() == 1 &&
+      r.ctx->dock.fenced == 0);
+  }
+}
+
 int main()
 {
   rclcpp::init(0, nullptr);
@@ -1163,6 +1326,7 @@ int main()
   setCameraModelTests();
   fireBesideDockingTests();
   bayNumberTests();
+  courseFenceTests();
   rclcpp::shutdown();
   std::printf("\n%d checks, %d failed\n", g_checks, g_fails);
   std::printf("%s\n", g_fails == 0 ? "PASS" : "FAIL");

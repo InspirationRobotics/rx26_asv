@@ -134,11 +134,31 @@ private:
     if (out.send) {sendSetpoint(c_, lg, out.setpoint, sendLabel(out, label));}
     for (const std::string & line : out.log) {RCLCPP_INFO(lg, "nav: %s", line.c_str());}
     writeStatus(out);
+    if (out.result == path::Result::Failure && blockedByInvader()) {
+      // Task 4: a moving object's keep-out on the leg is a wait for it to pass, not a dead end.
+      // The leg starts again (its blocked clock with it) and holds until the line is clear.
+      RCLCPP_WARN(lg, "nav: %s - a Task 4 object's keep-out is on the leg: waiting for it to "
+        "pass (the leg restarts instead of failing)", out.why.c_str());
+      leg_ = std::make_unique<path::PlannedLeg>(c_.nav, c_.nav_mode, c_.planner.get());
+      const path::LegOutput again = leg_->start(cfg_, legInputs(c_, true, goal_));
+      if (again.send) {sendSetpoint(c_, lg, again.setpoint, sendLabel(again, label));}
+      writeStatus(again);
+      return again.result == path::Result::Success ? BT::NodeStatus::SUCCESS :
+             BT::NodeStatus::RUNNING;
+    }
     if (out.result == path::Result::Failure) {
       RCLCPP_WARN(lg, "nav: leg FAILED: %s", out.why.c_str());
       return BT::NodeStatus::FAILURE;
     }
     return out.result == path::Result::Success ? BT::NodeStatus::SUCCESS : BT::NodeStatus::RUNNING;
+  }
+
+  /// A Task 4 keep-out within 1 m of the straight line to the goal or of the leg's path.
+  bool blockedByInvader()
+  {
+    std::lock_guard<std::mutex> lk(c_.mu);
+    if (invaderNear(c_, {c_.boat, goal_}, 1.0)) {return true;}
+    return leg_ && invaderNear(c_, leg_->path(), 1.0);
   }
 
   void writeStatus(const path::LegOutput & out)
@@ -175,17 +195,28 @@ private:
 
 /// The autonomy latch: a CONDITION, first in the guard band, because a tree that ticks
 /// while the pilot has the boat fights the pilot. FAILURE halts everything within a tick.
+/// manual="true" is the guard of a mission that drives the sticks in MANUAL itself (the Task 3
+/// trees saved from the Mission tab, which writes it): MANUAL passes too unless the
+/// autonomy-drop latch is set (SC down, RC lost), so the pilot's switches still end it.
 class IsAutonomous : public CrusaderCondition
 {
 public:
   IsAutonomous(const std::string & n, const BT::NodeConfig & c)
   : CrusaderCondition(n, c) {}
-  static BT::PortsList providedPorts() {return {};}
+  static BT::PortsList providedPorts()
+  {
+    return {BT::InputPort<bool>("manual", false,
+      "true: MANUAL passes too unless the autonomy-drop latch is set (a mission that drives in "
+      "MANUAL itself; the Mission tab writes it)")};
+  }
 
   BT::NodeStatus tick() override
   {
+    const bool manual = getInput<bool>("manual").value_or(false);
     std::lock_guard<std::mutex> lk(ctx_->mu);
-    return ctx_->autonomous ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
+    const bool ok = ctx_->autonomous ||
+      (manual && ctx_->mode == "MANUAL" && !ctx_->drop_tripped);
+    return ok ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
   }
 };
 
@@ -1013,6 +1044,7 @@ void registerCrusaderNodes(BT::BehaviorTreeFactory & factory)
   registerFireNodes(factory);
   // Task 1 above Core, planned over the whole field (src/global_leaves.cpp).
   registerGlobalPassageNodes(factory);
+  registerTask4Nodes(factory);
 }
 
 }  // namespace crusader_bt

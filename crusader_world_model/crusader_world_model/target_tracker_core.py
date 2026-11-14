@@ -54,6 +54,8 @@ from dataclasses import dataclass, field
 
 from crusader_common import geo
 
+from crusader_world_model import light_core
+
 SOURCE_CAMERA = 1
 SOURCE_LIDAR = 2
 
@@ -100,6 +102,24 @@ class TrackerParams:
     tentative_timeout_s: float = 3.0  # unconfirmed tracks expire fast; ALWAYS
     track_timeout_s: float = 0.0     # confirmed: 0 = never expire. See _prune
     max_tracks: int = 64             # hard cap; see _prune
+    # A camera frame and the pose it is projected with are not from one instant
+    # (detector latency vs the pose stream): turning at w rad/s, a sighting at
+    # range R lands about R * w * turn_skew_s sideways of its buoy. Past
+    # assoc_radius_m that is a new track that never expires (a ghost copy of
+    # the buoy, often family-merged with its gate partner); inside it, it drags
+    # the real track. Camera-only sightings whose expected smear exceeds
+    # turn_smear_max_m are dropped (0 = off). LiDAR-positioned ones are kept.
+    turn_smear_max_m: float = 1.0
+    turn_skew_s: float = 0.2
+
+    # -- beacon light state (light_core). Used only by tracks fed READING labels
+    # (camera_node light_raw_labels): the state is decided over every look at the buoy,
+    # not over one image track. The colour needs colour_min_votes lit samples and
+    # colour_min_ratio of them, as the label vote does.
+    light_window_s: float = 30.0     # samples older than this decide nothing
+    light_min_watch_s: float = 4.0   # watching (gaps <= 1 s) before any decision
+    light_corr_min: float = 0.45     # anti-correlation at 1 s that means flashing
+    rg_must_flash: bool = True       # a SOLID red or green reports unknown (Task 1 has none)
 
     # -- colour voting (stage 3). See the module docstring, "ONE BUOY, MANY
     # COLOURS". Tuples, because the node hands in whatever list rclpy gives it
@@ -163,6 +183,7 @@ class BoatState:
     roll: float
     pitch: float
     yaw: float
+    yaw_rate: float = 0.0   # rad/s, Attitude.yawspeed; 0 = steady or unknown
 
 
 @dataclass
@@ -175,6 +196,9 @@ class Observation:
     confidence: float
     sources: int
     extent: tuple = (0.0, 0.0, 0.0)
+    # (lit score, colour, shape) when the camera sent a READING label; `label` is then the
+    # bare shape, so association sees one stable name instead of a new one every frame.
+    reading: tuple = None
 
     @property
     def range_h(self) -> float:
@@ -313,8 +337,10 @@ def fuse(cameras, lidars, p: TrackerParams):
             stats["cam_low_conf"] += 1
             continue
         x, y, z = camera_to_body(d.x, d.y, d.z, p)
-        cam_obs.append(Observation(x, y, z, d.label, d.confidence,
-                                   SOURCE_CAMERA))
+        reading = light_core.parse_reading(d.label)
+        label = reading[2] if reading else d.label
+        cam_obs.append(Observation(x, y, z, label, d.confidence,
+                                   SOURCE_CAMERA, reading=reading))
     cam_obs.sort(key=lambda o: o.range_h)
 
     taken = set()
@@ -370,11 +396,11 @@ def _fused(cam: Observation, lid: LidarCluster) -> Observation:
     # the cluster, which at least has a position.
     if cam_r < 1e-6:
         return Observation(lid.x, lid.y, lid.z, cam.label, cam.confidence,
-                           SOURCE_CAMERA | SOURCE_LIDAR, tuple(lid.extent))
+                           SOURCE_CAMERA | SOURCE_LIDAR, tuple(lid.extent), cam.reading)
     k = lid_r / cam_r
     return Observation(cam.x * k, cam.y * k, cam.z * k,
                        cam.label, cam.confidence,
-                       SOURCE_CAMERA | SOURCE_LIDAR, tuple(lid.extent))
+                       SOURCE_CAMERA | SOURCE_LIDAR, tuple(lid.extent), cam.reading)
 
 
 # -------------------------------------------------------------- the tracks
@@ -407,6 +433,10 @@ class Track:
     vel_e: float = 0.0
     vel_n: float = 0.0
     var: float = 0.0                 # EMA of squared association residual [m^2]
+    # Every light reading this buoy has given (light_core), whichever image track it
+    # came from; while it holds any, the reported label is its decision, not the vote.
+    light: light_core.LightHistory = field(default_factory=light_core.LightHistory)
+    shape: str = ""                  # the shape its readings named
     # Snapshot of the boat-relative geometry at the last update. Recomputed on
     # every publish against the current pose, so these are only a fallback for
     # a track that was not updated this cycle.
@@ -553,7 +583,7 @@ class TargetTracker:
 
     # ---- the cycle ----
 
-    def update(self, cameras, lidars, boat: BoatState, now: float):
+    def update(self, cameras, lidars, boat: BoatState, now: float, frame_t=None):
         """One fuse -> project -> associate -> decay cycle.
 
         Args:
@@ -561,6 +591,9 @@ class TargetTracker:
           lidars: list[LidarCluster] in base_link (may be empty).
           boat: BoatState — position AND attitude for this instant.
           now: monotonic seconds.
+          frame_t: seconds the camera frame was taken (its header stamp), the time its
+            light readings are filed under; None = now. A flash is judged on the
+            spacing of its frames, which the tick's own jitter would blur.
 
         Returns:
           list[Track], sorted nearest-first by horizontal range from the boat.
@@ -570,6 +603,7 @@ class TargetTracker:
         the area).
         """
         obs, stats = fuse(cameras, lidars, self.p)
+        obs, stats["turn_dropped"] = self._drop_turn_smear(obs, boat)
 
         projected = []
         for o in obs:
@@ -580,6 +614,7 @@ class TargetTracker:
 
         stats["associated"] = 0
         stats["new_tracks"] = 0
+        self._frame_t = now if frame_t is None else frame_t
         self._associate(projected, now, stats)
 
         stats["expired"] = self._prune(now)
@@ -589,8 +624,47 @@ class TargetTracker:
         stats["colour_unknown"] = sum(
             1 for t in tracks if t.label == self.p.colour_unknown_label
             or t.label.startswith("unknown_"))
+        stats.update(self._light_stats(tracks))
         self.stats = stats
         return tracks
+
+    def _light_cfg(self) -> light_core.LightConfig:
+        """Built per call: every field is a live parameter."""
+        p = self.p
+        return light_core.LightConfig(
+            window_s=p.light_window_s, min_watch_s=p.light_min_watch_s,
+            corr_min=p.light_corr_min, min_colour_votes=p.colour_min_votes,
+            min_colour_ratio=p.colour_min_ratio,
+            must_flash=("red", "green") if p.rg_must_flash else ())
+
+    @staticmethod
+    def _light_stats(tracks) -> dict:
+        """The health topic's view of the light decisions: a count per state and, for the
+        nearest tracks with readings, the evidence behind each."""
+        lit = [t for t in tracks if t.light.samples]
+        counts = {"flashing": 0, "solid": 0, "off": 0, "undecided": 0}
+        for t in lit:
+            counts[t.light.decided[0] if t.light.decided else "undecided"] += 1
+
+        def r(v, n=2):
+            return None if v is None else round(v, n)
+        detail = [{"id": t.id, "label": t.label, "n": t.light.ev["samples"],
+                   "watch_s": r(t.light.ev["watch_s"], 1), "duty": r(t.light.ev["duty"]),
+                   "period": r(t.light.ev["period"]), "colour": t.light.ev["colour"],
+                   "share": r(t.light.ev["colour_share"])} for t in lit[:12]]
+        return {"light": counts, "light_tracks": detail}
+
+    def _drop_turn_smear(self, obs, boat: BoatState):
+        """(kept, dropped count): camera-only sightings too far out to place while
+        turning this fast (see TrackerParams.turn_smear_max_m)."""
+        lim = self.p.turn_smear_max_m
+        rate = abs(boat.yaw_rate)
+        if lim <= 0.0 or not math.isfinite(rate) or rate == 0.0:
+            return obs, 0
+        per_m = rate * self.p.turn_skew_s
+        kept = [o for o in obs
+                if o.sources != SOURCE_CAMERA or o.range_h * per_m <= lim]
+        return kept, len(obs) - len(kept)
 
     def forget_colours(self) -> int:
         """A new run: the competition re-deals red and green between runs, and votes from the
@@ -598,17 +672,30 @@ class TargetTracker:
         whole life). Every colour-family track keeps its id, position and hits and loses its
         colour: its votes become one unlit vote of its family, so it reports unknown until
         the camera reads its light again. Other tracks (dock signs, boats, LiDAR-only) keep
-        theirs. Returns how many tracks lost a colour."""
+        theirs. A track's light readings go too, whatever its family. Returns how many
+        tracks lost a colour."""
         n = 0
         for t in self.tracks:
+            had_light = bool(t.light.samples)
+            t.light.clear()
             key = _family_of(t.label_votes, self.p)
             ph = None if key is None else _placeholder(key, self.p)
-            if ph is None:
+            if ph is not None:
+                t.label_votes = {ph: 1}
+            if ph is None and not had_light:
                 continue
-            t.label_votes = {ph: 1}
-            t.label = resolve_label(t.label_votes, self.p)
+            t.label = self._label(t)
             n += 1
         return n
+
+    def _label(self, t: Track) -> str:
+        """What a track reports: its light decision while it has readings, else the vote."""
+        if t.light.samples:
+            cfg = self._light_cfg()
+            return light_core.light_label(t.light.update(cfg), t.shape, cfg.must_flash)
+        if not t.shape:
+            return resolve_label(t.label_votes, self.p)
+        return "unknown_" + t.shape          # readings once, none since forget_colours
 
     def snapshot(self, boat: BoatState):
         """Tracks with range/bearing and label refreshed, nearest first.
@@ -617,7 +704,7 @@ class TargetTracker:
         against a newer pose without inventing observations.
         """
         for t in self.tracks:
-            t.label = resolve_label(t.label_votes, self.p)
+            t.label = self._label(t)
             de, dn = t.x - boat.east, t.y - boat.north
             t.range_h = math.hypot(de, dn)
             # Absolute bearing in the LatLonHead convention (0 = true north,
@@ -694,8 +781,16 @@ class TargetTracker:
         if o.label:
             t.label_votes[o.label] = t.label_votes.get(o.label, 0) + 1
             t.confidence = o.confidence
+        self._add_reading(t, o)
         if o.sources & SOURCE_LIDAR and any(o.extent):
             t.extent = o.extent
+
+    def _add_reading(self, t: Track, o: Observation):
+        """File the sighting's light reading, if it carried one, on the buoy's own history."""
+        if o.reading:
+            score, colour, shape = o.reading
+            t.light.add(self._frame_t, score, colour)
+            t.shape = shape
 
     def _blend_velocity(self, t: Track, ve: float, vn: float):
         """EMA the world velocity. See TrackedTarget.msg on what it is for."""
@@ -712,6 +807,7 @@ class TargetTracker:
                   extent=tuple(o.extent))
         if o.label:
             t.label_votes[o.label] = 1
+        self._add_reading(t, o)
         self._next_id += 1           # never reused, even after the track dies
         self.tracks.append(t)
 

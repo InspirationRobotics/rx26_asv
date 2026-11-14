@@ -47,6 +47,28 @@ def arc(centre, radius, a0_deg, sweep_deg, step_deg=2.0):
             for i in range(n + 1)]
 
 
+class Circles(unittest.TestCase):
+    """A circle is one continuous sweep (lite_t1far 2026-11-13: the boat drove 371 deg cw round
+    the ENTRY after passing south of it on the way in, +138 deg ccw; the net said -233)."""
+
+    def circle_of(self, path, name="entry"):
+        j = judge(buoy("entry", 0.0, 0.0, "flash_blue"))
+        drive(j, path)
+        return j.verdict()["circles"][name]
+
+    def test_a_pass_the_other_way_first_does_not_cancel_the_orbit(self):
+        way_in = [(-7.0, -3.0), (6.0, -3.0)]          # south of the buoy, heading east: ccw
+        orbit = arc((0.0, 0.0), 6.0, math.degrees(math.atan2(-3.0, 6.0)), -370.0)
+        self.assertEqual(self.circle_of(way_in + orbit), "correct")
+
+    def test_the_wrong_way_round_is_still_wrong(self):
+        self.assertEqual(self.circle_of(arc((0.0, 0.0), 5.0, 0.0, 360.0)), "WRONG (ccw)")
+
+    def test_short_of_a_turn_is_not_circled(self):
+        got = self.circle_of(arc((0.0, 0.0), 5.0, 0.0, -300.0))
+        self.assertTrue(str(got).startswith("not circled (best cw sweep 30"), got)
+
+
 class PerBuoySides(unittest.TestCase):
     def test_a_lone_red_is_judged_with_no_partner_at_all(self):
         # red at (10, -3): the eastbound track passes north of it, so it is to STARBOARD

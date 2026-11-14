@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Task1CoreScan: Task 1 Safe Passage at Core tier (no aircraft) when the boat must FIND the field
+  itself. The body only: no guard band, no task token, no Task 4 guard. The callers wrap it:
+  task1_core_scan.xml on its own, mission_t1_t3_t4.xml before Task 3.
+
+  From the caller's blackboard (_autoremap; bt_runner_node puts the GCS Run panel's numbers there
+  at Start):
+    t1_scan_dwell_s   each look of a scan, and each mid-field pause (5 s)
+    t1_pause_every_m  a pause to look every this far along the transit (5 m; 0 = none)
+    t1_unknown_range_m  stop to look at a buoy with no colour yet this near ahead (12 m; 0 = never)
+    t1_approach_lat/lon  an APPROACH POINT to drive to before scanning (blank = scan from here)
+  and from the context, the Run panel's FIELD CENTRE (t1_field_lat/lon, blank = not known).
+
+  The tracker needs ~4 s on a buoy to call its light (flashing blue ENTRY, solid blue EXIT, red,
+  green), so the boat stands still to look rather than looking on the move.
+
+    0. DRIVE TO THE APPROACH POINT, when the Run panel gives one: NavigateTo it (2 m, a leg
+       blocked 30 s is given up), then scan from there. Skipped with no approach point and once
+       a passage plan exists (a Retry or a Task 4 resume never drives back). A blocked or failed
+       leg does not fail Task 1: the scan starts from wherever the boat is.
+    1. FIND THE FIELD (skipped once a passage plan exists, so a Task 4 resume goes straight to 2).
+       a. A static scan where the boat is: face the field centre (none: the bow), look at 0, -45
+          and +45 deg for t1_scan_dwell_s each, done early once the field is known.
+       b. Not known yet: up to 6 vantage points 8 m from the field centre (one lap), the first
+          on the boat's side, then 60 deg round each time; drive there and scan the same way.
+          Without a field centre there are none.
+       c. WaitForField: 60 s more for the field to become known, then FAILURE (Task 1 gives up;
+          mission_t1_t3_t4.xml goes on to Task 3).
+       "Known" = the ENTRY seen, and the EXIT seen OR GUESSED: with a field centre and no EXIT
+       yet, the runner mirrors the centre through the ENTRY (bt_runner_node guessExit). A guess
+       steers the plan only; it is never reported to RoboCommand. ENTRY/EXIT are only ever what
+       the boat sees this run (or the Run panel gives): the competition re-deals the light
+       beacons every run, so nothing about them is remembered between runs.
+    2. PLAN AND DRIVE the passage (global_passage.hpp, as Task1PlanDrive): round the ENTRY
+       clockwise, reds to starboard, greens to port, round the EXIT counter-clockwise. The
+       TRANSIT stops every t1_pause_every_m for t1_scan_dwell_s to look again; what it sees
+       re-plans the rest when it matters (Core tier). In the approach, the entry orbit and the
+       transit the boat also STOPS whenever a buoy with no colour yet (the EXIT is not expected
+       at the first scan) comes within t1_unknown_range_m and +-35 deg of the bow: it holds up
+       to t1_scan_dwell_s until that buoy has a colour, once per buoy, then drives on. Never in
+       the exit orbit. Before the EXIT orbit, an EXIT not seen
+       yet (still the guess) is looked for: face it, then 0, -50, +50. A phase blocked for
+       blocked_timeout_s fails and the Retry re-plans from the boat; finished phases return
+       SUCCESS at once.
+
+  orbit_min_m 1.5: the end buoys have neighbours 3.4-3.5 m away (task1_core_survey.xml).
+-->
+<root BTCPP_format="4">
+
+  <BehaviorTree ID="Task1CoreScan">
+    <Sequence name="core_scan">
+      <SetCameraModel model="buoy" timeout_s="15.0"/>
+
+      <ForceSuccess name="drive_to_approach">
+        <Sequence>
+          <Inverter><PassageStarted/></Inverter>
+          <FixGiven lat="{t1_approach_lat}" lon="{t1_approach_lon}"/>
+          <NavigateTo target="fix" lat="{t1_approach_lat}" lon="{t1_approach_lon}" tolerance="2.0"
+                      blocked_timeout_s="30.0"/>
+        </Sequence>
+      </ForceSuccess>
+
+      <Fallback name="find_the_field">
+        <PassageStarted/>
+        <Sequence name="look_from_here">
+          <ScanForBuoys face="field" offsets_deg="0,-45,45" dwell_s="{t1_scan_dwell_s}"
+                        until="field"/>
+          <FieldKnown/>
+        </Sequence>
+        <RetryUntilSuccessful num_attempts="6">
+          <Sequence name="look_from_round_the_field">
+            <PickFieldVantage radius_m="8.0" offsets_deg="0,60,120,180,240,300" goal="{vantage}"/>
+            <NavigateTo target="port" goal="{vantage}" tolerance="2.0" blocked_timeout_s="20.0"/>
+            <ScanForBuoys face="field" offsets_deg="0,-45,45" dwell_s="{t1_scan_dwell_s}"
+                          until="field"/>
+            <FieldKnown/>
+          </Sequence>
+        </RetryUntilSuccessful>
+        <AlwaysSuccess/>
+      </Fallback>
+
+      <Timeout msec="60000">
+        <WaitForField/>
+      </Timeout>
+
+      <RetryUntilSuccessful num_attempts="4">
+        <Sequence name="passage">
+          <PlanGlobalPassage orbit_min_m="1.5" overshoot_deg="45.0"/>
+          <DrivePlanPhase phase="approach" lookahead_m="2.5" blocked_timeout_s="15.0"
+                          pause_unknown_m="{t1_unknown_range_m}" pause_s="{t1_scan_dwell_s}"/>
+          <DrivePlanPhase phase="entry_orbit" lookahead_m="2.5" blocked_timeout_s="15.0"
+                          pause_unknown_m="{t1_unknown_range_m}" pause_s="{t1_scan_dwell_s}"/>
+          <DrivePlanPhase phase="transit" lookahead_m="2.5" blocked_timeout_s="15.0"
+                          pause_every_m="{t1_pause_every_m}" pause_unknown_m="{t1_unknown_range_m}"
+                          pause_s="{t1_scan_dwell_s}"/>
+          <Fallback name="exit_seen">
+            <AnchorSeen which="exit"/>
+            <ScanForBuoys face="exit" offsets_deg="0,-50,50" dwell_s="{t1_scan_dwell_s}"
+                          until="exit"/>
+          </Fallback>
+          <DrivePlanPhase phase="exit_orbit" lookahead_m="2.5" blocked_timeout_s="15.0"/>
+        </Sequence>
+      </RetryUntilSuccessful>
+    </Sequence>
+  </BehaviorTree>
+
+</root>
