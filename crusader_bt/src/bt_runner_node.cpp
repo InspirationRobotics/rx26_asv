@@ -166,8 +166,8 @@ public:
     declare_parameter<double>("t1_sector_overlap_deg", 15.0);  // each sector overlaps the next by this
     declare_parameter<double>("t1_sector_min_s", 4.0);     // at least this long on each sector
     declare_parameter<double>("t1_sector_max_s", 15.0);    // at most this long on each sector
-    declare_parameter<double>("t1_colour_wait_s", 6.0);    // a buoy uncoloured after this long in view is waited on no more (black ones never colour); 0 = wait to max
-    declare_parameter<double>("t1_centre_tol_m", 2.5);     // the drive to the field centre stops this near it
+    declare_parameter<double>("t1_colour_wait_s", 8.0);    // a buoy uncoloured after this long in view is waited on no more (black ones never colour); 0 = wait to max
+    declare_parameter<double>("t1_centre_tol_m", 1.0);     // the drive to the field centre stops this near it (the scan then holds the centre itself)
     declare_parameter<double>("t3_backoff_m", 4.0);        // the docked hold once the fire is out
     declare_parameter<double>("t3_via_lat", 0.0);          // Task 1 -> Task 3 through here; 0, 0 = straight
     declare_parameter<double>("t3_via_lon", 0.0);
@@ -717,6 +717,10 @@ private:
     forget_colours_pub_->publish(m);
     std::lock_guard<std::mutex> lk(ctx_->mu);
     entry_track_id_ = exit_track_id_ = -1;
+    // and this node's own copy at once: until target_tracker's next (colourless) list lands, the
+    // tracks it holds still carry last run's colours, and the tree is already ticking
+    for (nav::Buoy & b : tracked_) {b.state = nav::Beacon::Unknown;}
+    refuseLocked();
     RCLCPP_INFO(get_logger(), "mission %s: asked target_tracker to forget the buoy colours",
       mission.c_str());
   }

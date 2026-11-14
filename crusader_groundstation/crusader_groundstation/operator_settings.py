@@ -44,7 +44,7 @@ DEFAULTS = {
     "t1_approach_lat": 0.0, "t1_approach_lon": 0.0, "t1_unknown_range_m": 12.0,
     "t1_field_radius_m": 0.0, "t1_scan_range_m": 15.0, "t1_cam_hfov_deg": 82.0,
     "t1_sector_overlap_deg": 15.0, "t1_sector_min_s": 4.0, "t1_sector_max_s": 15.0,
-    "t1_colour_wait_s": 6.0, "t1_centre_tol_m": 2.5,
+    "t1_colour_wait_s": 8.0, "t1_centre_tol_m": 1.0,
     "t3_backoff_m": 4.0, "t3_via_lat": 0.0, "t3_via_lon": 0.0,
     **T3_CONTROL,
 }

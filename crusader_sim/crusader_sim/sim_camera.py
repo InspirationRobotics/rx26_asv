@@ -195,6 +195,12 @@ class SimCamera(Node):
         self.declare_parameter("false_blue_buoys", "")
         self.declare_parameter("false_blue_prob", 0.0)
         self.declare_parameter("flash_resolve_m", 0.0)
+        #   flash_beacons     a flash_* beacon BLINKS (course.beacon_lit: 1 s on / 1 s off on sim
+        #                     time, each buoy at its own phase, as beacon_driver draws it): in the
+        #                     dark half its box reads black_buoy, as the real detector sees it, and
+        #                     target_tracker's colour vote has to ride that out. False = always lit
+        #                     (every run before 2026-11-13).
+        self.declare_parameter("flash_beacons", True)
         # ROBUSTNESS knobs, on whatever the detector boxed (truth or yolo), applied as the
         # detections are published. All 0 / empty = off, so every existing run is unchanged:
         #   miss_prob        each detection dropped with this chance (a missed box)
@@ -478,8 +484,9 @@ class SimCamera(Node):
         """position_source:=truth — a timer, as before depth existed."""
         dets = []
         if self.pose is not None:
+            t = self.get_clock().now().nanoseconds * 1e-9
             dets = [self._det_msg(c.label, c.bbox, self._truth_position(c))
-                    for c in self._visible(self.pose)]
+                    for c in self._visible(self.pose, sim_t=t)]
         self._publish(dets, self.pose)
 
     def _on_depth_detect(self, depth, t):
@@ -490,7 +497,7 @@ class SimCamera(Node):
             self.stats["no_pose"] += 1
             return                       # nothing published: the tracker sees it stale
         dets = []
-        for c in self._visible(pose):
+        for c in self._visible(pose, sim_t=t):
             measured = self._measure(depth, c.bbox, c.pc[0])
             if measured is None:
                 continue
@@ -564,11 +571,13 @@ class SimCamera(Node):
                                   scored, hidden))
         self.scores.update(t, truths, dets)
 
-    def _visible(self, pose, min_px=None):
+    def _visible(self, pose, min_px=None, sim_t=None):
         """The oracle half: [Cand] for every buoy a detector would box — in
         front of the camera, in the frame, inside max_range_m, and at least
         min_bbox_px tall (min_px overrides it). The box is the only thing the
-        depth half is given."""
+        depth half is given. sim_t (sim s): label a flashing beacon by its phase then
+        (flash_beacons); None, as the YOLO scoring passes, labels the true state. (Not `t`:
+        that name is the camera's position below, and shadowing it crashed the node.)"""
         R = quat_to_R(pose.orientation)
         t = np.array([pose.position.x, pose.position.y, pose.position.z])
         rmax = float(self.get_parameter("max_range_m").value)
@@ -589,7 +598,11 @@ class SimCamera(Node):
             if hpx < min_px:
                 continue
             wpx = self.fx * BUOY_W / x
-            label = self._mislabel(name, state if side_on else "off", float(np.linalg.norm(pc)))
+            shown = state if side_on else "off"
+            if (shown != "off" and sim_t is not None and self.get_parameter("flash_beacons").value
+                    and not C.beacon_lit(shown, name, sim_t)):
+                shown = "off"                     # the dark half of a flash
+            label = self._mislabel(name, shown, float(np.linalg.norm(pc)))
             out.append(Cand(name, label, pc,
                             [int(max(0, u - wpx / 2)), int(max(0, v - hpx / 2)),
                              int(min(self.W - 1, u + wpx / 2)),

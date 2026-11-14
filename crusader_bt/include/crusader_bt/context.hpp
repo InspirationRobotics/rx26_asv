@@ -290,8 +290,8 @@ struct Context
     double sector_overlap_deg = 15.0;  ///< t1_sector_overlap_deg: each sector overlaps the next by this
     double sector_min_s = 4.0;       ///< t1_sector_min_s: at least this long on each sector
     double sector_max_s = 15.0;      ///< t1_sector_max_s: at most this long on each sector
-    double colour_wait_s = 6.0;      ///< t1_colour_wait_s: a buoy uncoloured after this long in view is waited on no more (0 = wait to max)
-    double centre_tol_m = 2.5;       ///< t1_centre_tol_m: the drive to the field centre stops this near it
+    double colour_wait_s = 8.0;      ///< t1_colour_wait_s: a buoy uncoloured after this long in view is waited on no more (0 = wait to max)
+    double centre_tol_m = 1.0;       ///< t1_centre_tol_m: the drive to the field centre stops this near it
     t3tune::Values t3 = t3tune::defaults();   ///< Task 3 control, t3_tuning.hpp's knobs, clamped
   };
   Inputs inputs;

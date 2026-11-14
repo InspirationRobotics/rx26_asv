@@ -31,6 +31,9 @@
        held 1 s (at least min_s, at most max_s). Then FieldKnown (the ENTRY seen, the EXIT seen
        or guessed from the centre); not yet: one more lap, then 30 s of WaitForField, then
        FAILURE.
+    2a. A GUESSED EXIT IS LOOKED AT: when the scan saw the ENTRY but not the EXIT, turn to where the
+       guess puts it (and 40 deg either side) before planning. Planning on the guess gave a 42 m
+       EXIT orbit of radius 6 m and a failed run (core_c_s4, 2026-11-13).
     2b. BACK OUT TO STAGING, when the Run panel's Task 1 approach point (t1_approach_lat/lon) is
        set: NavigateTo it after the scan, so the passage is planned from OUTSIDE the field (put
        it a few metres off the ENTRY, away from the field). Blank: plan from the scan spot. In
@@ -56,8 +59,10 @@
           <ForceSuccess name="drive_to_centre">
             <Sequence>
               <FixGiven lat="{t1_field_lat}" lon="{t1_field_lon}"/>
-              <NavigateTo target="fix" lat="{t1_field_lat}" lon="{t1_field_lon}"
-                          tolerance="{t1_centre_tol_m}" blocked_timeout_s="30.0"/>
+              <RetryUntilSuccessful num_attempts="3">
+                <NavigateTo target="fix" lat="{t1_field_lat}" lon="{t1_field_lon}"
+                            tolerance="{t1_centre_tol_m}" blocked_timeout_s="30.0"/>
+              </RetryUntilSuccessful>
             </Sequence>
           </ForceSuccess>
           <RetryUntilSuccessful num_attempts="2">
@@ -68,6 +73,13 @@
               <FieldKnown/>
             </Sequence>
           </RetryUntilSuccessful>
+          <ForceSuccess name="look_for_the_exit">
+            <Fallback>
+              <AnchorSeen which="exit"/>
+              <ScanForBuoys face="exit" offsets_deg="0,-40,40" dwell_s="{t1_scan_dwell_s}"
+                            until="exit"/>
+            </Fallback>
+          </ForceSuccess>
           <ForceSuccess name="back_out_to_staging">
             <Sequence>
               <FixGiven lat="{t1_approach_lat}" lon="{t1_approach_lon}"/>

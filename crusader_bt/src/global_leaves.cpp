@@ -1232,13 +1232,14 @@ public:
       BT::InputPort<double>("min_s", 4.0, "at least this long on each sector"),
       BT::InputPort<double>("max_s", 15.0, "at most this long on each sector"),
       BT::InputPort<double>("stable_s", 1.0, "a colour must hold this long to count"),
-      BT::InputPort<double>("colour_wait_s", 6.0,
+      BT::InputPort<double>("colour_wait_s", 8.0,
         "stop waiting on a buoy still uncoloured after this long in view (0 = wait to max_s)"),
       BT::InputPort<double>("settle_deg", 12.0, "on the heading within this"),
       BT::InputPort<double>("turn_timeout_s", 15.0, "a turn taking longer looks from there"),
       BT::InputPort<double>("radius_m", 0.8, "drift from the spot that triggers a return"),
-      BT::InputPort<double>("spot_search_m", 1.5,
-        "the spot is the point this near the boat farthest from every known buoy (0 = here)")};
+      BT::InputPort<double>("spot_search_m", 1.0,
+        "the spot is the point this near the FIELD CENTRE (the boat, without one) farthest from "
+        "every known buoy (0 = the centre itself)")};
   }
 
   /// Distance from p to the nearest known buoy or obstacle (inf: none). CALL UNDER ctx.mu.
@@ -1281,7 +1282,7 @@ public:
     min_s_ = std::max(0.5, getInput<double>("min_s").value_or(4.0));
     max_s_ = std::max(min_s_, getInput<double>("max_s").value_or(15.0));
     stable_s_ = std::max(0.0, getInput<double>("stable_s").value_or(1.0));
-    colour_wait_s_ = std::max(0.0, getInput<double>("colour_wait_s").value_or(6.0));
+    colour_wait_s_ = std::max(0.0, getInput<double>("colour_wait_s").value_or(8.0));
     settle_deg_ = getInput<double>("settle_deg").value_or(12.0);
     turn_timeout_s_ = getInput<double>("turn_timeout_s").value_or(15.0);
     prm_.radius_m = std::max(0.3, getInput<double>("radius_m").value_or(0.8));
@@ -1293,14 +1294,19 @@ public:
         RCLCPP_ERROR(log(), "SectorScan: no fresh pose, cannot take the spot");
         return BT::NodeStatus::FAILURE;
       }
-      anchor_ = clearestSpot(*ctx_, ctx_->boat, std::max(0.0, getInput<double>("spot_search_m").value_or(1.5)));
+      // the spot is the operator's FIELD CENTRE (its clearest point within spot_search_m), not
+      // wherever the drive there stopped: the boat looks all round from the middle of the field
+      // (the team, 2026-11-13; a blocked drive used to leave it scanning from outside)
+      Vec2 centre;
+      const bool have_centre = fieldCentre(*ctx_, &centre);
+      anchor_ = clearestSpot(*ctx_, have_centre ? centre : ctx_->boat,
+        std::max(0.0, getInput<double>("spot_search_m").value_or(1.0)));
       start_s_ = turn_s_ = ctx_->now_s;
       base_ = std::isfinite(ctx_->heading_deg) ? ctx_->heading_deg : 0.0;
-      const double moved = nav::norm(anchor_ - ctx_->boat);
-      if (moved > 0.2) {
-        RCLCPP_INFO(log(), "sector scan: the spot moves %.1f m, to %.1f m from the nearest buoy",
-          moved, nearestBuoy(*ctx_, anchor_));
-      }
+      RCLCPP_INFO(log(), "sector scan: the spot is %.1f m from the %s, %.1f m from the nearest buoy; "
+        "the boat is %.1f m from it", have_centre ? nav::norm(anchor_ - centre) : 0.0,
+        have_centre ? "field centre" : "boat (no field centre set)", nearestBuoy(*ctx_, anchor_),
+        nav::norm(anchor_ - ctx_->boat));
     }
     sector_ = 0;
     dwelling_since_ = -1.0;
@@ -1464,7 +1470,7 @@ private:
   std::map<int, std::pair<nav::Beacon, double>> seen_;   ///< id -> colour, since when
   std::map<int, double> waited_;   ///< id -> seconds in view with no colour, this scan
   double base_ = 0.0, half_view_deg_ = 36.0, range_m_ = 15.0, min_s_ = 4.0, max_s_ = 15.0;
-  double stable_s_ = 1.0, colour_wait_s_ = 6.0, settle_deg_ = 12.0, turn_timeout_s_ = 15.0;
+  double stable_s_ = 1.0, colour_wait_s_ = 8.0, settle_deg_ = 12.0, turn_timeout_s_ = 15.0;
   double last_tick_s_ = -1.0;
   double start_s_ = 0.0, turn_s_ = 0.0, dwelling_since_ = -1.0, stale_s_ = 0.0;
   int n_ = 6, sector_ = 0;
